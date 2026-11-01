@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 mod documented_examples;
 mod function_scope;
+mod project_flows;
 mod managed_files;
 pub(crate) mod modules;
 mod paused_programs;
@@ -209,6 +210,7 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     // The main AI finds methods to read and run with while it gets to know the task.
     if program_flow::role(w) == program_flow::Role::Main && s.plugin.is_none() {
         definitions.push(program_flow::find_main_tool());
+        definitions.extend(project_flows::tools());
     }
     definitions
 }
@@ -351,12 +353,11 @@ fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str)
                 definitions.iter().any(|tool| tool["function"]["name"] == name),
                 "TOOL_UNAVAILABLE: {name}; use the given tools or find_library_methods"
             ),
-            // Outside its program the main AI calls what it was given: it reads
-            // and runs while it gets to know the task; changes go in the program.
+            // Outside a program the main AI can use its published tools directly.
             program_flow::Role::Main => ensure!(
                 s.plugin.is_some()
                     || main_publishes(s, &program_flow::familiar(&w.messages), &program_flow::library_catalog(s, definitions), name),
-                "TOOL_UNAVAILABLE: {name}; while you get to know the task you can read and run, and changes to the project go in your program"
+                "TOOL_UNAVAILABLE: {name}; use an available tool or find_library_methods"
             ),
         }
     }
@@ -1735,10 +1736,13 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
                             .and_then(|_| program_flow::install_scoped(s, w, &args, body));
                         match installed {
                             Ok(receipt) => {
-                                // The program is part of the conversation record: read back with
-                                // read_session_history({programs:true}), never kept in a context.
+                                // Preserve the exact execution source in the conversation and,
+                                // for main flows, in the project-scoped host library.
                                 let function = w.program_task.as_ref().map(|task| task["name"].clone()).unwrap_or(Value::Null);
-                                append(s, "program/start", json!({"turn":s.turn,"receipt":receipt,"function":function,"source":args["source"]}), false).await?;
+                                let saved_flow = if !body && s.plugin.is_none() {
+                                    Some(project_flows::save(s, w, args["source"].as_str().unwrap_or(""))?)
+                                } else { None };
+                                append(s, "program/start", json!({"turn":s.turn,"receipt":receipt,"function":function,"source":args["source"],"saved_flow":saved_flow}), false).await?;
                                 // A module's first code is saved for every later call of its contract.
                                 if body {
                                     modules::authored(s, w, args["source"].as_str().unwrap_or("")).await?;
@@ -2128,6 +2132,8 @@ async fn execute_call(
                 Ok(json!(results))
             },
             name if name == program_flow::FIND => program_flow::find(s, w, &args),
+            "list_project_flows" => project_flows::list(s),
+            "read_project_flow" => project_flows::read(s, &args),
             name if name == paused_programs::RESUME => match w.resumed.clone().context("the paused program was not resumed")? {
                 (value, false) => Ok(value),
                 (error, true) => Err(anyhow::anyhow!("{}", error["message"].as_str().map(str::to_owned).unwrap_or_else(|| error.to_string()))),

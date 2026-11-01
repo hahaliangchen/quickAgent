@@ -150,6 +150,8 @@ pub fn builtin() -> Libraries {
         // script has them, as a function has only its arguments.
         ("session".into(), same(&[
             "read_session_history",
+            "list_project_flows",
+            "read_project_flow",
             "read_asset",
             "list_context_assets",
             "refresh_asset",

@@ -210,16 +210,19 @@ pub(super) fn find_tool() -> Value {
 }
 /// The main AI's finding, while it gets to know the task.
 pub(super) fn find_main_tool() -> Value {
-    function(FIND, "Search by keywords for a library method to read or run with while you get to know the task, when you need one you were not given. Matching methods become callable until your program starts. Methods that write files are not offered: changes go in the program. Permissions are unchanged.",
+    function(FIND, "Search by keywords for a library method needed for this task. Matching methods become callable until your program starts. Permissions are unchanged.",
         json!({"query":{"type":"string","minLength":1}}), json!(["query"]))
 }
-/// What the main AI calls itself while it gets to know the task, besides the
-/// conversation's own tools: reading and searching files, running the
-/// project's scripts and programs, and looking at the images and attachments
-/// the user sent. Writing files is for its program.
-pub(super) const FAMILIAR: [&str; 11] = [
+/// Tools the main AI can call directly, in addition to conversation tools.
+/// Other library methods can be discovered without expanding permissions.
+pub(super) const FAMILIAR: [&str; 16] = [
     "read_file",
     "read_file_lines",
+    "write_file",
+    "edit_file",
+    "replace_range",
+    "list_project_flows",
+    "read_project_flow",
     "list_dir",
     "search_text",
     "workspace_info",
@@ -236,16 +239,6 @@ pub(super) fn familiar(messages: &[Value]) -> BTreeSet<String> {
     let mut tools = FAMILIAR.iter().map(|tool| (*tool).to_owned()).collect::<BTreeSet<_>>();
     tools.extend(found_tools(messages));
     tools
-}
-/// A tool that changes files: allowed where the workspace can be written but
-/// not where it is read-only. Running a program is execution, not this.
-fn writes(s: &Session<'_>, name: &str) -> bool {
-    use agent_service::PermissionMode::{ReadOnly, WorkspaceWrite};
-    let allowed = |mode: agent_service::PermissionMode| match &s.state.tool_catalog {
-        Some(catalog) => catalog.packages.allows(name, mode, false),
-        None => mode.allows(name),
-    };
-    !allowed(ReadOnly) && allowed(WorkspaceWrite)
 }
 /// Whether a reply has a ```js, ```javascript or ```mjs fence anywhere, even
 /// one that is not a block the host can read.
@@ -306,12 +299,7 @@ pub(super) fn find(s: &Session<'_>, w: &Window, args: &Value) -> Result<Value> {
     let query = args["query"].as_str().context("query is required")?.to_lowercase();
     let terms = query.split_whitespace().collect::<Vec<_>>();
     ensure!(!terms.is_empty(), "query is required");
-    let mut definitions = available_tools(s, w);
-    // The main AI reads and runs while it gets to know the task; changing
-    // files is for its program.
-    if role(w) == Role::Main {
-        definitions.retain(|d| d["function"]["name"].as_str().is_none_or(|name| !writes(s, name)));
-    }
+    let definitions = available_tools(s, w);
     let catalog = library_catalog(s, &definitions);
     let mut matches = definitions
         .iter()
@@ -1460,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn the_main_ai_finds_methods_to_read_and_run_but_not_to_write() {
+    fn the_main_ai_finds_methods_to_read_run_and_write() {
         let root = TestRoot::new();
         let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
         let cancel = CancellationToken::new();
@@ -1469,7 +1457,7 @@ mod tests {
         let methods = |w: &Window| find(&s, w, &json!({"query":"write edit replace file"})).unwrap()["methods"].as_array().unwrap()
             .iter().map(|m| m["method"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         let main = methods(&Window::default());
-        assert!(!main.iter().any(|m| matches!(m.as_str(), "io.write" | "io.edit" | "io.replace")), "writing is for the program: {main:?}");
+        assert!(main.contains(&"io.write".to_owned()), "main can find writing tools: {main:?}");
         let leaf = methods(&Window { program_task: Some(json!({"role":"leaf","leaf_tools":[]})), ..Default::default() });
         assert!(leaf.contains(&"io.write".to_owned()), "a function can still find them: {leaf:?}");
         let marked = |text: &str| js_marker(&json!({"content":text}));
@@ -1502,15 +1490,11 @@ mod tests {
         for name in FAMILIAR.iter().copied().chain([FIND, "read_session_history", "read_asset"]) {
             assert!(tools.contains(&name.to_owned()), "{name} while getting to know the task: {tools:?}");
         }
-        for name in ["write_file", "edit_file", "replace_range"] {
-            assert!(!tools.contains(&name.to_owned()), "{name} is for the program");
-        }
         let text = |body: &Value| body["messages"].to_string();
         let calls = |body: &Value| body["messages"].as_array().unwrap().iter()
             .flat_map(|m| m["tool_calls"].as_array().cloned().unwrap_or_default())
             .map(|c| c["function"]["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert!(!root.path().join("early.txt").exists(), "nothing is written before the program");
-        assert!(text(&bodies[1]).contains("TOOL_UNAVAILABLE: write_file"), "the refusal is a fact the AI reads");
+        assert_eq!(std::fs::read_to_string(root.path().join("early.txt")).unwrap(), "x", "the main loop can write directly");
         assert_eq!(calls(&bodies[2]), ["write_file", "read_file"], "its own calls keep their names");
         // A program that does not compile has not started: the context stays.
         assert!(text(&bodies[3]).contains("PROGRAM_SOURCE_INVALID") && text(&bodies[3]).contains("alpha"));

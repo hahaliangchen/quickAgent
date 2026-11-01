@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-labelledby="title desc">
+<title id="title">QuickAgent</title><desc id="desc">Code orchestrates work. AI handles judgment.</desc>
+<rect width="1280" height="420" rx="28" fill="#f8fbf9"/>
+<circle cx="1090" cy="110" r="160" fill="#eaf5ee"/><circle cx="1020" cy="355" r="125" fill="#eff8f2"/>
+<rect x="70" y="58" width="52" height="52" rx="16" fill="#158767"/>
+<path d="M83 87h11l6-11 5 19 5-8h7" fill="none" stroke="white" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="138" y="93" fill="#1c6f58" font-family="Arial,sans-serif" font-size="22" font-weight="700" letter-spacing="3">QUICKAGENT</text>
+<text x="70" y="190" fill="#142a25" font-family="Arial,sans-serif" font-size="62" font-weight="700">Think. Code. Do.</text>
+<text x="72" y="241" fill="#587168" font-family="Arial,sans-serif" font-size="24">A local agent that orchestrates work with code.</text>
+<rect x="70" y="292" width="126" height="42" rx="21" fill="#e4f3e9"/><text x="93" y="319" fill="#137c5d" font-family="Arial,sans-serif" font-size="16" font-weight="700">RUST VM</text>
+<rect x="208" y="292" width="128" height="42" rx="21" fill="#e4f3e9"/><text x="231" y="319" fill="#137c5d" font-family="Arial,sans-serif" font-size="16" font-weight="700">AI + CODE</text>
+<rect x="348" y="292" width="133" height="42" rx="21" fill="#e4f3e9"/><text x="371" y="319" fill="#137c5d" font-family="Arial,sans-serif" font-size="16" font-weight="700">LOCAL FIRST</text>
+<g fill="none" stroke="#4ea889" stroke-width="3"><path d="M828 139h82l45 70h80"/><path d="M828 281h82l45-72h80"/></g>
+<g fill="#fff" stroke="#a4d3bd" stroke-width="2"><rect x="715" y="112" width="164" height="54" rx="15"/><rect x="715" y="254" width="164" height="54" rx="15"/><rect x="1001" y="180" width="175" height="60" rx="15"/></g>
+<g font-family="Arial,sans-serif" font-weight="700" font-size="17" fill="#305b4a"><text x="751" y="145">AI THINKS</text><text x="748" y="287">CODE RUNS</text><text x="1037" y="216">WORK DONE</text></g>
+<circle cx="955" cy="209" r="8" fill="#158767"/></svg>
