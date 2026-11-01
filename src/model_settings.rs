@@ -181,6 +181,7 @@ mod tests {
             "alternate".into(),
             crate::agent_service::AgentProviderRoute {
                 prefix_system_messages: false,
+                responses: false,
                 url: "http://alternate.example/v1".into(),
                 api_key: "fixture-key".into(),
                 models: [("alias".into(), "mapped-model".into())]

@@ -21,6 +21,5 @@ function reviewPages(paths, requirements) {
 function inspectPages(pages, requirements) {
   // 在这个 AI 上下文中按 pages 顺序检查 initial 的已读正文，不因进入函数重复读取。
   // 若 initial 表示内容被分页或截断，按回执只读取尚未取得的部分。
-  // 发现职责和授权范围内的问题时可以修复；修改后读回实际文件并复查。
-  // 返回逐页实际发现、处理和复查结果；不做浏览器或视觉验收。
+  // 只检查，不修改文件；返回逐页的实际发现和依据，不做浏览器或视觉验收。
 }

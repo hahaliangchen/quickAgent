@@ -1,4 +1,5 @@
-//! Host-owned file baselines for Agent edits. External MCP keeps its own contract.
+//! Host-owned file baselines for Agent edits, including what the task's own
+//! commands change. External MCP keeps its own contract.
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -10,9 +11,10 @@ fn connection(root: &Path) -> Result<rusqlite::Connection> {
         task_id TEXT NOT NULL, workspace TEXT NOT NULL, path TEXT NOT NULL,
         exists_at_baseline INTEGER NOT NULL, bytes BLOB,
         PRIMARY KEY(task_id, workspace, path));
-        CREATE TABLE IF NOT EXISTS agent_parallel_file_owners (
+        CREATE TABLE IF NOT EXISTS agent_file_writer_versions (
         task_id TEXT NOT NULL, workspace TEXT NOT NULL, path TEXT NOT NULL, owner TEXT NOT NULL,
-        PRIMARY KEY(task_id, workspace, path));")?;
+        turn INTEGER NOT NULL, seq INTEGER NOT NULL,
+        PRIMARY KEY(task_id, workspace, path, owner, turn));")?;
     Ok(conn)
 }
 
@@ -42,6 +44,62 @@ fn save(root: &Path, task: &str, workspace: &str, path: &str, bytes: Option<&[u8
     };
     conn.execute(sql, params![task, workspace, path, bytes.is_some(), bytes])?;
     Ok(())
+}
+
+/// Each write takes the task's next write version. `owner` is the parallel
+/// function that wrote, or `@main` for the main program and its serial calls.
+fn record_writer(root: &Path, task: &str, workspace: &str, path: &str, owner: &str, turn: usize) -> Result<()> {
+    connection(root)?.execute("INSERT INTO agent_file_writer_versions(task_id,workspace,path,owner,turn,seq) VALUES (?1,?2,?3,?4,?5,(SELECT COALESCE(MAX(seq),0)+1 FROM agent_file_writer_versions WHERE task_id=?1)) ON CONFLICT(task_id,workspace,path,owner,turn) DO UPDATE SET seq=excluded.seq",
+        params![task, workspace, path, owner, turn as i64])?;
+    Ok(())
+}
+
+/// The task's latest write version. A function started at this version has
+/// not seen any write numbered above it.
+pub(super) fn write_clock(root: &Path, task: &str) -> Result<i64> {
+    Ok(connection(root)?.query_row("SELECT COALESCE(MAX(seq),0) FROM agent_file_writer_versions WHERE task_id=?1", [task], |r| r.get(0))?)
+}
+
+/// The task's managed files that still match their baselines when one of its
+/// commands starts. What the command then changes in them is the task's own edit.
+pub(super) struct Untouched {
+    workspace: String,
+    files: Vec<(String, PathBuf, Option<Vec<u8>>)>,
+}
+
+pub(super) fn untouched(root: &Path, task: &str, workspace: &Path) -> Result<Untouched> {
+    let canonical = workspace.canonicalize()?;
+    let work = canonical.to_string_lossy().into_owned();
+    let conn = connection(root)?;
+    let mut statement = conn.prepare("SELECT path, exists_at_baseline, bytes FROM agent_file_baselines WHERE task_id=?1 AND workspace=?2")?;
+    let rows = statement.query_map(params![task, work], |r| {
+        let exists: bool = r.get(1)?;
+        let bytes: Option<Vec<u8>> = r.get(2)?;
+        Ok((r.get::<_, String>(0)?, if exists { bytes } else { None }))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    // A file that already differs from its baseline keeps it, so that outside
+    // change still stops the next edit.
+    let files = rows.into_iter().filter_map(|(relative, base)| {
+        let path = crate::file_edit::workspace_path(&canonical, &relative).ok()?;
+        (crate::file_edit::snapshot(&path).ok()? == base).then_some((relative, path, base))
+    }).collect();
+    Ok(Untouched { workspace: work, files })
+}
+
+impl Untouched {
+    /// After the command, what it changed becomes the baseline and counts as a
+    /// write by whoever ran it, as its edits do.
+    pub(super) fn adopt(self, root: &Path, task: &str, owner: Option<&str>, turn: usize) -> Result<()> {
+        for (relative, path, before) in self.files {
+            let Ok(after) = crate::file_edit::snapshot(&path) else { continue };
+            if after == before {
+                continue;
+            }
+            save(root, task, &self.workspace, &relative, after.as_deref(), true)?;
+            record_writer(root, task, &self.workspace, &relative, owner.unwrap_or("@main"), turn)?;
+        }
+        Ok(())
+    }
 }
 
 /// Only save a read snapshot if it matches the actual version delivered by the tool.
@@ -116,34 +174,56 @@ fn proposed_content(name: &str, args: &Value, base: Option<&[u8]>) -> Result<Vec
 }
 
 impl Prepared {
-    pub(super) fn other_parallel_writer(&self, root: &Path, task: &str, owner: &str) -> Result<bool> {
-        let conn = connection(root)?;
-        let previous: Option<String> = conn.query_row(
-            "SELECT owner FROM agent_parallel_file_owners WHERE task_id=?1 AND workspace=?2 AND path=?3",
-            params![task,self.workspace,self.relative], |row| row.get(0),
-        ).optional()?;
-        Ok(previous.is_some_and(|previous| previous != owner))
+    /// A whole-file write by a function that started at version `started` may
+    /// erase a change it never saw: another writer's version above that.
+    /// The host does not record what a function read, so a later read does not
+    /// lift this. Writing back the current content cannot lose anything.
+    pub(super) fn parallel_conflict(&self, root: &Path, task: &str, owner: &str, started: i64) -> Result<bool> {
+        if !self.request_only && self.base.as_deref() == Some(self.proposed.as_slice()) { return Ok(false); }
+        Ok(connection(root)?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_file_writer_versions WHERE task_id=?1 AND workspace=?2 AND path=?3 AND owner<>?4 AND seq>?5)",
+            params![task, self.workspace, self.relative, owner, started], |row| row.get(0),
+        )?)
     }
-    pub(super) fn record_parallel_writer(&self, root: &Path, task: &str, owner: &str) -> Result<()> {
-        let conn = connection(root)?;
-        conn.execute("INSERT INTO agent_parallel_file_owners(task_id,workspace,path,owner) VALUES (?1,?2,?3,?4) ON CONFLICT(task_id,workspace,path) DO UPDATE SET owner=excluded.owner",
-            params![task,self.workspace,self.relative,owner])?;
-        Ok(())
+    pub(super) fn record_writer(&self, root: &Path, task: &str, owner: &str, turn: usize) -> Result<()> {
+        record_writer(root, task, &self.workspace, &self.relative, owner, turn)
     }
     pub(super) fn conflict(&self) -> Result<bool> {
         Ok(crate::file_edit::snapshot(&self.target)?.as_deref() != self.base.as_deref())
     }
     pub(super) fn preserve(&self, root: &Path) -> Result<Value> {
+        self.preserve_versions(root, Some(self.base.as_deref()), "external")
+    }
+    pub(super) fn preserve_versions(&self, root: &Path, base: Option<Option<&[u8]>>, reason: &str) -> Result<Value> {
         let dir = root.join(".codex-workspace-mcp").join("conflicts");
         fs::create_dir_all(&dir)?;
         let suffix = self.target.file_name().context("file name required")?.to_string_lossy();
         let (kind, extension) = if self.request_only { ("request", ".request.json") } else { ("file", "") };
-        let path = dir.join(format!("{}-{}{}", crate::agent_service::uuid_like(), suffix, extension));
+        let id = crate::agent_service::uuid_like();
+        let path = dir.join(format!("{}-{}{}", id, suffix, extension));
         let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
         std::io::Write::write_all(&mut file, &self.proposed)?;
         file.sync_all()?;
+        let current = crate::file_edit::snapshot(&self.target)?;
+        let current_path = if let Some(bytes) = current.as_deref() {
+            let saved = dir.join(format!("{}-current-{}", id, suffix));
+            fs::write(&saved, bytes)?; Some(saved.to_string_lossy().into_owned())
+        } else { None };
+        let base_path = if let Some(Some(bytes)) = base {
+            let saved = dir.join(format!("{}-base-{}", id, suffix));
+            fs::write(&saved, bytes)?; Some(saved.to_string_lossy().into_owned())
+        } else { None };
+        let preview = |bytes: Option<&[u8]>| -> Value {
+            match bytes.and_then(|b| std::str::from_utf8(b).ok()) {
+                Some(text) => { let mut chars = text.chars(); let clipped: String = chars.by_ref().take(8000).collect(); json!({"text":clipped,"truncated":chars.next().is_some()}) },
+                None => Value::Null,
+            }
+        };
         Ok(json!({"error_code":"ASSET_CONFLICT", "path":self.relative,
             "workspace":self.workspace,"candidate":kind,"candidate_path":path.to_string_lossy(),
+            "reason":reason, "base_known":base.is_some(), "base_exists":base.flatten().is_some(), "base_path":base_path,
+            "current_exists":current.is_some(), "current_path":current_path,
+            "base_preview":preview(base.flatten()), "current_preview":preview(current.as_deref()), "candidate_preview":preview(Some(&self.proposed)),
             "message":"The file changed outside this task. The current file and the proposed change are preserved; ask the user how to proceed. Do not merge or retry automatically."}))
     }
     pub(super) fn committed(&self, root: &Path, task: &str) -> Result<bool> {
@@ -166,6 +246,106 @@ mod tests {
         path
     }
 
+    fn commit_as(root: &Path, task: &str, owner: &str, content: &str, turn: usize) -> Result<()> {
+        let p = prepare(root, task, root, "write_file", json!({"path":"document.txt","content":content}))?;
+        fs::write(root.join("document.txt"), content)?;
+        assert!(p.committed(root, task)?);
+        p.record_writer(root, task, owner, turn)
+    }
+
+    fn write_as(root: &Path, content: &str) -> Result<Prepared> {
+        prepare(root, "task", root, "write_file", json!({"path":"document.txt","content":content}))
+    }
+
+    fn session<'a>(state: &'a crate::agent_service::AgentServiceState, cancel: &'a tokio_util::sync::CancellationToken, node: Option<&str>) -> super::super::Session<'a> {
+        super::super::Session {
+            agent_id: None, task_node_id: node.map(str::to_owned), plugin: None,
+            state, task: "task", model: "fake", turn: 1, cancel,
+            ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+        }
+    }
+
+    /// A parallel function's frame that started at write version `clock`.
+    fn parallel_frame(conn: &rusqlite::Connection, id: &str, clock: i64) -> Result<()> {
+        let node = json!({"node_id":id,"parent_id":null,"kind":"temp","ordinal":0,"title":id,"goal":id,"inputs":{},"executor":"inline","agent_id":null,"status":"running","spawned_from":null,"briefing":"","result":null,"review":null,"first_seq":0,"last_seq":0,"metadata":{"parallel":true,"parallel_owner":id,"file_write_clock":clock}});
+        conn.execute("INSERT INTO agent_task_nodes(task_id,node_id,parent_id,executor,status,data) VALUES ('task',?1,NULL,'inline','running',?2)", params![id, node.to_string()])?;
+        Ok(())
+    }
+
+    #[test]
+    fn only_another_functions_write_after_this_one_started_conflicts() -> Result<()> {
+        let root = root();
+        fs::write(root.join("document.txt"), "base")?;
+        let early = write_clock(&root, "task")?;
+        commit_as(&root, "task", "a", "from A", 1)?;
+        let later = write_clock(&root, "task")?;
+        let pending = write_as(&root, "from B")?;
+        assert!(pending.parallel_conflict(&root, "task", "b", early)?, "B started before A wrote");
+        assert!(!pending.parallel_conflict(&root, "task", "b", later)?, "started after A wrote, in order or in a later turn");
+        assert!(!pending.parallel_conflict(&root, "task", "a", early)?, "a function's own writes never block it");
+        assert!(!write_as(&root, "from A")?.parallel_conflict(&root, "task", "b", early)?, "writing back the current content loses nothing");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_functions_own_later_write_does_not_hide_another_writer() -> Result<()> {
+        let root = root();
+        fs::write(root.join("document.txt"), "base")?;
+        let started = write_clock(&root, "task")?;
+        commit_as(&root, "task", "a", "from A", 1)?;
+        commit_as(&root, "task", "b", "from A + local change", 1)?;
+        assert!(write_as(&root, "stale B")?.parallel_conflict(&root, "task", "b", started)?);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parallel_functions_and_the_main_program_through_the_file_tools() -> Result<()> {
+        let root = root();
+        fs::write(root.join("document.txt"), "base")?;
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let conn = crate::agent_service::open_db(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+        parallel_frame(&conn, "a", 0)?;
+        parallel_frame(&conn, "b", 0)?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (a, b, main) = (session(&state, &cancel, Some("a")), session(&state, &cancel, Some("b")), session(&state, &cancel, None));
+        let write = |content: &str| json!({"path":"document.txt","content":content});
+        super::super::business_tool(&b, "node", "read_file", json!({"path":"document.txt"}), "read b").await?;
+        let first = super::super::business_tool(&a, "node", "write_file", write("from A"), "write a").await?;
+        assert_eq!(first["changed"], true, "{first}");
+        let refused = super::super::business_tool(&b, "node", "write_file", write("from B"), "write b").await?;
+        assert_eq!(refused["error_code"], "ASSET_CONFLICT", "{refused}");
+        assert_eq!(refused["reason"], "parallel");
+        assert_eq!(refused["base_known"], false);
+        assert_eq!(refused["current_preview"]["text"], "from A");
+        assert_eq!(refused["candidate_preview"]["text"], "from B");
+        assert_eq!(fs::read_to_string(refused["candidate_path"].as_str().unwrap())?, "from B");
+        assert!(super::super::stop_on_conflict(&b, &refused).await.is_err());
+        let shown: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.actor')='host' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))?;
+        assert!(shown.contains("另一个函数在该函数开始工作后修改了文件") && shown.contains("from A") && shown.contains("from B") && !shown.contains("基准"), "{shown}");
+        // The host does not record what a function read: reading again does not lift it.
+        super::super::business_tool(&b, "node", "read_file", json!({"path":"document.txt"}), "read b again").await?;
+        let again = super::super::business_tool(&b, "node", "write_file", write("from A and B"), "write b again").await?;
+        assert_eq!(again["error_code"], "ASSET_CONFLICT", "{again}");
+        // A function that starts after A wrote may replace the file.
+        parallel_frame(&conn, "c", write_clock(&root, "task")?)?;
+        let c = session(&state, &cancel, Some("c"));
+        let replaced = super::super::business_tool(&c, "node", "write_file", write("from C"), "write c").await?;
+        assert_eq!(replaced["changed"], true, "{replaced}");
+        // The main program's writes count as another writer's too.
+        let by_main = super::super::business_tool(&main, "node", "write_file", write("from main"), "write main").await?;
+        assert_eq!(by_main["changed"], true, "{by_main}");
+        let after_main = super::super::business_tool(&c, "node", "write_file", write("from C again"), "write c again").await?;
+        assert_eq!(after_main["error_code"], "ASSET_CONFLICT", "{after_main}");
+        assert_eq!(fs::read_to_string(root.join("document.txt"))?, "from main");
+        drop(conn);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
     #[test]
     fn conflict_preserves_current_and_proposed_content() -> Result<()> {
         let root = root();
@@ -181,26 +361,6 @@ mod tests {
         assert_eq!(fs::read_to_string(saved["candidate_path"].as_str().unwrap())?, "agent\n");
         assert_eq!(saved["error_code"], "ASSET_CONFLICT");
         assert_eq!(saved["candidate"], "file");
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn parallel_writers_record_the_owner_and_preserve_the_second_candidate() -> Result<()> {
-        let root = root();
-        let path = root.join("document.txt");
-        fs::write(&path, "original")?;
-        let first = prepare(&root, "task", &root, "write_file", json!({"path":"document.txt","content":"first"}))?;
-        assert!(!first.other_parallel_writer(&root, "task", "one")?);
-        fs::write(&path, "first")?;
-        assert!(first.committed(&root, "task")?);
-        first.record_parallel_writer(&root, "task", "one")?;
-        let second = prepare(&root, "task", &root, "write_file", json!({"path":"document.txt","content":"second"}))?;
-        assert!(!second.other_parallel_writer(&root, "task", "one")?);
-        assert!(second.other_parallel_writer(&root, "task", "two")?);
-        let conflict = second.preserve(&root)?;
-        assert_eq!(fs::read_to_string(&path)?, "first");
-        assert_eq!(fs::read_to_string(conflict["candidate_path"].as_str().unwrap())?, "second");
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -280,6 +440,183 @@ mod tests {
         assert_eq!(conflict["error_code"], "ASSET_CONFLICT");
         assert_eq!(fs::read_to_string(root.join("document.txt"))?, "external");
         assert_eq!(fs::read_to_string(conflict["candidate_path"].as_str().unwrap())?, "proposed");
+        drop(conn);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_edit_tells_the_agent_what_the_file_has() -> Result<()> {
+        let root = root();
+        fs::write(root.join("bundler.js"), "function build() {\n  const out = [];\n  return out.join('\\n');\n}\n")?;
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let conn = crate::agent_service::open_db(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let main = session(&state, &cancel, None);
+        let stale = json!({"path":"bundler.js","edits":[{"old_text":"  const out = [];\n  return out.join(',');","new_text":"  return '';"}]});
+        let failed = super::super::business_tool(&main, "node", "edit_file", stale, "edit").await;
+        let message = format!("{:#}", failed.expect_err("old_text is not in the file"));
+        assert!(message.contains("old_text not found") && message.contains("2|   const out = [];") && message.contains("3|   return out.join('\\n');"), "{message}");
+        assert_eq!(fs::read_to_string(root.join("bundler.js"))?, "function build() {\n  const out = [];\n  return out.join('\\n');\n}\n");
+        drop(conn);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn a_commands_changes_become_the_tasks_baselines_but_not_another_tasks() -> Result<()> {
+        let root = root();
+        let path = root.join("document.txt");
+        fs::write(&path, "first")?;
+        let read = json!({"code_hash":crate::symbol_description::content_hash(b"first")});
+        observe(&root, "task", &root, &json!({"path":"document.txt"}), &read)?;
+        observe(&root, "other", &root, &json!({"path":"document.txt"}), &read)?;
+        let untouched = untouched(&root, "task", &root)?;
+        fs::write(&path, "command")?;
+        untouched.adopt(&root, "task", None, 1)?;
+        let edit = prepare(&root, "task", &root, "edit_file", json!({"path":"document.txt","edits":[{"old_text":"command","new_text":"agent"}]}))?;
+        assert!(!edit.conflict()?);
+        assert_eq!(edit.proposed, b"agent");
+        let other = prepare(&root, "other", &root, "write_file", json!({"path":"document.txt","content":"other"}))?;
+        assert!(other.conflict()?);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_change_made_outside_before_the_command_still_conflicts() -> Result<()> {
+        let root = root();
+        let path = root.join("document.txt");
+        fs::write(&path, "first")?;
+        observe(&root, "task", &root, &json!({"path":"document.txt"}), &json!({"code_hash":crate::symbol_description::content_hash(b"first")}))?;
+        fs::write(&path, "outside")?;
+        let untouched = untouched(&root, "task", &root)?;
+        fs::write(&path, "outside+command")?;
+        untouched.adopt(&root, "task", None, 1)?;
+        let prepared = prepare(&root, "task", &root, "write_file", json!({"path":"document.txt","content":"agent"}))?;
+        assert!(prepared.conflict()?);
+        assert_eq!(prepared.base.as_deref(), Some(b"first".as_slice()));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_parallel_functions_command_counts_as_its_write() -> Result<()> {
+        let root = root();
+        let path = root.join("document.txt");
+        fs::write(&path, "first")?;
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let conn = crate::agent_service::open_db(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+        parallel_frame(&conn, "one", 0)?;
+        parallel_frame(&conn, "two", 0)?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (one, two) = (session(&state, &cancel, Some("one")), session(&state, &cancel, Some("two")));
+        super::super::business_tool(&one, "node", "read_file", json!({"path":"document.txt"}), "read").await?;
+        let ran = super::super::business_tool(&one, "node", "run_program", json!({"program":"python","args":["-c","import pathlib; pathlib.Path('document.txt').write_text('command')"]}), "run").await?;
+        if ran["outcome"] == "spawn_failed" {
+            // Python is not installed here.
+            drop(conn);
+            drop(state);
+            let _ = fs::remove_dir_all(root);
+            return Ok(());
+        }
+        assert_eq!(ran["process_success"], true, "{ran}");
+        let refused = super::super::business_tool(&two, "node", "write_file", json!({"path":"document.txt","content":"from two"}), "write two").await?;
+        assert_eq!(refused["error_code"], "ASSET_CONFLICT", "{refused}");
+        assert_eq!(refused["reason"], "parallel");
+        let own = super::super::business_tool(&one, "node", "write_file", json!({"path":"document.txt","content":"from one"}), "write one").await?;
+        assert_eq!(own["changed"], true, "{own}");
+        assert_eq!(fs::read_to_string(&path)?, "from one");
+        drop(conn);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_the_task_runs_changes_its_files_as_its_own_edit() -> Result<()> {
+        let root = root();
+        let path = root.join("document.txt");
+        fs::write(&path, "first")?;
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let conn = crate::agent_service::open_db(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let session = super::super::Session {
+            agent_id: None, task_node_id: None, plugin: None,
+            state: &state, task: "task", model: "fake", turn: 1, cancel: &cancel,
+            ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+        };
+        let python = |code: &str| json!({"program":"python","args":["-c",format!("import pathlib; p = pathlib.Path('document.txt'); {code}")]});
+        super::super::business_tool(&session, "node", "write_file", json!({"path":"document.txt","content":"second"}), "write").await?;
+        let ran = super::super::business_tool(&session, "node", "run_program", python("p.write_text('command')"), "run").await?;
+        if ran["outcome"] == "spawn_failed" {
+            // Python is not installed here.
+            drop(conn);
+            drop(state);
+            let _ = fs::remove_dir_all(root);
+            return Ok(());
+        }
+        assert_eq!(ran["process_success"], true, "{ran}");
+        let edited = super::super::business_tool(&session, "node", "edit_file", json!({"path":"document.txt","edits":[{"old_text":"command","new_text":"agent"}]}), "edit").await?;
+        assert_eq!(edited["changed"], true, "{edited}");
+        assert_eq!(fs::read_to_string(&path)?, "agent");
+        // A change made outside before the next command still stops the edit after it.
+        fs::write(&path, "outside")?;
+        super::super::business_tool(&session, "node", "run_program", python("p.write_text(p.read_text() + '+command')"), "run again").await?;
+        let conflict = super::super::business_tool(&session, "node", "edit_file", json!({"path":"document.txt","edits":[{"old_text":"agent","new_text":"again"}]}), "edit again").await?;
+        assert_eq!(conflict["error_code"], "ASSET_CONFLICT", "{conflict}");
+        assert_eq!(fs::read_to_string(&path)?, "outside+command");
+        drop(conn);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn what_a_background_process_changes_is_not_taken_as_the_tasks_own() -> Result<()> {
+        let root = root();
+        let path = root.join("document.txt");
+        fs::write(&path, "first")?;
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        fs::write(root.join("package.json"), r#"{"scripts":{"dev":"node writer.js"}}"#)?;
+        // The file is written before the server listens, so before the launch returns.
+        fs::write(root.join("writer.js"), format!(
+            "require('fs').writeFileSync('document.txt', 'background'); require('http').createServer((q, r) => r.end('ready')).listen({port}, '127.0.0.1');"
+        ))?;
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let conn = crate::agent_service::open_db(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let session = super::super::Session {
+            agent_id: None, task_node_id: None, plugin: None,
+            state: &state, task: "task", model: "fake", turn: 1, cancel: &cancel,
+            ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+        };
+        super::super::business_tool(&session, "node", "read_file", json!({"path":"document.txt"}), "read").await?;
+        let launch = json!({"project_path":".","script":"dev","background":true,"ready_url":format!("http://127.0.0.1:{port}/"),"wait_seconds":30});
+        let launched = match super::super::business_tool(&session, "node", "run_project_script", launch, "launch").await {
+            Ok(launched) => launched,
+            // Node and npm are not installed here.
+            Err(error) if format!("{error:#}").contains("runtime_bootstrap") => {
+                drop(conn);
+                drop(state);
+                let _ = fs::remove_dir_all(root);
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let written = fs::read_to_string(&path)?;
+        let conflict = super::super::business_tool(&session, "node", "edit_file", json!({"path":"document.txt","edits":[{"old_text":"background","new_text":"agent"}]}), "edit").await?;
+        super::super::business_tool(&session, "node", "stop_project_process", json!({"process_id":launched["process_id"]}), "stop").await?;
+        assert_eq!(launched["running"], true, "{launched}");
+        assert_eq!(written, "background");
+        assert_eq!(conflict["error_code"], "ASSET_CONFLICT", "{conflict}");
+        assert_eq!(fs::read_to_string(&path)?, "background");
         drop(conn);
         drop(state);
         let _ = fs::remove_dir_all(root);

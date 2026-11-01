@@ -312,6 +312,26 @@ pub fn index(libraries: &Libraries, definitions: &[Value]) -> String {
     result
 }
 
+/// Third-party libraries by name and purpose. A program loads one where it
+/// needs it; its methods are read with read_tool_contracts.
+pub fn third_party_index(libraries: &BTreeMap<String, String>) -> String {
+    if libraries.is_empty() {
+        return String::new();
+    }
+    let mut result = String::from(
+        "// Third-party libraries, loaded where the code needs one: const lib = require(\"<name>\"), or require(\"<name>/promises\") for async methods. read_tool_contracts with the library name lists its methods.\n",
+    );
+    for (library, description) in libraries {
+        let summary = description.split(['.', '。', '\n']).next().unwrap_or("");
+        let summary = text(&summary.chars().take(140).collect::<String>());
+        if !summary.is_empty() {
+            result.push_str(&format!("/** {summary} */\n"));
+        }
+        result.push_str(&format!("declare module \"{library}\";\n"));
+    }
+    result
+}
+
 pub fn selected(libraries: &Libraries, args: &Value) -> anyhow::Result<Libraries> {
     use anyhow::{Context, ensure};
     let mut result = Libraries::new();

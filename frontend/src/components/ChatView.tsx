@@ -14,10 +14,11 @@ import chatCss from '../dsh/chat/ChatView.module.css'
 import messageCss from '../dsh/chat/MessageItem.module.css'
 import { markdownLabels } from '../dsh/markdown-labels.ts'
 import { t } from '../i18n.ts'
-import { awaitingModel, chatItems, formatDuration, type ChatItem, type TurnEndReason } from '../model.ts'
+import { awaitingModel, chatItems, flattenItems, formatDuration, splitTurnItems, type ChatItem, type TurnEndReason } from '../model.ts'
 import { useTaskDuration } from '../useTaskDuration.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
 import css from './ChatView.module.css'
+import { ProcessList, liveActivity } from './ProcessList.tsx'
 import { ToolRow } from './ToolRow.tsx'
 import { NoteProposal } from './NoteProposal.tsx'
 import { ApprovalCards } from './ApprovalCards.tsx'
@@ -126,8 +127,13 @@ function Item({
           result={item.result}
           stopped={turnClosed}
           onOpenChild={onOpenTask}
+          line={item.line}
         />
       )
+    case 'call':
+    case 'program':
+      return <ProcessList items={[item]} closed={turnClosed} onOpenTask={onOpenTask}
+        renderItem={child => <Item item={child} turnClosed={turnClosed} slashNames={slashNames} onOpenTask={onOpenTask} />} />
     case 'turn-end':
       return <TurnEnd reason={item.reason} durationMs={item.durationMs} />
   }
@@ -136,8 +142,7 @@ function Item({
 interface AssistantTurnData {
   turn: number
   key: string
-  tools: ChatItem[]
-  assistant?: (ChatItem & { kind: 'assistant' }) | undefined
+  entries: ChatItem[]
   turnEnd?: (ChatItem & { kind: 'turn-end' }) | undefined
   closed: boolean
   durationMs?: number | undefined
@@ -175,10 +180,9 @@ function AssistantTurnView({
 
   // Note proposals wait for the user, so they sit below the answer, not in the collapsible process.
   const isNote = (item: ChatItem): item is ChatItem & { kind: 'tool' } => item.kind === 'tool' && item.name === 'propose_project_note'
-  const notes = turn.tools.filter(isNote)
-  const processTools = turn.tools.filter(item => !isNote(item))
-  const hasTools = processTools.length > 0
-  const hasReasoning = Boolean(turn.assistant?.reasoning && turn.assistant.reasoning.trim() !== '')
+  const notes = turn.entries.filter(isNote)
+  const { process, conclusion } = splitTurnItems(turn.entries.filter(item => !isNote(item)))
+  const hasReasoning = Boolean(conclusion?.reasoning && conclusion.reasoning.trim() !== '')
   const duration = turn.durationMs ?? (isTurnRunning ? liveDurationMs : undefined)
 
   const headerLabel = useMemo(() => {
@@ -193,7 +197,7 @@ function AssistantTurnView({
     return '执行过程'
   }, [duration, isTurnRunning])
 
-  const conclusionText = turn.assistant?.text ?? ''
+  const conclusionText = conclusion?.text ?? ''
 
   return (
     <div className={css.assistantTurnRoot}>
@@ -220,32 +224,20 @@ function AssistantTurnView({
       {/* 2. Expanded Process Container (Thinking + Tools) - Borderless like Figure 2 */}
       {open && (
         <div className={css.processContainer}>
-          {hasReasoning && turn.assistant && (
-            <div className={css.reasoningText}>
-              <SmoothMarkdown
-                text={turn.assistant.reasoning}
-                labels={labels}
-                streaming={turn.assistant.streaming}
-                variant="compact"
-              />
-            </div>
-          )}
-
-          {hasTools && (
+          {process.length > 0 && (
             <div className={css.toolsList}>
-              {processTools.map((tool) => (
-                <Item
-                  key={tool.key}
-                  item={tool}
-                  turnClosed={turn.closed}
-                  slashNames={slashNames}
-                  onOpenTask={onOpenTask}
-                />
-              ))}
+              <ProcessList items={process} closed={turn.closed} onOpenTask={onOpenTask}
+                renderItem={item => <Item item={item} turnClosed={turn.closed} slashNames={slashNames} onOpenTask={onOpenTask} />} />
             </div>
           )}
 
-          {!hasReasoning && !hasTools && notes.length === 0 && (
+          {hasReasoning && conclusion && (
+            <div className={css.reasoningText}>
+              <SmoothMarkdown text={conclusion.reasoning} labels={labels} streaming={conclusion.streaming} variant="compact" />
+            </div>
+          )}
+
+          {!hasReasoning && process.length === 0 && notes.length === 0 && (
             <div style={{ color: 'var(--dsw-alias-label-tertiary, #9ca3af)', fontSize: 12, padding: '4px 0' }}>
               （本轮未产生额外的思考或外部工具调用）
             </div>
@@ -259,7 +251,7 @@ function AssistantTurnView({
           <AssistantMessage
             text={conclusionText}
             reasoning=""
-            streaming={turn.assistant?.streaming}
+            streaming={conclusion?.streaming}
           />
         </div>
       )}
@@ -268,7 +260,7 @@ function AssistantTurnView({
       {isTurnRunning && conclusionText === '' && (
         <div className={css.inFlightAnalyzing}>
           <TextShimmer active className={css.thinking}>
-            正在分析请求
+            {liveActivity(process) || '正在分析请求'}
           </TextShimmer>
         </div>
       )}
@@ -278,7 +270,7 @@ function AssistantTurnView({
       {/* 6. Codex-Style Edited Files Summary Card */}
       {changes && <ChangesCard taskId={taskId} summary={changes} running={running} onChangesUpdated={onChangesUpdated} />}
       {trackingError && <p role="status" className={css.turnNote}>部分改动未能记录：{trackingError}</p>}
-      {!changes && turn.tools.some(item => item.kind === 'tool' && /^(write_file|replace_range|edit_file)$/.test(item.name) && item.result && !item.result.isError) && <p className={css.turnNote}>这轮没有可用的修改前后快照，无法显示准确统计或撤销。</p>}
+      {!changes && flattenItems(turn.entries).some(item => item.kind === 'tool' && /^(write_file|replace_range|edit_file)$/.test(item.name) && item.result && !item.result.isError) && <p className={css.turnNote}>这轮没有可用的修改前后快照，无法显示准确统计或撤销。</p>}
       {/* 7. Error or Abort notices if any */}
       {turn.turnEnd && (
         <TurnEnd reason={turn.turnEnd.reason} durationMs={turn.durationMs} />
@@ -338,8 +330,7 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
     const flushTurn = () => {
       if (currentTurn) {
         if (
-          currentTurn.assistant ||
-          currentTurn.tools.length > 0 ||
+          currentTurn.entries.length > 0 ||
           !currentTurn.closed
         ) {
           list.push({ kind: 'assistant-turn', turn: currentTurn })
@@ -375,16 +366,16 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
         return
       }
 
-      if (item.kind === 'tool' || item.kind === 'observer' || item.kind === 'interjection') {
+      if (item.kind === 'tool' || item.kind === 'call' || item.kind === 'program' || item.kind === 'observer' || item.kind === 'interjection') {
         if (!currentTurn) {
           currentTurn = {
             key: `turn:${item.key}`,
             turn: turnNumber,
-            tools: [],
-            closed: index < closedBefore || (!running && item.kind === 'tool'),
+            entries: [],
+            closed: index < closedBefore || (!running && (item.kind === 'tool' || item.kind === 'call' || item.kind === 'program')),
           }
         }
-        currentTurn.tools.push(item)
+        currentTurn.entries.push(item)
         return
       }
 
@@ -393,11 +384,11 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
           currentTurn = {
             key: `turn:${item.key}`,
             turn: turnNumber,
-            tools: [],
+            entries: [],
             closed: index < closedBefore,
           }
         }
-        currentTurn.assistant = item
+        currentTurn.entries.push(item)
         return
       }
 

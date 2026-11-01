@@ -257,6 +257,75 @@ pub fn line_replacement(
     Ok(output)
 }
 
+/// The file's lines from `first` (0-based), numbered as the file numbers them.
+fn numbered(lines: &[&str], first: usize, count: usize) -> String {
+    lines.iter().enumerate().skip(first).take(count).map(|(i, line)| {
+        let mut text: String = line.chars().take(200).collect();
+        if line.chars().count() > 200 {
+            text.push('…');
+        }
+        format!("{}| {}", i + 1, text)
+    }).collect::<Vec<_>>().join("\n")
+}
+
+/// Where a missing old_text most nearly is: the start line that most of its
+/// lines agree on, ignoring indentation; for a single line with a small
+/// difference, the line sharing the most words with it. None when nothing
+/// in the file resembles it.
+fn closest_lines(source: &str, old_text: &str) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let old: Vec<&str> = old_text.lines().collect();
+    let mut at = std::collections::HashMap::<&str, Vec<usize>>::new();
+    for (i, line) in lines.iter().enumerate() {
+        at.entry(line.trim()).or_default().push(i);
+    }
+    let mut votes = std::collections::HashMap::<usize, usize>::new();
+    for (j, line) in old.iter().enumerate() {
+        // Braces and blank lines match everywhere and say nothing.
+        if line.trim().len() < 4 {
+            continue;
+        }
+        for &i in at.get(line.trim()).into_iter().flatten() {
+            if i >= j {
+                *votes.entry(i - j).or_default() += 1;
+            }
+        }
+    }
+    let words = |text: &str| -> std::collections::HashSet<String> {
+        text.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| !w.is_empty()).map(str::to_owned).collect()
+    };
+    let start = votes.into_iter().max_by_key(|&(start, n)| (n, std::cmp::Reverse(start))).map(|(start, _)| start).or_else(|| {
+        let (j, longest) = old.iter().enumerate().max_by_key(|(_, line)| line.trim().len())?;
+        let wanted = words(longest);
+        let (best, shared) = lines.iter().enumerate().map(|(i, line)| (i, words(line).intersection(&wanted).count()))
+            .max_by_key(|&(i, n)| (n, std::cmp::Reverse(i)))?;
+        (shared >= 2).then(|| best.saturating_sub(j))
+    })?;
+    let first = start.saturating_sub(1);
+    let count = (old.len() + 2).min(30);
+    Some(format!("lines in the file now are {}-{}:\n{}", first + 1, (first + count).min(lines.len()), numbered(&lines, first, count)))
+}
+
+/// How often and on which lines an ambiguous old_text occurs.
+fn occurrences(source: &str, anchor: &str) -> String {
+    let (mut lines, mut count, mut from) = (Vec::<usize>::new(), 0, 0);
+    while let Some(found) = source[from..].find(anchor) {
+        let at = from + found;
+        count += 1;
+        let line = source[..at].matches('\n').count() + 1;
+        if lines.last() != Some(&line) {
+            lines.push(line);
+        }
+        if count == 10 {
+            break;
+        }
+        from = at + anchor.chars().next().map_or(1, char::len_utf8);
+    }
+    let list = lines.iter().map(usize::to_string).collect::<Vec<_>>().join(", ");
+    let times = if count == 10 { "10 or more".to_owned() } else { count.to_string() };
+    format!("it occurs {times} times, at {} {list}", if lines.len() == 1 { "line" } else { "lines" })
+}
+
 pub fn text_edits(source: &str, edits: &[crate::tools::TextEdit]) -> Result<String> {
     if edits.is_empty() || edits.len() > 100 {
         return Err(ToolError::InvalidEdit(
@@ -281,14 +350,20 @@ pub fn text_edits(source: &str, edits: &[crate::tools::TextEdit]) -> Result<Stri
         };
         let mut offsets = source.match_indices(anchor);
         let Some((start, _)) = offsets.next() else {
-            return Err(ToolError::InvalidEdit(format!(
-                "edit {index}: old_text not found; no edits applied"
-            )));
+            return Err(ToolError::InvalidEdit(match closest_lines(source, &edit.old_text) {
+                Some(lines) => format!(
+                    "edit {index}: old_text not found; no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."
+                ),
+                None => format!(
+                    "edit {index}: old_text not found, and no line of it appears in the file; no edits applied"
+                ),
+            }));
         };
         let next_char = start + anchor.chars().next().unwrap().len_utf8();
         if offsets.next().is_some() || source[next_char..].contains(anchor) {
             return Err(ToolError::InvalidEdit(format!(
-                "edit {index}: old_text is ambiguous; supply more surrounding text; no edits applied"
+                "edit {index}: old_text is ambiguous: {}; supply more surrounding text; no edits applied",
+                occurrences(source, anchor)
             )));
         }
         replacements.push((
@@ -308,4 +383,36 @@ pub fn text_edits(source: &str, edits: &[crate::tools::TextEdit]) -> Result<Stri
         output.replace_range(begin..end, &text);
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edit(old_text: &str) -> crate::tools::TextEdit {
+        crate::tools::TextEdit { old_text: old_text.into(), new_text: "changed".into() }
+    }
+
+    fn error(source: &str, old_text: &str) -> String {
+        text_edits(source, &[edit(old_text)]).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn a_missing_anchor_shows_the_closest_lines_of_the_file() {
+        let source = "fn a() {\n    let x = 1;\n    let y = 2;\n    return x + y;\n}\n\nfn b() {}\n";
+        let message = error(source, "    let x = 1;\n    let y = 3;\n    return x + y;");
+        assert!(message.contains("no edits applied") && message.contains("lines in the file now are 1-5"), "{message}");
+        assert!(message.contains("3|     let y = 2;") && message.contains("Copy old_text exactly"), "{message}");
+        let typo = error("const x = 2;\nconst y = 3;\n", "const x = 1;");
+        assert!(typo.contains("1| const x = 2;"), "{typo}");
+        let unrelated = error(source, "nothing like this");
+        assert!(unrelated.contains("no line of it appears in the file") && !unrelated.contains("|"), "{unrelated}");
+    }
+
+    #[test]
+    fn an_ambiguous_anchor_says_where_it_occurs() {
+        let message = error("x = 1;\ny = 2;\nx = 1;\n", "x = 1;");
+        assert!(message.contains("it occurs 2 times, at lines 1, 3") && message.contains("supply more surrounding text"), "{message}");
+        assert!(error("aa;\n", "a").contains("at line 1"));
+    }
 }

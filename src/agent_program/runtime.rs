@@ -107,6 +107,10 @@ pub struct Runtime {
     /// What the program printed with console, for the AI that wrote it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     logs: Vec<String>,
+    /// Libraries this run has required, as in Node's module cache: requiring
+    /// one again gives the same object.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    required: BTreeMap<String, HeapId>,
     pub finished: bool,
     pub result: Value,
     pub error: Option<Value>,
@@ -131,6 +135,11 @@ pub enum ActionKind {
     Tool {
         name: String,
         args: Value,
+    },
+    /// Link a third-party library: the host answers with its methods'
+    /// tool names, or fails, and the program goes on from this line.
+    Require {
+        library: String,
     },
     ParallelReads {
         operations: Vec<(String, Value)>,
@@ -334,6 +343,7 @@ impl Runtime {
                         }
                         Effect::PromiseCreate { value, .. } => expression(value, &mut live),
                         Effect::PromiseConstruct { executor } => expression(executor, &mut live),
+                        Effect::Require(_) => {}
                         Effect::ParallelReadMap { items, args, .. } => {
                             expression(items, &mut live);
                             for arg in args {
@@ -460,6 +470,7 @@ impl Runtime {
             active_async_batch: Vec::new(),
             inflight_async: BTreeMap::new(),
             logs: Vec::new(),
+            required: BTreeMap::new(),
             finished: false,
             result: Value::Null,
             error: None,
@@ -527,6 +538,21 @@ impl Runtime {
             executor: None,
             origin: Vec::new(),
         })
+    }
+    /// The object a required library gives: each method a tool value, async
+    /// for "<library>/promises", as with Node's fs and fs/promises.
+    fn link(&mut self, library: &str, value: &Value) -> Result<VmValue> {
+        let methods = value["methods"].as_object().context("a required library returns its methods")?;
+        let prefix = if library.ends_with("/promises") { "tool:async-tool:" } else { "tool:" };
+        let mut properties = Vec::with_capacity(methods.len());
+        for (method, tool) in methods {
+            let tool = tool.as_str().context("a library method names its tool")?;
+            let native = self.heap.native(&format!("{prefix}{tool}"))?;
+            properties.push((method.clone(), VmValue::Reference(native)));
+        }
+        let id = self.heap.allocate(HeapNode::Object(properties))?;
+        self.required.insert(library.to_owned(), id);
+        Ok(VmValue::Reference(id))
     }
     /// Write a call result into the caller's temporary.
     fn store(&mut self, destination: Option<String>, value: VmValue) -> Result<()> {
@@ -1034,8 +1060,13 @@ impl Runtime {
             }
             return Ok(());
         }
+        // A required library becomes an object of its methods, kept for this run.
+        let linked = match self.pending.as_ref().map(|action| &action.kind) {
+            Some(ActionKind::Require { library }) if !failed => Some(self.link(&library.clone(), &value)?),
+            _ => None,
+        };
         let imported = if !failed && ((self.active_async_action.is_some() || self.active_reaction.is_some()) || self.pending.as_ref().and_then(|action| action.destination.as_ref()).is_some()) {
-            Some(self.heap.from_json(&value)?)
+            Some(match linked { Some(module) => module, None => self.heap.from_json(&value)? })
         } else { None };
         let action = self.pending.take().context("no suspended effect")?;
         if let Some(pending) = self.active_async_action.take().or_else(|| self.active_reaction.take()) {
@@ -1305,6 +1336,7 @@ impl Runtime {
                     );
                 }
                 roots.extend(self.module_env.map(VmValue::Reference));
+                roots.extend(self.required.values().copied().map(VmValue::Reference));
                 if let Err(error) = self.heap.collect(&roots) {
                     self.finished = true;
                     let error = json!({"message":format!("VM heap collection failed: {error:#}")});
@@ -1606,6 +1638,14 @@ impl Runtime {
                                     Some(kind) => kind,
                                     None => return Ok(None),
                                 }
+                            }
+                            Effect::Require(library) => {
+                                // A library this run already required is the same object.
+                                if let Some(id) = self.required.get(&library) {
+                                    self.store(destination, VmValue::Reference(*id))?;
+                                    return Ok(None);
+                                }
+                                ActionKind::Require { library }
                             }
                             Effect::Tool(name, args) => {
                                 let values = vm_args(&args, locals, &mut self.heap)?;

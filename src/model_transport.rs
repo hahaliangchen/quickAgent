@@ -56,6 +56,65 @@ impl std::fmt::Display for ModelTimeout {
 }
 impl std::error::Error for ModelTimeout {}
 
+/// A model request that got no answer: the service could not be reached,
+/// failed or was busy each time it was tried. Nothing ran for it.
+#[derive(Debug)]
+pub struct ModelUnavailable {
+    pub reason: String,
+    pub attempts: u32,
+}
+impl std::fmt::Display for ModelUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "model service unavailable: {} ({} attempts)", self.reason, self.attempts)
+    }
+}
+impl std::error::Error for ModelUnavailable {}
+
+/// How long to wait before trying a failed model request again: 2, 4, 8
+/// seconds. Tests simulate the failures, so their retries need no real wait.
+pub fn backoff(attempt: u32) -> Duration {
+    let base = if cfg!(test) { Duration::from_millis(5) } else { Duration::from_secs(1) };
+    base * 2u32.pow(attempt)
+}
+
+/// Why a failed model request can be tried again: it failed before any of its
+/// answer arrived, so another try repeats nothing. A rejected request, bad
+/// credentials or a cancelled turn are final.
+pub fn transient(error: &anyhow::Error, output_started: bool) -> Option<String> {
+    if output_started {
+        return None;
+    }
+    for cause in error.chain() {
+        if cause.downcast_ref::<ModelTimeout>().is_some() {
+            return Some("no answer in time".into());
+        }
+        if let Some(failure) = cause.downcast_ref::<crate::visual_probe::HttpModelFailure>() {
+            return match failure.status {
+                429 => Some("busy (HTTP 429)".into()),
+                500..=599 => Some(format!("server error (HTTP {})", failure.status)),
+                _ => None,
+            };
+        }
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            if error.is_connect() {
+                return Some("could not connect".into());
+            }
+            if error.is_timeout() {
+                return Some("no answer in time".into());
+            }
+            if error.is_request() || error.is_body() {
+                return Some("connection lost".into());
+            }
+        }
+    }
+    let text = format!("{error:#}").to_ascii_lowercase();
+    (!text.contains("cancelled")
+        && (text.contains("connection closed before message completed")
+            || text.contains("connection reset")
+            || text.contains("without completion")))
+    .then(|| "connection lost".into())
+}
+
 /// Decode a model response without emitting execution-agent chat events.
 /// Context and vision requests still refresh the same progress watchdog.
 pub async fn consume_response(
@@ -115,14 +174,17 @@ impl ModelRequestLog {
             .ok()
             .map(|url| url.origin().ascii_serialization());
         let bytes = serde_json::to_vec(body).unwrap_or_default();
-        let messages = body["messages"]
+        // A Responses request carries input items instead of messages.
+        let responses = body.get("input").is_some();
+        let messages = body[if responses { "input" } else { "messages" }]
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or_default();
         let mut roles = BTreeMap::<String, usize>::new();
         for message in messages {
-            let role = match message["role"].as_str() {
-                Some(role @ ("system" | "user" | "assistant" | "tool" | "developer")) => role,
+            let role = match message["role"].as_str().or_else(|| message["type"].as_str()) {
+                Some(role @ ("system" | "user" | "assistant" | "tool" | "developer"
+                    | "function_call" | "function_call_output" | "reasoning")) => role,
                 _ => "other",
             };
             *roles.entry(role.into()).or_default() += 1;
@@ -158,20 +220,33 @@ impl ModelRequestLog {
         .filter(|name| std::env::var_os(name).is_some())
         .collect::<Vec<_>>();
         log.event("prepared", json!({
-            "origin":origin,"endpoint":"chat/completions", "request_bytes":bytes.len(),
+            "origin":origin,"endpoint":if responses { "responses" } else { "chat/completions" }, "request_bytes":bytes.len(),
             "body_sha256":crate::visual_artifacts::hash(&bytes),
             "message_count":messages.len(),"role_counts":roles,
             "proxy_env_names":proxy_env_names,
             "tool_count":body["tools"].as_array().map_or(0,Vec::len),
             "tail_message_shapes":messages.iter().rev().take(8).map(|message|json!({
-                "role":message["role"],
+                "role":message.get("role").unwrap_or(&message["type"]),
                 "content_type":match &message["content"] { Value::Array(_)=>"array",Value::String(_)=>"string",Value::Null=>"null",_=>"other" },
                 "tool_call_count":message["tool_calls"].as_array().map_or(0,Vec::len),
                 "has_tool_call_id":message["tool_call_id"].is_string(),
             })).collect::<Vec<_>>(),
-            "timeout_policy":{"connect_ms":30_000,"headers_ms":180_000,"first_output_ms":180_000,"idle_ms":180_000,"total_ms":null},"attempt":1,
+            "timeout_policy":{"connect_ms":30_000,"headers_ms":180_000,"first_output_ms":180_000,"idle_ms":180_000,"total_ms":null},
+            "attempt":log.identity["attempt"].as_u64().unwrap_or(1),
         }));
         log
+    }
+
+    /// Whether any of the answer arrived; only a request with none is tried again.
+    pub fn output_started(&self) -> bool {
+        self.progress.lock().unwrap().first_delta_ms.is_some()
+    }
+
+    /// The wait a busy service asked for, from a Retry-After in seconds.
+    pub fn retry_after(&self) -> Option<Duration> {
+        let progress = self.progress.lock().unwrap();
+        let seconds = progress.http["headers"]["retry-after"].as_str()?.trim().parse::<u64>().ok()?;
+        Some(Duration::from_secs(seconds))
     }
 
     fn elapsed(&self) -> u64 {
@@ -423,6 +498,22 @@ fn error_chain(error: &anyhow::Error) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_requests_that_got_no_answer_from_a_reachable_failure_are_retried() {
+        let status = |code: u16| anyhow::Error::new(crate::visual_probe::HttpModelFailure { status: code, body: String::new() });
+        assert_eq!(transient(&status(503), false).as_deref(), Some("server error (HTTP 503)"));
+        assert_eq!(transient(&status(429), false).as_deref(), Some("busy (HTTP 429)"));
+        assert_eq!(transient(&status(400), false), None, "a rejected request is final");
+        assert_eq!(transient(&status(401), false), None, "so are bad credentials");
+        assert_eq!(transient(&status(503), true), None, "part of the answer already arrived");
+        let timeout = anyhow::Error::new(ModelTimeout { phase: "awaiting_headers", limit_ms: 1 });
+        assert_eq!(transient(&timeout, false).as_deref(), Some("no answer in time"));
+        assert_eq!(transient(&anyhow::anyhow!("cancelled"), false), None);
+        assert_eq!(transient(&anyhow::anyhow!("model stream ended without completion"), false).as_deref(), Some("connection lost"));
+        let unavailable = ModelUnavailable { reason: "could not connect".into(), attempts: 4 };
+        assert_eq!(unavailable.to_string(), "model service unavailable: could not connect (4 attempts)");
+    }
 
     #[test]
     fn replica_affinity_is_stable_and_separates_task_and_window() {

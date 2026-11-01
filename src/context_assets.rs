@@ -401,6 +401,7 @@ pub fn reference_only(message: &mut Value) {
     }
     message["_asset_state"] = json!("reference_only");
     message.as_object_mut().unwrap().remove("reasoning_content");
+    message.as_object_mut().unwrap().remove(crate::model_stream::REASONING_ITEMS);
     message
         .as_object_mut()
         .unwrap()

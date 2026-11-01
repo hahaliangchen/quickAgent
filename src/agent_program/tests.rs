@@ -1089,6 +1089,7 @@ impl TutorialRun {
             };
             let result = match action.kind {
                 ActionKind::ParallelReads { .. } => panic!("tutorial does not use parallel reads"),
+                ActionKind::Require { .. } => panic!("tutorial does not require libraries"),
                 ActionKind::Call { name, args, .. } => {
                     self.run(Runtime::task_program(run.program.clone(), &name, args).unwrap())
                 }
@@ -1140,6 +1141,11 @@ impl TutorialRun {
                             assert_eq!(self.files[path], input["content"], "revise the saved page");
                             assert_eq!(input["issues"], json!(["缺少要点"]));
                             Ok(json!({"content":format!("{}（已修正）", input["content"].as_str().unwrap())}))
+                        }
+                        "summarizeFile" => {
+                            assert!(input["requirements"].is_string(), "a module gets the requirements as a parameter");
+                            let path = input["path"].as_str().unwrap();
+                            Ok(json!({"path":path,"points":[format!("{path} 的要点")]}))
                         }
                         _ => panic!("unexpected tutorial task {name}"),
                     }
@@ -1245,6 +1251,21 @@ fn documented_parallel_example_checks_all_five_pages() {
         }
     }
     assert!(harness.workers.is_empty());
+}
+
+#[test]
+fn documented_module_example_summarizes_each_file_with_one_module() {
+    let source = include_str!("../../skills/task-program/examples/module-notes.js");
+    assert!(compile(source).unwrap().functions["summarizeFile"].module_task);
+    let mut harness = TutorialRun::default();
+    let output = harness.run(tutorial(source)).unwrap();
+    assert_eq!(output, Value::Null);
+    assert_eq!(harness.events.iter().filter(|e| *e == "summarizeFile").count(), 3);
+    assert_eq!(harness.events.iter().filter(|e| *e == "write_file:notes.md").count(), 1);
+    assert_eq!(
+        harness.files["notes.md"],
+        "## README.md\n- README.md 的要点\n\n## docs/agent-design-guide.md\n- docs/agent-design-guide.md 的要点\n\n## docs/agent-program.md\n- docs/agent-program.md 的要点"
+    );
 }
 
 #[test]
@@ -1462,10 +1483,11 @@ fn library_calls_compile_to_exact_tools_and_keep_json_arguments() {
         "function main(){io.write({path:'never'});return io.unknown({});}",
         "function main(){return ppt.get_design({});}",
         "function main(){return io['read']({});}",
-        "function main(){const io={};return io;}",
     ] {
         assert!(compile(source).is_err(), "{source}");
     }
+    // A variable the source declares is its own, even named like a library.
+    assert_eq!(returned(runtime("function main(){const io={};return io;}")), json!({}));
 }
 
 #[test]
@@ -1487,6 +1509,120 @@ fn library_catalog_uses_real_ownership_and_omits_unavailable_or_ambiguous_names(
         {"id":"a_b","enabled":true,"tools":["other__inspect"]},
     ]);
     assert!(!libraries::catalog(&definitions, &collision).contains_key("a_b"));
+}
+
+#[test]
+fn require_links_a_library_when_its_line_runs_and_keeps_one_object() {
+    let source = r#"function main(){
+  const before = io.read({path:'first'});
+  const ppt = require("ppt");
+  const same = require("ppt") === ppt;
+  const design = ppt.get_design({page: 2});
+  let missing = null;
+  try { require("absent"); } catch (error) { missing = error.code; }
+  let unknown = null;
+  try { ppt.nothing({}); } catch (error) { unknown = error.message; }
+  return {before: before.content, same, design, missing, unknown};
+}"#;
+    let mut run = runtime(source);
+    assert!(matches!(run.next(), State::Action(Action{kind:ActionKind::Tool{name,..},..}) if name=="read_file"), "nothing links before its line runs");
+    run.resume(json!({"content":"read"}), false).unwrap();
+    let State::Action(action) = run.next() else { panic!("require asks the host") };
+    assert!(matches!(&action.kind, ActionKind::Require { library } if library == "ppt"));
+    // A pending link survives a snapshot like any other action.
+    let mut run: Runtime = serde_json::from_value(serde_json::to_value(run).unwrap()).unwrap();
+    run.resume(json!({"library":"ppt","methods":{"get_design":"ppt_master__get_design"}}), false).unwrap();
+    let State::Action(action) = run.next() else { panic!("the method runs its tool") };
+    assert!(
+        matches!(&action.kind, ActionKind::Tool { name, args } if name == "ppt_master__get_design" && args == &json!({"page":2})),
+        "requiring the library again asked the host nothing: {action:?}"
+    );
+    let mut run: Runtime = serde_json::from_value(serde_json::to_value(run).unwrap()).unwrap();
+    run.resume(json!({"slides":2}), false).unwrap();
+    let State::Action(action) = run.next() else { panic!("another library links at its own line") };
+    assert!(matches!(&action.kind, ActionKind::Require { library } if library == "absent"));
+    run.resume(json!({"code":"MODULE_NOT_FOUND","message":"Cannot find library 'absent'"}), true).unwrap();
+    let result = returned(run);
+    assert_eq!(result["before"], "read");
+    assert_eq!(result["same"], true);
+    assert_eq!(result["design"], json!({"slides":2}));
+    assert_eq!(result["missing"], "MODULE_NOT_FOUND", "a library that cannot be found throws at its require line");
+    assert!(result["unknown"].as_str().unwrap().contains("nothing"), "a method the library lacks fails where it is called: {result}");
+}
+
+#[test]
+fn a_required_library_outlives_collection_and_its_promises_variant_is_async() {
+    // Nothing but the run's cache holds the first object while the loop runs
+    // long enough to collect the heap.
+    let source = r#"function main(){
+  require("ppt");
+  let total = 0;
+  for (let i = 0; i < 400; i++) { total += i; }
+  const ppt = require("ppt");
+  return [typeof ppt.get_design, total];
+}"#;
+    let mut run = runtime(source);
+    let State::Action(_) = run.next() else { panic!("require asks the host") };
+    run.resume(json!({"library":"ppt","methods":{"get_design":"ppt_master__get_design"}}), false).unwrap();
+    assert_eq!(returned(run), json!(["function", 79800]));
+    let source = r#"async function main(){
+  const ppt = require("ppt/promises");
+  const pending = ppt.get_design({page: 3});
+  const plain = require("ppt");
+  return [(await pending).slides, plain === ppt];
+}"#;
+    let mut run = runtime(source);
+    let State::Action(action) = run.next() else { panic!("require asks the host") };
+    assert!(matches!(&action.kind, ActionKind::Require { library } if library == "ppt/promises"));
+    run.resume(json!({"library":"ppt/promises","methods":{"get_design":"ppt_master__get_design"}}), false).unwrap();
+    let State::Action(action) = run.next() else { panic!("the sync variant is another library object") };
+    assert!(matches!(&action.kind, ActionKind::Require { library } if library == "ppt"), "the async call is queued behind it: {action:?}");
+    run.resume(json!({"library":"ppt","methods":{"get_design":"ppt_master__get_design"}}), false).unwrap();
+    let State::Action(action) = run.next() else { panic!("the async method runs its tool") };
+    assert!(matches!(&action.kind, ActionKind::Tool { name, .. } if name == "ppt_master__get_design"));
+    run.resume(json!({"slides":3}), false).unwrap();
+    assert_eq!(returned(run), json!([3, false]));
+}
+
+#[test]
+fn require_takes_a_library_name_and_gives_its_methods_to_the_hooks_of_that_source() {
+    for source in [
+        "function main(){const name='ppt';return require(name);}",
+        "function main(){return require('ppt', 1);}",
+        "function main(){return require('host:ppt');}",
+        "function main(){return require('a b');}",
+    ] {
+        assert!(compile(source).is_err(), "{source}");
+    }
+    let error = compile_with_libraries("import * as ppt from \"host:ppt\";\nppt.get_design({});", libraries::builtin()).unwrap_err();
+    assert!(format!("{error:#}").contains("const ppt = require(\"ppt\")"), "the host: error says how to load it: {error:#}");
+    let program = compile(r#"const ppt = require("ppt/promises");
+/** @virtual Judge the deck and return {passed:boolean}. */
+function judge(deck){}
+/** @module Build the deck and return {pages:number}. */
+function build(deck){}
+judge(ppt);"#).unwrap();
+    assert_eq!(program.functions["judge"].leaf_libraries, ["ppt"], "a hook gets the libraries its declaring source requires");
+    assert!(program.functions["build"].leaf_libraries.is_empty(), "a module requires its own");
+    // A declared function named require is an ordinary call.
+    assert_eq!(returned(runtime("function require(name){return 'own ' + name;} function main(){return require('ppt');}")), json!("own ppt"));
+}
+
+#[test]
+fn a_name_the_source_binds_shadows_a_library_it_did_not_import() {
+    // Without imports the host's libraries are in scope by name, but a
+    // variable the source declares is its own, as in plain JavaScript.
+    let mut run = runtime("const io = require(\"io\");\nconst text = io.read({path: \"a\"});\nconst echo = io.echo({});");
+    let State::Action(action) = run.next() else { panic!("io is required at its line") };
+    assert!(matches!(&action.kind, ActionKind::Require { library } if library == "io"));
+    run.resume(json!({"library":"io","methods":{"read":"read_file"}}), false).unwrap();
+    assert!(matches!(run.next(), State::Action(Action{kind:ActionKind::Tool{name,..},..}) if name == "read_file"), "its method is the required object's");
+    run.resume(json!({"content":"x"}), false).unwrap();
+    assert!(matches!(run.next(), State::Failed(error) if error["message"].as_str().unwrap().contains("echo")), "a method the object lacks fails at its call, not at compile time");
+    // With an explicit import the name is taken, as in JavaScript.
+    assert!(compile("import * as io from \"host:io\";\nconst io = require(\"io\");").is_err());
+    // A source that binds nothing keeps the library by name.
+    assert!(compile("const text = io.read({path: \"a\"});").is_ok());
 }
 
 #[test]
@@ -2956,4 +3092,29 @@ const result = console.error("x") === undefined;
         r#"{"done":true} null undefined end"#,
         "[error] x",
     ]);
+}
+
+#[test]
+fn a_module_and_a_virtual_are_told_apart_by_their_declaration() {
+    let program = compile("import * as io from \"host:io\";\nconst a = await summarize([\"x\"]);\nconst b = await judge(\"x\");\n\n/** @module */\nasync function summarize(paths) {\n  // Summarize the files. Returns {summary:string}.\n}\n\n/** @virtual */\nasync function judge(path) {\n  // Judge the file. Returns {keep:boolean}.\n}").unwrap();
+    let summarize = &program.functions["summarize"];
+    assert!(summarize.virtual_task && summarize.module_task && summarize.leaf_tools.is_none());
+    assert_eq!(summarize.description, "Summarize the files. Returns {summary:string}.");
+    let judge = &program.functions["judge"];
+    assert!(judge.virtual_task && !judge.module_task);
+    let tools = judge.leaf_tools.as_ref().expect("a @virtual in a main program is limited to its imports");
+    assert!(tools.iter().any(|tool| tool == "read_file"), "{tools:?}");
+    assert_eq!(judge.description, "Judge the file. Returns {keep:boolean}.");
+}
+
+#[test]
+fn a_module_takes_parameters_not_uses() {
+    let error = compile("const brief = \"x\";\nconst r = await summarize([]);\n\n/**\n * @module\n * Summarize the files as the brief asks.\n * @uses brief the user's request\n * Returns {summary:string}.\n */\nasync function summarize(paths) {}").unwrap_err().to_string();
+    assert!(error.contains("@uses is for @virtual functions"), "{error}");
+}
+
+#[test]
+fn a_function_is_either_virtual_or_a_module() {
+    let error = compile("const r = await f(1);\n\n/** @virtual @module */\nasync function f(x) {\n  // Do x. Returns {ok:boolean}.\n}").unwrap_err().to_string();
+    assert!(error.contains("both @virtual and @module"), "{error}");
 }

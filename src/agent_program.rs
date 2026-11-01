@@ -17,7 +17,7 @@ mod values;
 
 #[cfg(test)]
 pub use compiler::{compile, compile_body, compile_entry};
-pub use compiler::{compile_body_with_scope, compile_with_libraries};
+pub use compiler::{compile_body_with_scope, compile_with_libraries, required_libraries};
 pub use runtime::{Action, Runtime, State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -58,14 +58,27 @@ pub struct Function {
     pub description: String,
     #[serde(default)]
     pub virtual_task: bool,
+    /// Declared `@module`: AI writes its code once per contract and later
+    /// calls reuse it. Without it, an AI function is a `@virtual` hook.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub module_task: bool,
     /// Outer variables a virtual function's contract names with `@uses`: its
     /// closure, read in the scope where it is declared when it is called.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<String>,
-    /// A virtual declared inside a function implementation is a leaf: a plain
-    /// tool loop limited to the tools that implementation imported.
+    /// A `@virtual` hook is a plain tool loop limited to the tools the source
+    /// declaring it imports. Programs saved before `@module` existed have None
+    /// for a virtual declared in a main program, which was implemented as code.
     #[serde(default)]
     pub leaf_tools: Option<Vec<String>>,
+    /// The third-party libraries the source declaring a `@virtual` requires:
+    /// their methods join its tools when it is called.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaf_libraries: Vec<String>,
+    /// The libraries a `@virtual` names with `@uses`: only their instructions
+    /// come into its context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
     pub params: Vec<String>,
     /// Index of the final rest parameter, if present.
     #[serde(default)]
@@ -162,6 +175,8 @@ pub enum Expr {
 pub enum Effect {
     PromiseCreate { reject: bool, value: Expr },
     PromiseConstruct { executor: Expr },
+    /// `require("ppt")`: the host links a third-party library when this runs.
+    Require(String),
     Tool(String, Vec<Expr>),
     ParallelReads(Vec<(String, Vec<Expr>)>),
     ParallelReadMap {

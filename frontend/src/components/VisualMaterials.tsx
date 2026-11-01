@@ -1,7 +1,4 @@
-import { useMemo } from 'react'
-import type { AgentEvent } from '../api.ts'
-import type { FlowNodeData } from '../model.ts'
-import { visualRecords, type VisualRecord } from '../visual.ts'
+import type { VisualRecord } from '../visual.ts'
 
 export function VisualArtifactPreview({ artifact }: { artifact: VisualRecord }) {
   const task = String(artifact.task_id ?? '')
@@ -15,13 +12,4 @@ export function VisualArtifactPreview({ artifact }: { artifact: VisualRecord }) 
       {id} · SHA256 {String(artifact.content_hash ?? '')}
     </figcaption>
   </figure>
-}
-export function VisualMaterials({ events, node }: { events: readonly AgentEvent[]; node: FlowNodeData }) {
-  const records = useMemo(() => visualRecords(events, node), [events, node])
-  if (!records.artifacts.length && !records.dispatches.length && !records.checks.length) return null
-  return <section><h4>视觉材料与判断</h4>
-    {records.artifacts.map(artifact => <VisualArtifactPreview key={String(artifact.artifact_id)} artifact={artifact} />)}
-    {records.checks.map((check, index) => <details key={String(check.check_id ?? index)}><summary>{String(check.actor)} · {String(check.assessment)} · {String(check.checked_goal ?? '')}</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(check, null, 2)}</pre></details>)}
-    {records.dispatches.map((dispatch, index) => <details key={index}><summary>图片请求 · {String(dispatch.actor)} · {String(dispatch.status)} · {JSON.stringify(dispatch.model_route)}</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(dispatch, null, 2)}</pre></details>)}
-  </section>
 }

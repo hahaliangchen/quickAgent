@@ -84,11 +84,20 @@ pub fn namespace(id: &str) -> String {
     }
     name
 }
-/// These are file-tool API aliases, not domain workflow rules.
+/// The host's own libraries, one kind of capability each, as Node splits its
+/// built-in modules into fs, child_process and http: what code imports is
+/// what it needs. Every host tool belongs to one of them; there is no
+/// catch-all library. A method drops a prefix that repeats its library's
+/// name; `io` keeps its short names.
 pub fn builtin() -> Libraries {
-    BTreeMap::from([(
-        "io".into(),
-        [
+    let named = |methods: &[(&str, &str)]| -> BTreeMap<String, String> {
+        methods.iter().map(|(method, tool)| ((*method).to_owned(), (*tool).to_owned())).collect()
+    };
+    let same = |tools: &[&str]| -> BTreeMap<String, String> {
+        tools.iter().map(|tool| ((*tool).to_owned(), (*tool).to_owned())).collect()
+    };
+    BTreeMap::from([
+        ("io".into(), named(&[
             ("read", "read_file"),
             ("read_lines", "read_file_lines"),
             ("write", "write_file"),
@@ -96,15 +105,57 @@ pub fn builtin() -> Libraries {
             ("search", "search_text"),
             ("edit", "edit_file"),
             ("replace", "replace_range"),
-        ]
-        .into_iter()
-        .map(|(method, tool)| (method.into(), tool.into()))
-        .collect(),
-    ), (
+            ("workspace_info", "workspace_info"),
+        ])),
         // Published only while a program the user's message paused can be resumed.
-        "previous".into(),
-        BTreeMap::from([("resume".into(), "resume_previous_program".into())]),
-    )])
+        ("previous".into(), named(&[("resume", "resume_previous_program")])),
+        ("process".into(), same(&[
+            "run_program",
+            "run_project_script",
+            "install_dependencies",
+            "get_project_process",
+            "stop_project_process",
+        ])),
+        ("http".into(), named(&[("probe", "http_probe")])),
+        ("browser".into(), named(&[
+            ("open", "browser_open"),
+            ("read", "browser_read"),
+            ("wait", "browser_wait"),
+            ("diagnostics", "browser_diagnostics"),
+            ("click", "browser_click"),
+            ("press_key", "browser_press_key"),
+            ("upload", "browser_upload"),
+            ("screenshot", "browser_screenshot"),
+            ("close", "browser_close"),
+        ])),
+        ("code".into(), same(&["search_code_map"])),
+        ("code_go".into(), same(&["list_go_symbols", "search_go_symbols", "read_go_symbol"])),
+        ("code_rust".into(), same(&["list_rust_symbols", "search_rust_symbols", "read_rust_symbol"])),
+        ("code_ts".into(), same(&["list_ts_symbols", "search_ts_symbols", "read_ts_symbol"])),
+        ("code_python".into(), same(&["list_python_symbols", "search_python_symbols", "read_python_symbol"])),
+        ("memory".into(), same(&[
+            "record_work_memory",
+            "list_work_memory",
+            "search_work_memory",
+            "record_architecture_memory",
+            "list_architecture_memory",
+            "search_architecture_memory",
+            "record_symbol_business_context",
+            "list_symbol_business_context",
+            "search_symbol_business_context",
+        ])),
+        ("vision".into(), same(&["view_image", "analyze_images", "image_analysis_results"])),
+        ("attachments".into(), same(&["read_attachment"])),
+        // The main conversation's own materials and records: only the main
+        // script has them, as a function has only its arguments.
+        ("session".into(), same(&[
+            "read_session_history",
+            "read_asset",
+            "list_context_assets",
+            "refresh_asset",
+            "propose_project_note",
+        ])),
+    ])
 }
 /// Only tools present in this frame's catalog are published. Colliding plugin
 /// namespaces are omitted rather than silently routing to the wrong owner.
@@ -113,13 +164,7 @@ pub fn catalog(definitions: &[Value], packages: &Value) -> Libraries {
         .iter()
         .filter_map(|d| d["function"]["name"].as_str())
         .collect::<BTreeSet<_>>();
-    let owned = packages
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|p| p["tools"].as_array().into_iter().flatten())
-        .filter_map(Value::as_str)
-        .collect::<BTreeSet<_>>();
+    let owned = owned(packages);
     let mut result = builtin();
     for methods in result.values_mut() {
         methods.retain(|_, tool| allowed.contains(tool.as_str()) && !owned.contains(tool.as_str()));
@@ -161,25 +206,61 @@ pub fn catalog(definitions: &[Value], packages: &Value) -> Libraries {
             result.insert(name, methods.remove(0));
         }
     }
-    let bound = result
+    result
+}
+/// Tools that plugin packages declare, whether or not they got a library.
+fn owned(packages: &Value) -> BTreeSet<&str> {
+    packages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|p| p["tools"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .collect()
+}
+/// Host tools in these definitions that no library has: neither a plugin's
+/// nor the AI loop's own. There is no catch-all library, so each one needs
+/// a place in `builtin`; a test keeps this list empty.
+#[cfg(test)]
+pub fn unassigned(definitions: &[Value], packages: &Value) -> Vec<String> {
+    let libraries = catalog(definitions, packages);
+    let bound = libraries
         .values()
         .flat_map(|methods| methods.values().map(String::as_str))
         .collect::<BTreeSet<_>>();
-    let rest = allowed
+    let owned = owned(packages);
+    definitions
         .iter()
-        .filter(|name| !bound.contains(**name) && !owned.contains(**name) && !control(name))
-        .map(|name| ((*name).to_owned(), (*name).to_owned()))
-        .collect::<BTreeMap<_, _>>();
-    if !rest.is_empty() {
-        result.insert("host".into(), rest);
-    }
-    result
+        .filter_map(|d| d["function"]["name"].as_str())
+        .filter(|name| !bound.contains(name) && !owned.contains(name) && !control(name))
+        .map(str::to_owned)
+        .collect()
 }
 
-/// Host-owned namespaces cannot be claimed by plugins.
-pub fn valid_namespace(name: &str) -> bool {
-    identifier(name) && !reserved(name) && !matches!(name, "io" | "host")
+/// The libraries enabled plugin packages contribute: third-party code a
+/// program loads with require when it runs, never a host: import.
+pub fn third_party(libraries: &Libraries, packages: &Value) -> BTreeSet<String> {
+    packages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|package| package["enabled"] == true)
+        .filter_map(|package| {
+            package["library"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| package["id"].as_str().map(namespace))
+        })
+        .filter(|name| libraries.contains_key(name))
+        .collect()
 }
+/// Host-owned namespaces cannot be claimed by plugins: the host's own
+/// libraries, and `host`, the import prefix.
+pub fn valid_namespace(name: &str) -> bool {
+    identifier(name) && !reserved(name) && name != "host" && !builtin().contains_key(name)
+}
+/// The AI loop's own tools, called directly and never a library's method.
+#[cfg(test)]
 pub fn control(name: &str) -> bool {
     matches!(
         name,
@@ -191,6 +272,8 @@ pub fn control(name: &str) -> bool {
             | "read_skill"
             | "unload_skill"
             | "release_assets"
+            | "find_library_methods"
+            | "ask_user"
     )
 }
 pub fn public_name(libraries: &Libraries, target: &str) -> Option<String> {

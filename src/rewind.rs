@@ -209,6 +209,9 @@ pub fn rewind(root: &std::path::Path, task: &str, turn: usize) -> Result<Value> 
     tx.execute("UPDATE agent_tasks SET status=CASE WHEN ?2=1 THEN 'draft' ELSE status END,updated_at=?3 WHERE id=?1",
         params![task, turn as i64, agent_service::now()])?;
     tx.commit()?;
+    // Modules written or fixed in the dropped turns went with their rows; the
+    // chat folder goes back to the versions that remain.
+    crate::single_agent::modules::rebuild(root, task)?;
     Ok(json!({"turn":turn,"prompt":prompt,"undone_turns":undone}))
 }
 

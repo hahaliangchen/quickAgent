@@ -5,10 +5,10 @@ const request = {
   requirements: "制作五个内容不同、风格协调的独立中文 HTML。忠实于源材料的当前设计，准确区分已废弃的机制和现行设计；内嵌 CSS、无外部资源依赖，兼顾桌面与手机阅读。完成后对实际读回的各页进行验收。",
   pages: [
     {path: "agent-01-overview.html", title: "设计出发点", focus: "朴素循环为何最稳、上下文有限带来的问题，以及用函数作用域代替压缩"},
-    {path: "agent-02-program.html", title: "流程与虚函数", focus: "流程代码就是 JavaScript、虚函数是唯一的 AI 入口、第一层与叶子的两层边界"},
+    {path: "agent-02-program.html", title: "流程、虚函数与模块", focus: "流程代码就是 JavaScript、虚函数是 AI 钩子、模块是 AI 写成并复用的代码，以及程序怎么组织由 AI 决定"},
     {path: "agent-03-scope.html", title: "作用域与上下文", focus: "参数显式传入、返回值是跨作用域的唯一通道、上下文超限时抛错而不压缩"},
-    {path: "agent-04-libraries.html", title: "工具库与并发", focus: "工具即库并通过 import 引入、叶子的工具范围与运行时查找、Promise 取代子 Agent"},
-    {path: "agent-05-acceptance.html", title: "错误与交付", focus: "错误统一走异常、副作用边界、已废弃机制，以及真实证据与完成条件"}
+    {path: "agent-04-libraries.html", title: "工具库与并发", focus: "工具即库并通过 import 引入、虚函数的工具范围与运行时查找、Promise 取代子 Agent"},
+    {path: "agent-05-acceptance.html", title: "错误与交付", focus: "错误统一走异常、模块出错交给修复者、副作用边界、已废弃机制，以及真实证据与完成条件"}
   ]
 };
 

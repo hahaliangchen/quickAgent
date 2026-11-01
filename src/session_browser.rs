@@ -378,7 +378,12 @@ pub async fn delete_session(
     }
     let root = state.workspace.root().to_path_buf();
     match tokio::task::spawn_blocking(move || {
-        delete(&mut agent_service::open_db(&root)?, &id).map(|ids| json!({"deleted":ids}))
+        let ids = delete(&mut agent_service::open_db(&root)?, &id)?;
+        // A deleted chat's module folder goes with it.
+        for id in &ids {
+            crate::single_agent::modules::remove(&root, id);
+        }
+        Ok(json!({"deleted":ids}))
     })
     .await
     {

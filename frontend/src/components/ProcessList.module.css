@@ -1,0 +1,87 @@
+/* Rows opened inside a step or a call sit under their header, indented with a guide line. */
+.inside {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 6px 7px;
+  padding-left: 14px;
+  border-left: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
+}
+
+.thought {
+  color: var(--codex-text-secondary, #4b5563);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+}
+
+.contract {
+  margin: 4px 0;
+  white-space: pre-wrap;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--codex-text-muted, #6b7280);
+}
+
+.error {
+  margin: 4px 0;
+  white-space: pre-wrap;
+  font-size: 12.5px;
+  color: var(--dsw-alias-state-error-primary, #d23c3c);
+}
+
+.returned {
+  margin: 4px 0;
+  font-size: 12.5px;
+  color: var(--codex-text-secondary, #4b5563);
+}
+
+.returned summary {
+  cursor: pointer;
+}
+
+.returned pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, #f6f7f9);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}
+
+/* What the host recorded about a run: started, stopped, failed. */
+.event {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+  padding: 2px 0 2px 22px;
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: 20px;
+  color: var(--codex-text-muted, #6b7280);
+}
+
+.event strong {
+  flex: none;
+  font-weight: 500;
+}
+
+.event span {
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.event[data-tone='warn'] strong {
+  color: var(--dsw-alias-state-warn-label, #b45309);
+}
+
+.event[data-tone='error'] strong,
+.event[data-tone='error'] span {
+  color: var(--dsw-alias-state-error-primary, #d23c3c);
+}

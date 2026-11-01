@@ -87,6 +87,11 @@ fn built_in_capabilities(model: &str) -> ModelCapabilities {
 fn default_api_type() -> String {
     "openai-completions".to_owned()
 }
+/// The provider APIs the agent speaks: Chat Completions, and Responses as
+/// Codex uses it.
+fn agent_api(api_type: &str) -> bool {
+    matches!(api_type, "openai-completions" | "openai-responses")
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct AiProxyConfig {
@@ -131,12 +136,12 @@ pub(crate) fn apply_agent_config(
     let main = config
         .providers
         .get(main_name)
-        .filter(|provider| provider.api_type == "openai-completions");
+        .filter(|provider| agent_api(&provider.api_type));
     state.provider_name = main.map(|_| main_name.to_owned()).unwrap_or_default();
     state.provider_routes = config
         .providers
         .iter()
-        .filter(|(_, provider)| provider.api_type == "openai-completions")
+        .filter(|(_, provider)| agent_api(&provider.api_type))
         .map(|(name, provider)| {
             (
                 name.clone(),
@@ -146,6 +151,7 @@ pub(crate) fn apply_agent_config(
                         .get("prefixSystemMessages")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    responses: provider.api_type == "openai-responses",
                     url: provider.url.clone(),
                     api_key: provider.api_key.clone(),
                     models: provider.model_map.clone(),
@@ -585,7 +591,7 @@ pub(crate) fn catalog_view(config: &AiProxyConfig) -> Value {
                 "provider":provider, "id":id,
                 "name":metadata.and_then(|m|m["name"].as_str()).unwrap_or(id),
                 "provider_name":route.extra.get("displayName").and_then(Value::as_str).unwrap_or(provider),
-                "enabled":true, "available_for_agent":route.api_type == "openai-completions",
+                "enabled":true, "available_for_agent":agent_api(&route.api_type),
                 "api_type":route.api_type,
                 "context_window":metadata.and_then(|m|m["contextWindow"].as_u64()),
                 "max_output_tokens":route.max_output_tokens.get(id),
@@ -1993,8 +1999,12 @@ pub async fn run(
             post(crate::flow_skills::save_route),
         )
         .route(
-            "/agent/tasks/{task_id}/flow/nodes/{node_id}/interrupt",
-            post(crate::agent_service::interrupt_flow_node),
+            "/agent/tasks/{task_id}/frames",
+            get(crate::frame_view::list),
+        )
+        .route(
+            "/agent/tasks/{task_id}/frames/{node_id}",
+            get(crate::frame_view::get),
         )
         .route(
             "/agent/tasks/{task_id}/messages",

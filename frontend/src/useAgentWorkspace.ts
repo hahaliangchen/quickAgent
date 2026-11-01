@@ -349,14 +349,6 @@ export function useAgentWorkspace() {
     session.reload()
   }, [api, session.reload, taskId])
 
-  const interruptNode = useCallback((nodeId: string) => {
-    if (taskId === undefined) return
-    api.interruptNode(taskId, nodeId).then(
-      () => { session.reload() },
-      (cause: unknown) => { setNotice(messageOf(cause)) },
-    )
-  }, [api, session.reload, taskId])
-
   const saveSettings = useCallback((updated: SettingsData) => {
     setSettings(updated)
     refreshInfoAndSettings()
@@ -372,7 +364,7 @@ export function useAgentWorkspace() {
     canContinue: ready && task !== undefined && acceptsPrompt(task),
     settingsOpen, settingsTab, setSettingsTab,
     openSettings, closeSettings, saveSettings, refreshInfoAndSettings, selectModel, setGenerationOptions,
-    openTask, submit, stop, interject, interruptNode,
+    openTask, submit, stop, interject,
   }
 }
 

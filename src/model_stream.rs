@@ -1,4 +1,5 @@
-//! Incremental assembly of an OpenAI Chat Completions response.
+//! Incremental assembly of an OpenAI Chat Completions or Responses response,
+//! and the Responses form of a Chat Completions request.
 //!
 //! The accumulator is transport-only: it never emits events or applies tool
 //! calls. Worker and Organizer each consume its deltas through their own
@@ -7,6 +8,108 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use serde_json::{Value, json};
+
+/// Where an assistant message keeps the reasoning items a Responses provider
+/// returned with it, so the next request can hand them back.
+pub const REASONING_ITEMS: &str = "_reasoning_items";
+
+/// The text of a Chat Completions content value: a string, the text parts of
+/// an array, or the JSON of anything else.
+fn plain(content: &Value) -> String {
+    match content {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        other => other.to_string(),
+    }
+}
+
+/// The same request on the Responses API, the way Codex talks to its models.
+/// The first system message is the instructions; later ones become developer
+/// messages where they stand. A message's name heads its text, since input
+/// messages have no name. An assistant message replays the reasoning items it
+/// came with before its text and calls, so the model goes on from its own
+/// reasoning; nothing is stored upstream. Like Codex, it sets no output limit.
+pub fn responses_request(chat: &Value) -> Value {
+    let named = |message: &Value, text: String| match message["name"].as_str().filter(|name| !name.is_empty()) {
+        Some(name) => format!("[{name}]\n{text}"),
+        None => text,
+    };
+    let mut instructions = None;
+    let mut input = Vec::new();
+    for message in chat["messages"].as_array().into_iter().flatten() {
+        match message["role"].as_str().unwrap_or("") {
+            "system" | "developer" => {
+                let text = named(message, plain(&message["content"]));
+                if instructions.is_none() && input.is_empty() {
+                    instructions = Some(text);
+                } else {
+                    input.push(json!({"type":"message","role":"developer","content":[{"type":"input_text","text":text}]}));
+                }
+            }
+            "user" => {
+                let parts = match &message["content"] {
+                    Value::Array(items) => {
+                        let mut parts = message["name"].as_str().filter(|name| !name.is_empty())
+                            .map(|name| json!({"type":"input_text","text":format!("[{name}]")})).into_iter().collect::<Vec<_>>();
+                        for part in items {
+                            parts.push(match part["type"].as_str() {
+                                Some("text") => json!({"type":"input_text","text":part["text"]}),
+                                Some("image_url") => {
+                                    let image = &part["image_url"];
+                                    let mut input_image = json!({"type":"input_image","image_url":image.get("url").unwrap_or(image)});
+                                    if let Some(detail) = image.get("detail") {
+                                        input_image["detail"] = detail.clone();
+                                    }
+                                    input_image
+                                }
+                                _ => json!({"type":"input_text","text":part.to_string()}),
+                            });
+                        }
+                        parts
+                    }
+                    other => vec![json!({"type":"input_text","text":named(message, plain(other))})],
+                };
+                input.push(json!({"type":"message","role":"user","content":parts}));
+            }
+            "assistant" => {
+                input.extend(message[REASONING_ITEMS].as_array().into_iter().flatten().cloned());
+                let text = plain(&message["content"]);
+                if !text.is_empty() {
+                    input.push(json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}));
+                }
+                for call in message["tool_calls"].as_array().into_iter().flatten() {
+                    input.push(json!({"type":"function_call","call_id":call["id"],"name":call["function"]["name"],"arguments":call["function"]["arguments"]}));
+                }
+            }
+            "tool" => input.push(json!({"type":"function_call_output","call_id":message["tool_call_id"],"output":plain(&message["content"])})),
+            _ => {}
+        }
+    }
+    let tools = chat["tools"].as_array().into_iter().flatten().map(|tool| {
+        let function = &tool["function"];
+        json!({"type":"function","name":function["name"],"description":function["description"],"parameters":function["parameters"],"strict":false})
+    }).collect::<Vec<_>>();
+    let mut body = json!({"model":chat["model"],"input":input,"stream":true,"store":false,
+        "include":["reasoning.encrypted_content"],
+        "parallel_tool_calls":chat.get("parallel_tool_calls").cloned().unwrap_or(json!(false))});
+    if let Some(text) = instructions {
+        body["instructions"] = json!(text);
+    }
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+        body["tool_choice"] = json!("auto");
+    }
+    let mut reasoning = json!({"summary":"auto"});
+    if let Some(effort) = chat.get("reasoning_effort").filter(|effort| !effort.is_null()) {
+        reasoning["effort"] = effort.clone();
+    }
+    body["reasoning"] = reasoning;
+    if let Some(tier) = chat.get("service_tier").filter(|tier| !tier.is_null()) {
+        body["service_tier"] = tier.clone();
+    }
+    body
+}
 
 /// Some Chat Completions templates accept system instructions only in the prefix.
 /// This changes the wire projection, never the durable conversation order.
@@ -133,6 +236,10 @@ pub struct ChatStream {
     reasoning: String,
     reasoning_chars: usize,
     tools: BTreeMap<usize, PartialTool>,
+    /// Reasoning items of a Responses stream, handed back on the next request.
+    items: Vec<Value>,
+    /// Text of completed Responses message items, used when no delta carried it.
+    item_text: String,
     usage: Value,
     finish_reason: Value,
     received_done: bool,
@@ -160,6 +267,8 @@ impl ChatStream {
             reasoning: String::new(),
             reasoning_chars: 0,
             tools: BTreeMap::new(),
+            items: Vec::new(),
+            item_text: String::new(),
             usage: Value::Null,
             finish_reason: Value::Null,
             received_done: false,
@@ -315,6 +424,16 @@ impl ChatStream {
         if event_name == "error" {
             return fail("UPSTREAM_ERROR", data);
         }
+        // A Responses stream names each event's kind in its data.
+        if let Some(kind) = event.get("type").and_then(Value::as_str) {
+            if kind == "error" {
+                let message = event["message"].as_str().map(str::to_owned).unwrap_or_else(|| event.to_string());
+                return fail("UPSTREAM_ERROR", message);
+            }
+            if kind.starts_with("response.") {
+                return self.response_event(kind, &event, delta);
+            }
+        }
         if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
             self.usage = usage.clone();
         }
@@ -407,6 +526,171 @@ impl ChatStream {
         Ok(())
     }
 
+    fn response_event(&mut self, kind: &str, event: &Value, delta: &mut Delta) -> anyhow::Result<()> {
+        let index = event["output_index"].as_u64().unwrap_or(0) as usize;
+        let piece = event["delta"].as_str().filter(|piece| !piece.is_empty());
+        let mut model_delta = false;
+        match kind {
+            "response.output_text.delta" => if let Some(piece) = piece {
+                self.text.push_str(piece);
+                delta.text.push_str(piece);
+                model_delta = true;
+            },
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => if let Some(piece) = piece {
+                self.reasoning_chars += piece.chars().count();
+                if self.limits.retain_reasoning {
+                    self.reasoning.push_str(piece);
+                }
+                delta.reasoning.push_str(piece);
+                model_delta = true;
+            },
+            // Parts of a summary are paragraphs, in the stream as in the final message.
+            "response.reasoning_summary_part.added" if self.reasoning_chars > 0 => {
+                if self.limits.retain_reasoning {
+                    self.reasoning.push_str("\n\n");
+                }
+                delta.reasoning.push_str("\n\n");
+            }
+            "response.function_call_arguments.delta" => if let Some(piece) = piece {
+                let limit = self.limits.max_tool_argument_bytes;
+                let entry = self.tools.entry(index).or_default();
+                entry.arguments.push_str(piece);
+                if entry.arguments.len() > limit {
+                    return fail("ARGUMENTS_TOO_LARGE", format!("tool call arguments exceeded {limit} bytes"));
+                }
+                self.tool_delta(delta);
+                model_delta = true;
+            },
+            "response.output_item.added" | "response.output_item.done" => {
+                model_delta |= self.output_item(index, &event["item"], kind == "response.output_item.done", delta)?;
+            }
+            "response.completed" | "response.incomplete" | "response.failed" => {
+                let response = &event["response"];
+                if let Some(usage) = response.get("usage").filter(|usage| !usage.is_null()) {
+                    self.usage = usage.clone();
+                }
+                if kind == "response.failed" {
+                    let error = &response["error"];
+                    return fail("UPSTREAM_ERROR", error["message"].as_str().map(str::to_owned).unwrap_or_else(|| error.to_string()));
+                }
+                // A response that streamed no items still lists them.
+                if self.text.is_empty() && self.item_text.is_empty() && self.tools.is_empty() && self.items.is_empty() {
+                    for (index, item) in response["output"].as_array().into_iter().flatten().enumerate() {
+                        self.output_item(index, item, true, delta)?;
+                    }
+                }
+                self.finish_reason = json!(self.response_finish(response));
+                self.received_done = true;
+            }
+            _ => {}
+        }
+        if model_delta && self.first_delta_ms.is_none() {
+            self.first_delta_ms = Some(self.elapsed_ms());
+        }
+        Ok(())
+    }
+
+    /// One output item of a Responses stream: a function call, a reasoning
+    /// item kept for the next request, or a message whose text may also have
+    /// arrived in deltas. True when it is generation progress.
+    fn output_item(&mut self, index: usize, item: &Value, done: bool, delta: &mut Delta) -> anyhow::Result<bool> {
+        match item["type"].as_str() {
+            Some("function_call") => {
+                let limit = self.limits.max_tool_argument_bytes;
+                let entry = self.tools.entry(index).or_default();
+                if let Some(id) = item["call_id"].as_str().filter(|id| !id.is_empty()) {
+                    entry.id = id.to_owned();
+                }
+                if let Some(name) = item["name"].as_str().filter(|name| !name.is_empty()) {
+                    entry.name = name.to_owned();
+                }
+                if let Some(arguments) = item["arguments"].as_str().filter(|_| done) {
+                    entry.arguments = arguments.to_owned();
+                }
+                if entry.arguments.len() > limit {
+                    return fail("ARGUMENTS_TOO_LARGE", format!("tool call arguments exceeded {limit} bytes"));
+                }
+                self.tool_delta(delta);
+                Ok(true)
+            }
+            Some("reasoning") if done => {
+                self.items.push(item.clone());
+                Ok(false)
+            }
+            Some("message") if done => {
+                for part in item["content"].as_array().into_iter().flatten() {
+                    if let Some(text) = part["text"].as_str() {
+                        self.item_text.push_str(text);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn tool_delta(&mut self, delta: &mut Delta) {
+        delta.tool_call = true;
+        if self.first_tool_delta_ms.is_none() {
+            self.first_tool_delta_ms = Some(self.elapsed_ms());
+        }
+    }
+
+    /// The Chat Completions finish reason a Responses result corresponds to.
+    fn response_finish(&self, response: &Value) -> &'static str {
+        match response["incomplete_details"]["reason"].as_str() {
+            Some("max_output_tokens") => "length",
+            Some("content_filter") => "content_filter",
+            _ if self.tools.is_empty() => "stop",
+            _ => "tool_calls",
+        }
+    }
+
+    /// The assistant message assembled so far, in Chat Completions form; a
+    /// Responses provider's reasoning items ride along under REASONING_ITEMS.
+    fn message(&self) -> Value {
+        let mut tool_calls = Vec::new();
+        for (index, tool) in &self.tools {
+            if tool.name.is_empty() {
+                continue;
+            }
+            let id = if tool.id.is_empty() {
+                format!("call_{}_{index}", crate::agent_service::uuid_like())
+            } else {
+                tool.id.clone()
+            };
+            let arguments = if tool.arguments.is_empty() {
+                "{}".to_owned()
+            } else {
+                tool.arguments.clone()
+            };
+            tool_calls.push(json!({"id":id,"type":"function","function":{"name":tool.name,"arguments":arguments}}));
+        }
+        let text = if self.text.is_empty() { &self.item_text } else { &self.text };
+        let mut message = json!({"role":"assistant","content":if text.is_empty() {Value::Null} else {json!(text)}});
+        let summary = || {
+            self.items.iter().flat_map(|item| item["summary"].as_array().into_iter().flatten())
+                .filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n\n")
+        };
+        let reasoning = if !self.reasoning.is_empty() {
+            self.reasoning.clone()
+        } else if self.limits.retain_reasoning {
+            summary()
+        } else {
+            String::new()
+        };
+        if !reasoning.is_empty() {
+            message["reasoning_content"] = json!(reasoning);
+        }
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
+        if !self.items.is_empty() {
+            message[REASONING_ITEMS] = json!(self.items);
+        }
+        message
+    }
+
     fn format_name(&self) -> &'static str {
         match self.format {
             Format::Json => "json",
@@ -451,6 +735,20 @@ impl ChatStream {
                         .unwrap_or_else(|| error.to_string());
                     return fail("UPSTREAM_ERROR", message);
                 }
+                // A complete Responses body lists its output items.
+                if value["object"] == "response" || value["output"].is_array() {
+                    let mut delta = Delta::default();
+                    for (index, item) in value["output"].as_array().into_iter().flatten().enumerate() {
+                        self.output_item(index, item, true, &mut delta)?;
+                    }
+                    self.usage = value.get("usage").cloned().unwrap_or(Value::Null);
+                    self.finish_reason = json!(self.response_finish(&value));
+                    let mut stats = self.stats();
+                    stats["first_delta_ms"] = Value::Null;
+                    stats["first_tool_delta_ms"] = Value::Null;
+                    stats["response_complete_ms"] = json!(complete_ms);
+                    return Ok(Completed { message: self.message(), stats, terminated: true });
+                }
                 let Some(message) = value.pointer("/choices/0/message").cloned() else {
                     return fail("NO_MESSAGE", "model response has no choices[0].message");
                 };
@@ -477,30 +775,7 @@ impl ChatStream {
                     self.line(&line, &mut delta)?;
                 }
                 self.dispatch(&mut delta)?;
-                let mut tool_calls = Vec::new();
-                for (index, tool) in &self.tools {
-                    if tool.name.is_empty() {
-                        continue;
-                    }
-                    let id = if tool.id.is_empty() {
-                        format!("call_{}_{index}", crate::agent_service::uuid_like())
-                    } else {
-                        tool.id.clone()
-                    };
-                    let arguments = if tool.arguments.is_empty() {
-                        "{}".to_owned()
-                    } else {
-                        tool.arguments.clone()
-                    };
-                    tool_calls.push(json!({"id":id,"type":"function","function":{"name":tool.name,"arguments":arguments}}));
-                }
-                let mut message = json!({"role":"assistant","content":if self.text.is_empty() {Value::Null} else {json!(self.text)}});
-                if !self.reasoning.is_empty() {
-                    message["reasoning_content"] = json!(self.reasoning);
-                }
-                if !tool_calls.is_empty() {
-                    message["tool_calls"] = Value::Array(tool_calls);
-                }
+                let message = self.message();
                 let terminated = self.received_done || !self.finish_reason.is_null();
                 let mut stats = self.stats();
                 stats["response_complete_ms"] = json!(complete_ms);
@@ -531,6 +806,108 @@ mod tests {
             .push(tool_event(0, None, "{\"content\":").as_bytes())
             .unwrap();
         assert!(arguments.tool_call);
+    }
+
+    fn responses_events(events: &[Value]) -> String {
+        events.iter().map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap())).collect()
+    }
+
+    #[test]
+    fn a_responses_stream_is_the_same_message_and_keeps_its_reasoning_items() {
+        let reasoning = json!({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Checking the files"}],"encrypted_content":"enc-1"});
+        let stream = responses_events(&[
+            json!({"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}),
+            json!({"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0}),
+            json!({"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"Checking the files"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+            json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":""}}),
+            json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"path\":"}),
+            json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":"\"a.txt\"}"}),
+            json!({"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}),
+            json!({"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":10,"output_tokens":5}}}),
+        ]);
+        let mut chat = ChatStream::new(Limits::WORKER, Instant::now());
+        let delta = chat.push(stream.as_bytes()).unwrap();
+        assert!(delta.tool_call && delta.reasoning == "Checking the files");
+        assert!(chat.received_done(), "response.completed ends the stream");
+        let completed = chat.finish().unwrap();
+        let message = completed.message;
+        assert_eq!(message["tool_calls"], json!([{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]));
+        assert_eq!(message["reasoning_content"], "Checking the files");
+        assert_eq!(message[REASONING_ITEMS], json!([reasoning]), "the encrypted reasoning goes back on the next request");
+        assert_eq!(completed.stats["finish_reason"], "tool_calls");
+        assert_eq!(completed.stats["usage"]["input_tokens"], 10);
+        assert!(completed.terminated);
+    }
+
+    #[test]
+    fn summary_parts_stream_as_the_paragraphs_the_final_message_keeps() {
+        let part = |index: u64, text: &str| [
+            json!({"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":index}),
+            json!({"type":"response.reasoning_summary_text.delta","output_index":0,"delta":text}),
+        ];
+        let events = [part(0, "**Reading the file**"), part(1, "**Writing the fix**")].concat();
+        let mut chat = ChatStream::new(Limits::WORKER, Instant::now());
+        let streamed = events
+            .iter()
+            .map(|event| chat.push(responses_events(std::slice::from_ref(event)).as_bytes()).unwrap().reasoning)
+            .collect::<String>();
+        assert_eq!(streamed, "**Reading the file**\n\n**Writing the fix**");
+        chat.push(responses_events(&[json!({"type":"response.completed","response":{"status":"completed"}})]).as_bytes()).unwrap();
+        assert_eq!(chat.finish().unwrap().message["reasoning_content"], streamed);
+    }
+
+    #[test]
+    fn a_responses_answer_failure_and_cut_off_read_as_their_chat_counterparts() {
+        let answer = responses_events(&[
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"Done"}),
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"."}),
+            json!({"type":"response.completed","response":{"status":"completed"}}),
+        ]);
+        let completed = feed(&[answer.as_bytes()]).unwrap();
+        assert_eq!(completed.message["content"], "Done.");
+        assert_eq!(completed.stats["finish_reason"], "stop");
+        let cut = responses_events(&[json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}})]);
+        assert_eq!(feed(&[cut.as_bytes()]).unwrap().stats["finish_reason"], "length");
+        let failed = responses_events(&[json!({"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"upstream broke"}}})]);
+        let Err(error) = feed(&[failed.as_bytes()]) else { panic!("a failed response is an error") };
+        assert_eq!(stream_error_code(&error), Some("UPSTREAM_ERROR"));
+        assert!(error.to_string().contains("upstream broke"));
+        // A provider that does not stream sends the whole response.
+        let whole = json!({"object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Whole"}]}]});
+        assert_eq!(feed(&[whole.to_string().as_bytes()]).unwrap().message["content"], "Whole");
+    }
+
+    #[test]
+    fn a_chat_request_is_carried_over_to_the_responses_form() {
+        let chat = json!({"model":"gpt-6-luna","stream":true,"parallel_tool_calls":false,"max_tokens":4096,"reasoning_effort":"medium",
+            "messages":[
+                {"role":"system","content":"You are the main AI."},
+                {"role":"system","name":"program_tool_headers","content":"declare namespace io {}"},
+                {"role":"user","content":"Add --version"},
+                {"role":"assistant","content":null,REASONING_ITEMS:[{"type":"reasoning","id":"rs_1","encrypted_content":"enc-1"}],
+                    "tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},
+                {"role":"tool","tool_call_id":"call_1","content":"{\"content\":\"alpha\"}"},
+                {"role":"user","name":"program_diagnostic","content":"{\"code\":\"PROGRAM_NOT_RUN\"}"},
+                {"role":"user","content":[{"type":"text","text":"see"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA","detail":"high"}}]},
+            ],
+            "tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object"}}}]});
+        let body = responses_request(&chat);
+        assert_eq!(body["instructions"], "You are the main AI.");
+        assert_eq!(body["store"], false);
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["reasoning"], json!({"effort":"medium","summary":"auto"}));
+        assert!(body.get("max_output_tokens").is_none() && body.get("messages").is_none());
+        assert_eq!(body["tools"], json!([{"type":"function","name":"read_file","description":"Read a file","parameters":{"type":"object"},"strict":false}]));
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input[0], json!({"type":"message","role":"developer","content":[{"type":"input_text","text":"[program_tool_headers]\ndeclare namespace io {}"}]}));
+        assert_eq!(input[1]["content"][0]["text"], "Add --version");
+        assert_eq!(input[2], json!({"type":"reasoning","id":"rs_1","encrypted_content":"enc-1"}), "reasoning comes back before the call it led to");
+        assert_eq!(input[3], json!({"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"a.txt\"}"}));
+        assert_eq!(input[4], json!({"type":"function_call_output","call_id":"call_1","output":"{\"content\":\"alpha\"}"}));
+        assert_eq!(input[5]["content"][0]["text"], "[program_diagnostic]\n{\"code\":\"PROGRAM_NOT_RUN\"}");
+        assert_eq!(input[6]["content"][1], json!({"type":"input_image","image_url":"data:image/png;base64,AA","detail":"high"}));
     }
 
     #[test]

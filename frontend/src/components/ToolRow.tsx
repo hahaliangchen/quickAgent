@@ -39,6 +39,13 @@ function summaryOf(args: unknown): string {
   return ''
 }
 
+/** The action title and argument summary a collapsed row shows for one call. */
+export function toolLabel(name: string, rawArguments: string): { title: string; summary: string } {
+  const args = parse(rawArguments)
+  const visual = toolVisual(name, args)
+  return { title: visual.title, summary: visual.summary ?? summaryOf(args) }
+}
+
 function extractDiffHunks(name: string, args: unknown, result: ToolResult | undefined): DiffHunk[] | undefined {
   if (!result || result.isError) return undefined
   try { if ((JSON.parse(result.text) as { changed?: boolean }).changed === false) return undefined } catch { /* non-JSON tool output */ }
@@ -180,13 +187,15 @@ function extractReadLines(name: string, args: unknown, result: ToolResult | unde
 }
 
 /** ui-tool ToolRow with authentic DSH TerminalBlock, ReadBlock, DiffBlock, and SearchBlock surfaces. */
-export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopped, onOpenChild }: {
+export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopped, onOpenChild, line }: {
   name: string
   rawArguments: string
   result: ToolResult | undefined
   /** The turn ended without this call producing a result. */
   stopped: boolean
   onOpenChild: (taskId: string) => void
+  /** The program line that made the call. */
+  line?: number | undefined
 }) {
   const { expanded, toggle } = useDisclosure()
   const args = useMemo(() => parse(rawArguments), [rawArguments])
@@ -220,7 +229,8 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
       ? `退出码 ${String(nativeResult.process_exit_code ?? '未知')}${nativeDiagnostics.length > 0 ? ` · ${nativeDiagnostics.length} 项输出诊断` : ''}`
       : `${String(nativeResult.outcome ?? '未启动')}${nativeResult.error_message ? ` · ${String(nativeResult.error_message)}` : ''}${nativeDiagnostics.length > 0 ? ` · ${nativeDiagnostics.length} 项输出诊断` : ''}`
     : ''
-  const summaryText = name === 'run_program' ? nativeSummary : errorLine !== '' ? errorLine : visual.summary ?? summaryOf(args)
+  const ownSummary = name === 'run_program' ? nativeSummary : errorLine !== '' ? errorLine : visual.summary ?? summaryOf(args)
+  const summaryText = line === undefined ? ownSummary : [`第 ${line} 行`, ownSummary].filter(Boolean).join(' · ')
   const duration = result?.durationMs === undefined ? null : `${result.durationMs} ms`
 
   const diffs = useMemo(() => extractDiffHunks(name, args, result), [name, args, result])
@@ -316,7 +326,7 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
   const nativeArgs = Array.isArray(cmdRecord.args) ? cmdRecord.args.map(value => JSON.stringify(String(value))).join(' ') : ''
   const commandStr = name === 'run_program'
     ? `${String(cmdRecord.program ?? '')}${nativeArgs ? ` ${nativeArgs}` : ''}`
-    : String(cmdRecord.command ?? cmdRecord.CommandLine ?? summaryText)
+    : String(cmdRecord.command ?? cmdRecord.CommandLine ?? ownSummary)
   const cwdStr = typeof cmdRecord.project_path === 'string'
     ? cmdRecord.project_path
     : typeof cmdRecord.cwd === 'string'

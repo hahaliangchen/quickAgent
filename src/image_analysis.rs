@@ -172,7 +172,7 @@ pub async fn execute(
         context.task_id(),
         json!({"actor":"tool","stage":"tool_execution","tool_name":"analyze_images",
             "turn":context.turn,"nodeId":node,"parent_node_id":context.identity["node_id"],
-            "tool_call_id":call_id,"request_flow":false,"images":sent,"sheet":sheet_record,
+            "tool_call_id":call_id,"images":sent,"sheet":sheet_record,
             "model_route":{"provider":state.provider_name,"model":model}}),
         &body,
     )

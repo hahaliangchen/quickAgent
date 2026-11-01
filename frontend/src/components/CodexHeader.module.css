@@ -48,10 +48,8 @@
 .tabPillGroup {
   display: flex;
   align-items: center;
-  background: var(--codex-hover-bg, #f4f4f5);
-  padding: 2px;
-  border-radius: 8px;
-  gap: 2px;
+  background: transparent;
+  gap: 16px;
 }
 
 :global(body[data-ds-dark-theme]) .tabPillGroup {
@@ -59,9 +57,10 @@
 }
 
 .tabPill {
-  padding: 4px 12px;
-  border-radius: 6px;
+  padding: 14px 8px 12px;
+  border-radius: 0;
   border: none;
+  border-bottom: 2px solid transparent;
   background: transparent;
   font-size: 12px;
   font-weight: 500;
@@ -83,9 +82,10 @@
 }
 
 .tabPillActive {
-  background: var(--codex-card-bg, #ffffff) !important;
+  background: transparent !important;
   color: var(--codex-text-primary, #18181b) !important;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  border-bottom-color: var(--codex-blue-primary, #1d9e75);
+  box-shadow: none;
 }
 
 :global(body[data-ds-dark-theme]) .tabPillActive {
@@ -107,7 +107,7 @@
   gap: 5px;
   padding: 3px 8px;
   border-radius: 6px;
-  background: var(--codex-hover-bg, #f4f4f5);
+  background: transparent;
   font-size: 11px;
   font-weight: 500;
   color: var(--codex-text-secondary, #52525b);

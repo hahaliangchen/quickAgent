@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetSta
 import clsx from 'clsx'
 import { useBrandIcon, usePalette } from '../brand.ts'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
-import { FlowView } from './FlowView.tsx'
 import { latestContextUsage } from './ContextRing.tsx'
 import { SkillPagesView } from './SkillPagesView.tsx'
 import type { AgentSlotProps } from '../cordis/slot-contract.ts'
@@ -70,7 +69,7 @@ export function SkillPackagesPage({ workspace, onBack }: { workspace: AgentWorks
   </main>
 }
 
-export type Tab = 'chat' | 'flow' | 'trajectory' | 'skill-pages'
+export type Tab = 'chat' | 'flow' | 'skill-pages'
 
 export function ConversationPage({
   workspace,
@@ -107,7 +106,7 @@ export function ConversationPage({
 
   const {
     task, parent, parentId, isChild, running, ready, canContinue,
-    composerNote, session, openTask, submit, stop, interruptNode,
+    composerNote, session, openTask, submit, stop,
   } = workspace
   const durationInfo = useTaskDuration(session.events, task, running)
   const contextUsage = useMemo(() => latestContextUsage(session.events), [session.events])
@@ -115,7 +114,7 @@ export function ConversationPage({
 
   return (
     <main className={root.root} data-phase="active" style={{ background: 'var(--codex-bg-main, #ffffff)' }}>
-      {/* Codex-style Top Header: [ 📄 Clarify request ]  [ 对话 | 流程图 | 轨迹 ]  [ 耗时 12s | ⧉ | ... ] */}
+      {/* Codex-style Top Header: [ 📄 Clarify request ]  [ 对话 | 流程图 ]  [ 耗时 12s | ⧉ | ... ] */}
       <header className={headerCss.header}>
         {/* Left: Document icon + Session title */}
         <div className={headerCss.titleArea}>
@@ -141,16 +140,14 @@ export function ConversationPage({
           >
             对话
           </button>
-          {/* 任务流节点展示暂时隐藏：新的虚函数执行路径跑通后再按新设计恢复。 */}
-          <button type="button" role="tab" aria-selected={tab === 'skill-pages'} className={clsx(headerCss.tabPill, tab === 'skill-pages' && headerCss.tabPillActive)} onClick={() => setTab('skill-pages')}>技能页面</button>
           <button
             type="button"
             role="tab"
-            aria-selected={tab === 'trajectory'}
-            className={clsx(headerCss.tabPill, tab === 'trajectory' && headerCss.tabPillActive)}
-            onClick={() => setTab('trajectory')}
+            aria-selected={tab === 'flow'}
+            className={clsx(headerCss.tabPill, tab === 'flow' && headerCss.tabPillActive)}
+            onClick={() => setTab('flow')}
           >
-            执行轨迹
+            流程图
           </button>
         </div>
 
@@ -191,15 +188,11 @@ export function ConversationPage({
             followTail.current = box.scrollHeight - box.scrollTop - box.clientHeight < 80
           }}
         >
-          <div className={css.session} data-slot="conversation.session" style={tab === 'flow' || tab === 'skill-pages' ? { height: '100%', flex: 1, display: 'flex', flexDirection: 'column' } : undefined}>
-            <div className={root.viewArea} style={tab === 'flow' || tab === 'skill-pages' ? { height: '100%', flex: 1, minHeight: 520, display: 'flex' } : undefined}>
+          <div className={css.session} data-slot="conversation.session" style={tab === 'flow' ? { height: '100%', flex: 1, display: 'flex', flexDirection: 'column' } : undefined}>
+            <div className={root.viewArea} style={tab === 'flow' ? { height: '100%', flex: 1, minHeight: 520, display: 'flex' } : undefined}>
               {tab === 'chat'
                 ? <>{renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: openTask, onChangesUpdated: session.reload })}</>
-                : tab === 'skill-pages'
-                ? <SkillPagesView workspaceRoot={workspace.activeWorkspace ?? workspace.info?.workspace ?? ''} />
-                : tab === 'flow'
-                ? <FlowView key={workspace.taskId} events={session.events} task={task} running={running} onInterruptNode={interruptNode} />
-                : renderSlot('agent.trajectory', { events: session.events, onOpenTask: openTask })}
+                : <>{renderSlot('agent.flow', { taskId: workspace.taskId, running })}</>}
             </div>
           </div>
           <div className={root.composerSeat}>

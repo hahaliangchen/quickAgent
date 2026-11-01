@@ -156,6 +156,8 @@ pub async fn set_setting(
 #[derive(Deserialize)]
 pub struct ListQuery {
     before: Option<i64>,
+    /// Only the requests one function frame made.
+    frame: Option<String>,
 }
 
 pub async fn list(
@@ -167,8 +169,8 @@ pub async fn list(
     respond(tokio::task::spawn_blocking(move || -> Result<Value> {
         let conn = connection(&root)?; exists(&conn, &task_id)?;
         expire_bodies(&conn, &task_id, policy(&conn, &task_id)?["retention_days"].as_u64().unwrap(), now())?;
-        let mut stmt = conn.prepare("SELECT id,metadata FROM agent_request_contexts WHERE task_id=?1 AND id<?2 ORDER BY id DESC LIMIT 201")?;
-        let raw = stmt.query_map(params![task_id,query.before.unwrap_or(i64::MAX)], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt = conn.prepare("SELECT id,metadata FROM agent_request_contexts WHERE task_id=?1 AND id<?2 AND (?3 IS NULL OR json_extract(metadata,'$.task_node_id')=?3) ORDER BY id DESC LIMIT 201")?;
+        let raw = stmt.query_map(params![task_id,query.before.unwrap_or(i64::MAX),query.frame], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let has_more = raw.len() > 200;
         let mut items = Vec::new();
         for (id, text) in raw.into_iter().take(200) { let mut item: Value = serde_json::from_str(&text)?; item["id"] = json!(id); items.push(item); }
@@ -309,15 +311,6 @@ async fn persist_outcome(root: PathBuf, task_id: String, id: i64, metadata: Valu
         ensure!(tx.execute("UPDATE agent_request_contexts SET metadata=?1 WHERE id=?2 AND task_id=?3",
             params![metadata.to_string(),id,task_id])? == 1, "request context disappeared");
         crate::agent_service::append_event_tx(&tx,&task_id,"debug/context_end",&json!({"id":id,"task_node_id":metadata["task_node_id"]}),None)?;
-        if metadata["request_flow"] == true {
-            let status = match metadata["status"].as_str() {
-                Some("completed") => "done",
-                Some("cancelled" | "interrupted") => "interrupted",
-                _ => "failed",
-            };
-            crate::agent_service::append_event_tx(&tx,&task_id,"flow/node_state",
-                &json!({"turn":metadata["turn"],"id":metadata["nodeId"],"status":status,"context_id":id,"task_node_id":metadata["task_node_id"]}),None)?;
-        }
         tx.commit()?;
         Ok(())
     }).await?
@@ -353,15 +346,6 @@ pub(crate) fn recover_interrupted(conn: &mut Connection, task: &str) -> Result<(
             &json!({"id":id,"task_node_id":metadata["task_node_id"]}),
             None,
         )?;
-        if metadata["request_flow"] == true {
-            crate::agent_service::append_event_tx(
-                &tx,
-                task,
-                "flow/node_state",
-                &json!({"turn":metadata["turn"],"id":metadata["nodeId"],"status":"interrupted","context_id":id,"task_node_id":metadata["task_node_id"]}),
-                None,
-            )?;
-        }
     }
     tx.commit()?;
     Ok(())
@@ -437,20 +421,6 @@ pub async fn record(
             "history_pool":db_meta["history_pool"],"history_reference":db_meta["history_reference"],
             "note":"Exact role input view; references shared history, not a new tool action or independent observation."
         }),None)?;
-        if db_meta["request_flow"] == true {
-            let node = &db_meta["nodeId"];
-            let mut edges = Vec::new();
-            if let Some(previous) = db_meta["previous_node_id"].as_str() {
-                edges.push(json!({"source":previous,"target":node,"label":"next request"}));
-            } else if let Some(parent) = db_meta["task_node_id"].as_str().or_else(||db_meta["parent_node_id"].as_str()) {
-                let label = if db_meta["actor"] == "worker" { "task delegate" } else { "context subagent" };
-                edges.push(json!({"source":parent,"target":node,"label":label}));
-            }
-            crate::agent_service::append_event_tx(&tx,&db_id,"flow/node_add",&json!({"turn":db_meta["turn"],
-                "task_node_id":db_meta["task_node_id"],"node":{"id":node,"kind":db_meta["actor"],"title":format!("{} · {}",db_meta["actor"].as_str().unwrap_or("agent"),id),"task_node_id":db_meta["task_node_id"],
-                    "status":"running","parent_id":db_meta["parent_node_id"],"agent_id":db_meta["agent_id"],"request_id":db_meta["request_id"],"context_id":id},
-                "edges":edges}),None)?;
-        }
         tx.commit()?;
         Ok((id,db_meta))
     }).await;
@@ -478,7 +448,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn body_recording_can_be_disabled_without_losing_flow_or_audit_identity() {
+    async fn body_recording_can_be_disabled_without_losing_audit_identity() {
         let root = std::env::temp_dir().join(format!(
             "request-policy-{}",
             crate::visual_artifacts::new_id()
@@ -490,7 +460,7 @@ mod tests {
         let trace = record(
             &root,
             "task",
-            json!({"actor":"agent","turn":1,"step":1,"nodeId":"request-a","request_flow":true}),
+            json!({"actor":"agent","turn":1,"step":1,"nodeId":"request-a"}),
             &json!({"model":"fake","messages":[{"role":"user","content":"private full input"}]}),
         )
         .await
@@ -501,14 +471,12 @@ mod tests {
         assert!(saved["body"].is_null());
         assert_eq!(saved["metadata"]["body_recorded"], false);
         assert_eq!(saved["metadata"]["status"], "completed");
-        let nodes: usize = conn
-            .query_row(
-                "SELECT COUNT(*) FROM agent_task_events WHERE kind='flow/node_add'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(nodes, 1);
+        let count = |kind: &str| -> usize {
+            conn.query_row("SELECT COUNT(*) FROM agent_task_events WHERE kind=?1", [kind], |row| row.get(0)).unwrap()
+        };
+        assert_eq!((count("debug/context_request"), count("debug/context_end")), (1, 1));
+        // The flow graph reads the frames itself; a request writes nothing for it.
+        assert_eq!(count("flow/node_add") + count("flow/node_state"), 0);
         drop(conn);
         std::fs::remove_dir_all(root).unwrap();
     }

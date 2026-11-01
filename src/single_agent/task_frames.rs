@@ -237,6 +237,7 @@ pub(super) async fn start_parallel_function(
     let mut node = new_task(&parent, &arguments, ordinal, "temp", s.turn)?;
     node.metadata["parallel"] = json!(true);
     node.metadata["parallel_owner"] = json!(node.node_id);
+    node.metadata["file_write_clock"] = json!(super::managed_files::write_clock(s.state.workspace.root(), s.task)?);
     node.metadata["parallel_call_id"] = json!(action.id);
     // The frame knows its caller: a concurrent call records its result there.
     node.metadata["caller"] = json!({"task":parent_id,"scope":s.scope,"call_id":action.id,"step":step,"flowNodeId":action.id,"concurrent":true});
@@ -386,10 +387,10 @@ fn temporary_frame(s: &Session<'_>, parent: &Window, node: &Node) -> Result<Wind
     let virtual_function = task["role"] != "body";
     if virtual_function {
         // A virtual function's context is its signature, contract and actual
-        // arguments: nothing of its caller's conversation or scope comes along.
-        let mut messages = vec![json!({"role":"system","content":s.prompt()})];
-        inherit_material(parent, &mut messages);
-        child.messages = messages;
+        // arguments: nothing of its caller's conversation, scope or skills
+        // comes along. The skills its own code or contract references are
+        // added to each of its requests.
+        child.messages = vec![json!({"role":"system","content":s.prompt()})];
         child.scope_values.clear();
         // Except what its contract names with @uses: its closure, as in JS.
         if let Some(captured) = task["captured"].as_object() {
@@ -408,7 +409,6 @@ fn temporary_frame(s: &Session<'_>, parent: &Window, node: &Node) -> Result<Wind
 
 fn inherited_frame(s: &Session<'_>, parent: &Window, node: &Node) -> Window {
     let mut messages = vec![json!({"role":"system","content":s.prompt()})];
-    inherit_material(parent, &mut messages);
     messages.extend(
         parent
             .messages
@@ -420,8 +420,6 @@ fn inherited_frame(s: &Session<'_>, parent: &Window, node: &Node) -> Window {
         scope_values: super::function_scope::values(parent),
         messages,
         task_node_id: Some(node.node_id.clone()),
-        active_skills: parent.active_skills.clone(),
-        active_skill_scopes: parent.active_skill_scopes.clone(),
         token_calibration: parent.token_calibration.clone(),
         parallel_root: parent.parallel_root.clone(),
         ..Default::default()
@@ -471,6 +469,8 @@ pub(super) async fn finish(
     if id == tree::ROOT {
         return Ok(None);
     }
+    // Calls waiting for this frame to write or fix a module may go on.
+    super::modules::release_frame(w);
     let agent = s.delegate_id().map(str::to_owned);
     let saved = returned_assets(s, w, &id);
     let text = message["content"].as_str().unwrap_or("").to_owned();
@@ -793,46 +793,6 @@ fn fit_input_bodies(s: &Session<'_>, child: &mut Window) -> Result<()> {
 }
 
 
-/// Point a frame at the node it now executes: refresh its path and node card.
-fn inherit_material(parent: &Window, messages: &mut Vec<Value>) {
-    for message in &parent.messages {
-        if message["_pinned"] == true
-            || message[crate::context_assets::REFERENCE]["source_tool"] == "read_skill"
-        {
-            let mut message = message.clone();
-            message["role"] = json!("user");
-            message["name"] = json!("saved_asset");
-            message.as_object_mut().unwrap().remove("tool_call_id");
-            message["_pinned"] = json!(true);
-            // Provenance/event sequence changes on every delivery, even when
-            // it is the same complete skill asset. Carry one body, not every
-            // read of it. A reference must never replace an available body.
-            if message[crate::context_assets::REFERENCE]["source_tool"] == "read_skill"
-                && let Some(id) = message[crate::context_assets::REFERENCE]["asset_id"].as_str()
-                && let Some(existing) = messages
-                    .iter_mut()
-                    .find(|m| m[crate::context_assets::REFERENCE]["asset_id"] == id)
-            {
-                let loaded = !matches!(
-                    message["_asset_state"].as_str(),
-                    Some("reference_only" | "not_delivered")
-                );
-                let existing_loaded = !matches!(
-                    existing["_asset_state"].as_str(),
-                    Some("reference_only" | "not_delivered")
-                );
-                if loaded || !existing_loaded {
-                    *existing = message;
-                }
-                continue;
-            }
-            if !messages.iter().any(|m| m == &message) {
-                messages.push(message);
-            }
-        }
-    }
-}
-
 pub(super) fn write_window(tx: &rusqlite::Transaction<'_>, task: &str, scope: &str, w: &Window) -> Result<()> {
     tx.execute("INSERT INTO agent_runtime_windows VALUES (?1,?2,?3) ON CONFLICT(task_id,scope) DO UPDATE SET state=excluded.state",params![task,scope,serde_json::to_string(w)?])?;
     Ok(())
@@ -990,32 +950,6 @@ mod tests {
 
 
 
-    #[test]
-    fn inherited_skill_material_is_deduplicated_by_asset_not_delivery_event() {
-        let skill = |seq: i64, state: &str| {
-            json!({"role":"tool","tool_call_id":format!("call-{seq}"),
-            "content":format!("skill delivery {seq}"),"source":{"seq":seq},"_asset_state":state,
-            (crate::context_assets::REFERENCE):{"asset_id":"asset-skill","source_tool":"read_skill"}})
-        };
-        let parent = Window {
-            messages: vec![
-                skill(1, "loaded"),
-                skill(2, "loaded"),
-                skill(3, "reference_only"),
-            ],
-            ..Default::default()
-        };
-        let mut messages = vec![];
-        inherit_material(&parent, &mut messages);
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["content"], "skill delivery 2");
-        assert_eq!(messages[0]["name"], "saved_asset");
-        assert_eq!(messages[0]["_pinned"], true);
-        assert!(messages[0].get("tool_call_id").is_none());
-        // An explicitly declared asset and inherited skill are still one input.
-        inherit_material(&parent, &mut messages);
-        assert_eq!(messages.len(), 1);
-    }
 
 
 
@@ -1095,7 +1029,7 @@ mod tests {
                         "a resumed task has one memory, not one per turn"
                     );
                     assert_eq!(entries[0]["request"], "Draft a plan");
-                    assert_eq!(entries[0]["task"]["goal"], "Draft the plan");
+                    assert_eq!(entries[0]["task"]["goal"], "Draft a plan", "the user's request is the main task");
                     assert_eq!(entries[0]["task"]["status"], "done");
                     assert_eq!(
                         entries[0]["answer"],
@@ -1115,12 +1049,14 @@ mod tests {
                     let index: Value =
                         serde_json::from_str(memory["content"].as_str().unwrap()).unwrap();
                     let entries = index["entries"].as_array().unwrap();
-                    assert_eq!(entries.len(), 2, "a task-free answer keeps its own memory");
+                    assert_eq!(entries.len(), 2, "each request keeps its own memory");
                     assert_eq!(entries[0]["kind"], "task");
-                    assert_eq!(entries[1]["kind"], "qa");
+                    // Every request is a main task, a question included.
+                    assert_eq!(entries[1]["kind"], "task");
                     assert_eq!(entries[1]["turn"], 3);
                     assert_eq!(entries[1]["request"], "A separate question");
-                    assert_eq!(entries[1]["answer"], "问答摘要".repeat(50));
+                    assert_eq!(entries[1]["task"]["goal"], "A separate question");
+                    assert_eq!(entries[1]["answer"], "问答摘要".repeat(60));
                     answer("Done")
                 }
                 _ => panic!("unexpected request {n}"),

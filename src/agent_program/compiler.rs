@@ -40,10 +40,81 @@ struct Compiler {
     /// The next lowered expression is the object of the current chain link.
     chain_object: bool,
     /// Header contracts of every function declaration, nested ones included,
-    /// keyed by the position of the function.
-    contracts: std::sync::Arc<BTreeMap<u32, (bool, String)>>,
-    /// The tools a virtual declared here may use, when this is an implementation.
+    /// keyed by the position of the function: whether it is AI work, whether
+    /// it is a @module, and its description.
+    contracts: std::sync::Arc<BTreeMap<u32, (bool, bool, String)>>,
+    /// The tools a @virtual declared here may use: what this source imports.
     leaf_tools: Option<Vec<String>>,
+    /// And the third-party libraries this source requires.
+    leaf_libraries: Vec<String>,
+}
+
+/// The library a `require("ppt")` call names: one string argument.
+fn required_name(call: &ast::CallExpr) -> Option<String> {
+    let [ast::ExprOrSpread { spread: None, expr }] = &call.args[..] else { return None };
+    let ast::Expr::Lit(ast::Lit::Str(name)) = &**expr else { return None };
+    Some(name.value.to_string_lossy().into_owned())
+}
+/// A library name, optionally with /promises for its async methods.
+fn valid_library(spec: &str) -> bool {
+    let name = spec.strip_suffix("/promises").unwrap_or(spec);
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+/// The library a `require("ppt")` call names, without /promises.
+fn required_library(call: &ast::CallExpr) -> Option<String> {
+    let ast::Callee::Expr(callee) = &call.callee else { return None };
+    if !matches!(&**callee, ast::Expr::Ident(i) if i.sym == *"require") {
+        return None;
+    }
+    let spec = required_name(call).filter(|spec| valid_library(spec))?;
+    Some(spec.strip_suffix("/promises").unwrap_or(&spec).to_owned())
+}
+/// The libraries a source requires, wherever the calls are, and the
+/// variables `const md = require("markdown")` binds to them.
+#[derive(Default)]
+struct Requires {
+    libraries: BTreeSet<String>,
+    bindings: BTreeMap<String, String>,
+}
+impl Visit for Requires {
+    fn visit_call_expr(&mut self, call: &ast::CallExpr) {
+        if let Some(library) = required_library(call) {
+            self.libraries.insert(library);
+        }
+        call.visit_children_with(self);
+    }
+    fn visit_var_declarator(&mut self, declarator: &ast::VarDeclarator) {
+        if let ast::Pat::Ident(name) = &declarator.name
+            && let Some(ast::Expr::Call(call)) = declarator.init.as_deref()
+            && let Some(library) = required_library(call)
+        {
+            self.bindings.insert(name.id.sym.to_string(), library);
+        }
+        declarator.visit_children_with(self);
+    }
+}
+/// Every name a source binds: declarations, parameters, catch bindings and
+/// function names.
+struct Bound(BTreeSet<String>);
+impl Visit for Bound {
+    fn visit_binding_ident(&mut self, name: &ast::BindingIdent) {
+        self.0.insert(name.id.sym.to_string());
+    }
+    fn visit_fn_decl(&mut self, f: &ast::FnDecl) {
+        self.0.insert(f.ident.sym.to_string());
+        f.visit_children_with(self);
+    }
+}
+/// The libraries a source requires, read without compiling it. A source that
+/// does not parse requires nothing.
+pub fn required_libraries(source: &str) -> Vec<String> {
+    let map: Lrc<SourceMap> = Default::default();
+    let file = map.new_source_file(FileName::Custom("agent-program.js".into()).into(), source.to_owned());
+    let lexer = Lexer::new(Syntax::Es(EsSyntax::default()), Default::default(), StringInput::from(&*file), None);
+    let Ok(module) = Parser::new_from(lexer).parse_module() else { return Vec::new() };
+    let mut requires = Requires::default();
+    module.visit_with(&mut requires);
+    requires.libraries.into_iter().collect()
 }
 
 /// Global built-in functions that can be used as values, as in `.filter(Boolean)`.
@@ -346,6 +417,14 @@ impl Compiler {
             }
         }
         Ok(names)
+    }
+    /// A @module is code that later calls reuse, like a JavaScript module: it
+    /// closes over nothing of its caller and takes what it needs as parameters.
+    fn no_uses(&self, description: &str, span: Span) -> Result<()> {
+        if description.lines().any(|line| line.trim().starts_with("@uses")) {
+            return self.error(span, "@uses is for @virtual functions; a @module takes what it needs as parameters");
+        }
+        Ok(())
     }
     /// The innermost binding of `name`: Some(true) if it may be reassigned.
     fn resolve(&self, name: &str) -> Option<bool> {
@@ -721,6 +800,7 @@ impl Compiler {
             chain_object: false,
             contracts: self.contracts.clone(),
             leaf_tools: self.leaf_tools.clone(),
+            leaf_libraries: self.leaf_libraries.clone(),
         };
         let mut params = Vec::new();
         let mut parameter_lexical = Vec::new();
@@ -767,21 +847,27 @@ impl Compiler {
             }
             _ => (Vec::new(), Vec::new()),
         };
-        // A nested declaration marked @virtual is AI work, as at the top level.
-        let contract = source.name.as_ref().and_then(|_| self.contracts.get(&source.span.lo.0)).filter(|(v, _)| *v).cloned();
+        // A nested declaration marked @virtual or @module is AI work, as at the top level.
+        let contract = source.name.as_ref().and_then(|_| self.contracts.get(&source.span.lo.0)).filter(|(v, _, _)| *v).cloned();
+        let module_task = contract.as_ref().is_some_and(|(_, module, _)| *module);
         match source.body {
             FunctionBody::Block(body) if contract.is_some() => {
-                let (_, description) = contract.clone().unwrap();
+                let (_, _, description) = contract.clone().unwrap();
                 if patterned {
-                    return c.error(source.span, "@virtual functions require simple parameters");
+                    return c.error(source.span, "@virtual and @module functions require simple parameters");
                 }
                 if !body.stmts.iter().all(|s| matches!(s, ast::Stmt::Empty(_))) {
-                    return c.error(body.span, "@virtual declares AI work: its body holds only comments describing it");
+                    return c.error(body.span, "@virtual and @module declare AI work: the body holds only comments describing it");
                 }
                 if description.is_empty() {
-                    return c.error(body.span, "@virtual needs a task description and return contract");
+                    return c.error(body.span, "@virtual and @module need a task description and return contract");
                 }
-                let uses = self.captures(&description, &params, source.span)?;
+                let uses = if module_task {
+                    self.no_uses(&description, source.span)?;
+                    Vec::new()
+                } else {
+                    self.captures(&description, &params, source.span)?
+                };
                 // Captured variables join the input, read in this closure's scope.
                 let input = Expr::Object(params.iter().chain(&uses).map(|p| (p.clone(), Expr::Variable(p.clone()))).collect());
                 let dest = c.temp();
@@ -803,15 +889,18 @@ impl Compiler {
         }
         self.nested.extend(c.nested);
         let virtual_task = contract.is_some();
-        let description = contract.map(|(_, description)| description).unwrap_or_default();
-        let uses = if virtual_task { self.captures(&description, &params, source.span)? } else { Vec::new() };
+        let description = contract.map(|(_, _, description)| description).unwrap_or_default();
+        let uses = if virtual_task && !module_task { self.captures(&description, &params, source.span)? } else { Vec::new() };
         self.nested.push((
             id.clone(),
             Function {
                 description,
                 virtual_task,
+                module_task,
                 uses,
-                leaf_tools: if virtual_task { self.leaf_tools.clone() } else { None },
+                leaf_tools: if virtual_task && !module_task { self.leaf_tools.clone() } else { None },
+                leaf_libraries: if virtual_task && !module_task { self.leaf_libraries.clone() } else { Vec::new() },
+                skills: Vec::new(),
                 params,
                 rest_parameter,
                 parameter_scope: patterned,
@@ -1577,6 +1666,25 @@ impl Compiler {
                     };
                     self.code[success].op = Op::Jump(end);
                     return Ok(Expr::Value(json!(true)));
+                }
+                // A third-party library loads when this line runs, as with
+                // require() in Node; the host's own libraries are imported.
+                if let ast::Callee::Expr(target) = &call.callee
+                    && matches!(&**target, ast::Expr::Ident(i) if i.sym == *"require")
+                    && self.global("require")
+                {
+                    let Some(library) = required_name(call) else {
+                        return self.error(call.span, "require takes one library name string, such as require(\"ppt\")");
+                    };
+                    if !valid_library(&library) {
+                        return self.error(
+                            call.span,
+                            &format!("require(\"{library}\"): a library name has letters, digits, _ or -, optionally followed by /promises; the host's own libraries are imported from host:<library>"),
+                        );
+                    }
+                    let destination = self.temp();
+                    self.emit(call.span, Op::Effect(Some(destination.clone()), Effect::Require(library)));
+                    return Ok(Expr::Variable(destination));
                 }
                 if call.args.iter().any(|arg| arg.spread.is_some()) {
                     let ast::Callee::Expr(target) = &call.callee else { return self.error(call.span, "spread call needs a function value"); };
@@ -2405,7 +2513,7 @@ pub fn compile_body_with_scope(
     let program = link_prelude(compile_inner(source, entry, true, libraries, external_names, false)?)?;
     ensure!(
         !program.functions[entry].virtual_task,
-        "the implementation of {entry} needs a real body; do not mark it @virtual again"
+        "the implementation of {entry} needs a real body; do not mark it @virtual or @module again"
     );
     Ok(program)
 }
@@ -2491,6 +2599,10 @@ fn compile_inner(
     }
     let mut all_declarations = Declarations(Vec::new());
     module.visit_with(&mut all_declarations);
+    let mut requires = Requires::default();
+    module.visit_with(&mut requires);
+    let mut bound = Bound(BTreeSet::new());
+    module.visit_with(&mut bound);
     for item in module.body {
         match item {
             ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
@@ -2501,7 +2613,7 @@ fn compile_inner(
                 };
                 let (library, asynchronous) = namespace.strip_suffix("/promises").map(|base| (base, true)).unwrap_or((namespace, false));
                 let Some(base_methods) = libraries.get(library) else {
-                    bail!("TS_PROGRAM 1:1: unknown or unavailable tool library {namespace}");
+                    bail!("TS_PROGRAM 1:1: unknown or unavailable tool library {namespace}; host: imports only the host's own libraries, and a third-party library is loaded where it is needed with const {library} = require(\"{namespace}\")");
                 };
                 let methods: BTreeMap<String, String> = base_methods.iter().map(|(name, tool)| (name.clone(), if asynchronous { format!("async-tool:{tool}") } else { tool.clone() })).collect();
                 ensure!(
@@ -2564,10 +2676,12 @@ fn compile_inner(
         .collect::<Vec<_>>();
     // The top-level statements are the program, as in a JavaScript module.
     let implicit_entry = !refinement && entry == super::ENTRY;
+    // Without imports the host's libraries are in scope by name. A name the
+    // source binds itself, as in `const io = require("io")`, is its own.
     let libraries = if has_import {
         imported_libraries
     } else {
-        libraries
+        libraries.into_iter().filter(|(name, _)| !bound.0.contains(name)).collect()
     };
     ensure!(
         declarations.len() <= 64,
@@ -2622,9 +2736,9 @@ fn compile_inner(
     // Walk only adjacent comments: a tag inside the previous function must
     // never attach to the next declaration. Every contract is read first, so
     // calls compiled before a declaration know whether it is AI work.
-    let contract_of = |f: &ast::FnDecl| -> (bool, String) {
+    let contract_of = |f: &ast::FnDecl| -> Result<(bool, bool, String)> {
         let Some(body) = &f.function.body else {
-            return (false, String::new());
+            return Ok((false, false, String::new()));
         };
         let mut header_start = f.function.span.lo;
         let mut header = Vec::new();
@@ -2639,19 +2753,26 @@ fn compile_inner(
             header_start = note.span.lo;
         }
         header.reverse();
-        let marked = |text: &str| {
+        let marked = |text: &str, tag: &str| {
             text.split(|ch: char| !(ch.is_alphanumeric() || matches!(ch, '@' | '_')))
-                .any(|word| word == "@virtual")
+                .any(|word| word == tag)
         };
         let inner = notes
             .iter()
             .filter(|n| n.span.lo >= body.span.lo && n.span.hi <= body.span.hi)
             .map(|n| n.text.to_string())
             .collect::<Vec<_>>();
-        // The header marks a function virtual, and so does a marker in a body
-        // that holds only comments. A nested helper's marker belongs to it.
+        // The header marks a function, and so does a marker in a body that
+        // holds only comments. A nested helper's marker belongs to it.
         let comment_only = body.stmts.iter().all(|s| matches!(s, ast::Stmt::Empty(_)));
-        let virtual_task = marked(&header.join("\n")) || (comment_only && marked(&inner.join("\n")));
+        let (header_text, inner_text) = (header.join("\n"), inner.join("\n"));
+        let has = |tag: &str| marked(&header_text, tag) || (comment_only && marked(&inner_text, tag));
+        let (hook, module_task) = (has("@virtual"), has("@module"));
+        if hook && module_task {
+            let p = map.lookup_char_pos(f.function.span.lo);
+            bail!("TS_PROGRAM {}:{}: {} is marked both @virtual and @module; a @virtual is AI work done in a loop, a @module is code AI writes once, so pick one", p.line, p.col.0 + 1, f.ident.sym);
+        }
+        let virtual_task = hook || module_task;
         header.extend(inner);
         let contract = header.join("\n");
         let description = contract
@@ -2659,7 +2780,7 @@ fn compile_inner(
             .map(|line| line.trim().trim_start_matches('*').trim())
             .map(|line| {
                 if virtual_task {
-                    line.replace("@virtual", "")
+                    line.replace("@virtual", "").replace("@module", "")
                 } else {
                     line.to_owned()
                 }
@@ -2667,19 +2788,22 @@ fn compile_inner(
             .filter(|line| !line.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n");
-        (virtual_task, description)
+        Ok((virtual_task, module_task, description))
     };
     let contracts = declarations
         .iter()
-        .map(|f| (f.ident.sym.to_string(), contract_of(f)))
-        .collect::<BTreeMap<_, _>>();
+        .map(|f| Ok((f.ident.sym.to_string(), contract_of(f)?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let contracts_by_position = std::sync::Arc::new(
-        all_declarations.0.iter().map(|f| (f.function.span.lo.0, contract_of(f))).collect::<BTreeMap<_, _>>(),
+        all_declarations.0.iter().map(|f| Ok((f.function.span.lo.0, contract_of(f)?))).collect::<Result<BTreeMap<_, _>>>()?,
     );
-    let leaf_tools = refinement.then(|| imported_tools.clone());
+    // A @virtual is limited to what the source declaring it imports, whether
+    // that source is a main program or a module.
+    let leaf_tools = Some(imported_tools.clone());
+    let leaf_libraries = requires.libraries.iter().cloned().collect::<Vec<_>>();
     let virtuals = contracts
         .iter()
-        .filter(|(_, (virtual_task, _))| *virtual_task)
+        .filter(|(_, (virtual_task, _, _))| *virtual_task)
         .map(|(name, _)| name.clone())
         .collect::<BTreeSet<_>>();
     let async_functions = declarations
@@ -2722,6 +2846,7 @@ fn compile_inner(
             chain_object: false,
             contracts: contracts_by_position.clone(),
             leaf_tools: leaf_tools.clone(),
+            leaf_libraries: leaf_libraries.clone(),
         };
         for name in &module_vars {
             c.declare(name, true, module.span)?;
@@ -2748,7 +2873,10 @@ fn compile_inner(
                 uses: Vec::new(),
                 description: String::new(),
                 virtual_task: false,
+                module_task: false,
                 leaf_tools: None,
+                leaf_libraries: Vec::new(),
+                skills: Vec::new(),
                 params: Vec::new(),
                 rest_parameter: None,
                 parameter_scope: false,
@@ -2787,6 +2915,7 @@ fn compile_inner(
             chain_object: false,
             contracts: contracts_by_position.clone(),
             leaf_tools: leaf_tools.clone(),
+            leaf_libraries: leaf_libraries.clone(),
         };
         if f.function.is_generator {
             return c.error(f.function.span, "generator functions are unsupported");
@@ -2816,9 +2945,9 @@ fn compile_inner(
             .body
             .as_ref()
             .context("function body is required")?;
-        let (virtual_task, description) = contracts[f.ident.sym.as_ref()].clone();
+        let (virtual_task, module_task, description) = contracts[f.ident.sym.as_ref()].clone();
         if virtual_task && !parameter_patterns.is_empty() {
-            return c.error(f.function.span, "@virtual functions require simple parameters");
+            return c.error(f.function.span, "@virtual and @module functions require simple parameters");
         }
         for (pattern, argument) in parameter_patterns {
             c.bind_value(pattern, Expr::Variable(argument), true)?;
@@ -2851,15 +2980,20 @@ fn compile_inner(
         if virtual_task {
             if !empty && !error_placeholder {
                 return c.error(body.span,
-                    "@virtual declares AI work: use an empty body or a sole throw new Error with a literal message; executable work and placeholder returns are unsupported");
+                    "@virtual and @module declare AI work: use an empty body or a sole throw new Error with a literal message; executable work and placeholder returns are unsupported");
             }
             if description.is_empty() {
                 return c.error(
                     body.span,
-                    "@virtual needs a task description and return contract",
+                    "@virtual and @module need a task description and return contract",
                 );
             }
-            let uses = c.captures(&description, &params, f.function.span)?;
+            let uses = if module_task {
+                c.no_uses(&description, f.function.span)?;
+                Vec::new()
+            } else {
+                c.captures(&description, &params, f.function.span)?
+            };
             let input = Expr::Object(
                 params
                     .iter()
@@ -2894,14 +3028,17 @@ fn compile_inner(
             c.emit(body.span, Op::Return(Expr::Undefined));
         }
         functions.extend(std::mem::take(&mut c.nested));
-        let uses = if virtual_task { c.captures(&description, &params, f.function.span)? } else { Vec::new() };
+        let uses = if virtual_task && !module_task { c.captures(&description, &params, f.function.span)? } else { Vec::new() };
         functions.insert(
             f.ident.sym.to_string(),
             Function {
                 description,
                 virtual_task,
+                module_task,
                 uses,
-                leaf_tools: if virtual_task { leaf_tools.clone() } else { None },
+                leaf_tools: if virtual_task && !module_task { leaf_tools.clone() } else { None },
+                leaf_libraries: if virtual_task && !module_task { leaf_libraries.clone() } else { Vec::new() },
+                skills: Vec::new(),
                 params,
                 rest_parameter,
                 parameter_scope: patterned,
@@ -2919,6 +3056,13 @@ fn compile_inner(
         functions.len() <= 1024,
         "TS_PROGRAM supports at most 1024 functions, including nested functions and arrows"
     );
+    // A hook carries the instructions of a library only when its contract
+    // names, with @uses, the variable the library was required into.
+    for function in functions.values_mut() {
+        if function.virtual_task && !function.module_task {
+            function.skills = function.uses.iter().filter_map(|name| requires.bindings.get(name).cloned()).collect::<BTreeSet<_>>().into_iter().collect();
+        }
+    }
     Ok(Program {
         version: VERSION,
         source: source.into(),

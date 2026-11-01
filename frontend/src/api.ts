@@ -234,6 +234,46 @@ export interface AgentEvent {
   readonly surfaceOp?: string
 }
 
+/** A function frame as the agent keeps it: one per user request, one per call a program made. */
+export interface FrameSummary {
+  readonly id: string
+  readonly parent_id: string | null
+  /** The frame waiting for this one's return; a paused program's calls return to it. */
+  readonly caller_id: string | null
+  readonly kind: 'conversation' | 'request' | 'virtual' | 'module' | 'function' | 'paused_program' | (string & {})
+  readonly turn: number | null
+  readonly title: string
+  readonly function: string | null
+  readonly description: string | null
+  readonly status: string
+  readonly call_site: { readonly line: number; readonly column: number } | null
+  readonly concurrent: boolean
+  readonly started_at: number | null
+  readonly ended_at: number | null
+  readonly last_seq: number | null
+  readonly error: string | null
+  /** A running frame's latest reasoning summary, and a tool it called after it. */
+  readonly activity?: {
+    readonly reasoning: string
+    readonly tool: { readonly name: string; readonly arguments: Readonly<Record<string, string>> } | null
+    readonly at: number
+  } | null
+}
+
+export interface FrameDetail {
+  readonly frame: FrameSummary & {
+    readonly goal: string
+    readonly arguments: unknown
+    readonly parameters: unknown
+    readonly captured: unknown
+    readonly result: unknown
+  }
+  /** The frame's own record: its AI's replies and tools, its program's runs. */
+  readonly events: readonly AgentEvent[]
+  /** The program that made the call, as its caller was running it. */
+  readonly caller_program: { readonly frame: string; readonly source: string; readonly call_site: { readonly line: number; readonly column: number } } | null
+}
+
 const TERMINAL: ReadonlySet<TaskStatus> = new Set(['completed', 'failed', 'cancelled', 'max_steps', 'interrupted'])
 
 export function isTerminal(status: TaskStatus): boolean {
@@ -357,7 +397,13 @@ export const api = {
   events: async (id: string) => (await request<{ events: AgentEvent[] }>(`${task(id)}/events`)).events,
   contextDebug: (id: string) => request<{ enabled: boolean }>(`${task(id)}/context-debug`, { cache: 'no-store' }),
   setContextDebug: (id: string, enabled: boolean) => put<{ enabled: boolean }>(`${task(id)}/context-debug`, { enabled }),
-  requestContexts: (id: string, before?: number) => request<{ items: readonly RequestContextMeta[]; has_more: boolean }>(`${task(id)}/request-contexts${before === undefined ? '' : `?before=${before}`}`, { cache: 'no-store' }),
+  requestContexts: (id: string, before?: number, frame?: string) => {
+    const query = new URLSearchParams()
+    if (before !== undefined) query.set('before', String(before))
+    if (frame !== undefined) query.set('frame', frame)
+    const search = query.toString()
+    return request<{ items: readonly RequestContextMeta[]; has_more: boolean }>(`${task(id)}/request-contexts${search === '' ? '' : `?${search}`}`, { cache: 'no-store' })
+  },
   requestContext: (id: string, requestId: number) => request<RequestContext>(`${task(id)}/request-contexts/${requestId}`, { cache: 'no-store' }),
   changes: (id: string, turn: number) => request<ChangesSummary>(`${task(id)}/changes/${turn}`),
   changeDiff: (id: string, turn: number, index: number, path?: string) => request<FileDiff>(`${task(id)}/changes/${turn}/files/${index}${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`, { cache: 'no-store' }),
@@ -366,8 +412,8 @@ export const api = {
   prompt: (id: string, prompt: string, options?: { permission_mode?: PermissionMode | undefined; model?: string | undefined; provider?: string | undefined; reasoning_effort?: string | undefined; fast_mode?: boolean | undefined; content?: readonly unknown[]; requestId?: string }) =>
     post<{ task_id: string }>(`${task(id)}/messages`, { prompt, ...options }),
   cancel: (id: string) => request<unknown>(task(id), { method: 'DELETE' }),
-  interruptNode: (id: string, nodeId: string) =>
-    post<unknown>(`${task(id)}/flow/nodes/${encodeURIComponent(nodeId)}/interrupt`),
+  frames: (id: string) => request<{ frames: readonly FrameSummary[] }>(`${task(id)}/frames`, { cache: 'no-store' }),
+  frame: (id: string, frameId: string) => request<FrameDetail>(`${task(id)}/frames/${encodeURIComponent(frameId)}`, { cache: 'no-store' }),
   getSettings: () => request<SettingsData>('/agent/settings/data'),
   saveSettings: (payload: SaveSettingsInput) => put<SettingsData>('/agent/settings/data', payload),
   probeImage: (payload: { revision: string; provider: string; model: string }) => post<{ probe: Record<string, unknown>; settings: SettingsData }>('/agent/settings/probe-image', payload),

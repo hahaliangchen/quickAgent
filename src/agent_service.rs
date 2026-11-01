@@ -78,6 +78,9 @@ impl PermissionMode {
 #[derive(Clone, Debug)]
 pub struct AgentProviderRoute {
     pub prefix_system_messages: bool,
+    /// The provider speaks the Responses API (`api: openai-responses`), as
+    /// Codex does; requests then replay the model's reasoning items.
+    pub responses: bool,
     pub url: String,
     pub api_key: String,
     pub models: HashMap<String, String>,
@@ -118,8 +121,6 @@ pub struct AgentServiceState {
 pub struct ActiveTask {
     run_id: String,
     token: CancellationToken,
-    flow_node: Arc<Mutex<String>>,
-    node_interrupt: Arc<Mutex<Option<String>>>,
 }
 
 async fn clear_active_task(state: &AgentServiceState, task_id: &str, run_id: &str) {
@@ -129,18 +130,6 @@ async fn clear_active_task(state: &AgentServiceState, task_id: &str, run_id: &st
         .is_some_and(|entry| entry.run_id == run_id)
     {
         active.remove(task_id);
-    }
-}
-
-pub(crate) async fn set_active_flow_node(
-    state: &AgentServiceState,
-    task_id: &str,
-    turn: usize,
-    node: &str,
-) {
-    let active = state.cancellations.lock().await.get(task_id).cloned();
-    if let Some(active) = active {
-        *active.flow_node.lock().await = format!("turn_{turn}:{node}");
     }
 }
 
@@ -738,8 +727,6 @@ pub async fn create_task(
         ActiveTask {
             run_id: run_id.clone(),
             token: cancel.clone(),
-            flow_node: Arc::new(Mutex::new("turn_1:1".into())),
-            node_interrupt: Arc::new(Mutex::new(None)),
         },
     );
     let runner_state = state.clone();
@@ -1017,8 +1004,6 @@ pub async fn continue_task(
         ActiveTask {
             run_id: run_id.clone(),
             token: cancel.clone(),
-            flow_node: Arc::new(Mutex::new(format!("turn_{turn}:1"))),
-            node_interrupt: Arc::new(Mutex::new(None)),
         },
     );
     let runner_state = state.clone();
@@ -1296,35 +1281,6 @@ pub async fn cancel_task(
         .into_response()
 }
 
-pub async fn interrupt_flow_node(
-    State(state): State<AgentServiceState>,
-    Path((task_id, node_id)): Path<(String, String)>,
-) -> impl IntoResponse {
-    let active = state.cancellations.lock().await.get(&task_id).cloned();
-    let Some(active) = active else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({"error":"task is not running"})),
-        )
-            .into_response();
-    };
-    let current = active.flow_node.lock().await.clone();
-    if current != node_id {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error":"node is no longer active","active_node":current})),
-        )
-            .into_response();
-    }
-    *active.node_interrupt.lock().await = Some(node_id.clone());
-    active.token.cancel();
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({"task_id":task_id,"node_id":node_id,"status":"interrupting"})),
-    )
-        .into_response()
-}
-
 pub(crate) fn uuid_like() -> String {
     let mut bytes = [0u8; 16];
     if getrandom::fill(&mut bytes).is_ok() {
@@ -1478,12 +1434,15 @@ fn spawn_supervised_task(
 }
 
 /// Read an OpenAI chat completion stream, emit coalesced `assistant/delta` events, and return the assembled message.
+/// Each delta names the function frame whose request it answers.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn consume_model_stream_observed(
     response: reqwest::Response,
     root: &std::path::Path,
     task_id: &str,
     turn: usize,
     step: usize,
+    frame: Option<&str>,
     cancel: &CancellationToken,
     diagnostics: Option<&crate::model_transport::ModelRequestLog>,
 ) -> anyhow::Result<(Value, Value)> {
@@ -1533,7 +1492,7 @@ pub(crate) async fn consume_model_stream_observed(
                 root,
                 task_id,
                 "assistant/delta",
-                json!({"turn":turn,"step":step,"text":delta_text,"reasoning":delta_reasoning}),
+                json!({"turn":turn,"step":step,"task_node_id":frame,"text":delta_text,"reasoning":delta_reasoning}),
             )
             .await?;
             delta_text.clear();
@@ -1550,7 +1509,7 @@ pub(crate) async fn consume_model_stream_observed(
             root,
             task_id,
             "assistant/delta",
-            json!({"turn":turn,"step":step,"text":delta_text,"reasoning":delta_reasoning}),
+            json!({"turn":turn,"step":step,"task_node_id":frame,"text":delta_text,"reasoning":delta_reasoning}),
         )
         .await?;
     }
@@ -1984,7 +1943,9 @@ mod output_contract_tests {
         assert_eq!(first_page["complete"], false);
         assert!(first_page["next_start_line"].is_u64());
         let libraries = crate::agent_program::libraries::catalog(&tools, &json!([]));
-        let declarations = crate::agent_program::declarations::headers(&libraries, &tools);
+        // Other libraries have a read too, such as browser.read.
+        let io_read = crate::agent_program::declarations::selected(&libraries, &json!({"methods":["io.read"]})).unwrap();
+        let declarations = crate::agent_program::declarations::headers(&io_read, &tools);
         let read = declarations.lines().find(|line| line.contains("function read(")).unwrap();
         assert!(read.contains("next_start_line") && !read.ends_with("): unknown;"), "{read}");
         std::fs::remove_dir_all(root).unwrap();

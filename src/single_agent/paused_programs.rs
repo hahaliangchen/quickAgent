@@ -104,6 +104,7 @@ pub(super) fn step_label(action: &Action) -> String {
         }
         ActionKind::Tool { name, .. } if name == RESUME => "previous.resume()".into(),
         ActionKind::Task { name, .. } | ActionKind::Tool { name, .. } => name.clone(),
+        ActionKind::Require { library } => format!("require({library:?})"),
         _ => "并行读取".into(),
     };
     format!("第 {} 行 {callee}", action.at.line)
@@ -125,6 +126,8 @@ pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window) -> Result<String
     previous.program_value = None;
     previous.parallel_root = None;
     let (task, turn) = (s.task.to_owned(), s.turn);
+    // Writes after this point are ones the paused program has not seen.
+    let clock = super::managed_files::write_clock(s.state.workspace.root(), &task)?;
     let scope = db(s.state.workspace.root(), move |conn| {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let main = tree::get(&tx, &task, &main_id)?;
@@ -133,6 +136,7 @@ pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window) -> Result<String
         // It runs beside the main AI, so it never counts as the task in view.
         node.metadata["parallel"] = json!(true);
         node.metadata["parallel_owner"] = json!(node.node_id);
+        node.metadata["file_write_clock"] = json!(clock);
         node.metadata["previous"] = json!(true);
         node.status = PAUSED.into();
         tree::emit(&tx, &task, "task/node_paused", &mut node, turn)?;

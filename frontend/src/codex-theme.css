@@ -14,8 +14,8 @@
 
   --codex-bg-main: #ffffff;
   --codex-dock-bg: #ffffff;
-  --codex-sidebar-bg: #f6f8f6;
-  --codex-panel-bg: #f6f8f6;
+  --codex-sidebar-bg: #ffffff;
+  --codex-panel-bg: #ffffff;
   --codex-card-bg: #ffffff;
 
   /* Crisp, high-contrast text matching OpenAI Codex Desktop */
@@ -25,9 +25,9 @@
 
   --codex-border-subtle: #efefef;
   --codex-card-border: #e5e7eb;
-  --codex-hover-bg: #eef3ef;
-  --codex-active-pill: #e3f1ea;
-  --codex-active-hover: #d6ebe0;
+  --codex-hover-bg: #f5f6f7;
+  --codex-active-pill: #f3f5f5;
+  --codex-active-hover: #ecefee;
   /* Sprout theme: the brand accent is green; the variable names predate it. */
   --codex-blue-primary: #1d9e75;
   --codex-blue-hover: #0f6e56;
@@ -55,7 +55,8 @@
 
   /* Harmonize DSH tokens with Codex aesthetic */
   --dsw-alias-bg-base: #ffffff;
-  --dsw-specific-sidebar-fill: #f6f8f6;
+  --dsw-specific-sidebar-fill: #ffffff;
+  --dsw-specific-bubble: #f5f6f7;
   --dsw-alias-border-l2: #e5e7eb;
   --dsw-alias-border-l3: #efefef;
   --dsw-alias-label-primary: #111827;
@@ -140,6 +141,10 @@ html body[data-ds-dark-theme] {
   --dsw-static-deepseek-700-delete: #085041;
   --dsw-static-deepseek-800: #1d3a2e;
   --dsw-static-deepseek-900: #14261f;
+}
+html body:not([data-ds-dark-theme]):not([data-theme='ginkgo']) {
+  --dsw-specific-bubble: #f5f6f7;
+  --dsw-specific-sidebar-nav-item-active-accent: #f3f5f5;
 }
 html body[data-ds-dark-theme] {
   --dsw-specific-bubble: #1f3029;

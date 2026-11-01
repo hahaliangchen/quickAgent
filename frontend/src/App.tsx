@@ -19,7 +19,7 @@ export function App({ renderSlot }: AgentSlotProps) {
     const saved = localStorage.getItem('codex_sidebar_width')
     return saved ? Number(saved) : 260
   })
-  const [rightPanelOpen, setRightPanelOpen] = useState(true)
+  const [rightPanelOpen, setRightPanelOpen] = useState(false)
   const [rightPanelWidth, setRightPanelWidth] = useState(() => {
     const saved = localStorage.getItem('codex_right_panel_width')
     return saved ? Math.max(300, Math.min(700, Number(saved))) : 380

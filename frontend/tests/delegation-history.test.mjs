@@ -4,7 +4,7 @@ import test from 'node:test'
 import ts from 'typescript'
 const source = await readFile(new URL('../src/model.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
-const { chatItems, flowState } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+const { chatItems } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
 const e = (seq, type, data) => ({seq,time:1000+seq,type,data:{turn:1,...data}})
 const child = (seq,id,type,data) => e(seq,'subagent/event',{agent_id:id,event_type:type,event:{agent_id:id,turn:1,step:1,...data}})
 
@@ -34,17 +34,4 @@ test('dispatch order stays fixed while reverse completion and interleaved tool c
   assert.match(groups[1].review,/accepted/)
   assert.equal(rows.at(-1).text,'Main continues independent work')
   assert.deepEqual(chatItems(JSON.parse(JSON.stringify(events))),rows)
-})
-
-test('flow tool results remain attached to the actual delegate request when call IDs collide', () => {
-  const events=[e(0,'flow/node_add',{node:{id:'parent',kind:'agent',status:'done'}}),
-    e(1,'flow/node_add',{node:{id:'a',kind:'worker',status:'running',parent_id:'parent'}}),
-    e(2,'flow/node_add',{node:{id:'b',kind:'worker',status:'running',parent_id:'parent'}}),
-    child(3,'slow','tool/call',{flowNodeId:'a',callId:'same',name:'read_file',arguments:'{}'}),
-    child(4,'fast','tool/call',{flowNodeId:'b',callId:'same',name:'read_file',arguments:'{}'}),
-    child(5,'slow','tool/result',{flowNodeId:'a',message:{toolCallId:'same',content:[{type:'text',text:'A'}]}}),
-    child(6,'fast','tool/result',{flowNodeId:'b',message:{toolCallId:'same',content:[{type:'text',text:'B'}]}})]
-  const flow=flowState(events)
-  assert.equal(flow.nodes.find(n=>n.id==='turn_1:a').tools[0].output,'A')
-  assert.equal(flow.nodes.find(n=>n.id==='turn_1:b').tools[0].output,'B')
 })

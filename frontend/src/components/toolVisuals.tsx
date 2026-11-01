@@ -104,6 +104,14 @@ const EXACT: Record<string, Omit<ToolVisual, 'summary'>> = {
   browser_screenshot: { tone: 'media', icon: <ImageIcon />, title: '截取了页面' },
   http_probe: { tone: 'web', icon: <IconApiOutlineMedium />, title: '探测了接口' },
   run_program: { tone: 'run', icon: <TerminalIcon />, title: '运行了程序' },
+  // The host's own lookups while the AI gets to know the work.
+  workspace_info: { tone: 'search', icon: <IconWorkspaceTreeOutlineMedium />, title: '查看了工作区' },
+  read_tool_contracts: { tone: 'context', icon: <IconApiOutlineMedium />, title: '查看了库方法说明' },
+  find_library_methods: { tone: 'context', icon: <IconSearchOutlineMedium />, title: '查找了库方法' },
+  read_program_guide: { tone: 'context', icon: <IconChecklistOutlineMedium />, title: '查看了编程指南' },
+  parallel_read_batch: { tone: 'read', icon: <FileTextIcon />, title: '并行读取了文件' },
+  install_dependencies: { tone: 'run', icon: <TerminalIcon />, title: '安装了依赖' },
+  ask_user: { tone: 'read', icon: <IconQuestionOutlineMedium />, title: '向你提问' },
 }
 
 const RETURNS: Record<string, Omit<ToolVisual, 'summary'>> = {

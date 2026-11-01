@@ -369,6 +369,16 @@ impl Registry {
             .clone()
             .unwrap_or_default())
     }
+    /// Packages whose tools are available: every enabled one.
+    pub fn enabled(&self) -> std::collections::BTreeSet<String> {
+        self.entries
+            .read()
+            .unwrap()
+            .values()
+            .filter(|package| package.scope.is_some())
+            .map(|package| package.manifest.id.clone())
+            .collect()
+    }
     pub fn tools(&self, active: &std::collections::BTreeSet<String>) -> Vec<Value> {
         let installed = self.entries.read().unwrap();
         active.iter().filter_map(|id|installed.get(id)).filter(|package|package.scope.is_some())
@@ -931,7 +941,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let mut manifest =
             json!({"version":1,"id":"library-test","title":"Library test","library":"ppt"});
-        for library in ["io", "host", "tools", "default", "bad-name", ""] {
+        for library in ["io", "host", "process", "tools", "default", "bad-name", ""] {
             manifest["library"] = json!(library);
             std::fs::write(root.join("plugin.json"), manifest.to_string()).unwrap();
             assert!(load(&root).is_err(), "{library}");

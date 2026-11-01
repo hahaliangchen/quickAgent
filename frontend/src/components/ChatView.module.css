@@ -90,7 +90,7 @@
   align-items: center;
   justify-content: flex-start;
   padding-bottom: 10px;
-  border-bottom: 1px solid var(--codex-border-subtle, #efefef);
+  border-bottom: none;
   margin-bottom: 16px;
 }
 

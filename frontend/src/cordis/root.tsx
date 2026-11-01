@@ -13,7 +13,7 @@ export const RootPlugin = {
       children: {
         'agent.sidebar': { kind: 'single', scope: 'root' },
         'agent.chat': { kind: 'single', scope: 'root' },
-        'agent.trajectory': { kind: 'single', scope: 'root' },
+        'agent.flow': { kind: 'single', scope: 'root' },
         'agent.composer': { kind: 'single', scope: 'root' },
       },
     }, (props: AgentSlotProps) => (

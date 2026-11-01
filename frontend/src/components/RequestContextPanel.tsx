@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from 'react'
-import type { AgentEvent, RequestContext, RequestContextMeta } from '../api.ts'
+import type { RequestContext, RequestContextMeta } from '../api.ts'
 import { useAgentApi } from '../cordis/react.tsx'
 import css from './RequestContextPanel.module.css'
 import { foldImageData } from '../visual.ts'
@@ -57,8 +57,8 @@ const ContextMessages = memo(function ContextMessages({ messages, added }: { mes
     value={message} />)}</div>
 })
 
-/** Full bodies are fetched only after selecting a request. SSE carries IDs only. */
-export function RequestContextPanel({ taskId, events, nodeId, turn, workId, requestId, revision, planRevision }: { taskId: string; events: readonly AgentEvent[]; nodeId?: string | undefined; turn?: number | undefined; workId?: string | undefined; requestId?: number | undefined; revision?: number | undefined; planRevision?: number | undefined }) {
+/** Full bodies are fetched only after selecting a request; `version` changes when new requests may exist. */
+export function RequestContextPanel({ taskId, frameId, version }: { taskId: string; frameId?: string | undefined; version: number }) {
   const api = useAgentApi()
   const [items, setItems] = useState<readonly RequestContextMeta[]>([])
   const [hasMore, setHasMore] = useState(false)
@@ -69,13 +69,12 @@ export function RequestContextPanel({ taskId, events, nodeId, turn, workId, requ
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
-  const contextEventVersion = [...events].reverse().find(event => event.type.startsWith('debug/context_'))?.seq ?? -1
 
   useEffect(() => {
     let alive = true
     // Coalesce the start/end notifications without refetching on token deltas.
     const timer = setTimeout(() => {
-      void api.requestContexts(taskId).then(result => {
+      void api.requestContexts(taskId, undefined, frameId).then(result => {
         if (!alive) return
         setItems(current => [...result.items, ...current.filter(item => !result.items.some(newer => newer.id === item.id))].sort((a, b) => b.id - a.id))
         setHasMore(result.has_more)
@@ -83,29 +82,16 @@ export function RequestContextPanel({ taskId, events, nodeId, turn, workId, requ
       }).catch(reason => { if (alive) setError(String(reason)) })
     }, 150)
     return () => { alive = false; clearTimeout(timer) }
-  }, [api, taskId, contextEventVersion])
+  }, [api, taskId, frameId, version])
 
-  const visible = useMemo(() => items.filter(item => {
-    if (nodeId === undefined) return true
-    if (nodeId.startsWith('task:')) return item.task_node_id === nodeId.slice(5)
-    if (item.request_id !== undefined && requestId !== undefined && item.request_id !== requestId) return false
-    if (item.revision !== undefined && revision !== undefined && item.revision !== revision) return false
-    if (item.plan_revision !== undefined && planRevision !== undefined && item.plan_revision !== planRevision) return false
-    if (item.workId !== undefined && workId !== undefined) return item.workId === workId
-    const rawNodeId = nodeId.replace(/^turn_\d+:/, '').replace(/^request_\d+:/, '')
-    if (item.request_id !== undefined && requestId !== undefined && item.workId !== undefined) return item.workId === rawNodeId
-    if (item.turn !== turn) return false
-    const itemWorkId = (item as unknown as { workId?: string }).workId
-    return item.nodeId === nodeId || `turn_${item.turn}:${item.nodeId}` === nodeId ||
-           item.nodeId === rawNodeId ||
-           (Boolean(itemWorkId) && (itemWorkId === nodeId || `turn_${item.turn}:${itemWorkId}` === nodeId || itemWorkId === rawNodeId))
-  }), [items, nodeId, turn, workId, requestId, revision, planRevision])
+  // A frame's requests are the ones its own AI made.
+  const visible = useMemo(() => frameId === undefined ? items : items.filter(item => item.task_node_id === frameId), [items, frameId])
   const active = visible.find(item => item.id === selected)
   const predecessor = active ? items.find(item => item.id < active.id && item.actor === active.actor && item.task_node_id === active.task_node_id) : undefined
 
   useEffect(() => {
     setSelected(null); setContext(null); setPrevious(null); setCompare(false)
-  }, [taskId, nodeId, turn])
+  }, [taskId, frameId])
 
   useEffect(() => {
     if (!active) return
@@ -140,7 +126,7 @@ export function RequestContextPanel({ taskId, events, nodeId, turn, workId, requ
     if (!oldest) return
     setLoading(true)
     try {
-      const result = await api.requestContexts(taskId, oldest.id)
+      const result = await api.requestContexts(taskId, oldest.id, frameId)
       setItems(current => [...current, ...result.items.filter(item => !current.some(existing => existing.id === item.id))])
       setHasMore(result.has_more)
     } catch (reason) { setError(String(reason)) } finally { setLoading(false) }

@@ -4,7 +4,25 @@ import test from 'node:test'
 import ts from 'typescript'
 const source = await readFile(new URL('../src/model.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
-const { flowState, chatItems, trajectoryRows } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+const { chatItems, splitTurnItems } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+
+test('progress messages and tools stay in order while the last reply remains the conclusion', () => {
+  const events = [
+    event('turn/start', { turn: 1 }),
+    event('assistant/message', { turn: 1, step: 1, message: { content: '先检查。' } }),
+    event('tool/call', { turn: 1, callId: 'one', name: 'read_file', arguments: '{}' }),
+    event('assistant/message', { turn: 1, step: 2, message: { content: '发现问题，继续修复。' } }),
+    event('tool/call', { turn: 1, callId: 'two', name: 'edit_file', arguments: '{}' }),
+    event('assistant/message', { turn: 1, step: 3, message: { content: '已经完成。' } }),
+  ]
+  const items = chatItems(events).filter(item => item.kind === 'assistant' || item.kind === 'tool')
+  const split = splitTurnItems(items)
+  assert.deepEqual(split.process.map(item => item.kind === 'assistant' ? item.text : item.name), ['先检查。', 'read_file', '发现问题，继续修复。', 'edit_file'])
+  assert.equal(split.conclusion.text, '已经完成。')
+  const pending = splitTurnItems(items.slice(0, -1))
+  assert.equal(pending.conclusion, undefined)
+  assert.equal(pending.process.length, 4)
+})
 const event = (type, data) => ({ type, time: 0, data })
 
 test('execution result is pending acceptance and the original specific gap is visible', () => {
@@ -51,42 +69,29 @@ test('Observer retrospective is visible after the answer and survives history re
   assert.equal(items.filter(item => item.kind === 'turn-end').length, 1)
 })
 
-test('six task stages retain their tools and failures after a completed history is reloaded', () => {
-  const goals = ['服务探测', '打开浏览器', '上传并等待加载', '读取初始页码', '截图与翻页核对', '浏览器诊断']
+test('six tool calls keep their results and failures after a completed history is reloaded', () => {
   const tools = ['http_probe', 'browser_open', 'browser_upload', 'browser_read', 'browser_screenshot', 'browser_diagnostics']
   const events = [event('turn/start', { turn: 1 })]
-  const nodes = []
-  for (let i = 0; i < goals.length; i++) {
-    nodes.push({ id: `task_${i}`, kind: 'agent', title: goals[i], request_id: 1, status: 'running' })
-    events.push(event('flow/node_add', { turn: 1, node: nodes[i] }))
-    events.push(event('tool/call', { turn: 1, flowNodeId: `task_${i}`, callId: `call_${i}`, name: tools[i], arguments: '{}' }))
+  for (let i = 0; i < tools.length; i++) {
+    events.push(event('tool/call', { turn: 1, callId: `call_${i}`, name: tools[i], arguments: '{}' }))
     events.push(event('tool/result', { turn: 1, toolCallId: `call_${i}`, message: { toolCallId: `call_${i}`, isError: i === 5, content: [{ type: 'text', text: i === 5 ? 'original diagnostic error' : 'actual tool result' }] } }))
-    events.push(event('flow/node_state', { turn: 1, id: `task_${i}`, status: 'done' }))
   }
   events.push(event('turn/end', { turn: 1, reason: { kind: 'completed' } }))
-  const reloaded = flowState(JSON.parse(JSON.stringify(events)))
-  assert.equal(reloaded.nodes.length, 6, 'tool routing must not create extra request nodes')
-  assert.deepEqual(reloaded.nodes.map(n => n.title), goals)
-  assert.deepEqual(reloaded.nodes.map(n => n.tools[0].name), tools)
-  assert.equal(reloaded.nodes.every(n => n.status === 'done'), true)
-  assert.equal(reloaded.nodes[5].tools[0].failed, true)
-  assert.equal(reloaded.nodes[5].tools[0].output, 'original diagnostic error')
-  assert.equal(reloaded.activeNodeId, undefined)
   const chat = chatItems(JSON.parse(JSON.stringify(events)))
-  assert.equal(chat.filter(item => item.kind === 'tool').length, 6)
+  assert.deepEqual(chat.filter(item => item.kind === 'tool').map(item => item.name), tools)
+  assert.equal(chat.find(item => item.kind === 'tool' && item.callId === 'call_5').result.text, 'original diagnostic error')
   assert.equal(chat.find(item => item.kind === 'tool' && item.callId === 'call_5').result.isError, true)
 })
 
 
-test('ordinary work messages and visual input limitations survive history reload', () => {
+test('ordinary work messages survive history reload and image input records stay out of the transcript', () => {
   const limitation = '模型图像能力未知，未配置备用视觉服务；截图已保存，本次没有收到图像输入。'
   const events = [event('turn/start', { turn: 1 }),
     event('assistant/message', { turn: 1, step: 1, message: { content: '已经加载完成，继续读取页码。' } }),
     event('visual/input_result', { turn: 1, actor: 'worker', request_trace_id: 'visual-1', message: { role: 'system', content: limitation } }),
     event('turn/end', { turn: 1, reason: { kind: 'completed' } })]
   const restored = JSON.parse(JSON.stringify(events))
-  assert.equal(chatItems(restored).filter(item => item.kind === 'assistant').length, 1)
-  const row = trajectoryRows(restored).find(item => item.type === 'visual/input_result')
-  assert.equal(row.detail, limitation)
-  assert.equal(row.name, '视觉输入结果')
+  const items = chatItems(restored)
+  assert.equal(items.filter(item => item.kind === 'assistant').length, 1)
+  assert.ok(!items.some(item => item.kind === 'assistant' && item.text === limitation), 'the image input record is model input, shown with the request context')
 })
