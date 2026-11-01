@@ -758,6 +758,20 @@ fn trusted_settings_request(headers: &HeaderMap) -> bool {
     })
 }
 
+// The desktop server is a privileged local API; a web page from another
+// origin must not be able to use its permissive web-mode CORS configuration.
+async fn desktop_origin_guard(
+    State(expected): State<String>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let host = request.headers().get(header::HOST).and_then(|v| v.to_str().ok());
+    if !trusted_settings_request(request.headers()) || Some(expected.as_str()) != host {
+        return (StatusCode::FORBIDDEN, "untrusted desktop request").into_response();
+    }
+    next.run(request).await
+}
+
 async fn get_agent_settings(State(state): State<AiProxyState>, headers: HeaderMap) -> Response {
     if !trusted_settings_request(&headers) {
         return (
@@ -2087,6 +2101,14 @@ pub async fn run(
         .with_state(state)
         .layer(CorsLayer::permissive());
 
+    let app = if std::env::args().any(|arg| arg == "--desktop-agent") {
+        app.layer(axum::middleware::from_fn_with_state(
+            listener.local_addr()?.to_string(),
+            desktop_origin_guard,
+        ))
+    } else {
+        app
+    };
     let addr = listener.local_addr()?;
     info!(%addr, "Agent service starting");
 

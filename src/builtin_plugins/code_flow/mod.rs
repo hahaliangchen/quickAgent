@@ -31,8 +31,8 @@ pub fn package() -> Result<Package> {
         )]),
         frontend_entries: vec!["code-flow.architecture".into()],
     });
-    crate::skill_packages::load_builtin(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/builtin_plugins/code_flow"),
-        contributions,
-    )
+    let root = std::env::var_os("GROW_RESOURCES_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    crate::skill_packages::load_builtin(&root.join("src/builtin_plugins/code_flow"), contributions)
 }

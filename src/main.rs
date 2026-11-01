@@ -143,6 +143,27 @@ async fn main() -> anyhow::Result<()> {
     } else {
         env::current_dir()?.join(ai_config_path)
     };
+    // The desktop shell owns this process and requires an exclusive loopback
+    // listener. Report the bound address only after bind succeeds.
+    if env::args().any(|arg| arg == "--desktop-agent") {
+        use std::io::Write;
+        let bind = env::var("GROW_DESKTOP_BIND").unwrap_or_else(|_| "127.0.0.1:0".to_owned());
+        let addr: SocketAddr = bind.parse()?;
+        anyhow::ensure!(addr.ip().is_loopback(), "desktop listener must use loopback");
+        let listener = TcpListener::bind(addr).await?;
+        println!("GROW_DESKTOP_PORT={}", listener.local_addr()?.port());
+        std::io::stdout().flush()?;
+        std::thread::spawn(|| {
+            use std::io::Read;
+            let mut input = std::io::stdin().lock();
+            let mut buf = [0u8; 64];
+            while let Ok(n) = input.read(&mut buf) {
+                if n == 0 { break; }
+            }
+            std::process::exit(0);
+        });
+        return ai_proxy::run(listener, &ai_config_path, workspace).await;
+    }
     {
         let agent_bind = env::var("AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:3001".to_string());
         match TcpListener::bind(&agent_bind).await {

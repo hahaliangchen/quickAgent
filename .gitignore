@@ -1,6 +1,9 @@
 /target
 /frontend/node_modules
 /frontend/dist
+/desktop/target
+/desktop/binaries
+/desktop/gen
 /ai_proxy_config.json
 /.codex-workspace-mcp/
 

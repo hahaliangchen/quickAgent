@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Grow",
+  "version": "0.1.0",
+  "identifier": "com.grow.agent",
+  "build": { "frontendDist": "../frontend/dist" },
+  "app": {
+    "windows": [],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "externalBin": ["binaries/grow-agent"],
+    "resources": {
+      "../frontend/dist/": "frontend/dist/",
+      "../src/builtin_plugins/code_flow/": "src/builtin_plugins/code_flow/"
+    }
+  }
+}
