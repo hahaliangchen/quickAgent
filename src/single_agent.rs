@@ -1097,6 +1097,12 @@ async fn business_tool(
                 )),
         "permission_denied: {name}"
     );
+    if crate::process_sandbox::ExecutionBoundary::for_mode(s.state.permission_mode)
+        == crate::process_sandbox::ExecutionBoundary::Workspace
+        && s.state.tool_catalog.as_ref().is_some_and(|catalog| catalog.packages.is_command_tool(name))
+    {
+        anyhow::bail!("SANDBOX_UNSUPPORTED: package command tools cannot yet run under the workspace sandbox");
+    }
     if crate::tool_approvals::needs_approval(
         s.state.permission_mode,
         name,
@@ -1202,8 +1208,14 @@ async fn business_tool(
     } else if crate::workspace_changes::is_mutation(name) {
         // Git delegates keep their own branch diff; parent turn snapshots refer
         // to the main checkout and must not record isolated worktree edits.
-        agent_service::execute_tool(tool_workspace.clone(), s.state.tool_catalog.as_deref(), name, args.clone())
-            .await
+        let boundary = crate::process_sandbox::ExecutionBoundary::for_mode(s.state.permission_mode);
+        if crate::project_process::is_tool(name) {
+            crate::project_process::execute_with_boundary(&tool_workspace, name, args.clone(), s.cancel, boundary).await
+        } else if crate::program_execution::is_tool(name) {
+            crate::program_execution::execute_with_boundary(&tool_workspace, &args, s.cancel, boundary).await
+        } else {
+            agent_service::execute_tool(tool_workspace.clone(), s.state.tool_catalog.as_deref(), name, args.clone()).await
+        }
     } else if crate::browser_control::is_tool(name) {
         let mut visual = visual_context(s, node)?;
         visual.source_tool_call_id = call_id.to_owned();

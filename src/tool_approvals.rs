@@ -38,11 +38,11 @@ pub fn needs_approval(
     ban_execution: bool,
 ) -> bool {
     matches!(mode, PermissionMode::Ask)
-        && !(PermissionMode::WorkspaceWrite.allows(name)
+        && (crate::project_process::is_execution(name) || !(PermissionMode::WorkspaceWrite.allows(name)
             && catalog.is_none_or(|c| {
                 c.packages
                     .allows(name, PermissionMode::WorkspaceWrite, ban_execution)
-            }))
+            })))
 }
 
 fn grant_scopes(task: &str, project: Option<&FsPath>) -> Vec<String> {
@@ -252,7 +252,7 @@ mod tests {
             false
         ));
         assert!(PermissionMode::Ask.allows("run_program"));
-        assert!(!PermissionMode::WorkspaceWrite.allows("run_program"));
+        assert_eq!(PermissionMode::WorkspaceWrite.allows("run_program"), cfg!(target_os = "linux"));
     }
 
     #[tokio::test]

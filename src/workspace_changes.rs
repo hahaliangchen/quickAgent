@@ -394,10 +394,11 @@ pub async fn execute_tracked(
     let before =
         tokio::task::spawn_blocking(move || capture(&capture_root, &capture_name, &capture_args))
             .await?;
+    let boundary = crate::process_sandbox::ExecutionBoundary::for_mode(state.permission_mode);
     let result = if crate::project_process::is_tool(&name) {
-        crate::project_process::execute_cancellable(&workspace, &name, args.clone(), &cancel).await
+        crate::project_process::execute_with_boundary(&workspace, &name, args.clone(), &cancel, boundary).await
     } else if crate::program_execution::is_tool(&name) {
-        crate::program_execution::execute_cancellable(&workspace, &args, &cancel).await
+        crate::program_execution::execute_with_boundary(&workspace, &args, &cancel, boundary).await
     } else {
         // A started blocking file commit cannot be aborted. Await completion
         // before recording its after-image or releasing the mutation lock.

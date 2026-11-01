@@ -35,6 +35,7 @@ mod plugin_protocol;
 mod plugin_runtime;
 mod plugin_sessions;
 mod program_execution;
+mod process_sandbox;
 mod project_notes;
 mod project_process;
 mod proxy_log;

@@ -920,6 +920,15 @@ export function Composer({
               )}
             </button>
 
+            <button type="button" className={codexCss.permOptionItem} onClick={() => handleSelectPermission('workspace_write')}>
+              <span className={codexCss.permOptionIcon}>{ASK_ICON}</span>
+              <div className={codexCss.permOptionBody}>
+                <span className={codexCss.permOptionTitle}>工作区内修改</span>
+                <span className={codexCss.permOptionDesc}>Linux 上命令在工作区写入沙箱中运行；其他系统暂不允许运行命令。网络和文件读取不受沙箱限制。</span>
+              </div>
+              {permissionMode === 'workspace_write' && <span className={codexCss.permOptionCheck}>✓</span>}
+            </button>
+
             {/* 2. 执行前询问 (Ask) */}
             <button
               type="button"
@@ -929,7 +938,7 @@ export function Composer({
               <span className={codexCss.permOptionIcon}>{ASK_ICON}</span>
               <div className={codexCss.permOptionBody}>
                 <span className={codexCss.permOptionTitle}>执行前询问</span>
-                <span className={codexCss.permOptionDesc}>直接修改工作区文件；运行命令或打开浏览器前先问你，可以一次允许整个会话或整个项目</span>
+                <span className={codexCss.permOptionDesc}>运行命令或打开浏览器前先询问。Linux 的命令使用工作区写入沙箱，浏览器不受该沙箱约束。</span>
               </div>
               {permissionMode === 'ask' && (
                 <span className={codexCss.permOptionCheck}>

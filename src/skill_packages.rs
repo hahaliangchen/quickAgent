@@ -435,6 +435,10 @@ impl Registry {
         }
         mode.allows(name)
     }
+    pub fn is_command_tool(&self, name: &str) -> bool {
+        self.entries.read().unwrap().values().any(|package|
+            package.manifest.command_tools.iter().any(|tool| tool.name == name))
+    }
     pub fn scopes(&self, active: &std::collections::BTreeSet<String>) -> BTreeMap<String, ScopeId> {
         let entries = self.entries.read().unwrap();
         active

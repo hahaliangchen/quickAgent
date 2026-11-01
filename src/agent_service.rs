@@ -55,13 +55,12 @@ impl PermissionMode {
     pub(crate) fn allows(self, name: &str) -> bool {
         match name {
             "write_file" | "replace_range" | "edit_file" => !matches!(self, Self::ReadOnly),
-            // Process execution uses the host account without a filesystem
-            // sandbox. Only full access may invoke it; structured writes retain path checks.
             "run_program"
             | "install_dependencies"
             | "run_project_script"
-            | "stop_project_process"
-            | "browser_open"
+            | "stop_project_process" => matches!(self, Self::FullAccess | Self::Ask)
+                || (cfg!(target_os = "linux") && matches!(self, Self::WorkspaceWrite)),
+            "browser_open"
             | "browser_read"
             | "browser_wait"
             | "browser_diagnostics"

@@ -368,6 +368,8 @@ struct Meta {
     exit_code: Option<i32>,
     termination_reason: Option<String>,
     background: bool,
+    #[serde(default)]
+    sandboxed: bool,
 }
 #[derive(Default)]
 struct Logs {
@@ -514,6 +516,7 @@ impl Record {
             recent_stderr.clone()
         };
         json!({"process_id":meta.process_id,"pid":meta.pid,"project_path":meta.project_path,"script":meta.script,"args":meta.args,"operation":meta.operation,
+            "sandbox": if meta.sandboxed { "workspace-write" } else { "none" },
             "state":if meta.running{"running"}else{"exited"},"running":meta.running,"process_running":meta.running,
             "ready":meta.running&&meta.ready,"listener_owned":meta.listener_owned,"page_ready":meta.page_ready,
             "readiness_detail":meta.readiness_detail,"script_command":meta.script_command,
@@ -728,8 +731,10 @@ async fn effective_npm_script_shell(
     npm: &Path,
     dir: &Path,
     cancel: &tokio_util::sync::CancellationToken,
+    root: &Path,
+    boundary: crate::process_sandbox::ExecutionBoundary,
 ) -> Result<Option<String>> {
-    let mut command = Command::new(external_runtime_path(node)?);
+    let mut command = crate::process_sandbox::command(external_runtime_path(node)?, root, dir, boundary)?;
     command
         .arg(external_runtime_path(npm)?)
         .args(["config", "get", "script-shell"])
@@ -746,7 +751,8 @@ async fn effective_npm_script_shell(
     };
     ensure!(
         output.status.success(),
-        "runtime_bootstrap: could not verify effective npm script-shell; refusing to start package scripts ({} {})",
+        "{}runtime_bootstrap: could not verify effective npm script-shell; refusing to start package scripts ({} {})",
+        if boundary == crate::process_sandbox::ExecutionBoundary::Workspace && String::from_utf8_lossy(&output.stderr).lines().any(|line| line.starts_with("bwrap:")) { "SANDBOX_UNAVAILABLE: " } else { "" },
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
@@ -1673,6 +1679,7 @@ mod tests {
             exit_code: None,
             termination_reason: None,
             background: true,
+            sandboxed: false,
         };
         std::sync::Arc::new(super::Record {
             meta: tokio::sync::Mutex::new(meta),
@@ -2361,11 +2368,17 @@ async fn supervise(
     bump_process_event_generation();
 }
 
-async fn launch(
+#[cfg(test)]
+async fn launch(root: &Path, args: &Value, install: bool, cancel: &tokio_util::sync::CancellationToken) -> Result<Value> {
+    launch_with_boundary(root, args, install, cancel, crate::process_sandbox::ExecutionBoundary::Host).await
+}
+
+async fn launch_with_boundary(
     root: &Path,
     args: &Value,
     install: bool,
     cancel: &tokio_util::sync::CancellationToken,
+    boundary: crate::process_sandbox::ExecutionBoundary,
 ) -> Result<Value> {
     let root = root.canonicalize()?;
     ensure!(
@@ -2461,7 +2474,7 @@ async fn launch(
         .await
         .map_err(runtime_bootstrap)?
         .map_err(runtime_bootstrap)?;
-    let configured_shell = effective_npm_script_shell(&node, &npm, &dir, cancel)
+    let configured_shell = effective_npm_script_shell(&node, &npm, &dir, cancel, &root, boundary)
         .await
         .map_err(runtime_bootstrap)?;
     if configured_shell
@@ -2485,6 +2498,7 @@ async fn launch(
             let meta = existing.meta.lock().await.clone();
             if meta.running
                 && meta.root == root
+                && meta.sandboxed == (boundary == crate::process_sandbox::ExecutionBoundary::Workspace)
                 && meta.project_path == relative
                 && meta.script == script
                 && meta.args == extra
@@ -2562,7 +2576,7 @@ async fn launch(
             );
         }
     }
-    let mut command = Command::new(node_arg);
+    let mut command = crate::process_sandbox::command(node_arg, &root, &dir, boundary)?;
     command.arg(npm_arg);
     let mode = args["mode"].as_str().unwrap_or("auto");
     if install {
@@ -2661,6 +2675,7 @@ async fn launch(
             exit_code: None,
             termination_reason: None,
             background,
+            sandboxed: boundary == crate::process_sandbox::ExecutionBoundary::Workspace,
         }),
         logs: Mutex::new(Logs::default()),
         persist_guard: Mutex::new(()),
@@ -2806,6 +2821,15 @@ pub async fn execute_cancellable(
     args: Value,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Value> {
+    execute_with_boundary(workspace, name, args, cancel, crate::process_sandbox::ExecutionBoundary::Host).await
+}
+pub async fn execute_with_boundary(
+    workspace: &crate::tools::Workspace,
+    name: &str,
+    args: Value,
+    cancel: &tokio_util::sync::CancellationToken,
+    boundary: crate::process_sandbox::ExecutionBoundary,
+) -> Result<Value> {
     ensure!(args.is_object(), "tool arguments must be an object");
     ensure!(
         args.get("process_id").is_none_or(|id| id.is_string()),
@@ -2821,8 +2845,8 @@ pub async fn execute_cancellable(
         );
     }
     match name {
-        "install_dependencies" => launch(workspace.root(), &args, true, cancel).await,
-        "run_project_script" => launch(workspace.root(), &args, false, cancel).await,
+        "install_dependencies" => launch_with_boundary(workspace.root(), &args, true, cancel, boundary).await,
+        "run_project_script" => launch_with_boundary(workspace.root(), &args, false, cancel, boundary).await,
         "get_project_process" => {
             if let Some(id) = args["process_id"].as_str() {
                 let record = find(workspace.root(), id).await?;
