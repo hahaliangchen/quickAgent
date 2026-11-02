@@ -429,6 +429,33 @@ pub(super) fn reply_source(message: &Value) -> std::result::Result<Option<String
         n => Err(format!("the reply contains {n} JavaScript blocks; a reply runs exactly one complete program, so merge them into one ```js block")),
     }
 }
+/// A main reply as the user sees it: its program is a record of the
+/// conversation, read on demand, so only the words around it are shown.
+/// None when the reply holds no program.
+pub(super) fn shown_reply(message: &Value) -> Option<Value> {
+    let text = message["content"].as_str()?;
+    let mut shown = Vec::new();
+    let mut found = false;
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let program = line.trim_start().strip_prefix("```")
+            .is_some_and(|tag| matches!(tag.trim().to_ascii_lowercase().as_str(), "js" | "javascript" | "mjs"));
+        if !program {
+            shown.push(line);
+            continue;
+        }
+        found = true;
+        for line in lines.by_ref() {
+            if line.trim_start().starts_with("```") || line.trim_end().ends_with("```") { break; }
+        }
+    }
+    if !found {
+        return None;
+    }
+    let mut message = message.clone();
+    message["content"] = json!(shown.join("\n").trim());
+    Some(message)
+}
 /// Repairable source errors stay ordinary tool results for the current AI.
 /// No source is auto-edited and no failed install replaces the saved program.
 pub(super) fn source_error(operation: &str, args: &Value, error: &anyhow::Error) -> Value {
@@ -778,30 +805,33 @@ fn outcome(s: &Session<'_>, printed: &[String], ended: std::result::Result<&Valu
 pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window, step: usize) -> Result<()> {
     let console = printed(w);
     let stopped_at = super::paused_programs::pause_main(s, w).await?;
-    let text = outcome(s, &console, Err(&json!({"code":PAUSED,"stopped_at":stopped_at})))?;
-    end_program(s, w, step, Value::Null, text).await?;
+    let paused = json!({"code":PAUSED,"stopped_at":stopped_at});
+    let (text, shown) = (outcome(s, &console, Err(&paused))?, outcome(s, &[], Err(&paused))?);
+    end_program(s, w, step, Value::Null, text, Some(shown)).await?;
     // The turn goes on: the main AI may answer the message with a new program.
     w.program_value = None;
     save(s, w).await
 }
 async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value) -> Result<Round> {
-    let text = if w.program_task.is_some() {
-        serde_json::to_string(&value)?
+    let (text, shown) = if w.program_task.is_some() {
+        (serde_json::to_string(&value)?, None)
     } else {
-        outcome(s, &printed(w), Ok(&value))?
+        (outcome(s, &printed(w), Ok(&value))?, Some(outcome(s, &[], Ok(&value))?))
     };
-    end_program(s, w, step, value, text).await
+    end_program(s, w, step, value, text, shown).await
 }
 /// End the window's program with this reply: a function returns its value,
 /// a main program its outcome. The frame then finishes like any reply.
-async fn end_program(s: &Session<'_>, w: &mut Window, step: usize, value: Value, text: String) -> Result<Round> {
+/// `shown` is the outcome as the user reads it, without what the program
+/// printed for the AI; the AI's context and memory keep the full text.
+async fn end_program(s: &Session<'_>, w: &mut Window, step: usize, value: Value, text: String, shown: Option<String>) -> Result<Round> {
     w.program_value = Some(value);
     w.program = None;
     let message = json!({"role":"assistant","content":text});
     let seq = append(
         s,
         "assistant/message",
-        json!({"actor":"program","turn":s.turn,"step":step,"message":message}),
+        json!({"actor":"program","turn":s.turn,"step":step,"message":{"role":"assistant","content":shown.unwrap_or_else(|| text.clone())}}),
         s.is_primary(),
     )
     .await?;
@@ -870,8 +900,8 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                 // A question, or a program that keeps failing: its outcome ends
                 // the turn, so the next message starts fresh instead of
                 // resuming the failure.
-                let text = outcome(s, &console, Err(&error))?;
-                end_program(s, w, step, Value::Null, text).await
+                let (text, shown) = (outcome(s, &console, Err(&error))?, outcome(s, &[], Err(&error))?);
+                end_program(s, w, step, Value::Null, text, Some(shown)).await
             }
         }
         State::Returned(value) => return_value(s, w, step, value).await,
@@ -2160,7 +2190,19 @@ mod tests {
         assert!(healed.contains("found {") && healed.contains("files"), "the diagnostic carries what it printed: {healed}");
         let conn = agent_service::open_db(root.path()).unwrap();
         let answer: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(answer, "程序已完成。\n输出：\nchecked 2 files\n[warn] b.txt is empty");
+        assert_eq!(answer, "程序已完成。", "the user sees the outcome without what the program printed for the AI");
+        let kept: String = conn.query_row("SELECT json_extract(data,'$.result.result') FROM agent_task_nodes WHERE task_id='task' AND json_extract(data,'$.result.result') LIKE '%输出%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, "程序已完成。\n输出：\nchecked 2 files\n[warn] b.txt is empty", "the AI's record of the turn keeps it");
+        let shown_code: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.message.content') LIKE '%```js%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(shown_code, 0, "programs are records, not shown replies");
+    }
+
+    #[test]
+    fn a_reply_is_shown_without_its_program() {
+        let reply = json!({"role":"assistant","content":"I will save the outline.\n\n```js\nimport * as io from \"host:io\";\nio.write({path: \"a\", content: \"b\"});\n```\n\nThen wait for your confirmation."});
+        assert_eq!(shown_reply(&reply).unwrap()["content"], "I will save the outline.\n\n\nThen wait for your confirmation.");
+        assert_eq!(shown_reply(&json!({"role":"assistant","content":"```js\nconst a = 1;\n```"})).unwrap()["content"], "");
+        assert!(shown_reply(&json!({"role":"assistant","content":"No program, but ```text\nnotes\n``` stay."})).is_none());
     }
 
     const SHOUT: &str = "/** @module */\nasync function shout(word) {\n  // Return {text:string}: word in capitals.\n}";

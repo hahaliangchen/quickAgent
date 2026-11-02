@@ -334,10 +334,19 @@ fn page_allows(s: &Session<'_>, name: &str) -> bool {
 }
 
 fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str) -> Result<()> {
-    ensure!(
-        page_allows(s, name),
-        "PLUGIN_SCOPE_DENIED: tool {name} does not belong to this conversation's plugin"
-    );
+    if !page_allows(s, name) {
+        // A library method called as a tool: say how it is called instead.
+        let libraries = program_flow::library_catalog(s, definitions);
+        let method = crate::agent_program::libraries::public_name(&libraries, name)
+            .or_else(|| crate::agent_program::libraries::target(&libraries, name).map(|_| name.to_owned()));
+        if let Some(method) = method {
+            let library = method.split('.').next().unwrap_or_default();
+            anyhow::bail!(
+                "NOT_A_TOOL: {method} is a library method, not a tool. Call it in a program: reply with one ```js block such as\nimport * as {library} from \"host:{library}\";\nconst result = await {method}({{...}});\nread_tool_contracts gives its arguments and result."
+            );
+        }
+        anyhow::bail!("PLUGIN_SCOPE_DENIED: tool {name} does not belong to this conversation's plugin");
+    }
     // Calls the AI makes itself; a running program's steps are its code's.
     if w.program.is_none() {
         match program_flow::role(w) {
@@ -1027,6 +1036,10 @@ async fn model_round(
         && (has_visual_jobs(s, w)?
             || !pending_plugin_jobs(s, w)?.is_empty());
     let provisional = no_calls && (s.scope.starts_with("node:") || awaiting_async);
+    // The user sees the main AI's words, not the program it runs: that is
+    // kept as the program's own record.
+    let shown = (program_flow::role(w) == program_flow::Role::Main).then(|| program_flow::shown_reply(&message)).flatten();
+    let speaks = shown.as_ref().is_none_or(|shown| shown["content"].as_str().is_some_and(|text| !text.is_empty()));
     let seq = append(
         s,
         if provisional {
@@ -1034,8 +1047,8 @@ async fn model_round(
         } else {
             "assistant/message"
         },
-        json!({"actor":s.actor(),"turn":s.turn,"step":step,"nodeId":node,"message":message}),
-        !provisional,
+        json!({"actor":s.actor(),"turn":s.turn,"step":step,"nodeId":node,"message":shown.as_ref().unwrap_or(&message)}),
+        !provisional && speaks,
     )
     .await?;
     // Keep the draft in history, but do not feed an answer made before pending
@@ -3900,4 +3913,21 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn a_library_method_called_as_a_tool_is_told_how_to_call_it() {
+        let root = std::env::temp_dir().join(format!("not-a-tool-{}", agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let s = Session { agent_id: None, task_node_id: None, plugin: Some("ppt-master".into()), state: &state, task: "task",
+            model: "fake", turn: 1, cancel: &cancel, ban_execution: false, scope: "main".into(), parent: None, input_budget: INPUT_BUDGET };
+        let definitions = vec![function("write_file", "Write a file", json!({}), json!([]))];
+        for name in ["io.write", "write_file"] {
+            let error = format!("{:#}", validate_tool(&s, &Window::default(), &definitions, name).unwrap_err());
+            assert!(error.starts_with("NOT_A_TOOL: io.write is a library method") && error.contains(r#"import * as io from "host:io""#), "{error}");
+        }
+        let error = format!("{:#}", validate_tool(&s, &Window::default(), &definitions, "shell").unwrap_err());
+        assert!(error.starts_with("PLUGIN_SCOPE_DENIED"), "{error}");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
