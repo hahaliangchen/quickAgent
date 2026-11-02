@@ -87,7 +87,7 @@ fn referenced(role: &str, messages: &[Value]) -> (Vec<String>, &'static str) {
                 .iter()
                 .rev()
                 .filter(|m| m["role"] == "assistant")
-                .find_map(|m| program_flow::reply_source(m).ok().flatten())
+                .find_map(|m| program_flow::written_source(m).and_then(Result::ok))
                 .unwrap_or_default();
             let reason = if role == "main" { "your program requires" } else { "your module requires" };
             (crate::agent_program::required_libraries(&source), reason)
@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(referenced("leaf", &hook).0, ["commonmark"], "a hook: what its contract names with @uses");
         let fix = [input(super::super::modules::FIX_INPUT, json!({"module":{"source":"async function check(x) {\n  const md = require(\"markdown/promises\");\n  return md;\n}"}}))];
         assert_eq!(referenced("fix", &fix).0, ["markdown"], "a fixer: what the module it fixes requires");
-        let written = |source: &str| json!({"role":"assistant","content":format!("```js\n{source}\n```")});
+        let written = |source: &str| super::super::program_flow::fixture_reply(&format!("```js\n{source}\n```"));
         let main = [written("const ppt = require(\"ppt\");"), json!({"role":"user","content":"again"}), written("const flow = require(\"flow\");")];
         assert_eq!(referenced("main", &main).0, ["flow"], "a writer: the latest code it wrote");
         assert!(referenced("implement", &[]).0.is_empty(), "nothing before it writes");

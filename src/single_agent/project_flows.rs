@@ -4,11 +4,18 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
 
+/// The project's saved flows, in the host's folder for the project. Flows
+/// saved before that folder existed are moved into it on first use.
 fn directory(s: &Session<'_>) -> Result<PathBuf> {
-    let project = crate::session_browser::task_workspace(s.state.workspace.root(), s.task)?;
-    let project = fs::canonicalize(&project).unwrap_or(project);
-    let key = crate::visual_artifacts::hash(project.to_string_lossy().as_bytes());
-    Ok(s.state.workspace.root().join(".codex-workspace-mcp").join("project-flows").join(key))
+    let root = s.state.workspace.root();
+    let dir = super::host_folder::project_dir(root, s.task)?.join("flows");
+    let project = crate::session_browser::task_workspace(root, s.task)?;
+    let legacy = root.join(".codex-workspace-mcp").join("project-flows").join(super::host_folder::project_key(&project));
+    if legacy.is_dir() && !dir.exists() {
+        fs::create_dir_all(dir.parent().context("project folder")?)?;
+        fs::rename(&legacy, &dir)?;
+    }
+    Ok(dir)
 }
 
 pub(super) fn tools() -> Vec<Value> {
@@ -66,6 +73,32 @@ mod tests {
         assert!(list(&session("other")).unwrap()["flows"].as_array().unwrap().is_empty());
         assert!(read(&session("other"), &json!({"id":first["id"]})).is_err());
         assert!(read(&session("two"), &json!({"id":"../secret"})).is_err());
+        let folder = directory(&session("one")).unwrap();
+        assert!(folder.starts_with(root.join(".codex-workspace-mcp/projects")) && folder.ends_with("flows"), "{folder:?}");
+        assert!(folder.parent().unwrap().file_name().unwrap().to_string_lossy().starts_with("a-"), "named after the project: {folder:?}");
+        drop(db); drop(state); fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn flows_saved_before_the_project_folder_move_into_it() {
+        let root = std::env::temp_dir().join(format!("flow-legacy-{}", crate::visual_artifacts::new_id()));
+        let project = root.join("deck");
+        fs::create_dir_all(&project).unwrap();
+        let state = agent_service::tests::test_state(&root, "127.0.0.1:9".parse().unwrap());
+        let db = agent_service::open_db(&root).unwrap();
+        db.execute("INSERT INTO agent_session_meta(task_id,workspace,kind) VALUES ('one',?1,'code')", params![project.to_string_lossy().to_string()]).unwrap();
+        let legacy = root.join(".codex-workspace-mcp/project-flows").join(super::super::host_folder::project_key(&project));
+        fs::create_dir_all(&legacy).unwrap();
+        let id = crate::visual_artifacts::hash(b"console.log(0);");
+        fs::write(legacy.join(format!("{id}.js")), "console.log(0);").unwrap();
+        fs::write(legacy.join(format!("{id}.json")), json!({"id":id,"saved_at_ms":1}).to_string()).unwrap();
+        let cancel = CancellationToken::new();
+        let session = Session { agent_id: None, task_node_id: None, plugin: None, state: &state, task: "one", model: "fake", turn: 1,
+            cancel: &cancel, ban_execution: false, scope: "main".into(), parent: None,
+            input_budget: context_window::MAX_TOKENS - model_settings::OUTPUT_RESERVE };
+        assert_eq!(read(&session, &json!({"id":id})).unwrap()["source"], "console.log(0);");
+        assert!(!legacy.exists(), "the old folder moved");
+        assert_eq!(list(&session).unwrap()["flows"].as_array().unwrap().len(), 1);
         drop(db); drop(state); fs::remove_dir_all(root).unwrap();
     }
 }

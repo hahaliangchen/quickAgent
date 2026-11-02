@@ -31,7 +31,7 @@ export function Sidebar({
   tasks, allTasks: _allTasks, selectedId, activeTaskId, workspace, projects = [], activeWorkspace,
   onSelectWorkspace, onAddWorkspace, onRemoveWorkspace, onRenameWorkspace,
   mode = 'code', onModeChange, onUpdateSession, onDeleteSession,
-  collapsed = false, width = 260, onToggleCollapse, onNew, onSelect, onOpenSettings,
+  collapsed = false, width = 260, onToggleCollapse, onNew, onSelect,
 }: {
   tasks: readonly Task[]
   allTasks?: readonly Task[] | undefined
@@ -135,7 +135,6 @@ export function Sidebar({
         <button type="button" className={css.iconBtn} title="搜索会话" aria-label="搜索会话" onClick={() => {setSearchOpen(value => !value); window.setTimeout(() => searchRef.current?.focus(),0)}}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
         </button>
-        <button type="button" className={css.iconBtn} title="设置" aria-label="设置" onClick={onOpenSettings}>⚙</button>
         <button type="button" className={css.iconBtn} title="折叠侧边栏" aria-label="折叠侧边栏" onClick={onToggleCollapse}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
         </button>

@@ -13,6 +13,10 @@ use serde_json::{Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
 pub fn schema(conn: &Connection, root: &FsPath) -> Result<()> {
+    schema_with_default_project(conn, root, !std::env::args().any(|arg| arg == "--desktop-agent"))
+}
+
+fn schema_with_default_project(conn: &Connection, root: &FsPath, default_project: bool) -> Result<()> {
     let fresh = !conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='agent_projects')",
         [],
@@ -24,7 +28,7 @@ pub fn schema(conn: &Connection, root: &FsPath) -> Result<()> {
         "ALTER TABLE agent_session_meta ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'",
         [],
     );
-    if fresh {
+    if fresh && default_project {
         conn.execute(
             "INSERT OR IGNORE INTO agent_projects(path,title) VALUES (?1,?2)",
             params![
@@ -32,6 +36,16 @@ pub fn schema(conn: &Connection, root: &FsPath) -> Result<()> {
                 root.file_name().unwrap_or_default().to_string_lossy()
             ],
         )?;
+    }
+    if !default_project {
+        // Migrate the old desktop default only when no code sessions depend on it.
+        // Remember the migration so an explicitly added folder stays registered.
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_sidebar_migrations(name TEXT PRIMARY KEY);")?;
+        let done: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_sidebar_migrations WHERE name='desktop-default-project')", [], |r| r.get(0))?;
+        if !done {
+            conn.execute("DELETE FROM agent_projects WHERE path=?1 AND title=?2 AND NOT EXISTS (SELECT 1 FROM agent_tasks t LEFT JOIN agent_session_meta m ON m.task_id=t.id WHERE COALESCE(m.kind,'code')='code' AND (m.workspace IS NULL OR m.workspace=?1))", params![root.to_string_lossy(), root.file_name().unwrap_or_default().to_string_lossy()])?;
+            conn.execute("INSERT OR IGNORE INTO agent_sidebar_migrations(name) VALUES ('desktop-default-project')", [])?;
+        }
     }
     Ok(())
 }
@@ -423,6 +437,21 @@ mod tests {
         .unwrap();
         schema(&conn, FsPath::new("/projects/current")).unwrap();
         conn
+    }
+    #[test]
+    fn desktop_removes_only_unused_legacy_default_once() {
+        let conn = db();
+        let root = FsPath::new("/projects/current");
+        schema_with_default_project(&conn, root, false).unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM agent_projects", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        conn.execute("INSERT INTO agent_projects(path,title) VALUES ('/projects/current','current')", []).unwrap();
+        schema_with_default_project(&conn, root, false).unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM agent_projects", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+
+        let used = db();
+        used.execute("INSERT INTO agent_tasks VALUES ('old','completed',NULL)", []).unwrap();
+        schema_with_default_project(&used, root, false).unwrap();
+        assert_eq!(used.query_row("SELECT count(*) FROM agent_projects", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
     #[test]
     fn deletes_descendants_and_legacy_records_without_touching_other_sessions() {

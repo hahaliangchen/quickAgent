@@ -456,6 +456,8 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
       case 'tool/call': {
         const callId = stringOf(event.data.callId) ?? key
         const name = stringOf(event.data.name) ?? 'tool'
+        // A handed-over program shows as its program item, not as a tool card with its source.
+        if (name === 'write_program') break
         const raw = argumentsOf(event.data.arguments)
         const result = results.get(callId)
         const call = name === 'create_task' ? functionCall(raw) : undefined
@@ -476,7 +478,7 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
         break
       }
       case 'program/start':
-        // The host compiled the reply's program and started it.
+        // The host compiled the program the AI handed over and started it.
         if (!markProgram(frame, { status: 'started' })) {
           items.push({ kind: 'program', key, frame, event: 'started', text: event.data.fixed === true ? '修复后重新运行' : stringOf(event.data.function) ?? '', time: event.time })
         }

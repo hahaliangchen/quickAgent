@@ -212,6 +212,7 @@ pub(super) fn search_events(
     conn: &Connection,
     task: &str,
     args: &Value,
+    boundary: Option<i64>,
 ) -> Result<SearchSelection> {
     let scope = args["scope"].as_str().unwrap_or("conversation");
     ensure!(
@@ -283,6 +284,21 @@ pub(super) fn search_events(
                  WHEN e.kind LIKE 'observer/%' THEN 'observer'
                  WHEN e.kind LIKE 'organizer/%' THEN 'organizer'
                  WHEN e.kind LIKE 'tool/%' THEN 'tool' ELSE 'worker' END AS role,
+            -- Keyword search reads what was said or called, not tool schemas,
+            -- reasoning or envelope fields copied into the saved event.
+            CASE WHEN e.kind='tool/call' THEN COALESCE(json_extract(e.data,'$.name'),'')||' '||COALESCE(json_extract(e.data,'$.arguments'),'')
+                 WHEN e.kind IN ('user/message','assistant/message') THEN COALESCE(json_extract(e.data,'$.message.content'),'')
+                 -- Runtime bookkeeping: library method maps, asset copies of
+                 -- tool output already searchable as tool/result, usage counters.
+                 WHEN e.kind IN ('program/require','asset/registered') OR e.kind LIKE 'context/%' THEN ''
+                 ELSE e.data END AS search_text,
+            -- History reads and their outputs would otherwise match their own query.
+            CASE WHEN e.kind='tool/call' THEN json_extract(e.data,'$.name')='read_session_history'
+                 WHEN e.kind='tool/result' THEN EXISTS(SELECT 1 FROM agent_task_events c WHERE c.task_id=e.task_id AND c.kind='tool/call'
+                    AND json_extract(c.data,'$.callId')=json_extract(e.data,'$.message.toolCallId') AND c.seq<e.seq
+                    AND json_extract(c.data,'$.name')='read_session_history')
+                 WHEN e.kind='asset/registered' THEN json_extract(e.data,'$.reference.source_tool')='read_session_history'
+                 ELSE 0 END AS history_read,
             COALESCE(e.node_id,json_extract(e.data,'$.nodeId'),json_extract(e.data,'$.flowNodeId'),
                 json_extract(e.data,'$.identity.node_id'),
                 (SELECT json_extract(c.data,'$.flowNodeId') FROM agent_task_events c
@@ -290,8 +306,10 @@ pub(super) fn search_events(
                    AND json_extract(c.data,'$.callId')=json_extract(e.data,'$.message.toolCallId') ORDER BY c.seq DESC LIMIT 1),'n0') AS node_id
         FROM agent_task_events e WHERE (?1 IS NULL OR e.task_id=?1)
           AND (e.kind!='debug/context_request' OR ?6 IS NOT NULL OR ?12)
+          AND (?14 IS NULL OR e.task_id!=?15 OR e.seq<?14)
     ), filtered AS (SELECT * FROM history
-      WHERE (?2='all' OR role=?2) AND (?3='' OR instr(lower(data),?3)>0 {context_search})
+      WHERE (?6 IS NOT NULL OR NOT history_read)
+        AND (?2='all' OR role=?2) AND (?3='' OR instr(lower(search_text),?3)>0 {context_search})
         AND (?4='' OR node_id=?4 OR (?13 AND EXISTS(SELECT 1 FROM descendants d WHERE d.task_id=history.task_id AND d.id=history.node_id))
           OR EXISTS(SELECT 1 FROM agent_task_nodes n WHERE n.task_id=history.task_id AND n.node_id=?4 AND history.node_id=json_extract(n.data,'$.source.node_id') AND seq BETWEEN json_extract(n.data,'$.source.after_seq') AND json_extract(n.data,'$.source.through_seq')))
         AND (?5 IS NULL OR json_extract(data,'$.turn')=?5)
@@ -327,6 +345,8 @@ pub(super) fn search_events(
         number(request),
         SqlValue::Integer(i64::from(args["include_context"] == true)),
         SqlValue::Integer(i64::from(args["include_descendants"] == true)),
+        number(boundary),
+        SqlValue::Text(task.to_owned()),
     ];
     let rows = query_events(conn, &format!("{base}{select}"), bindings, |row| {
         Ok((

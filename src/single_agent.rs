@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 mod documented_examples;
 mod function_scope;
+mod host_folder;
 mod project_flows;
 mod managed_files;
 pub(crate) mod modules;
@@ -207,6 +208,11 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
         definitions.push(program_flow::find_tool());
         definitions.push(program_flow::ask_tool());
     }
+    match program_flow::role(w) {
+        program_flow::Role::Main => definitions.push(program_flow::write_program_tool(false)),
+        program_flow::Role::Implement => definitions.push(program_flow::write_program_tool(true)),
+        _ => {}
+    }
     // The main AI finds methods to read and run with while it gets to know the task.
     if program_flow::role(w) == program_flow::Role::Main && s.plugin.is_none() {
         definitions.push(program_flow::find_main_tool());
@@ -326,6 +332,7 @@ fn page_allows(s: &Session<'_>, name: &str) -> bool {
             | "read_asset"
             | "release_assets"
             | "list_context_assets"
+            | "write_program"
     ) || crate::function_frames::is_tool(name)
         || s.state
             .tool_catalog
@@ -342,7 +349,7 @@ fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str)
         if let Some(method) = method {
             let library = method.split('.').next().unwrap_or_default();
             anyhow::bail!(
-                "NOT_A_TOOL: {method} is a library method, not a tool. Call it in a program: reply with one ```js block such as\nimport * as {library} from \"host:{library}\";\nconst result = await {method}({{...}});\nread_tool_contracts gives its arguments and result."
+                "NOT_A_TOOL: {method} is a library method, not a tool. Call it in a program you hand over with write_program, such as\nimport * as {library} from \"host:{library}\";\nconst result = await {method}({{...}});\nread_tool_contracts gives its arguments and result."
             );
         }
         anyhow::bail!("PLUGIN_SCOPE_DENIED: tool {name} does not belong to this conversation's plugin");
@@ -351,8 +358,8 @@ fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str)
     if w.program.is_none() {
         match program_flow::role(w) {
             program_flow::Role::Implement => ensure!(
-                matches!(name, "read_tool_contracts" | "read_program_guide" | "read_skill"),
-                "TOOL_UNAVAILABLE: {name}; implement this function as code in one ```js block"
+                matches!(name, "read_tool_contracts" | "read_program_guide" | "read_skill" | "write_program"),
+                "TOOL_UNAVAILABLE: {name}; implement this function as code with write_program"
             ),
             program_flow::Role::Fix => ensure!(
                 matches!(name, "edit_file" | "read_tool_contracts" | "read_program_guide"),
@@ -703,7 +710,7 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     let mut published = definitions.to_vec();
     if role == "implement" {
         // A module's author reads the skills its code will require.
-        published.retain(|d| matches!(d["function"]["name"].as_str(), Some("read_tool_contracts" | "read_program_guide" | "read_skill")));
+        published.retain(|d| matches!(d["function"]["name"].as_str(), Some("read_tool_contracts" | "read_program_guide" | "read_skill" | "write_program")));
     } else if role == "fix" {
         published.retain(|d| matches!(d["function"]["name"].as_str(), Some("edit_file" | "read_tool_contracts" | "read_program_guide")));
     } else if role == "main" {
@@ -812,7 +819,7 @@ async fn model_round(
     w: &mut Window,
     step: usize,
     definitions: &[Value],
-) -> Result<(String, Value)> {
+) -> Result<(String, Value, bool)> {
     let node = format!("request_{}", agent_service::uuid_like());
     let mut body = request(s, &w.messages, definitions);
     if let Some(error) = body
@@ -953,11 +960,8 @@ async fn model_round(
                         "model stream ended without completion"
                     );
                     ensure!(
-                        !matches!(
-                            stats["finish_reason"].as_str(),
-                            Some("length" | "content_filter")
-                        ),
-                        "model response was truncated or filtered; no tool was executed"
+                        stats["finish_reason"] != "content_filter",
+                        "model response was filtered; no tool was executed"
                     );
                     diagnostics.phase("completed");
                     return Ok((message, stats));
@@ -970,11 +974,8 @@ async fn model_round(
                     "model stream ended without completion"
                 );
                 ensure!(
-                    !matches!(
-                        completed.stats["finish_reason"].as_str(),
-                        Some("length" | "content_filter")
-                    ),
-                    "model response was truncated or filtered; no tool was executed"
+                    completed.stats["finish_reason"] != "content_filter",
+                    "model response was filtered; no tool was executed"
                 );
                 diagnostics.phase("completed");
                 Ok::<_, anyhow::Error>((completed.message, completed.stats))
@@ -1017,6 +1018,9 @@ async fn model_round(
     };
     trace.finish_checked(status, json!({"response":response.as_ref().ok().map(|r| &r.0),"usage":response.as_ref().ok().map(|r| &r.1["usage"]),"error":response.as_ref().err().map(|e|format!("{e:#}")),"transport":transport})).await?;
     let (message, stats) = response?;
+    // A reply that reached the output limit is returned like any other; the
+    // loop runs none of it and tells the AI it was cut off.
+    let cut_off = stats["finish_reason"] == "length";
     let usage = &stats["usage"];
     if let Some(actual) = usage["prompt_tokens"]
         .as_u64()
@@ -1054,9 +1058,15 @@ async fn model_round(
     // Keep the draft in history, but do not feed an answer made before pending
     // results back as an instruction or conclusion in the working context.
     if awaiting_async {
-        return Ok((node, message));
+        return Ok((node, message, cut_off));
     }
+    let malformed = crate::model_stream::tool_calls(&message)
+        .iter()
+        .any(|call| serde_json::from_str::<Value>(&call.arguments).is_err());
     let mut stored = sourced(message.clone(), s.task, seq);
+    if cut_off || malformed {
+        compact_cut_off_context(&mut stored);
+    }
     {
         let root = s.state.workspace.root().to_path_buf();
         let task = s.task.to_owned();
@@ -1072,7 +1082,30 @@ async fn model_round(
     }
     w.messages.push(stored);
     save(s, w).await?;
-    Ok((node, message))
+    Ok((node, message, cut_off))
+}
+
+/// Keep the transcript and tool records intact, but leave room for the retry.
+/// Tool IDs and names must remain paired with the NOT_RUN results.
+fn compact_cut_off_context(message: &mut Value) {
+    const EXCERPT_CHARS: usize = 512;
+    if let Some(object) = message.as_object_mut() {
+        object.remove("reasoning_content");
+        object.remove(crate::model_stream::REASONING_ITEMS);
+        if let Some(text) = object.get("content").and_then(Value::as_str) {
+            let mut chars = text.chars();
+            let excerpt: String = chars.by_ref().take(EXCERPT_CHARS).collect();
+            if chars.next().is_some() {
+                object.insert("content".into(), json!(format!("{excerpt}\n[Truncated reply omitted from retry context; the original is saved in the record.]")));
+            }
+        }
+        for call in object.get_mut("tool_calls").and_then(Value::as_array_mut).into_iter().flatten() {
+            let args = &mut call["function"]["arguments"];
+            if args.as_str().is_none_or(|text| text.len() > 1024 || serde_json::from_str::<Value>(text).is_err()) {
+                *args = json!("{}");
+            }
+        }
+    }
 }
 async fn business_tool(
     s: &Session<'_>,
@@ -1097,7 +1130,13 @@ async fn business_tool(
             );
             args["task_id"] = json!(s.task);
         }
-        return crate::session_history::read(s.state.workspace.root(), s.task, &args).await;
+        return crate::session_history::read_for_call(
+            s.state.workspace.root(),
+            s.task,
+            &args,
+            Some(call_id),
+        )
+        .await;
     }
     ensure!(
         s.state.permission_mode.allows(name)
@@ -1661,9 +1700,9 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
         // No context is folded: a result that does not fit is not delivered,
         // and a leaf that runs out ends with an error.
         let leaf = matches!(program_flow::role(w), program_flow::Role::Leaf(_));
-        let (node, message) = if w.program.is_some() {
+        let (node, message, cut_off) = if w.program.is_some() {
             match program_flow::next(s, w, step).await? {
-                program_flow::Round::Exchange(node, message) => (node, message),
+                program_flow::Round::Exchange(node, message) => (node, message, false),
                 program_flow::Round::Rewrite | program_flow::Round::Continue => continue,
                 program_flow::Round::Entered(scope) => {
                     current.scope = scope;
@@ -1703,13 +1742,27 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
         let execution = s.clone();
         let s = &execution;
         let calls = crate::model_stream::tool_calls(&message);
+        // A reply that reached the output limit, or a call whose arguments are
+        // not complete JSON, was cut off: nothing in that reply runs, and the
+        // AI is told so and calls again.
+        if cut_off || calls.iter().any(|call| serde_json::from_str::<Value>(&call.arguments).is_err()) {
+            cut_off_reply(s, w, &calls, &node, step).await?;
+            continue;
+        }
+        // A reply whose only call is write_program hands over the program.
+        if let [call] = calls.as_slice()
+            && call.name == program_flow::WRITE_PROGRAM
+            && matches!(program_flow::role(w), program_flow::Role::Main | program_flow::Role::Implement)
+            && w.program.is_none()
+            && w.program_value.is_none()
+        {
+            submit_program(s, w, &message, call, &node, step).await?;
+            continue;
+        }
         if calls.is_empty() {
             {
-                // A main-task reply that contains a JavaScript block is the
-                // program: the host compiles and runs it, or returns the
-                // compile diagnostics to the same AI.
-                // A virtual function's implementation is its reply's block too,
-                // run in the function's own scope.
+                // A reply without tool calls is an answer, code in it included:
+                // programs arrive only through write_program.
                 let role = program_flow::role(w);
                 let gives_up = message["content"].as_str()
                     .and_then(|text| serde_json::from_str::<Value>(text.trim()).ok())
@@ -1717,7 +1770,7 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
                 // A fixer changes its module file with edit_file and then says
                 // it is done; the fixed module runs this call again.
                 if role == program_flow::Role::Fix && !gives_up {
-                    let diagnostic = if !matches!(program_flow::reply_source(&message), Ok(None)) {
+                    let diagnostic = if program_flow::js_marker(&message) {
                         Some(json!({"code":"MODULE_EDIT_REQUIRED","executed":false,
                             "instruction":"Code in a reply is not applied. Change the module file with edit_file, then reply with one short sentence saying what you changed."}))
                     } else {
@@ -1730,55 +1783,9 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
                     }
                     continue;
                 }
-                if role != program_flow::Role::Main && role != program_flow::Role::Fix && !leaf && w.program.is_none() && w.program_value.is_none()
-                    && !gives_up && matches!(program_flow::reply_source(&message), Ok(None))
-                {
+                if role == program_flow::Role::Implement && w.program.is_none() && w.program_value.is_none() && !gives_up {
                     let diagnostic = json!({"code":"FUNCTION_IMPLEMENTATION_REQUIRED","executed":false,
-                        "instruction":"Implement this function as code: reply with exactly one ```js block holding its complete implementation."});
-                    let seq = append(s, "program/source_invalid", json!({"diagnostic":diagnostic}), false).await?;
-                    w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
-                    save(s, w).await?;
-                    continue;
-                }
-                if !leaf && w.program.is_none() && w.program_value.is_none() {
-                    let source = program_flow::reply_source(&message);
-                    if !matches!(source, Ok(None)) {
-                        let args = json!({"source":source.as_ref().ok().cloned().flatten()});
-                        let body = role != program_flow::Role::Main;
-                        let installed = source.map_err(|error| anyhow::anyhow!(error))
-                            .and_then(|_| program_flow::install_scoped(s, w, &args, body));
-                        match installed {
-                            Ok(receipt) => {
-                                // Preserve the exact execution source in the conversation and,
-                                // for main flows, in the project-scoped host library.
-                                let function = w.program_task.as_ref().map(|task| task["name"].clone()).unwrap_or(Value::Null);
-                                let saved_flow = if !body && s.plugin.is_none() {
-                                    Some(project_flows::save(s, w, args["source"].as_str().unwrap_or(""))?)
-                                } else { None };
-                                append(s, "program/start", json!({"turn":s.turn,"receipt":receipt,"function":function,"source":args["source"],"saved_flow":saved_flow}), false).await?;
-                                // A module's first code is saved for every later call of its contract.
-                                if body {
-                                    modules::authored(s, w, args["source"].as_str().unwrap_or("")).await?;
-                                } else if s.plugin.is_none() {
-                                    // Getting to know the task ends when the main script starts.
-                                    program_flow::end_familiarization(w, &message, args["source"].as_str().unwrap_or(""));
-                                }
-                            }
-                            Err(error) => {
-                                let diagnostic = program_flow::source_error("program", &args, &error);
-                                let seq = append(s, "program/source_invalid", json!({"diagnostic":diagnostic}), false).await?;
-                                w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
-                            }
-                        }
-                        save(s, w).await?;
-                        continue;
-                    }
-                }
-                // A ```js marker without a block the host can read: nothing ran,
-                // and the reply is not an answer yet.
-                if role == program_flow::Role::Main && w.program.is_none() && w.program_value.is_none() && program_flow::js_marker(&message) {
-                    let diagnostic = json!({"code":"PROGRAM_NOT_RUN","executed":false,"reason":"no complete ```js block",
-                        "instruction":"That reply has a ```js marker but no complete ```js block whose fences start their own lines, so nothing ran. Reply with the program in one such block, or answer without a ```js marker."});
+                        "instruction":"Implement this function as code: call write_program with its complete implementation. Code in reply text is not run."});
                     let seq = append(s, "program/source_invalid", json!({"diagnostic":diagnostic}), false).await?;
                     w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
                     save(s, w).await?;
@@ -1981,15 +1988,6 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
             crate::context_assets::release(&mut w.messages, &ids)?;
             save(s, w).await?;
         }
-        // A main-task reply that called tools and also held a ```js block:
-        // the tools ran and the block did not. Say so instead of dropping it.
-        if program_flow::role(w) == program_flow::Role::Main && w.program.is_none() && program_flow::js_marker(&message) {
-            let diagnostic = json!({"code":"PROGRAM_NOT_RUN","executed":false,"reason":"the reply also called tools",
-                "instruction":"The tool calls in that reply ran, but its ```js block did not. When you are ready to run the program, reply with it alone, without tool calls."});
-            let seq = append(s, "program/source_invalid", json!({"diagnostic":diagnostic}), false).await?;
-            w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
-            save(s, w).await?;
-        }
         // A leaf that outgrew its context throws to its coded caller, which
         // can split the work; nothing is compressed.
         // A leaf ends early when it asked the user or outgrew its context.
@@ -2020,6 +2018,121 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
     }
     Ok(LoopResult::Limit)
     })
+}
+
+/// A reply cut off at the model's output limit: the service reported a
+/// `length` finish, or call arguments stopped before they were complete JSON
+/// while the service still reported an ordinary tool-call finish. The
+/// arguments are kept in the record; the working context holds `{}` in their
+/// place, since a provider rejects the conversation when it is sent back
+/// invalid JSON. A cut-off reply without calls is followed by a notice, so
+/// its unfinished text is not taken as the answer.
+async fn cut_off_reply(
+    s: &Session<'_>,
+    w: &mut Window,
+    calls: &[crate::model_stream::ToolCall],
+    node: &str,
+    step: usize,
+) -> Result<()> {
+    let cut = calls
+        .iter()
+        .filter(|call| serde_json::from_str::<Value>(&call.arguments).is_err())
+        .map(|call| call.call_id.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(reply) = w.messages.iter_mut().rev().find(|m| {
+        m["role"] == "assistant"
+            && m["tool_calls"].as_array().is_some_and(|calls| calls.iter().any(|c| c["id"].as_str().is_some_and(|id| cut.contains(id))))
+    }) {
+        for call in reply["tool_calls"].as_array_mut().into_iter().flatten() {
+            if call["id"].as_str().is_some_and(|id| cut.contains(id)) {
+                call["function"]["arguments"] = json!("{}");
+            }
+        }
+    }
+    for call in calls {
+        append(s, "tool/call", json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
+            "callId":call.call_id,"name":call.name,"arguments":call.arguments}), false).await?;
+        let result = if cut.contains(&call.call_id) {
+            let received = call.arguments.chars().count();
+            json!({"code":"TOOL_ARGUMENTS_TRUNCATED","executed":false,"received_chars":received,
+                "error":format!("the arguments of this {} call stop after {received} characters and are not complete JSON", call.name),
+                "instruction":"Your reply was most likely cut off at the model's output limit, which your reasoning counts toward as well. Nothing in that reply ran. Call again with shorter arguments: write the code once instead of drafting it in your reasoning first, generate repeated parts such as pages from one template in a loop, or have @virtual functions write the parts."})
+        } else {
+            json!({"code":"NOT_RUN","executed":false,
+                "error":"the reply this call came in was cut off at the model's output limit, so none of its calls ran; make this call again if it is still needed"})
+        };
+        let seq = append(s, "tool/result", json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
+            "message":{"role":"tool","toolCallId":call.call_id,"isError":true,"content":[{"type":"text","text":result.to_string()}]},
+            "meta":{"result":result}}), false).await?;
+        w.messages.push(sourced(json!({"role":"tool","tool_call_id":call.call_id,"content":result.to_string()}), s.task, seq));
+    }
+    if calls.is_empty() {
+        let notice = json!({"code":"REPLY_TRUNCATED",
+            "error":"your last reply stopped at the model's output limit, which your reasoning counts toward as well, so it is unfinished",
+            "instruction":"Continue with a shorter reply: do not draft in your reasoning what you will write anyway, and hand over long work as a program with write_program."});
+        let seq = append(s, "assistant/cut_off", json!({"actor":s.actor(),"turn":s.turn,"step":step,"nodeId":node,"notice":notice}), false).await?;
+        w.messages.push(sourced(json!({"role":"user","name":"output_limit","content":notice.to_string()}), s.task, seq));
+    }
+    save(s, w).await
+}
+
+/// The AI handed over a program with write_program. The host writes it to the
+/// chat's folder and runs what it reads back from the file; a module author's
+/// code becomes the module's file. Compile errors are the call's result.
+async fn submit_program(
+    s: &Session<'_>,
+    w: &mut Window,
+    message: &Value,
+    call: &crate::model_stream::ToolCall,
+    node: &str,
+    step: usize,
+) -> Result<()> {
+    append(s, "tool/call", json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
+        "callId":call.call_id,"name":call.name,"arguments":call.arguments}), false).await?;
+    let body = program_flow::role(w) == program_flow::Role::Implement;
+    let root = s.state.workspace.root();
+    let written = program_flow::written_source(message)
+        .unwrap_or_else(|| Err("write_program needs a source".to_owned()))
+        .map_err(|error| anyhow::anyhow!(error))
+        .and_then(|source| {
+            if body {
+                return Ok((None, source));
+            }
+            let path = host_folder::write_program(root, s.task, s.turn, &source)?;
+            Ok((Some(path.clone()), std::fs::read_to_string(root.join(&path))?))
+        });
+    let path = written.as_ref().ok().and_then(|(path, _)| path.clone());
+    let args = json!({"source":written.as_ref().ok().map(|(_, source)| source)});
+    let installed = written.and_then(|_| program_flow::install_scoped(s, w, &args, body));
+    let source = args["source"].as_str().unwrap_or("");
+    let (result, is_error) = match installed {
+        Ok(receipt) => {
+            let function = w.program_task.as_ref().map(|task| task["name"].clone()).unwrap_or(Value::Null);
+            // Main flows are also kept in the project's saved flows.
+            let saved_flow = if !body && s.plugin.is_none() { Some(project_flows::save(s, w, source)?) } else { None };
+            append(s, "program/start", json!({"turn":s.turn,"receipt":receipt,"function":function,"source":source,
+                "path":path,"saved_flow":saved_flow}), false).await?;
+            if body {
+                // A module's first code is saved for every later call of its contract.
+                modules::authored(s, w, source).await?;
+            } else if s.plugin.is_none() {
+                // Getting to know the task ends when the main script starts.
+                program_flow::end_familiarization(w, message, source);
+            }
+            (json!({"status":"running","path":path,
+                "note":"The program runs when this reply ends; its outcome comes back to you."}), false)
+        }
+        Err(error) => {
+            let diagnostic = program_flow::source_error("program", &args, &error);
+            append(s, "program/source_invalid", json!({"diagnostic":diagnostic,"path":path}), false).await?;
+            (diagnostic, true)
+        }
+    };
+    let seq = append(s, "tool/result", json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
+        "message":{"role":"tool","toolCallId":call.call_id,"isError":is_error,"content":[{"type":"text","text":result.to_string()}]},
+        "meta":{"result":result}}), false).await?;
+    w.messages.push(sourced(json!({"role":"tool","tool_call_id":call.call_id,"content":result.to_string()}), s.task, seq));
+    save(s, w).await
 }
 
 /// A file changed outside the Agent while a write was pending: tell the user
@@ -2100,6 +2213,9 @@ async fn execute_call(
             ensure!(call_count==1,"context-changing tools must be called alone so every read result reaches a subsequent AI request");
         }
         match call.name.as_str() {
+            program_flow::WRITE_PROGRAM => anyhow::bail!(
+                "PROGRAM_NOT_RUN: write_program must be the only call in its reply, made while no program is running; nothing was written or run"
+            ),
             "parallel_read_batch" => {
                 ensure!(program_flow::internal_call(w, call), "parallel reads require a pending compiled program");
                 let operations = args["operations"].as_array().context("operations must be an array")?;
@@ -2675,6 +2791,7 @@ mod tests {
             &[],
         )
         .await
+        .map(|(node, message, _)| (node, message))
     }
 
     fn diagnostic_rows(root: &Path) -> Vec<Value> {
@@ -3022,7 +3139,7 @@ mod tests {
             } else {
                 "```js\nconst verdict = await judge(\"x\");\n\n/** @virtual */\nasync function judge(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".to_owned()
             };
-            async move { Json(json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":content}}]})) }
+            async move { Json(program_flow::fixture_completion(&content)) }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

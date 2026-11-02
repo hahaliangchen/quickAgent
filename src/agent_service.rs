@@ -148,7 +148,7 @@ impl AgentServiceState {
         self
     }
 
-    fn use_provider(&mut self, name: &str) -> bool {
+    pub(crate) fn use_provider(&mut self, name: &str) -> bool {
         if self.provider_routes.is_empty() {
             return name == self.provider_name;
         }

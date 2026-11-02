@@ -276,6 +276,7 @@ pub fn control(name: &str) -> bool {
             | "release_assets"
             | "find_library_methods"
             | "ask_user"
+            | "write_program"
     )
 }
 pub fn public_name(libraries: &Libraries, target: &str) -> Option<String> {

@@ -137,7 +137,7 @@ async fn real_model_async_five_pages_published_example() -> Result<()> {
     ensure!(!state.provider_url.is_empty() && !state.api_key.is_empty(),"configured model unavailable");
     agent_service::open_db(&root)?.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('example','',?1,'running',0,0)",[&model])?;
     eprintln!("REAL_ASYNC_FIVE_START model={model} root={}",root.display());
-    let prompt=format!("Run exactly this program: reply with it unchanged as your one ```js block.\n```js\n{}\n```",source.trim());
+    let prompt=format!("Run exactly this program: call write_program with it unchanged as the source.\n```js\n{}\n```",source.trim());
     let cancel=CancellationToken::new();
     let result=tokio::time::timeout(Duration::from_secs(600),run_task(state,"example".into(),model,prompt,80,cancel.clone(),1,false)).await;
     if result.is_err(){cancel.cancel();}
@@ -169,7 +169,7 @@ async fn real_model_serial_published_example() -> Result<()> {
     eprintln!("REAL_SERIAL_START model={model} root={}",root.display());
     // The production path: the main AI replies with the program, and every
     // virtual function in it is then implemented by the real model.
-    let prompt=format!("Run exactly this program: reply with it unchanged as your one ```js block.\n```js\n{}\n```",source.trim());
+    let prompt=format!("Run exactly this program: call write_program with it unchanged as the source.\n```js\n{}\n```",source.trim());
     let cancel=CancellationToken::new();
     let result=tokio::time::timeout(Duration::from_secs(480),run_task(state,"example".into(),model,prompt,40,cancel.clone(),1,false)).await;
     if result.is_err(){cancel.cancel();}
@@ -205,17 +205,22 @@ fn real_wire(state: &mut AgentServiceState) {
 }
 
 /// The configured default model at the given reasoning effort, in a fresh
-/// workspace. REAL_MODEL names another model of the same provider.
+/// workspace. REAL_PROVIDER names another configured provider, and REAL_MODEL
+/// another model of the provider in use.
 fn real_with_effort(name: &str, effort: &str) -> Result<(std::path::PathBuf, AgentServiceState, String)> {
     let root=std::env::temp_dir().join(format!("{name}-{}",agent_service::uuid_like()));
     std::fs::create_dir_all(&root)?;
     let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
     let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config); real_wire(&mut state);
+    if let Ok(provider)=std::env::var("REAL_PROVIDER") && !provider.is_empty() {
+        ensure!(state.use_provider(&provider),"provider {provider} is not configured");
+    }
     state.reasoning_effort=Some(real_effort(effort));
     let model=std::env::var("REAL_MODEL").ok().filter(|model|!model.is_empty())
         .unwrap_or_else(||state.model_map.get(&state.default_model).cloned().unwrap_or_else(||state.default_model.clone()));
-    ensure!(!state.provider_url.is_empty() && !state.api_key.is_empty(),"configured model unavailable");
+    // A local service may need no key.
+    ensure!(!state.provider_url.is_empty() && (!state.api_key.is_empty() || std::env::var("REAL_PROVIDER").is_ok()),"configured model unavailable");
     agent_service::open_db(&root)?.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('example','',?1,'running',0,0)",[&model])?;
     Ok((root,state,model))
 }
@@ -237,7 +242,7 @@ async fn real_model_leaf_asks_and_the_answer_continues() -> Result<()> {
     let (root,state,model)=real_low_effort("ask-real")?;
     eprintln!("REAL_ASK_START model={model} root={}",root.display());
     let source="import * as io from \"host:io\";\nconst page = await writeIntro(\"an agent runtime that runs AI-written programs\");\nio.write({path: \"intro.html\", content: page.html});\n\n/** @virtual */\nasync function writeIntro(subject) {\n  // Write a short standalone HTML introduction to subject. Its audience, developers or managers, is not known and changes the whole page: ask the user which audience before writing anything. Returns {html:string}.\n}";
-    let prompt=format!("Run exactly this program: reply with it unchanged as your one ```js block.\n```js\n{source}\n```");
+    let prompt=format!("Run exactly this program: call write_program with it unchanged as the source.\n```js\n{source}\n```");
     let started=std::time::Instant::now();
     tokio::time::timeout(Duration::from_secs(480),run_task(state.clone(),"example".into(),model.clone(),prompt,40,CancellationToken::new(),1,false)).await.context("first turn timed out")??;
     let first=program_outcomes(&root)?;
@@ -256,7 +261,7 @@ async fn real_model_user_message_pauses_the_program() -> Result<()> {
     let (root,state,model)=real_low_effort("interject-real")?;
     eprintln!("REAL_INTERJECT_START model={model} root={}",root.display());
     let source="import * as io from \"host:io\";\nconst topics = [\"agents\", \"programs\", \"tools\"];\nfor (const topic of topics) {\n  const page = await writePage(topic);\n  io.write({path: topic + \".html\", content: page.html});\n}\n\n/** @virtual */\nasync function writePage(topic) {\n  // Write a short standalone HTML page, under 40 lines, explaining topic in an agent runtime. Returns {html:string}.\n}";
-    let prompt=format!("Run exactly this program: reply with it unchanged as your one ```js block.\n```js\n{source}\n```");
+    let prompt=format!("Run exactly this program: call write_program with it unchanged as the source.\n```js\n{source}\n```");
     // The user speaks once the first page is written.
     let watched=root.clone();
     let speaker=tokio::spawn(async move {
@@ -279,6 +284,12 @@ async fn real_model_user_message_pauses_the_program() -> Result<()> {
 #[ignore = "real configured model, isolated workspace, consumes provider tokens"]
 async fn real_model_makes_a_five_slide_deck_on_its_own() -> Result<()> {
     real_deck(5, 1200).await
+}
+
+#[tokio::test]
+#[ignore = "real configured model, isolated workspace, consumes provider tokens"]
+async fn real_model_makes_a_ten_slide_deck_on_its_own() -> Result<()> {
+    real_deck(10, 1800).await
 }
 
 #[tokio::test]
@@ -463,7 +474,7 @@ async fn skills_reach_only_the_code_that_references_them() {
         let results=messages.iter().filter(|m|m["role"]=="tool").count();
         let call=|name:&str,args:Value| json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
             "tool_calls":[{"id":format!("call-{results}"),"type":"function","function":{"name":name,"arguments":args.to_string()}}]}}]});
-        let text=|content:&str| json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":content}}]});
+        let text=|content:&str| program_flow::fixture_completion(content);
         let function=messages.iter().find(|m|m["name"]=="program_task_input")
             .map(|m|serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap()["name"].as_str().unwrap().to_owned());
         let answer=match function.as_deref() {

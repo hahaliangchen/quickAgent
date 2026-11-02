@@ -99,7 +99,7 @@ fn image_message(message: &Value) -> Option<Value> {
 
 pub fn tool() -> Value {
     json!({"type":"function","function":{"name":"read_session_history",
-    "description":"Read saved conversation history only when current inputs lack needed information. Default scope=conversation reads the current conversation or a returned task_id. scope=project searches conversations in this workspace, returning one dated matching excerpt and a read_reference per conversation. Filter by keyword, role, node or turn. Conversation records are chronological; before_seq pages toward older events, event_seq/char_offset retrieve exact text. Project results page with project_offset. Historical records do not prove current resource availability. This read does not create a Flow node or change execution.",
+    "description":"Read saved conversation history only when current inputs lack needed information. Default scope=conversation reads the current conversation or a returned task_id. scope=project searches conversations in this workspace, returning one dated matching excerpt and a read_reference per conversation. Filter by keyword, role, node or turn; keywords match message text, tool names/arguments and tool output, a matched call returns with its result, and history reads are never matched. Conversation records are chronological; before_seq pages toward older events, event_seq/char_offset retrieve exact text. Project results page with project_offset. Historical records do not prove current resource availability. This read does not create a Flow node or change execution.",
     "parameters":{"type":"object","properties":{
         "scope":{"type":"string","enum":["conversation","project"]},
         "task_id":{"type":"string","description":"Conversation returned by project search; defaults to the current conversation. Only conversations saved in this workspace can be read."},
@@ -142,17 +142,95 @@ fn read_programs(conn: &rusqlite::Connection, task: &str, args: &Value) -> Resul
         "note":"function is null for a turn's main program, else the virtual function this code implements. A program records how work was done; check current files for their present state."}))
 }
 
+#[cfg(test)]
 pub async fn read(root: &Path, task: &str, args: &Value) -> Result<Value> {
+    read_for_call(root, task, args, None).await
+}
+
+/// Read history as it stood when the model issued `call_id`: that call and
+/// anything recorded while it runs stay outside this read and its pages.
+pub async fn read_for_call(
+    root: &Path,
+    task: &str,
+    args: &Value,
+    call_id: Option<&str>,
+) -> Result<Value> {
     let root = root.to_path_buf();
     let task = task.to_owned();
     let args = args.clone();
-    tokio::task::spawn_blocking(move || read_saved(&root, &task, &args)).await?
+    let call_id = call_id.map(str::to_owned);
+    tokio::task::spawn_blocking(move || {
+        let conn = crate::agent_service::open_db(&root)?;
+        let boundary = match call_id {
+            Some(id) => load_events(
+                &conn,
+                &task,
+                &EventQuery {
+                    kinds: &["tool/call"],
+                    call_id: Some(&id),
+                    newest: Some(1),
+                    ..Default::default()
+                },
+            )?
+            .first()
+            .map(|event| event.seq),
+            None => None,
+        };
+        read_saved(&conn, &task, &args, boundary)
+    })
+    .await?
 }
 
-fn read_saved(root: &Path, task: &str, args: &Value) -> Result<Value> {
-    let conn = crate::agent_service::open_db(root)?;
+/// The call that produced a tool result, or the latest result of a call, so a
+/// match on either side shows what was called and what came back.
+fn paired_event(
+    conn: &rusqlite::Connection,
+    task: &str,
+    kind: &str,
+    seq: i64,
+    data: &Value,
+    boundary: Option<i64>,
+) -> Result<Option<(i64, String, Value)>> {
+    let (sql, call_id) = match kind {
+        "tool/call" => (
+            "SELECT seq,kind,data FROM agent_task_events WHERE task_id=?1 AND seq>?2 AND (?4 IS NULL OR seq<?4)
+               AND ((kind='tool/result' AND json_extract(data,'$.message.toolCallId')=?3)
+                 OR (kind='tool/async_result' AND json_extract(data,'$.meta.result.original_call_id')=?3))
+             ORDER BY kind='tool/async_result' DESC,seq LIMIT 1",
+            data["callId"].as_str(),
+        ),
+        "tool/result" => (
+            "SELECT seq,kind,data FROM agent_task_events WHERE task_id=?1 AND seq<?2 AND (?4 IS NULL OR seq<?4)
+               AND kind='tool/call' AND json_extract(data,'$.callId')=?3 ORDER BY seq DESC LIMIT 1",
+            data.pointer("/message/toolCallId").and_then(Value::as_str),
+        ),
+        _ => return Ok(None),
+    };
+    let Some(call_id) = call_id else {
+        return Ok(None);
+    };
+    conn.query_row(sql, rusqlite::params![task, seq, call_id, boundary], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })
+    .map(|(seq, kind, raw)| Some((seq, kind, serde_json::from_str(&raw).unwrap_or_default())))
+    .or_else(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        error => Err(error.into()),
+    })
+}
+
+fn read_saved(
+    conn: &rusqlite::Connection,
+    task: &str,
+    args: &Value,
+    boundary: Option<i64>,
+) -> Result<Value> {
     if args["programs"] == true {
-        return read_programs(&conn, task, args);
+        return read_programs(conn, task, args);
     }
     let store::SearchSelection {
         rows,
@@ -165,7 +243,7 @@ fn read_saved(root: &Path, task: &str, args: &Value) -> Result<Value> {
         max_chars,
         offset,
         project_offset,
-    } = store::search_events(&conn, task, args)?;
+    } = store::search_events(conn, task, args, boundary)?;
     let scope = if project { "project" } else { "conversation" };
     let more = rows.len() > limit;
     let mut records = Vec::new();
@@ -180,14 +258,18 @@ fn read_saved(root: &Path, task: &str, args: &Value) -> Result<Value> {
         saved_history_payload(&kind, &data)?;
         if kind == "debug/context_request" {
             data["request_context"] = if let Some(id) = data["id"].as_i64() {
-                crate::request_context::saved_context(&conn,&record_task,id)?
+                crate::request_context::saved_context(conn,&record_task,id)?
                     .unwrap_or_else(||json!({"record_kind":"model_input","unavailable":true,"reason":"This older request body was not retained."}))
             } else {
                 json!({"record_kind":"model_input","unavailable":true})
             };
         }
+        // A call is its name and arguments; its schema description is not history.
+        let call = json!({"name":data["name"],"arguments":data["arguments"]});
         let (payload, pointer) = if kind == "tool/result" && args["include_event"] != true {
             (saved_history_payload(&kind, &data)?, "/meta/result")
+        } else if kind == "tool/call" && args["include_event"] != true {
+            (&call, "")
         } else {
             let paths: &[&str] = if args["include_event"] == true {
                 &[""]
@@ -259,6 +341,33 @@ fn read_saved(root: &Path, task: &str, args: &Value) -> Result<Value> {
             "next_char_offset":if next<total{Some(next)}else{None},
             "read_reference":{"scope":"conversation","task_id":record_task,"event_seq":seq,"include_event":args["include_event"]==true},
             "next_read":if next<total{json!({"task_id":record_task,"event_seq":seq,"char_offset":next,"include_event":args["include_event"]==true})}else{Value::Null}});
+        let pair_boundary = boundary.filter(|_| record_task == task);
+        if args["include_event"] != true
+            && let Some((pair_seq, pair_kind, pair)) =
+                paired_event(conn, &record_task, &kind, seq, &data, pair_boundary)?
+        {
+            let reference =
+                json!({"scope":"conversation","task_id":record_task,"event_seq":pair_seq});
+            if kind == "tool/call" {
+                let result = saved_history_payload(&pair_kind, &pair).unwrap_or(&pair);
+                let text = result
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| result.to_string());
+                let excerpt = text
+                    .chars()
+                    .take(per_record.min(remaining))
+                    .collect::<String>();
+                let returned = excerpt.chars().count();
+                remaining = remaining.saturating_sub(returned);
+                record["tool_result"] = json!({"seq":pair_seq,"kind":pair_kind,
+                    "is_error":pair.pointer("/message/isError"),"content":excerpt,
+                    "total_chars":text.chars().count(),"returned_chars":returned,"read_reference":reference});
+            } else {
+                record["tool_call"] = json!({"seq":pair_seq,"name":pair["name"],
+                    "arguments":pair["arguments"],"read_reference":reference});
+            }
+        }
         if let Some(images) = image_message(&data["message"]) {
             record["image_message"] = images;
             record["source_identity"] = data["identity"].clone();
@@ -283,10 +392,140 @@ fn read_saved(root: &Path, task: &str, args: &Value) -> Result<Value> {
     } else {
         Value::Null
     };
+    let no_match = (records.is_empty() && !query.is_empty()).then(|| format!(
+        "No saved {scope} record before this request matches \"{query}\". History reads are not searched, and history only holds past events: it cannot show current state. To get current data, call the tool that reads it instead of searching history again."
+    ));
     Ok(
-        json!({"records":records,"has_more":more,"next_before_seq":next_before,"next_search":next_search,
+        json!({"records":records,"has_more":more,"next_before_seq":next_before,"next_search":next_search,"no_match":no_match,
         "scope":scope,"task_id":if project{None}else{Some(target)},
-        "history_note":"Saved records in this workspace, not assertions about present resource availability. Project search returns the latest matching event per conversation, ordered by conversation update time; use read_reference to read that event or task_id with query/before_seq to read other records. Conversation records are chronological. Excerpts preserve original content; event_seq/char_offset retrieve omitted text. Project pagination can shift if conversations change during a search.",
+        "history_note":"Saved records in this workspace, not assertions about present resource availability. Project search returns the latest matching event per conversation, ordered by conversation update time; use read_reference to read that event or task_id with query/before_seq to read other records. Conversation records are chronological. Keywords match message text, tool names and arguments, and tool output; history reads themselves are not searched. A matched tool call carries its tool_result, a matched result its tool_call. Excerpts preserve original content; event_seq/char_offset retrieve omitted text. Records written after this request began are excluded; project pagination can shift if other conversations change during a search.",
         "returned_chars":max_chars-remaining,"max_chars":max_chars}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ppt-trial loop: the model searched `get_design` before ever calling
+    /// it, and each search returned its own call instead of saying no match.
+    #[tokio::test]
+    async fn history_search_skips_its_own_reads_and_pairs_tool_results() {
+        let root = std::env::temp_dir().join(format!(
+            "history-search-{}",
+            crate::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::agent_service::open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','ppt','test','running',1,1)",[]).unwrap();
+        let description = "Read saved conversation history only when current inputs lack needed information; x get_design";
+        let history_call = |call: &str, query: &str| {
+            json!({"actor":"agent","turn":2,"callId":call,"name":"read_session_history",
+                "arguments":json!({"query":query,"limit":1}).to_string(),"description":description})
+        };
+        let events = [
+            (
+                1,
+                "assistant/message",
+                json!({"actor":"agent","turn":2,"message":{"role":"assistant",
+                "content":"Running the gather program now.",
+                "reasoning_content":"const d = await ppt.get_design({ page: 1 });"}}),
+            ),
+            (2, "tool/call", history_call("h1", "get_design")),
+            (
+                3,
+                "tool/result",
+                json!({"actor":"agent","turn":2,"message":{"role":"tool","toolCallId":"h1",
+                "content":[{"type":"text","text":"{\"records\":[{\"content\":\"get_design\"}]}"}]},
+                "meta":{"result":{"records":[{"content":"get_design"}]}}}),
+            ),
+            (
+                4,
+                "asset/registered",
+                json!({"reference":{"source_tool":"read_session_history","summary":"get_design"}}),
+            ),
+            (5, "tool/call", history_call("h2", "get_design")),
+        ];
+        let insert = |seq: i64, kind: &str, data: &Value| {
+            conn.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('t',?1,1,?2,?3)",
+                rusqlite::params![seq, kind, data.to_string()]).unwrap();
+        };
+        for (seq, kind, data) in &events {
+            insert(*seq, kind, data);
+        }
+        let search = |query: &str, call: &str| {
+            let args = json!({"query":query,"limit":1});
+            let root = root.clone();
+            let call = call.to_owned();
+            async move { read_for_call(&root, "t", &args, Some(&call)).await.unwrap() }
+        };
+
+        // Neither the running search, earlier searches, their outputs nor the
+        // model's private reasoning count as a past get_design.
+        let none = search("get_design", "h2").await;
+        assert_eq!(none["records"], json!([]));
+        assert!(
+            none["no_match"]
+                .as_str()
+                .unwrap()
+                .contains("call the tool that reads it")
+        );
+        // A tool's schema description is not searchable text either.
+        assert_eq!(search("x", "h2").await["records"], json!([]));
+        // Exact reads still return the original history-read events in full.
+        let exact = read(&root, "t", &json!({"event_seq":2,"include_event":true}))
+            .await
+            .unwrap();
+        assert_eq!(exact["records"][0]["seq"], 2);
+        assert!(
+            exact["records"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains(description)
+        );
+
+        // A real call is found by name and returns with its latest result;
+        // a later tool/result match points back to the call that produced it.
+        insert(
+            6,
+            "tool/call",
+            &json!({"actor":"agent","turn":2,"callId":"p1","name":"ppt_master__get_design",
+            "arguments":"{}","description":description}),
+        );
+        insert(
+            7,
+            "tool/result",
+            &json!({"actor":"agent","turn":2,"message":{"role":"tool","toolCallId":"p1","isError":true,
+            "content":[{"type":"text","text":"{\"error\":\"PAGE_CLOSED\"}"}]},"meta":{"result":{"error":"PAGE_CLOSED"}}}),
+        );
+        insert(8, "tool/call", &history_call("h3", "get_design"));
+        let found = search("get_design", "h3").await;
+        let record = &found["records"][0];
+        assert_eq!(found["records"].as_array().unwrap().len(), 1);
+        assert_eq!(record["seq"], 6);
+        assert_eq!(
+            record["content"],
+            json!({"name":"ppt_master__get_design","arguments":"{}"}).to_string()
+        );
+        assert_eq!(record["tool_result"]["seq"], 7);
+        assert_eq!(record["tool_result"]["is_error"], true);
+        assert!(
+            record["tool_result"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("PAGE_CLOSED")
+        );
+        assert!(found["no_match"].is_null());
+        let by_result = search("page_closed", "h3").await;
+        assert_eq!(by_result["records"][0]["seq"], 7);
+        assert_eq!(
+            by_result["records"][0]["tool_call"]["name"],
+            "ppt_master__get_design"
+        );
+
+        // A search issued before the real call keeps the boundary it began with.
+        assert_eq!(search("get_design", "h2").await["records"], json!([]));
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

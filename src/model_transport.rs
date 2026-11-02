@@ -489,7 +489,7 @@ fn error_chain(error: &anyhow::Error) -> Vec<Value> {
             else if text.contains("timed out") || text.contains("timeout") { "timeout" }
             else if text.contains("cancelled") { "cancelled" }
             else if text.contains("without completion") { "missing_completion" }
-            else if text.contains("truncated or filtered") { "truncated_or_filtered" }
+            else if text.contains("response was filtered") { "filtered" }
             else { "unclassified" };
         json!({"kind":"source","reason":reason})
     }).collect()

@@ -26,6 +26,18 @@
         "target/debug/codex-workspace-mcp"
       ],
       "port": 3101
+    },
+    {
+      "name": "ppt-agent",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "WORKSPACE_ROOT=runs/ppt-trial",
+        "PORT=3001",
+        "AGENT_BIND=127.0.0.1:3001",
+        "MCP_BIND=127.0.0.1:3000",
+        "target/debug/codex-workspace-mcp"
+      ],
+      "port": 3001
     }
   ]
 }

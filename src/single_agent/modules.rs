@@ -6,7 +6,6 @@
 //! call fails.
 use super::*;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::Notify;
 
@@ -46,27 +45,18 @@ pub(super) fn is_module(w: &Window) -> bool {
     w.program_task.as_ref().is_some_and(|task| task["module"] == true)
 }
 
-fn chat_dir(root: &Path, task: &str) -> PathBuf {
-    let safe = if !task.is_empty() && task.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
-        task.to_owned()
-    } else {
-        crate::visual_artifacts::hash(task.as_bytes())[..16].to_owned()
-    };
-    root.join(".codex-workspace-mcp").join("chats").join(safe)
-}
-
 fn file_name(name: &str, key: &str) -> String {
     format!("{name}-{key}.js")
 }
 
 /// The module file, relative to the workspace, as the fixer is told it.
-pub(super) fn relative_path(root: &Path, task: &str, contract: &Contract) -> String {
-    let path = chat_dir(root, task).join("modules").join(file_name(&contract.name, &contract.key));
-    path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/")
+pub(super) fn relative_path(root: &Path, task: &str, contract: &Contract) -> Result<String> {
+    let path = host_folder::chat_dir(root, task)?.join("modules").join(file_name(&contract.name, &contract.key));
+    Ok(path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/"))
 }
 
 fn write_file(root: &Path, task: &str, name: &str, key: &str, source: &str) -> Result<()> {
-    let dir = chat_dir(root, task).join("modules");
+    let dir = host_folder::chat_dir(root, task)?.join("modules");
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join(file_name(name, key)), source)?;
     Ok(())
@@ -107,7 +97,7 @@ async fn save(s: &Session<'_>, contract: &Contract, source: &str, fixed: bool) -
     .await?;
     write_file(s.state.workspace.root(), s.task, &contract.name, &contract.key, source)?;
     append(s, "module/saved", json!({"function":contract.name,"contract":contract.key,"version":version,
-        "path":relative_path(s.state.workspace.root(), s.task, contract),"fixed":fixed}), false).await?;
+        "path":relative_path(s.state.workspace.root(), s.task, contract)?,"fixed":fixed}), false).await?;
     Ok(version)
 }
 
@@ -148,8 +138,9 @@ pub(super) fn system_message(root: &Path, task: &str) -> Option<Value> {
 /// Make the chat folder hold the latest surviving version of each module,
 /// as after a rewind dropped later versions.
 pub(crate) fn rebuild(root: &Path, task: &str) -> Result<()> {
-    let dir = chat_dir(root, task).join("modules");
-    if dir.exists() {
+    if let Some(dir) = host_folder::existing_chat_dir(root, task).map(|dir| dir.join("modules"))
+        && dir.exists()
+    {
         std::fs::remove_dir_all(&dir)?;
     }
     let conn = agent_service::open_db(root)?;
@@ -161,7 +152,9 @@ pub(crate) fn rebuild(root: &Path, task: &str) -> Result<()> {
 
 /// The chat is gone, and so is its folder.
 pub(crate) fn remove(root: &Path, task: &str) {
-    let _ = std::fs::remove_dir_all(chat_dir(root, task));
+    if let Some(dir) = host_folder::existing_chat_dir(root, task) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// Calls that write or fix the same module take turns: one does it, the
@@ -351,7 +344,7 @@ pub(super) async fn failed(s: &Session<'_>, w: &mut Window, error: &Value, conso
     let (_, source) = latest(s.state.workspace.root(), s.task, &contract.key)?.context("module version missing")?;
     // The file is what the fixer edits; it starts as the version that failed.
     write_file(s.state.workspace.root(), s.task, &contract.name, &contract.key, &source)?;
-    let path = relative_path(s.state.workspace.root(), s.task, &contract);
+    let path = relative_path(s.state.workspace.root(), s.task, &contract)?;
     let bindings = program_flow::call_view(&task)?["bindings"].clone();
     let input = json!({
         "module":{"path":path,"signature":contract.signature,"contract":contract.description,"version":version,"source":source},
