@@ -127,6 +127,19 @@ fn tool_value(mut response: Value) -> Result<Value> {
 }
 struct Transport;
 impl crate::plugin_io::SessionIo for Transport {
+    fn authorize_page_tool<'a>(
+        &'a self, state: &'a AgentServiceState, task: &'a str, tool: &'a str, args: &'a Value,
+    ) -> futures::future::BoxFuture<'a, Result<Option<Value>>> {
+        Box::pin(async move {
+            let Some((conversation, plugin, c)) = bound(state.workspace.root(), task)? else { return Ok(None) };
+            if !c.supports("page_authorization") { return Ok(None) }
+            let prefix = format!("{}__", plugin.replace('-', "_"));
+            let raw = tool.strip_prefix(&prefix).context("page tool owner mismatch")?;
+            let answer = c.rpc("plugin/authorizePageTool", json!({"context":context(task,&conversation),"tool":raw,"arguments":args})).await?;
+            ensure!(answer["allowed"].is_boolean(), "plugin page authorization returned no decision");
+            Ok(Some(answer))
+        })
+    }
     fn execute<'a>(
         &'a self,
         state: &'a AgentServiceState,
@@ -642,12 +655,15 @@ mod tests {
                         plugin_calls.lock().unwrap().push((method.clone(), args.clone()));
                         let result = match method.as_str() {
                             "handshake" => json!({"version":1,"subject":"alice","state":"awaiting_confirmation","connection_id":"c-alice",
-                                "plugin":{"id":"review-lab","title":"Visual check","pages":[],"capabilities":["visual_review"],"tools":[
+                                "plugin":{"id":"review-lab","title":"Visual check","pages":[],"capabilities":["visual_review","page_authorization"],"tools":[
                                     {"name":"render","description":"Render pages","executor":"page","inputSchema":{"type":"object","properties":{"slides":{"type":"array","items":{"type":"integer"}}}}},
                                     {"name":"record","description":"Record a review","inputSchema":{"type":"object","properties":{"analysis_ids":{"type":"array"}}}}]}}),
                             "confirm" => json!({"state":"ready"}),
                             "identity" => json!({"subject":"alice"}),
                             "session" => json!({}),
+                            "authorizePageTool" => if args["arguments"]["slides"] == json!([99]) {
+                                json!({"allowed":false,"code":"WAITING_FOR_USER","question":"Confirm first"})
+                            } else { json!({"allowed":true}) },
                             "reviewBrief" => json!({"instructions":INSTRUCTIONS,
                                 "subjects":args["images"].as_array().unwrap().iter().map(|meta| subject(&meta["slide"])).collect::<Vec<_>>()}),
                             "call" => json!({"value":{"recorded":true}}),
@@ -667,6 +683,10 @@ mod tests {
                         if body["model"] == "vision-only" {
                             vision_bodies.lock().unwrap().push(body);
                             return Json(json!({"choices":[{"message":{"role":"assistant","content":VISION},"finish_reason":"stop"}]}));
+                        }
+                        if body["messages"].to_string().contains("WAIT_PLAN_TEST") {
+                            let args = json!({"source":"const lib = require(\"review_lab\");\ntry { await lib.render({slides:[99]}); } catch (e) { console.log('should not continue'); }"});
+                            return Json(json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"write-wait","type":"function","function":{"name":"write_program","arguments":args.to_string()}}]}}]}));
                         }
                         let n = rounds.fetch_add(1, Ordering::SeqCst);
                         let message = match n {
@@ -718,6 +738,8 @@ mod tests {
         let created = value(handle(&runtime, state.clone(), "review-lab", "session", headers("alice"),
             json!({"connection_handle":alice["connection_handle"],"method":"create","document":"D1"})).await.unwrap()).await;
         let task = created["task_id"].as_str().unwrap().to_owned();
+        let denied = crate::plugin_io::authorize_page_tool(&state, &task, "review_lab__render", &json!({"slides":[99]})).await.unwrap().unwrap();
+        assert_eq!(denied["code"], "WAITING_FOR_USER");
         crate::agent_service::open_db(&root)
             .unwrap()
             .execute(
@@ -765,6 +787,7 @@ mod tests {
         page.abort();
 
         let calls = plugin_calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|(method, args)| method == "authorizePageTool" && args["tool"] == "render" && args["arguments"]["slides"] == json!([1,2])), "the page tool was authorized before dispatch");
         let (_, brief_request) = calls
             .iter()
             .find(|(method, _)| method == "reviewBrief")
@@ -841,6 +864,18 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(forged.contains("Unknown analysis_id"), "{forged}");
+        let waiting = value(handle(&runtime, state.clone(), "review-lab", "session", headers("alice"),
+            json!({"connection_handle":alice["connection_handle"],"method":"create","document":"D2"})).await.unwrap()).await;
+        let waiting_task = waiting["task_id"].as_str().unwrap().to_owned();
+        crate::agent_service::open_db(&root).unwrap().execute("UPDATE agent_tasks SET status='running',model='fake' WHERE id=?1", [&waiting_task]).unwrap();
+        crate::single_agent::run_task(state.clone(), waiting_task.clone(), "fake".into(), "WAIT_PLAN_TEST".into(), 8,
+            tokio_util::sync::CancellationToken::new(), 1, false).await.unwrap();
+        let conn = crate::agent_service::open_db(&root).unwrap();
+        let output: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE task_id=?1 AND kind='assistant/message' ORDER BY seq DESC LIMIT 1", [&waiting_task], |r|r.get(0)).unwrap();
+        assert!(output.contains("Confirm first"), "the user sees the wait: {output}");
+        assert!(!output.contains("should not continue"), "a confirmation boundary cannot be swallowed by the program");
+        let dispatched = crate::page_tools::poll(&waiting_task, "page-1", std::time::Duration::from_millis(1)).await;
+        assert!(dispatched.as_ref().map_or(true, |value| value["calls"].as_array().is_none_or(|calls| calls.is_empty())), "the denied operation must never reach the page: {dispatched:?}");
         crate::page_tools::forget_task(&task);
         runtime.shutdown().unwrap();
         server.abort();

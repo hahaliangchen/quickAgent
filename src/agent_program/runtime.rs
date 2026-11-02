@@ -648,7 +648,7 @@ impl Runtime {
     /// other values as JSON. Only the latest lines are kept.
     fn print(&mut self, method: &str, args: &[VmValue]) -> Result<()> {
         const KEPT: usize = 200;
-        const LINE: usize = 2_000;
+        const LINE: usize = 100_000;
         let parts = args
             .iter()
             .map(|value| match value {

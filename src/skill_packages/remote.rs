@@ -154,6 +154,11 @@ pub(crate) fn mount_user_package(
             old.manifest.tools == package.manifest.tools,
             "Plugin tool manifest changed; reload plugin"
         );
+        ensure!(old.manifest.library == package.manifest.library, "Plugin library changed; reload plugin");
+        ensure!(old.remote.as_ref().is_some_and(|previous| previous.skill == connection.skill), "Plugin skill changed; reload plugin");
+        ensure!(old.native.as_ref().zip(package.native.as_ref()).is_some_and(|(previous, current)|
+            previous.tools.iter().all(|(name, tool)| current.tools.get(name).is_some_and(|next| next.definition == tool.definition))),
+            "Plugin tool contracts changed; reload plugin");
         return Ok(connection);
     }
     let parent = runtime
@@ -217,22 +222,17 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
         )
         .await?;
     ensure!(confirmed["state"] == "ready", "remote plugin not ready");
-    let skill_entry = plugin["skill"].as_str().unwrap_or_default();
+    let skill_entry = match plugin.get("skill") {
+        None | Some(Value::Null) => "",
+        Some(value) => value.as_str().context("plugin skill must be a resource path")?,
+    };
     if !skill_entry.trim().is_empty() {
-        match remote
+        let (_, body) = remote
             .asset("resource", &[("path", skill_entry.into())])
-            .await
-        {
-            Ok((_, body)) => {
-                ensure!(body.len() <= 128000, "remote skill body too large");
-                remote.skill = String::from_utf8(body)?;
-            }
-            Err(error)
-                if error
-                    .downcast_ref::<reqwest::Error>()
-                    .is_some_and(|e| e.status() == Some(reqwest::StatusCode::NOT_FOUND)) => {}
-            Err(error) => return Err(error),
-        }
+            .await.context("declared plugin skill is unavailable")?;
+        ensure!(body.len() <= 128000, "remote skill body too large");
+        remote.skill = String::from_utf8(body)?;
+        ensure!(!remote.skill.trim().is_empty(), "declared plugin skill is empty");
     }
     let description = if !remote.skill.trim().is_empty() {
         let fields = super::frontmatter(&remote.skill)?;
@@ -248,6 +248,21 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
             .unwrap_or("Remote plugin")
             .to_owned()
     };
+    if let Some(resources) = plugin.get("skill_resources") {
+        let resources = resources.as_array().context("skill_resources must be an array")?;
+        ensure!(!skill_entry.trim().is_empty(), "skill resources require a declared skill");
+        let mut seen = BTreeSet::new();
+        for resource in resources {
+            let path = resource.as_str().context("skill resource path must be a string")?;
+            ensure!(path.starts_with("skill:") && seen.insert(path), "invalid or duplicate skill resource");
+            let (_, body) = remote.asset("resource", &[("path", path.into())]).await
+                .with_context(|| format!("declared plugin skill resource {path} is unavailable"))?;
+            ensure!(!body.is_empty() && remote.skill.len() + body.len() <= 128000, "plugin skill resources are empty or too large");
+            let content = String::from_utf8(body).context("plugin skill resource must be UTF-8")?;
+            ensure!(!content.trim().is_empty(), "plugin skill resource {path} is empty");
+            remote.skill.push_str(&format!("\n\n## Plugin skill resource: {path}\n\n{content}"));
+        }
+    }
     remote.capabilities = plugin["capabilities"]
         .as_array()
         .into_iter()
@@ -260,6 +275,10 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
         .as_array()
         .context("remote tools required")?
         .clone();
+    if !definitions.is_empty() {
+        let library = plugin["library"].as_str().map(str::to_owned).unwrap_or_else(|| crate::agent_program::libraries::namespace(&id));
+        ensure!(crate::agent_program::libraries::valid_namespace(&library), "invalid plugin library namespace");
+    }
     let mut names = Vec::new();
     let mut mapped = Vec::new();
     for mut definition in definitions {
@@ -271,6 +290,7 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
             !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
             "invalid remote tool name"
         );
+        ensure!(crate::agent_program::libraries::identifier(&raw) && !crate::agent_program::libraries::reserved(&raw), "remote tool is not a valid library method");
         let name = format!("{prefix}__{raw}");
         ensure!(
             name.len() <= 64 && !names.contains(&name),
@@ -535,7 +555,7 @@ mod tests {
         routing::{get, post},
     };
     #[tokio::test]
-    async fn remote_plugins_may_omit_or_not_have_a_skill_resource() {
+    async fn remote_plugins_may_omit_a_skill_but_declared_missing_skills_fail() {
         for entry in [None, Some("skill:missing.md")] {
             let app=Router::new().route("/api/plugin/{method}",post(move|Path(method):Path<String>,Json(body):Json<Value>|async move {
                 let value=if method=="handshake" {
@@ -548,12 +568,17 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let package = connect(Config {
+            let result = connect(Config {
                 url: format!("http://{address}"),
                 token: "test".into(),
             })
-            .await
-            .unwrap();
+            .await;
+            if entry.is_some() {
+                assert!(format!("{:#}", result.err().expect("declared missing skill must fail")).contains("declared plugin skill is unavailable"));
+                server.abort();
+                continue;
+            }
+            let package = result.unwrap();
             assert!(
                 package.remote.as_ref().unwrap().skill.is_empty(),
                 "tool mapping must not fabricate missing MD"
@@ -561,6 +586,25 @@ mod tests {
             assert_eq!(package.manifest.tools, vec!["plain_page__ping"]);
             server.abort();
         }
+    }
+    #[tokio::test]
+    async fn a_declared_skill_resource_must_load_with_the_plugin() {
+        let app = Router::new().route("/api/plugin/{method}", post(|Path(method):Path<String>, Json(body):Json<Value>| async move {
+            let value = if method == "handshake" {
+                json!({"version":1,"subject":"user","state":"awaiting_confirmation","connection_id":"c","plugin":{"id":"sample","skill":"skill:SKILL.md","skill_resources":["skill:references/workflow.md"],"pages":[],"tools":[]}})
+            } else { json!({"state":"ready"}) };
+            Json(json!({"type":"server-response","rpcId":body["rpcId"],"result":{"ok":true,"value":value}}))
+        })).route("/resource", get(|axum::extract::Query(query):axum::extract::Query<std::collections::HashMap<String,String>>| async move {
+            if query.get("path").is_some_and(|p| p == "skill:SKILL.md") {
+                (axum::http::StatusCode::OK, "---\nname: sample\ndescription: test\n---\nInstructions")
+            } else { (axum::http::StatusCode::NOT_FOUND, "missing") }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let error = connect(Config { url: format!("http://{address}"), token: "test".into() }).await.err().expect("missing required resource must fail");
+        assert!(format!("{error:#}").contains("skill:references/workflow.md"));
+        server.abort();
     }
     #[tokio::test]
     async fn remote_contract_is_generic_and_preserves_business_arguments() {
@@ -572,14 +616,16 @@ mod tests {
                 assert!(!headers.contains_key("x-ppt-connection"));
                 assert_eq!(body["method"],format!("plugin/{method}"));
                 let value=match method.as_str() {
-                    "handshake"=>json!({"version":1,"subject":"user-a","state":"awaiting_confirmation","connection_id":"test-connection","plugin":{"id":"note-book","library":"notes","title":"Notes","skill":"skill:SKILL.md","pages":[],"tools":[{"name":"read_file","description":"Read a note","inputSchema":{"type":"object","properties":{"document":{"type":"string"}},"required":["document"],"additionalProperties":false},"outputSchema":{"type":"object","properties":{"content":{"type":"string"}},"required":["content"]}}]}}),
+                    "handshake"=>json!({"version":1,"subject":"user-a","state":"awaiting_confirmation","connection_id":"test-connection","plugin":{"id":"note-book","library":"notes","title":"Notes","skill":"skill:SKILL.md","skill_resources":["skill:references/workflow.md"],"pages":[],"tools":[{"name":"read_file","description":"Read a note","inputSchema":{"type":"object","properties":{"document":{"type":"string"}},"required":["document"],"additionalProperties":false},"outputSchema":{"type":"object","properties":{"content":{"type":"string"}},"required":["content"]}}]}}),
                     "confirm"=>json!({"state":"ready"}),
                     "call"=>{assert_eq!(headers["x-plugin-connection"],"test-connection");received.lock().unwrap().push(body["payload"]["args"].clone());json!({"value":{"content":"note text"}})},
                     _=>panic!("unexpected method {method}")
                 };
                 Json(json!({"type":"server-response","rpcId":body["rpcId"],"result":{"ok":true,"value":value}}))
             }
-        })).route("/resource",get(||async{"---\nname: note-book\ndescription: Notes only\n---\nUse read_file."}));
+        })).route("/resource",get(|axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String,String>>|async move {
+            if query.get("path").is_some_and(|p| p == "skill:SKILL.md") { "---\nname: note-book\ndescription: Notes only\n---\nUse read_file." } else { "Required workflow instructions." }
+        }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -607,6 +653,7 @@ mod tests {
                 .unwrap()
                 .contains("`notes.read_file(args)`")
         );
+        assert!(read["content"].as_str().unwrap().contains("Required workflow instructions."));
         assert!(!read.to_string().contains("test-secret"));
         let tools = catalog
             .packages

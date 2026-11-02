@@ -14,11 +14,11 @@ import chatCss from '../dsh/chat/ChatView.module.css'
 import messageCss from '../dsh/chat/MessageItem.module.css'
 import { markdownLabels } from '../dsh/markdown-labels.ts'
 import { t } from '../i18n.ts'
-import { awaitingModel, chatItems, flattenItems, formatDuration, splitTurnItems, type ChatItem, type TurnEndReason } from '../model.ts'
+import { awaitingModel, chatItems, failedToolNames, flattenItems, formatDuration, splitTurnItems, type ChatItem, type TurnEndReason } from '../model.ts'
 import { useTaskDuration } from '../useTaskDuration.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
 import css from './ChatView.module.css'
-import { ProcessList, liveActivity } from './ProcessList.tsx'
+import { ProcessList, liveActivity, toolProgressLabel } from './ProcessList.tsx'
 import { ToolRow } from './ToolRow.tsx'
 import { NoteProposal } from './NoteProposal.tsx'
 import { ApprovalCards } from './ApprovalCards.tsx'
@@ -255,6 +255,15 @@ function AssistantTurnView({
           />
         </div>
       )}
+
+      {isTurnRunning && conclusion?.streaming && !!conclusion.toolProgress?.length && (
+        <div className={css.inFlightAnalyzing} role="status">{toolProgressLabel(conclusion)}</div>
+      )}
+
+      {turn.closed && turn.turnEnd?.reason.kind === 'completed' && (() => {
+        const names = failedToolNames(turn.entries)
+        return names.length > 0 ? <p className={css.turnNote} role="status">本轮曾有工具调用失败（{names.join('、')}）；请查看执行过程，确认是否已解决及相关检查是否完成。</p> : null
+      })()}
 
       {/* 4. In-flight Indicator when concluding text hasn't arrived yet (Figure 2) */}
       {isTurnRunning && conclusionText === '' && (

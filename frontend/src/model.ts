@@ -34,6 +34,8 @@ export interface AssistantItem {
   readonly reasoning: string
   readonly time: number
   readonly streaming: boolean
+  /** Metadata for arguments currently being generated; never the arguments themselves. */
+  readonly toolProgress?: readonly { readonly name: string; readonly argumentBytes: number }[] | undefined
   readonly turn: number
   readonly step: number
   /** The function frame whose AI wrote it. */
@@ -102,6 +104,12 @@ export function splitTurnItems(items: readonly ChatItem[]): {
   return last?.kind === 'assistant' && last.text.trim() !== '' && !PROGRAM_FENCE.test(last.text)
     ? { process: items.slice(0, -1), conclusion: last }
     : { process: items, conclusion: undefined }
+}
+
+/** Failures are historical facts, even if the agent may have recovered later. */
+export function failedToolNames(items: readonly ChatItem[]): string[] {
+  return [...new Set(flattenItems(items).flatMap(item =>
+    item.kind === 'tool' && item.result?.isError ? [item.name] : []))]
 }
 
 /** A step of the process: one model reply with the tools it called, or calls nobody's reply made. */
@@ -386,14 +394,18 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
         const step = numberOf(event.data.step) ?? 0
         const piece = stringOf(event.data.text) ?? ''
         const reasoningPiece = stringOf(event.data.reasoning) ?? ''
+        const toolProgress = Array.isArray(event.data.tool_progress) ? event.data.tool_progress.map(value => {
+          const tool = recordOf(value)
+          return { name: stringOf(tool.name) ?? '', argumentBytes: numberOf(tool.argument_bytes) ?? 0 }
+        }) : undefined
         const slot = `${frame ?? ''}:${turn}:${step}`
         const index = streaming.get(slot)
         const open = index === undefined ? undefined : items[index]
         if (index !== undefined && open?.kind === 'assistant') {
-          items[index] = { ...open, text: open.text + piece, reasoning: open.reasoning + reasoningPiece, time: event.time }
-        } else if (piece !== '' || reasoningPiece !== '') {
+          items[index] = { ...open, text: open.text + piece, reasoning: open.reasoning + reasoningPiece, toolProgress: toolProgress ?? open.toolProgress, time: event.time }
+        } else if (piece !== '' || reasoningPiece !== '' || toolProgress !== undefined) {
           streaming.set(slot, items.length)
-          items.push({ kind: 'assistant', key, text: piece, reasoning: reasoningPiece, time: event.time, streaming: true, turn, step, frame })
+          items.push({ kind: 'assistant', key, text: piece, reasoning: reasoningPiece, toolProgress, time: event.time, streaming: true, turn, step, frame })
         }
         break
       }

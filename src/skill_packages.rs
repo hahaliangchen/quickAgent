@@ -73,7 +73,7 @@ fn frontmatter(raw: &str) -> Result<Value> {
         .0;
     Ok(serde_yaml::from_str(front)?)
 }
-/// An absent instruction file is a normal plugin capability, not a failure.
+/// A plugin may omit a skill, but a declared skill must exist and be usable.
 fn optional_instructions(root: &Path, entry: &str) -> Result<Option<(PathBuf, String)>> {
     if entry.trim().is_empty() {
         return Ok(None);
@@ -82,10 +82,10 @@ fn optional_instructions(root: &Path, entry: &str) -> Result<Option<(PathBuf, St
     match std::fs::read_to_string(&path) {
         Ok(body) => {
             ensure!(body.len() <= 128000, "skill body too large");
-            Ok((!body.trim().is_empty()).then_some((path, body)))
+            ensure!(!body.trim().is_empty(), "declared skill is empty: {entry}");
+            Ok(Some((path, body)))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error).with_context(|| format!("declared skill is unavailable: {entry}")),
     }
 }
 fn load_with(root: &Path, origin: Origin, native: Option<NativeBackend>) -> Result<Package> {
@@ -977,7 +977,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn plugins_without_instruction_files_still_mount_and_expose_their_pages() {
+    fn plugins_may_omit_skills_but_declared_skills_must_exist_and_be_nonempty() {
         let root = std::env::temp_dir().join(format!(
             "optional-skill-{}",
             crate::agent_service::uuid_like()
@@ -991,7 +991,12 @@ mod tests {
                 manifest["skill"] = json!(entry)
             }
             std::fs::write(root.join("plugin.json"), manifest.to_string()).unwrap();
-            let mut package = load(&root).unwrap();
+            let result = load(&root);
+            if entry.is_some() {
+                assert!(result.is_err(), "a declared missing or empty skill must fail");
+                continue;
+            }
+            let mut package = result.unwrap();
             package.scope = Some(42);
             let registry = Registry::default();
             registry

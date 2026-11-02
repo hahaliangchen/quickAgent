@@ -703,6 +703,14 @@ impl ChatStream {
         self.tools.values().map(|tool| tool.arguments.len()).sum()
     }
 
+    /// Progress metadata only: partial arguments may contain private source or secrets.
+    pub fn tool_progress(&self) -> Value {
+        self.tools.values().map(|tool| json!({
+            "name": tool.name,
+            "argument_bytes": tool.arguments.len()
+        })).collect()
+    }
+
     /// Statistics so far; also saved for a cancelled or timed-out request.
     pub fn stats(&self) -> Value {
         json!({"response_format":self.format_name(),"finish_reason":self.finish_reason,"received_done":self.received_done,
@@ -806,6 +814,9 @@ mod tests {
             .push(tool_event(0, None, "{\"content\":").as_bytes())
             .unwrap();
         assert!(arguments.tool_call);
+        assert_eq!(stream.tool_progress(), json!([{"name":"write_file","argument_bytes":11}]));
+        stream.push(tool_event(0, None, "\"你好\"").as_bytes()).unwrap();
+        assert_eq!(stream.tool_progress(), json!([{"name":"write_file","argument_bytes":19}]));
     }
 
     fn responses_events(events: &[Value]) -> String {

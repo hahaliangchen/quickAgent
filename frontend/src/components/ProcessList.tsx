@@ -45,12 +45,20 @@ export function liveActivity(items: readonly ChatItem[]): string {
       return [label.title, label.summary].filter(Boolean).join(' · ')
     }
     if (item.kind === 'assistant') {
+      if (item.streaming && item.toolProgress?.length) return toolProgressLabel(item)
       if (PROGRAM_FENCE.test(item.text)) return '编写程序'
       const line = item.text.trim() !== '' ? firstLine(item.text) : reasoningHeadline(item.reasoning)
       if (line !== '') return line
     }
   }
   return ''
+}
+
+export function toolProgressLabel(reply: AssistantItem): string {
+  return (reply.toolProgress ?? []).map(tool => {
+    const action = tool.name === 'write_program' ? '正在编写程序' : tool.name === 'write_file' ? '正在编写文件' : `正在生成工具调用${tool.name ? ` ${tool.name}` : ''}`
+    return `${action} · 已生成 ${tool.argumentBytes.toLocaleString()} 字节`
+  }).join('；')
 }
 
 function toolsTitle(tools: readonly ToolItem[]): string {
@@ -114,7 +122,7 @@ const Thought = memo(function Thought({ reply, tools, closed, onOpenTask }: {
   return (
     <div className={toolCss.root} data-tone="context" data-state={running ? 'running' : failed ? 'error' : 'ok'}>
       <DisclosureRow rowClassName={toolCss.row} leadingClassName={toolCss.leading} titleClassName={toolCss.title} chevronClassName={toolCss.chevron}
-        icon={<IconThinkOutlineRegular size={14} />} title={headline === '' ? '思考' : headline} running={running}
+        icon={<IconThinkOutlineRegular size={14} />} title={reply.streaming && reply.toolProgress?.length ? toolProgressLabel(reply) : headline === '' ? '思考' : headline} running={running}
         open={expanded} expandable expandOnRowClick keepContentWhenOpen onToggle={toggle}
         collapsedContent={tools.length > 0 && <><Separator /><span className={`${toolCss.summary} ${failed ? toolCss.errorSummary : ''}`}>{toolsSummary(tools)}</span></>}>
         {expanded && (

@@ -4,7 +4,7 @@ import test from 'node:test'
 import ts from 'typescript'
 const source = await readFile(new URL('../src/model.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
-const { chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+const { chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
 
 let seq = 0
 const event = (type, data) => ({ seq: ++seq, time: 1000 + seq, type, data: { turn: 1, ...data } })
@@ -16,6 +16,25 @@ const call = (frameId, callId, name, args, extra = {}) =>
 const result = (frameId, callId, text, isError = false) =>
   event('tool/result', { task_node_id: frameId, message: { role: 'tool', toolCallId: callId, isError, content: [{ type: 'text', text }] } })
 const program = '```js\nimport * as io from "host:io";\nconst cli = await io.read({path:"cli.js"});\nawait implementWatch(cli);\n\n/** @virtual */\nasync function implementWatch(cli) {\n  // Add --watch to the CLI.\n}\n```'
+
+test('tool argument progress grows without exposing arguments and closes when the message arrives', () => {
+  seq = 0
+  const events = [event('assistant/delta', { step: 1, task_node_id: 'main', tool_progress: [{ name: 'write_file', argument_bytes: 10 }] }),
+    event('assistant/delta', { step: 1, task_node_id: 'main', tool_progress: [{ name: 'write_file', argument_bytes: 120 }] })]
+  const live = chatItems(events)
+  assert.equal(live.length, 1)
+  assert.deepEqual(live[0].toolProgress, [{ name: 'write_file', argumentBytes: 120 }])
+  assert.equal(live[0].streaming, true)
+  const done = chatItems([...events, reply('main', 1, null, '')])
+  assert.equal(done[0].streaming, false)
+})
+
+test('completed turns can report tool failures without claiming they were not recovered', () => {
+  seq = 0
+  const items = chatItems([call('main', 'c1', 'browser', {}), result('main', 'c1', 'unavailable', true),
+    call('main', 'c2', 'list_dir', {}), result('main', 'c2', '{}')])
+  assert.deepEqual(failedToolNames(items), ['browser'])
+})
 
 /** The shape of a real turn: the main AI looks around, writes a program, the program reads a file and calls a virtual function. */
 function turn() {

@@ -3095,6 +3095,15 @@ const result = console.error("x") === undefined;
 }
 
 #[test]
+fn console_retains_large_lines_up_to_one_hundred_thousand_characters() {
+    let mut run = runtime("console.log('页'.repeat(99999)); console.log('x'.repeat(100001));");
+    assert!(matches!(run.next(), State::Returned(_)));
+    assert_eq!(run.logs()[0].chars().count(), 99_999);
+    assert_eq!(run.logs()[1].chars().count(), 100_001);
+    assert!(run.logs()[1].ends_with('…'));
+}
+
+#[test]
 fn a_module_and_a_virtual_are_told_apart_by_their_declaration() {
     let program = compile("import * as io from \"host:io\";\nconst a = await summarize([\"x\"]);\nconst b = await judge(\"x\");\n\n/** @module */\nasync function summarize(paths) {\n  // Summarize the files. Returns {summary:string}.\n}\n\n/** @virtual */\nasync function judge(path) {\n  // Judge the file. Returns {keep:boolean}.\n}").unwrap();
     let summarize = &program.functions["summarize"];

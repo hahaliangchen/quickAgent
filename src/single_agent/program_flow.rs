@@ -843,6 +843,17 @@ pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window, step: usize) -> 
     save(s, w).await
 }
 async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value) -> Result<Round> {
+    if w.program_task.is_none() {
+        // A successful main program is one piece of work, not necessarily the
+        // end of the user's task. Give its actual result back to its author.
+        let text = outcome(s, &printed(w), Ok(&value))?;
+        w.program = None;
+        w.program_value = None;
+        let seq = append(s, "program/result", json!({"turn":s.turn,"step":step,"task_node_id":w.task_node_id,"result":value,"output":text}), false).await?;
+        w.messages.push(sourced(json!({"role":"user","name":"program_result","content":text}), s.task, seq));
+        save(s, w).await?;
+        return Ok(Round::Continue);
+    }
     let (text, shown) = if w.program_task.is_some() {
         (serde_json::to_string(&value)?, None)
     } else {
@@ -981,6 +992,12 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                 // The host links the library itself; no tool runs and no AI sees it.
                 ActionKind::Require { library } => {
                     let (value, failed) = link(s, &super::tools(s, w), library);
+                    if failed && s.plugin.as_ref().is_some_and(|owner| packages(s).as_array().into_iter().flatten().any(|package| {
+                        package["id"] == *owner && package["tools"].as_array().is_some_and(|tools| !tools.is_empty())
+                            && package["library"].as_str().map(str::to_owned).unwrap_or_else(|| agent_program::libraries::namespace(owner)) == library.trim_end_matches("/promises")
+                    })) {
+                        anyhow::bail!("PLUGIN_UNAVAILABLE: declared plugin library {library} is unavailable in this execution");
+                    }
                     append(s, "program/require", json!({"library":library,"result":value,"failed":failed,"program_location":at}), false).await?;
                     w.program.as_mut().unwrap().resume(value, failed)?;
                     save(s, w).await?;
@@ -1011,6 +1028,14 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
             let definitions = super::tools(s, w);
             let done = super::execute_call(s, w, &definitions, &node, step, &call, 1, Some(&at)).await?;
             super::stop_on_conflict(s, &done.result).await?;
+            if done.result["host_denied"] == true && done.result["code"] == WAITING && w.program_task.is_none() {
+                // A plugin's explicit user-confirmation boundary stops the
+                // main program even if its JavaScript would catch errors.
+                let mut waiting = done.result.clone();
+                locate_question(&action, &mut waiting);
+                let (text, shown) = (outcome(s, &printed(w), Err(&waiting))?, outcome(s, &[], Err(&waiting))?);
+                return end_program(s, w, step, Value::Null, text, Some(shown)).await;
+            }
             // A resumed program's error rises as it was, so a question keeps its code.
             let (result, is_error) = match w.resumed.take() {
                 Some((error, true)) => (error, true),
@@ -1468,6 +1493,55 @@ mod tests {
         conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
         run_task(state, "task".into(), "fake".into(), "Summarize a and b".into(), 20, CancellationToken::new(), 1, false).await.unwrap();
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn main_program_results_go_back_to_the_model_before_the_next_program() {
+        let root = TestRoot::new();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        run_scripted(root.path(), move |body| {
+            match count.fetch_add(1, Ordering::SeqCst) {
+                0 => reply("```js\nconsole.log(\"discovered: alpha\");\n```".into()),
+                1 => {
+                    assert!(body["messages"].as_array().unwrap().iter().any(|m|
+                        m["name"] == "program_result" && m["content"].as_str().unwrap_or("").contains("discovered: alpha")));
+                    reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"result.txt\", content: \"alpha\"});\n```".into())
+                }
+                2 => {
+                    assert!(body["messages"].to_string().contains("result.txt"));
+                    reply("Done after both programs.".into())
+                }
+                _ => panic!("unexpected additional request"),
+            }
+        }).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        assert_eq!(std::fs::read_to_string(root.path().join("result.txt")).unwrap(), "alpha");
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let count: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='program/result'", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
+        let answer: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(answer, "Done after both programs.");
+    }
+
+    #[tokio::test]
+    async fn a_long_console_line_reaches_the_next_model_request() {
+        let root = TestRoot::new();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        run_scripted(root.path(), move |body| {
+            match count.fetch_add(1, Ordering::SeqCst) {
+                0 => reply("```js\nconsole.log('A'.repeat(7000) + 'END_OF_PAGE');\n```".into()),
+                1 => {
+                    let result = body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "program_result").unwrap()["content"].as_str().unwrap();
+                    assert!(result.contains("END_OF_PAGE"));
+                    assert!(!result.ends_with('…'));
+                    reply("Done.".into())
+                }
+                _ => panic!("unexpected additional request"),
+            }
+        }).await;
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

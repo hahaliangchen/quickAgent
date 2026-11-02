@@ -1453,6 +1453,8 @@ pub(crate) async fn consume_model_stream_observed(
     let mut delta_reasoning = String::new();
     let mut last_flush = Instant::now();
     let mut flushed = false;
+    let mut tool_dirty = false;
+    let mut last_tool_flush = Instant::now();
 
     while !accumulator.received_done() {
         if let Some(log) = diagnostics {
@@ -1479,11 +1481,13 @@ pub(crate) async fn consume_model_stream_observed(
         }
         delta_text.push_str(&delta.text);
         delta_reasoning.push_str(&delta.reasoning);
-        let ready = !delta_text.is_empty() || !delta_reasoning.is_empty();
+        tool_dirty |= delta.tool_call;
+        let tool_due = tool_dirty && (!flushed || last_tool_flush.elapsed() >= Duration::from_millis(500));
+        let ready = !delta_text.is_empty() || !delta_reasoning.is_empty() || tool_due;
         let due = !flushed
             || last_flush.elapsed() >= Duration::from_millis(80)
             || delta_text.len() + delta_reasoning.len() >= 32;
-        if ready && due {
+        if ready && (due || tool_due) {
             if let Some(log) = diagnostics {
                 log.phase("event_persistence");
             }
@@ -1491,11 +1495,13 @@ pub(crate) async fn consume_model_stream_observed(
                 root,
                 task_id,
                 "assistant/delta",
-                json!({"turn":turn,"step":step,"task_node_id":frame,"text":delta_text,"reasoning":delta_reasoning}),
+                json!({"turn":turn,"step":step,"task_node_id":frame,"text":delta_text,"reasoning":delta_reasoning,
+                    "tool_progress": if tool_dirty { accumulator.tool_progress() } else { Value::Null }}),
             )
             .await?;
             delta_text.clear();
             delta_reasoning.clear();
+            if tool_dirty { last_tool_flush = Instant::now(); tool_dirty = false; }
             last_flush = Instant::now();
             flushed = true;
         }
@@ -1701,6 +1707,52 @@ pub(crate) async fn execute_tool(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tool_argument_progress_is_emitted_before_the_call_finishes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = std::env::temp_dir().join(format!("agent-tool-progress-{}", uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES('task','','test','running',0,0)", []).unwrap();
+        drop(conn);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
+            let data = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"write_file","arguments":"{\"content\":\"secret"}}]}}]});
+            socket.write_all(format!("data: {data}\n\n").as_bytes()).await.unwrap();
+            let _ = wait.await;
+            let data = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]},"finish_reason":"tool_calls"}]});
+            socket.write_all(format!("data: {data}\n\ndata: [DONE]\n\n").as_bytes()).await.unwrap();
+        });
+        let response = reqwest::get(format!("http://{address}/")).await.unwrap();
+        let root_for_task = root.clone();
+        let consumer = tokio::spawn(async move {
+            consume_model_stream_observed(response, &root_for_task, "task", 1, 1, Some("main"), &CancellationToken::new(), None).await.unwrap()
+        });
+        let progress = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let conn = open_db(&root).unwrap();
+                let value: Option<String> = conn.query_row("SELECT data FROM agent_task_events WHERE task_id='task' AND kind='assistant/delta' ORDER BY seq DESC LIMIT 1", [], |row| row.get(0)).ok();
+                if let Some(value) = value { break serde_json::from_str::<Value>(&value).unwrap(); }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        assert!(!consumer.is_finished(), "the progress must arrive while the provider is still writing");
+        assert_eq!(progress["tool_progress"][0]["name"], "write_file");
+        assert_eq!(progress["tool_progress"][0]["argument_bytes"], 18);
+        assert!(!progress.to_string().contains("secret"));
+        release.send(()).unwrap();
+        let (message, _) = consumer.await.unwrap();
+        assert_eq!(message["tool_calls"][0]["function"]["arguments"], "{\"content\":\"secret\"}");
+        server.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     pub(crate) fn test_state(
         root: &std::path::Path,

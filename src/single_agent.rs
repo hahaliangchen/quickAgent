@@ -340,6 +340,14 @@ fn page_allows(s: &Session<'_>, name: &str) -> bool {
             .is_some_and(|c| c.packages.owns_tool(owner, name))
 }
 
+fn library_load_example(library: &str) -> String {
+    if crate::agent_program::libraries::builtin().contains_key(library) {
+        format!("import * as {library} from \"host:{library}\";")
+    } else {
+        format!("const {library} = require(\"{library}\");")
+    }
+}
+
 fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str) -> Result<()> {
     if !page_allows(s, name) {
         // A library method called as a tool: say how it is called instead.
@@ -348,8 +356,9 @@ fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str)
             .or_else(|| crate::agent_program::libraries::target(&libraries, name).map(|_| name.to_owned()));
         if let Some(method) = method {
             let library = method.split('.').next().unwrap_or_default();
+            let load = library_load_example(library);
             anyhow::bail!(
-                "NOT_A_TOOL: {method} is a library method, not a tool. Call it in a program you hand over with write_program, such as\nimport * as {library} from \"host:{library}\";\nconst result = await {method}({{...}});\nread_tool_contracts gives its arguments and result."
+                "NOT_A_TOOL: {method} is a library method, not a tool. Call it in a program you hand over with write_program, such as\n{load}\nconst result = await {method}({{...}});\nread_tool_contracts gives its arguments and result."
             );
         }
         anyhow::bail!("PLUGIN_SCOPE_DENIED: tool {name} does not belong to this conversation's plugin");
@@ -528,6 +537,19 @@ async fn activate_page_plugin(s: &Session<'_>, w: &mut Window) -> Result<()> {
         return Ok(());
     };
     let owner = s.plugin.as_ref().unwrap();
+    let registry = &s.state.tool_catalog.as_ref().context("plugin registry unavailable")?.packages;
+    let packages = registry.catalog();
+    let declared = packages.as_array().into_iter().flatten().find(|package| package["id"] == *owner)
+        .context("activated plugin is unavailable")?;
+    let methods = declared["tools"].as_array().context("plugin tool manifest unavailable")?;
+    if !methods.is_empty() {
+        let library = declared["library"].as_str().map(str::to_owned).unwrap_or_else(|| crate::agent_program::libraries::namespace(owner));
+        let definitions = registry.tools(&registry.enabled());
+        let bindings = crate::agent_program::libraries::catalog(&definitions, &packages);
+        let supplied = bindings.get(&library).context("activated plugin library is unavailable or conflicts with another library")?;
+        ensure!(methods.iter().all(|method| method.as_str().is_some_and(|name| supplied.values().any(|tool| tool == name))),
+            "activated plugin library is missing a declared method");
+    }
     let scope = material["package_scope"]
         .as_u64()
         .context("plugin is not mounted")?;
@@ -570,8 +592,7 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     // AI's; a function that needs them requires the library itself.
     let plugin_error = match page_plugin_material(s) {
         Ok(Some(material)) => {
-            if role == "main"
-                && let Some(content) = material["content"]
+            if let Some(content) = material["content"]
                     .as_str()
                     .filter(|v| !v.trim().is_empty())
             {
@@ -1278,6 +1299,11 @@ async fn business_tool(
         if let Some(catalog) = &s.state.tool_catalog
             && let Some(page_name) = catalog.packages.page_tool(name)
         {
+            if let Some(decision) = crate::plugin_io::authorize_page_tool(s.state, s.task, name, &args).await?
+                && decision["allowed"] == false
+            {
+                return Ok(json!({"host_denied":true,"code":decision["code"],"message":decision["message"],"question":decision["question"]}));
+            }
             let supplied = args.clone();
             let answer = match crate::page_tools::call(s.task, &page_name, args, s.cancel).await {
                 Ok(answer) => answer,
@@ -2382,7 +2408,15 @@ async fn execute_call(
             },
         }
     }.await;
-    let is_error = output.is_err() || output.as_ref().is_ok_and(|value| value["error_code"] == "ASSET_CONFLICT");
+    // An activated plugin's transport disappearing is a session failure, not
+    // a model-repairable tool error. Never let the model guess a replacement.
+    if let Err(error) = &output
+        && s.plugin.as_ref().is_some_and(|owner| s.state.tool_catalog.as_ref().is_some_and(|catalog| catalog.packages.owns_tool(owner, &call.name)))
+        && (error.downcast_ref::<reqwest::Error>().is_some() || format!("{error:#}").contains("Plugin login expired"))
+    {
+        anyhow::bail!("PLUGIN_UNAVAILABLE: {error:#}");
+    }
+    let is_error = output.is_err() || output.as_ref().is_ok_and(|value| value["error_code"] == "ASSET_CONFLICT" || value["host_denied"] == true);
     let result = output.unwrap_or_else(|error| {
             json!({"error":format!("{error:#}")})
     });
@@ -3039,6 +3073,7 @@ mod tests {
             let received=received.clone();let instructions=instructions.clone();async move {
                 let mut requests=received.lock().unwrap();let n=requests.len();
                 let messages=body["messages"].as_array().unwrap();
+                assert!(messages.iter().any(|m| m["role"] == "system" && m["content"].as_str().is_some_and(|text| text.contains("The host has already opened this request"))), "plugin instructions never replace the core agent prompt");
                 let skill=messages.iter().filter(|m|m["name"]=="plugin_instructions").collect::<Vec<_>>();
                 assert_eq!(skill.len(),1);assert_eq!(skill[0]["role"],"system");assert_eq!(skill[0]["content"],instructions);
                 assert!(requirable(&body,"flow"),"the page's plugin library can be required from the first request");
@@ -4032,6 +4067,7 @@ mod tests {
 
     #[test]
     fn a_library_method_called_as_a_tool_is_told_how_to_call_it() {
+        assert_eq!(library_load_example("ppt_master"), "const ppt_master = require(\"ppt_master\");");
         let root = std::env::temp_dir().join(format!("not-a-tool-{}", agent_service::uuid_like()));
         std::fs::create_dir_all(&root).unwrap();
         let state = agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());

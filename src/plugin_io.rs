@@ -10,6 +10,12 @@ use std::{
 };
 
 pub trait SessionIo: Send + Sync {
+    /// Ask the plugin whether a page-owned operation may run in this session.
+    fn authorize_page_tool<'a>(
+        &'a self, _state: &'a AgentServiceState, _task: &'a str, _tool: &'a str, _args: &'a Value,
+    ) -> BoxFuture<'a, Result<Option<Value>>> {
+        Box::pin(async { Ok(None) })
+    }
     fn execute<'a>(
         &'a self,
         state: &'a AgentServiceState,
@@ -57,6 +63,12 @@ pub trait SessionIo: Send + Sync {
         _images: &'a Value,
     ) -> BoxFuture<'a, Result<Option<Value>>> {
         Box::pin(async { Ok(None) })
+    }
+}
+pub async fn authorize_page_tool(state: &AgentServiceState, task: &str, tool: &str, args: &Value) -> Result<Option<Value>> {
+    match adapter(state, task)? {
+        Some(adapter) => adapter.authorize_page_tool(state, task, tool, args).await,
+        None => Ok(None),
     }
 }
 fn adapters() -> &'static RwLock<BTreeMap<String, Arc<dyn SessionIo>>> {
