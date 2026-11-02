@@ -2008,6 +2008,11 @@ pub async fn run(
             "/agent/tasks/{task_id}/skill-draft",
             post(crate::flow_skills::draft),
         )
+        .route("/agent/tasks/{task_id}/programs", get(crate::workflow_drafts::programs))
+        .route("/agent/tasks/{task_id}/workflow-drafts", post(crate::workflow_drafts::create))
+        .route("/agent/workflow-drafts", get(crate::workflow_drafts::list))
+        .route("/agent/workflow-drafts/{id}", get(crate::workflow_drafts::read))
+        .route("/agent/workflow-drafts/{id}/chat", post(crate::workflow_drafts::chat))
         .route(
             "/agent/tasks/{task_id}/skills",
             post(crate::flow_skills::save_route),

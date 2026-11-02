@@ -28,6 +28,30 @@
       "port": 3101
     },
     {
+      "name": "workbench-check",
+      "runtimeExecutable": "E:/application/Git/usr/bin/env.exe",
+      "runtimeArgs": [
+        "WORKSPACE_ROOT=C:/Users/Admin/AppData/Local/Temp/wb-root",
+        "AGENT_BIND=127.0.0.1:3102",
+        "MCP_BIND=127.0.0.1:3103",
+        "AGENT_WEB_DIR=C:/Users/Admin/AppData/Local/Temp/wb-web",
+        "target/workbench-check/debug/codex-workspace-mcp.exe"
+      ],
+      "port": 3102
+    },
+    {
+      "name": "workbench-check-long",
+      "runtimeExecutable": "E:/application/Git/usr/bin/env.exe",
+      "runtimeArgs": [
+        "WORKSPACE_ROOT=C:/Users/Admin/AppData/Local/Temp/wb-root2",
+        "AGENT_BIND=127.0.0.1:3104",
+        "MCP_BIND=127.0.0.1:3105",
+        "AGENT_WEB_DIR=C:/Users/Admin/AppData/Local/Temp/wb-web",
+        "target/workbench-check/debug/codex-workspace-mcp.exe"
+      ],
+      "port": 3104
+    },
+    {
       "name": "ppt-agent",
       "runtimeExecutable": "env",
       "runtimeArgs": [

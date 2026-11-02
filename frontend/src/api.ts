@@ -310,6 +310,84 @@ export interface SkillDraft {
   readonly body: string
 }
 
+/** How the host recorded a main program's end: finished, failed and handed back to its author, stopped, or none recorded. */
+export type ProgramStatus = 'completed' | 'rewritten' | 'failed' | 'waiting' | 'paused' | 'running' | 'unknown'
+/** A hand-over that did not compile, so nothing of it ran. */
+export interface RejectedProgram {
+  readonly seq: number
+  readonly time: number
+  readonly turn: number
+  readonly source: string | null
+  readonly diagnostics: readonly { readonly line: number | null; readonly column: number | null; readonly message: string }[]
+}
+/** One run of a main program, as the session recorded it. */
+export interface SessionProgram {
+  readonly seq: number
+  readonly turn: number
+  readonly time: number
+  readonly ended_at: number | null
+  readonly source: string
+  readonly path: string | null
+  /** What its author said in the reply that handed it over. */
+  readonly note: string | null
+  readonly status: ProgramStatus
+  readonly output: string | null
+  readonly output_chars: number
+  readonly returned: string | null
+  readonly error: { readonly message: string; readonly line: number | null; readonly code: string | null } | null
+  readonly rewrite_of: number | null
+  readonly rewritten_by: number | null
+  readonly calls: readonly { readonly name: string; readonly kind: 'tool' | 'virtual' | 'module' | 'function'; readonly count: number }[]
+  readonly rejected: readonly RejectedProgram[]
+}
+export interface SessionTurn {
+  readonly turn: number
+  readonly request: {
+    readonly seq: number
+    readonly time: number
+    readonly text: string
+    /** What a plugin page appended about its selection; not the user's words. */
+    readonly page_selection: string | null
+    readonly attachments: readonly { readonly name: string; readonly bytes?: number | null }[]
+  } | null
+  /** What the AI told the user after the turn's last program. */
+  readonly reply: { readonly seq: number; readonly time: number; readonly text: string } | null
+  readonly ended: string | null
+  readonly programs: readonly SessionProgram[]
+  readonly rejected: readonly RejectedProgram[]
+}
+export interface WorkflowDraft {
+  readonly id: string
+  readonly source_task: string
+  readonly plugin_id: string | null
+  readonly workspace: string
+  readonly created_at: number | null
+  /** The draft's own Agent conversation, working in its folder. */
+  readonly chat_task: string | null
+  readonly programs: readonly { readonly seq: number; readonly turn: number; readonly file: string; readonly status?: ProgramStatus }[]
+  readonly modules: readonly { readonly name: string; readonly file: string; readonly version: number }[]
+}
+/** A draft file as it is on disk beside the snapshot it started from. */
+export interface WorkflowDraftFile {
+  readonly path: string
+  readonly status: 'unchanged' | 'modified' | 'added' | 'deleted'
+  readonly binary: boolean
+  readonly current: string | null
+  readonly original: string | null
+}
+export interface WorkflowDraftView {
+  readonly draft: WorkflowDraft
+  readonly files: readonly WorkflowDraftFile[]
+}
+export interface WorkflowDraftSummary {
+  readonly id: string
+  readonly source_task: string
+  readonly plugin_id: string | null
+  readonly created_at: number | null
+  readonly programs: number
+  readonly chat_task: string | null
+}
+
 /** The project's AGENTS.md, injected into every request of its code sessions. */
 export interface ProjectNotes {
   readonly path: string
@@ -370,6 +448,11 @@ export const api = {
   rewind: (taskId: string, turn: number) => post<{ turn: number; prompt: string; undone_turns: number[] }>(`${task(taskId)}/rewind`, { turn }),
   interject: (taskId: string, text: string) => post<{ seq: number }>(`${task(taskId)}/interjections`, { text }),
   skillDraft: (taskId: string, input: SkillDraftInput) => post<SkillDraft>(`${task(taskId)}/skill-draft`, input),
+  sessionPrograms: (taskId: string) => request<{ status: string; turns: SessionTurn[] }>(`${task(taskId)}/programs`, { cache: 'no-store' }),
+  createWorkflowDraft: (taskId: string) => post<WorkflowDraft>(`${task(taskId)}/workflow-drafts`, {}),
+  workflowDrafts: async () => (await request<{ drafts: WorkflowDraftSummary[] }>('/agent/workflow-drafts', { cache: 'no-store' })).drafts,
+  workflowDraft: (id: string) => request<WorkflowDraftView>(`/agent/workflow-drafts/${encodeURIComponent(id)}`, { cache: 'no-store' }),
+  workflowDraftChat: async (id: string) => (await post<{ task_id: string }>(`/agent/workflow-drafts/${encodeURIComponent(id)}/chat`, {})).task_id,
   saveSkill: (taskId: string, draft: SkillDraft, overwrite = false) => post<{ name: string; path: string }>(`${task(taskId)}/skills`, { ...draft, overwrite }),
   notes: (workspace: string) => request<ProjectNotes>(`/agent/notes?workspace=${encodeURIComponent(workspace)}`),
   saveNotes: (workspace: string, content: string) => put<ProjectNotes>('/agent/notes', { workspace, content }),

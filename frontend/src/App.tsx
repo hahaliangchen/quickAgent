@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ConversationPage, HeroPage, SkillPackagesPage, type Tab } from './components/AgentPage.tsx'
+import { SkillWorkbench } from './components/SkillWorkbench.tsx'
 import { CodexDock } from './components/CodexDock.tsx'
 import { CodexRightPanel } from './components/CodexRightPanel.tsx'
 import { SettingsModal } from './components/SettingsModal.tsx'
@@ -13,6 +14,7 @@ import css from './App.module.css'
 export function App({ renderSlot }: AgentSlotProps) {
   const workspace = useAgentWorkspace()
   const [tab, setTab] = useState<Tab>('chat')
+  const [workbench, setWorkbench] = useState(false)
   const [dark, setDark] = useState(() => document.body.hasAttribute('data-ds-dark-theme'))
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -91,8 +93,8 @@ export function App({ renderSlot }: AgentSlotProps) {
     <div className={css.appFrame} data-ds-dark-theme={dark ? '' : undefined}>
       {/* 1. Activity Dock (48px fixed on left) */}
       <CodexDock
-        activeTab={tab === 'skill-pages' ? 'skills' : 'home'}
-        onSelectTab={selected => { if (selected === 'skills') setTab('skill-pages'); else if (selected === 'home' && tab === 'skill-pages') handleNewChat() }}
+        activeTab={workbench || tab === 'skill-pages' ? 'skills' : 'home'}
+        onSelectTab={selected => { if (selected === 'skills') setWorkbench(true); else if (selected === 'home') { setWorkbench(false); if (tab === 'skill-pages') handleNewChat() } }}
         dark={dark}
         onNewChat={handleNewChat}
         onOpenSettings={workspace.openSettings}
@@ -103,14 +105,14 @@ export function App({ renderSlot }: AgentSlotProps) {
       />
 
       {/* 2. Codex Sidebar (collapsible & resizable) */}
-      {!sidebarCollapsed && (
+      {!sidebarCollapsed && !workbench && (
         <div className={css.sidebarCol} style={{ width: actualSidebarWidth }}>
           {sidebar}
         </div>
       )}
 
       {/* Drag handle for Sidebar */}
-      {!sidebarCollapsed && (
+      {!sidebarCollapsed && !workbench && (
         <div
           className={css.dragHandle}
           onPointerDown={(e) => {
@@ -133,7 +135,7 @@ export function App({ renderSlot }: AgentSlotProps) {
 
       {/* 3. Center Main Column (Header + Conversation + Floating Composer) */}
       <div className={css.centerCol}>
-        {tab === 'skill-pages' ? <SkillPackagesPage workspace={workspace} onBack={() => setTab('chat')} /> : workspace.heroPhase ? (
+        {workbench ? <SkillWorkbench tasks={workspace.allTasks} projects={workspace.projects} defaultWorkspace={workspace.info?.workspace ?? ''} onOpenChat={id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) }} onPackages={() => { setWorkbench(false); setTab('skill-pages') }} /> : tab === 'skill-pages' ? <SkillPackagesPage workspace={workspace} onBack={() => setTab('chat')} /> : workspace.heroPhase ? (
           <HeroPage key={newChatVersion} workspace={workspace} renderSlot={renderSlot} />
         ) : (
           <ConversationPage
@@ -148,7 +150,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       </div>
 
       {/* Drag handle for Right Panel */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && (
         <div
           className={css.dragHandle}
           title="拖动调整面板宽度"
@@ -171,7 +173,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       )}
 
       {/* 4. Right Inspector Panel (Changes, Sources) */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && (
         <CodexRightPanel
           width={rightPanelWidth}
           taskId={workspace.taskId}

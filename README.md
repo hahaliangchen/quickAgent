@@ -4,6 +4,8 @@
 
 <h1 align="center">QuickAgent</h1>
 
+<p align="center">简体中文 | <a href="README.en.md">English</a></p>
+
 <p align="center"><strong>用代码组织工作，让 AI 专注于理解、判断和创造。</strong></p>
 
 <p align="center">本地 Agent · Rust 运行时 · JavaScript 流程 · 虚函数 · 按需复用</p>

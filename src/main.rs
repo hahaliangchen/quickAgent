@@ -15,6 +15,7 @@ mod database;
 mod db_writer;
 mod file_edit;
 mod flow_skills;
+mod workflow_drafts;
 mod frame_view;
 mod go_index;
 mod http_probe;

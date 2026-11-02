@@ -1,4 +1,4 @@
-import sproutIcon from './assets/sprout.svg'
+import sproutIcon from './assets/pinwheel.svg'
 import ginkgoIcon from './assets/ginkgo.svg'
 
 const KEY = 'agent-theme'

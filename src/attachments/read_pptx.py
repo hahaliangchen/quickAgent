@@ -213,7 +213,7 @@ def main():
             index.append({'slide': number, 'pictures': [{k: v for k, v in p.items() if k != 'part'} for p in info['pictures']]})
         if any(p['pictures'] for p in index):
             out.append('\n（要复用图片：read_attachment 带 slide=页码 或 picture=图片编号，会把图片放进项目并返回可用于 addImage 的路径。）')
-        print(json.dumps({'text': '\n'.join(out), 'warnings': warnings, 'slides': index}, ensure_ascii=False))
+        sys.stdout.buffer.write(json.dumps({'text': '\n'.join(out), 'warnings': warnings, 'slides': index}, ensure_ascii=True).encode('ascii'))
     elif mode == 'pictures':
         target = sys.argv[3]
         found = []
@@ -226,7 +226,7 @@ def main():
                 found.append(pic)
         if wanted and not found:
             raise ValueError('没有图片 %s' % target)
-        print(json.dumps({'pictures': found}, ensure_ascii=False))
+        sys.stdout.buffer.write(json.dumps({'pictures': found}, ensure_ascii=True).encode('ascii'))
     else:
         raise ValueError('未知模式')
 

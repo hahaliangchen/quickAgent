@@ -44,6 +44,19 @@ export function CodexDock({
           </svg>
         </button>
 
+        <button
+          type="button"
+          className={clsx(css.dockBtn, activeTab === 'skills' && css.active)}
+          title="技能工作台"
+          aria-label="技能工作台"
+          onClick={() => onSelectTab?.('skills')}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3.5" y="3.5" width="7" height="7" rx="1" /><rect x="13.5" y="3.5" width="7" height="7" rx="1" />
+            <rect x="3.5" y="13.5" width="7" height="7" rx="1" /><rect x="13.5" y="13.5" width="7" height="7" rx="1" />
+          </svg>
+        </button>
+
       </div>
 
       <div className={css.bottomGroup}>

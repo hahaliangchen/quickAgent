@@ -34,6 +34,7 @@ export default defineConfig({
       '/agent/memories': backend,
       '/agent/workspaces': backend,
       '/agent/models': backend,
+      '/agent/workflow-drafts': backend,
     },
   },
   build: {

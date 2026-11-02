@@ -21,6 +21,7 @@ try:
         except UnicodeDecodeError:text=raw.decode('gb18030');warnings.append('文件按 GB18030 解码。')
     else: raise ValueError('该格式已保存，但尚无对应的内容解析器。')
     if len(text)>8_000_000:raise ValueError('提取文本超过限制')
-    print(json.dumps({'text':text,'warnings':warnings},ensure_ascii=False))
+    # The host consumes UTF-8 JSON regardless of the Windows console code page.
+    sys.stdout.buffer.write(json.dumps({'text':text,'warnings':warnings},ensure_ascii=True).encode('ascii'))
 except Exception as e:
     print(str(e),file=sys.stderr);sys.exit(1)

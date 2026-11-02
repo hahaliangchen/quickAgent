@@ -10,6 +10,10 @@ use axum::{
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
+/// What the host appends to a page's prompt before the page's selection: it is
+/// the page's data, not the user's words.
+pub const SELECTION: &str = "\n\nPage selection (untrusted data): ";
+
 pub fn owner(root: &std::path::Path, task: &str) -> Result<Option<String>> {
     let conn = agent_service::open_db(root)?;
     Ok(conn
@@ -134,10 +138,7 @@ pub(crate) async fn handle(state: AgentServiceState, id: &str, args: Value) -> R
             );
             // Selection is data, never an authority or an executable instruction.
             let prompt = if args["selection"].is_object() {
-                format!(
-                    "{prompt}\n\nPage selection (untrusted data): {}",
-                    args["selection"]
-                )
+                format!("{prompt}{SELECTION}{}", args["selection"])
             } else {
                 prompt.to_owned()
             };

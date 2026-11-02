@@ -130,7 +130,7 @@ export function Sidebar({
   if (collapsed) return <div className={clsx(css.root, css.collapsedRoot)}><button type="button" className={css.iconBtn} title="展开侧边栏" onClick={onToggleCollapse}>☰</button></div>
   return <aside className={css.root} style={{width}} aria-label="会话侧栏">
     <div className={css.header}>
-      <span className={css.brandTitle}><img src={brandLogo} width={18} height={18} alt="" />Grow</span>
+      <span className={css.brandTitle}><img src={brandLogo} width={28} height={28} alt="" />Grow</span>
       <div className={css.headerActions}>
         <button type="button" className={css.iconBtn} title="搜索会话" aria-label="搜索会话" onClick={() => {setSearchOpen(value => !value); window.setTimeout(() => searchRef.current?.focus(),0)}}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
