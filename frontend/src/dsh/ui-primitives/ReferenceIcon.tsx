@@ -31,7 +31,7 @@ function ReferenceIconArtwork({ kind, size = 16, className, strokeWidth }: Weigh
 }
 
 /**
- * Render a regular one-pixel reference icon.
+ * Render a regular reference icon.
  * @param props - Reference kind, size, and optional class.
  * @returns The regular decorative reference glyph.
  */
@@ -40,7 +40,7 @@ export function ReferenceIconRegular(props: ReferenceIconProps): ReactNode {
 }
 
 /**
- * Render a medium 1.3px reference icon.
+ * Render a medium reference icon.
  * @param props - Reference kind, size, and optional class.
  * @returns The medium decorative reference glyph.
  */

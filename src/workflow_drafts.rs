@@ -12,7 +12,7 @@ const OUTPUT_CHARS: usize = 8_000;
 /// Draft files larger than this are listed without their text.
 const FILE_BYTES: u64 = 512 * 1024;
 /// The host's own files in a draft folder; they describe the draft and are not its code.
-const HOST_FILES: &[&str] = &["draft.json", "history.json", "programs.json", "AGENTS.md", "README.md"];
+const HOST_FILES: &[&str] = &["draft.json", "history.json", "programs.json", "contracts.d.ts", "AGENTS.md", "README.md"];
 
 fn drafts(root: &FsPath) -> PathBuf {
     root.join(".codex-workspace-mcp").join("workflow-drafts")
@@ -388,6 +388,21 @@ fn source_title(conn: &Connection, task: &str) -> Result<String> {
     Ok(clip(title.lines().next().unwrap_or_default().trim(), 60))
 }
 
+/// Each distinct set of tool declarations the session read, in the order it read them.
+fn recorded_contracts(conn: &Connection, task: &str) -> Result<Vec<String>> {
+    let mut statement = conn.prepare("SELECT data FROM agent_task_events WHERE task_id=?1 AND kind='tool/result' AND data LIKE '%\"declarations\"%' ORDER BY seq")?;
+    let mut found: Vec<String> = Vec::new();
+    for raw in statement.query_map([task], |r| r.get::<_, String>(0))? {
+        let Ok(data) = serde_json::from_str::<Value>(&raw?) else { continue };
+        if let Some(text) = data["meta"]["result"]["declarations"].as_str().map(str::trim) {
+            if !text.is_empty() && !found.iter().any(|seen| seen == text) {
+                found.push(text.to_string());
+            }
+        }
+    }
+    Ok(found)
+}
+
 fn status_words(status: &str) -> &'static str {
     match status {
         "completed" => "已完成",
@@ -416,7 +431,13 @@ fn notes(manifest: &Value, view: &Value, title: &str) -> String {
             );
         }
     }
-    text += "\n## 怎么做\n\n- 先看 `programs.json`，弄清每段程序做了什么、哪些真正完成了、确认点在哪里。出错后改写过的，以跑通的版本为准。\n- 写或改流程代码之前，先用 read_program_guide 读流程语言的说明，再用 read_tool_contracts 读用到的库的方法契约。\n- 只属于这一次的值（题目、页数、模板、素材、项目编号等）改成参数；要用户确认的地方照旧停下来等确认。\n- 插件的方法会改动插件里的真实数据，这个会话只整理草稿文件，用不到它们；这里也没有插件页面的工具，做不了真实的插件测试。\n- 说结果时分开说：哪些确实检查过（读过的文件、对照过的记录），哪些还没有验证。没有真正运行过的测试，不说通过。\n";
+    text += "\n## 怎么做\n\n- 先看 `programs.json`，弄清每段程序做了什么、哪些真正完成了、确认点在哪里。出错后改写过的，以跑通的版本为准。\n- 写或改流程代码之前，先用 read_program_guide 读流程语言的说明，再用 read_tool_contracts 读用到的库的方法契约。\n";
+    text += if manifest["contracts"].is_string() {
+        "- 插件的库在这个会话里没有注册，read_tool_contracts 读不到它们。`contracts.d.ts` 是原会话当时读到的方法契约原文，按它写调用；它是那次会话时的版本，插件之后可能改过，说结果时要注明。\n"
+    } else {
+        "- 原会话没有留下插件库的方法契约记录。这个会话里读不到插件的库时，不要猜方法和参数，照原程序已有的调用写，并说明契约没有核对。\n"
+    };
+    text += "- 只属于这一次的值（题目、页数、模板、素材、项目编号等）改成参数；要用户确认的地方照旧停下来等确认。\n- 插件的方法会改动插件里的真实数据，这个会话只整理草稿文件，用不到它们；这里也没有插件页面的工具，做不了真实的插件测试。\n- 说结果时分开说：哪些确实检查过（读过的文件、对照过的记录），哪些还没有验证。没有真正运行过的测试，不说通过。\n";
     text
 }
 
@@ -462,7 +483,14 @@ fn create_draft(root: &FsPath, task: &str) -> Result<Value> {
         .into_iter().filter_map(|(seq,kind,raw)| serde_json::from_str::<Value>(&raw).ok().map(|data| json!({"seq":seq,"kind":kind,"data":data}))).collect();
     fs::write(dir.join("history.json"), serde_json::to_vec_pretty(&records)?)?;
     fs::write(dir.join("programs.json"), serde_json::to_vec_pretty(&view)?)?;
-    let manifest = json!({"id":id,"source_task":task,"plugin_id":owner,"created_at":agent_service::now(),"programs":sources,"modules":modules,"workspace":dir.to_string_lossy()});
+    // The draft's conversation is a code session: a plugin's libraries are not
+    // registered there, so keep the contracts the source session actually read.
+    let contracts = recorded_contracts(&conn, task)?;
+    if !contracts.is_empty() {
+        fs::write(dir.join("contracts.d.ts"), contracts.join("\n\n"))?;
+    }
+    let manifest = json!({"id":id,"source_task":task,"plugin_id":owner,"created_at":agent_service::now(),"programs":sources,"modules":modules,
+        "contracts":(!contracts.is_empty()).then_some("contracts.d.ts"),"workspace":dir.to_string_lossy()});
     fs::write(dir.join("draft.json"), serde_json::to_vec_pretty(&manifest)?)?;
     fs::write(dir.join("AGENTS.md"), notes(&manifest, &view, &source_title(&conn, task)?))?;
     Ok(manifest)
@@ -724,7 +752,8 @@ mod tests {
         let db = agent_service::open_db(&root).unwrap();
         db.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','hello','fake','completed',1,1)", []).unwrap();
         db.execute("INSERT INTO plugin_sessions(task_id,plugin_id) VALUES ('t','ppt-master')", []).unwrap();
-        for (seq, kind, value) in [(1,"user/message",json!({"turn":1,"message":{"content":"hello"}})),(2,"program/start",json!({"turn":1,"function":null,"source":"first();"})),(3,"program/start",json!({"turn":2,"function":null,"source":"second();"}))] {
+        for (seq, kind, value) in [(1,"user/message",json!({"turn":1,"message":{"content":"hello"}})),(2,"program/start",json!({"turn":1,"function":null,"source":"first();"})),(3,"program/start",json!({"turn":2,"function":null,"source":"second();"})),
+            (4,"tool/result",json!({"meta":{"result":{"declarations":"declare namespace ppt_master {}"}}})),(5,"tool/result",json!({"meta":{"result":{"declarations":"declare namespace ppt_master {}"}}}))] {
             db.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('t',?1,1,?2,?3)", params![seq,kind,value.to_string()]).unwrap();
         }
         db.execute_batch("CREATE TABLE IF NOT EXISTS agent_modules(task_id TEXT,turn INTEGER,contract TEXT,name TEXT,signature TEXT,description TEXT,version INTEGER,source TEXT,fixed INTEGER,created_at INTEGER);").unwrap();
@@ -734,6 +763,10 @@ mod tests {
         assert_eq!(result["programs"].as_array().unwrap().len(), 2);
         assert_eq!(result["modules"].as_array().unwrap().len(), 1);
         let dir = folder(&root, result["id"].as_str().unwrap()).unwrap();
+        // The plugin's contracts the session read come along once, and the notes point at them.
+        assert_eq!(result["contracts"], "contracts.d.ts");
+        assert_eq!(fs::read_to_string(dir.join("contracts.d.ts")).unwrap(), "declare namespace ppt_master {}");
+        assert!(fs::read_to_string(dir.join("AGENTS.md")).unwrap().contains("`contracts.d.ts`"));
         fs::write(dir.join("programs/program-2.js"), "changed();").unwrap();
         assert_eq!(fs::read_to_string(dir.join("original/program-2.js")).unwrap(), "first();");
         assert!(folder(&root, "../outside").is_err());

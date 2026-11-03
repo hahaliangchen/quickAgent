@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetStateAction } from 'react'
 import clsx from 'clsx'
-import { useBrandIcon, usePalette } from '../brand.ts'
+import { useBrandIcon } from '../brand.ts'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
 import { latestContextUsage } from './ContextRing.tsx'
 import { SkillPagesView } from './SkillPagesView.tsx'
@@ -24,8 +24,6 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
   const currentWs = workspace.projects.find(project => project.path === workspace.activeWorkspace)?.path ?? ''
   const wsName = workspaceName(currentWs)
   const logoImg = useBrandIcon()
-  // 新芽 plants, 银杏 harvests: the greeting follows the season of the theme.
-  const verb = usePalette() === 'ginkgo' ? '收获' : '种'
 
   return (
     <main className={welcomeCss.page} data-phase="hero">
@@ -33,7 +31,7 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
         <div className={welcomeCss.heading}>
           <img src={logoImg} className={welcomeCss.logo} alt="" />
           <h1 className={welcomeCss.title}>
-            {workspace.sidebarMode === 'chat' ? '今天想聊点什么？' : !currentWs ? '今天想一起做点什么？' : <>今天想在 <span className={welcomeCss.workspace}>{wsName}</span> 里{verb}点什么？</>}
+            {workspace.sidebarMode === 'chat' ? '今天想聊点什么？' : !currentWs ? '今天想一起做点什么？' : <>今天想在 <span className={welcomeCss.workspace}>{wsName}</span> 里种点什么？</>}
           </h1>
         </div>
         {renderSlot('agent.composer', {
@@ -64,8 +62,7 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
 
 export function SkillPackagesPage({ workspace, onBack }: { workspace: AgentWorkspace; onBack: () => void }) {
   return <main className={root.root} style={{ minHeight: 0 }}>
-    <header className={headerCss.header}><strong>技能页面</strong><button onClick={onBack}>返回对话</button></header>
-    <SkillPagesView workspaceRoot={workspace.activeWorkspace ?? workspace.info?.workspace ?? ''} />
+    <SkillPagesView workspaceRoot={workspace.activeWorkspace ?? workspace.info?.workspace ?? ''} onBack={onBack} />
   </main>
 }
 
@@ -119,7 +116,7 @@ export function ConversationPage({
         {/* Left: Document icon + Session title */}
         <div className={headerCss.titleArea}>
           <span className={headerCss.titleIcon}>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2">
               <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
               <polyline points="14 2 14 8 20 8" />
             </svg>
@@ -168,7 +165,7 @@ export function ConversationPage({
               title={rightPanelOpen ? '隐藏右侧检查器' : '显示右侧检查器'}
               onClick={onToggleRightPanel}
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2">
                 <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
                 <line x1="15" x2="15" y1="3" y2="21" />
               </svg>

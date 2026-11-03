@@ -46,7 +46,8 @@ export function DraftChat({ chatId, draftLabel, draftFolder, source, hidden, exp
   const [error, setError] = useState('')
   const body = useRef<HTMLDivElement>(null)
   useEffect(() => { onRunning(running) }, [running, onRunning])
-  useEffect(() => { body.current?.scrollTo({ top: body.current.scrollHeight }) }, [items])
+  // A hidden body cannot scroll, so reopening the conversation scrolls to its newest message too.
+  useEffect(() => { body.current?.scrollTo({ top: body.current.scrollHeight }) }, [items, hidden])
 
   const send = async (text: string) => {
     if (!text.trim() || busy || running) return

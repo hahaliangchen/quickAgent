@@ -30,7 +30,7 @@ import appearanceCss from '../dsh/settings/AppearanceRow.module.css'
 import modelsCss from '../dsh/settings/ModelsSection.module.css'
 import pluginsCss from '../dsh/settings/PluginInventorySettingsTab.module.css'
 import rootCss from '../dsh/settings/SettingsRoot.module.css'
-import { brandIcon, getPalette, getThemeMode, setPalette, setThemeMode, type ThemeMode, type ThemePalette } from '../theme.ts'
+import { getThemeMode, setThemeMode, type ThemeMode } from '../theme.ts'
 import type { SettingsTab } from '../useAgentWorkspace.ts'
 
 interface DraftProvider {
@@ -129,7 +129,6 @@ export function SettingsModal({
   onSaved: () => void
 }) {
   const [themeMode, setThemeModeState] = useState<ThemeMode>(getThemeMode)
-  const [palette, setPaletteState] = useState<ThemePalette>(getPalette)
   const [draft, setDraft] = useState<DraftSettings | null>(null)
   const [openProviderId, setOpenProviderId] = useState<string | null>(null)
   const [baseline, setBaseline] = useState<string | null>(null)
@@ -174,7 +173,6 @@ export function SettingsModal({
   useEffect(() => {
     if (!open) return
     setThemeModeState(getThemeMode())
-    setPaletteState(getPalette())
     loadSettings()
     loadPlugins()
   }, [open, loadSettings, loadPlugins])
@@ -468,38 +466,6 @@ export function SettingsModal({
                         ))}
                       </div>
                     </div>
-                  </div>
-                </div>
-
-                <div className={appearanceCss.block}>
-                  <div className={appearanceCss.label}>主题色</div>
-                  <div className={appearanceCss.group} role="radiogroup" aria-label="主题色">
-                    {([
-                      { palette: 'sprout', label: '新芽', hint: '生机 · 青绿', swatches: ['#1d9e75', '#5dcaa5', '#e3f1ea'] },
-                      { palette: 'ginkgo', label: '银杏', hint: '秋日 · 清爽冷静 · 枫叶红与银杏黄', swatches: ['#b5452c', '#e2a52e', '#f8eccd'] },
-                    ] as const).map(option => (
-                      <button
-                        key={option.palette}
-                        type="button"
-                        role="radio"
-                        aria-checked={palette === option.palette}
-                        className={clsx(appearanceCss.row, appearanceCss.rowButton)}
-                        onClick={() => {
-                          setPaletteState(option.palette)
-                          setPalette(option.palette)
-                        }}
-                      >
-                        <img className={appearanceCss.brand} src={brandIcon(option.palette)} width={28} height={28} alt="" />
-                        <div className={appearanceCss.rowText}>
-                          <span className={appearanceCss.rowTitle}>{option.label}</span>
-                          <span className={appearanceCss.rowHint}>{option.hint}</span>
-                        </div>
-                        <span className={appearanceCss.swatches} aria-hidden="true">
-                          {option.swatches.map(color => <i key={color} style={{ background: color }} />)}
-                        </span>
-                        <span className={clsx(appearanceCss.check, palette === option.palette && appearanceCss.checkOn)} aria-hidden="true" />
-                      </button>
-                    ))}
                   </div>
                 </div>
 

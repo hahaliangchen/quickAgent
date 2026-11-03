@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import clsx from 'clsx'
 import { api, type Project, type SessionProgram, type SessionTurn, type SkillPackage, type Task, type WorkflowDraftSummary, type WorkflowDraftView } from '../api.ts'
 import { taskTitle } from '../sidebarModel.ts'
-import { callName, clock, draftFileOf, duration, plainText, programEntries, projectName, sessionGroups, statusOf, turnTone, turnWindow, type SessionGroup, type Tone } from '../workbenchModel.ts'
+import { callName, clock, draftFileOf, duration, plainText, programEntries, programName, projectName, sessionGroups, statusOf, turnTone, turnWindow, type SessionGroup, type Tone } from '../workbenchModel.ts'
 import { CodeView, DiffView, diffStats } from './WorkbenchCode.tsx'
 import { DraftChat } from './WorkbenchChat.tsx'
 import { Icon, type IconName } from './WorkbenchIcon.tsx'
@@ -12,8 +12,6 @@ const TONE_ICON: Record<Tone, IconName> = { ok: 'check', error: 'close', warn: '
 const TONE_CLASS: Record<Tone, string | undefined> = { ok: styles.toneOk, error: styles.toneError, warn: styles.toneWarn, live: styles.toneLive, muted: styles.toneMuted }
 /** Sessions a group shows before "显示其余"; a long project must not push the other groups away. */
 const GROUP_ROWS = 6
-/** Program cards a turn shows before "显示全部". */
-const TURN_CARDS = 6
 /** Turn tabs shown at once, so they fit one line even in the narrow layout. */
 const TURN_TABS = 5
 /** Earlier turns the expanded request shows. */
@@ -55,7 +53,6 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
   const [turns, setTurns] = useState<readonly SessionTurn[]>()
   const [loadError, setLoadError] = useState('')
   const [selectedSeq, setSelectedSeq] = useState<number>()
-  const [allCards, setAllCards] = useState(false)
   const [requestOpen, setRequestOpen] = useState(false)
   const [draftId, setDraftId] = useState<string>()
   const [draft, setDraft] = useState<WorkflowDraftView>()
@@ -71,6 +68,7 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
+  const cardsRef = useRef<HTMLDivElement>(null)
 
   const refreshDrafts = useCallback(() => api.workflowDrafts().then(setDrafts, () => {}), [])
   useEffect(() => {
@@ -88,7 +86,7 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
   // The selected session's programs; re-read while it is still working.
   useEffect(() => {
     setTurns(undefined); setLoadError(''); setSelectedSeq(undefined); setFilePath(undefined); setView('original')
-    setRequestOpen(false); setAllCards(false); setError(''); setContextOpen(false)
+    setRequestOpen(false); setError(''); setContextOpen(false)
     if (!selectedId) return
     store('skill-workbench:session', selectedId)
     let active = true
@@ -149,7 +147,7 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
 
   const selectSession = (id: string) => { setSelectedId(id); setListOpen(false) }
   const selectProgram = (seq: number) => { setSelectedSeq(seq); setFilePath(undefined) }
-  const selectTurn = (turn: SessionTurn) => { setAllCards(false); setRequestOpen(false); const last = turn.programs.at(-1); if (last) selectProgram(last.seq) }
+  const selectTurn = (turn: SessionTurn) => { setRequestOpen(false); const last = turn.programs.at(-1); if (last) selectProgram(last.seq) }
   const showFile = useCallback((path: string) => {
     const seq = Number(/^programs\/program-(\d+)\.js$/.exec(path)?.[1] ?? Number.NaN)
     if (entries.some(entry => entry.program.seq === seq)) { setSelectedSeq(seq); setFilePath(undefined) } else setFilePath(path)
@@ -173,7 +171,7 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
 
   const sessionRow = (item: Task) => <button key={item.task_id} type="button" title={taskTitle(item)} onClick={() => selectSession(item.task_id)}
     className={clsx(styles.sessionRow, item.task_id === selectedId && styles.sessionActive)}>
-    <Icon name="file" size={16} />
+    <Icon name="file" size={18} />
     <span className={styles.sessionTitle}>{taskTitle(item)}</span>
     {drafts.some(entry => entry.source_task === item.task_id) && <span className={styles.draftMark}>草稿</span>}
     {(item.status === 'running' || item.status === 'cancelling') && <span className={styles.spinner} aria-label="运行中" />}
@@ -193,7 +191,7 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
     const open = !closed[entry.key] || !!query.trim()
     return <div key={entry.key} className={styles.group}>
       <button type="button" className={styles.groupHead} title={entry.detail} aria-expanded={open} onClick={() => toggle(entry.key)}>
-        <Icon name={icon} size={17} />
+        <Icon name={icon} size={19} />
         <span className={styles.groupTitle}>{entry.title}{labelled && <small> · {entry.detail}</small>}</span>
         <span className={styles.groupCount}>{entry.tasks.length}</span>
         <span className={clsx(styles.chevron, open && styles.chevronOpen)}><Icon name="chevron" size={14} /></span>
@@ -221,7 +219,13 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
   const requestLong = !!request && (request.text.length > 140 || request.text.includes('\n'))
   const rewriteIndex = (seq: number | null) => seq === null ? undefined : entries.find(entry => entry.program.seq === seq)
   const lastOfTurn = !!current && current.turn.programs.at(-1)?.seq === program?.seq
-  const cards = currentTurn ? (allCards ? currentTurn.programs : currentTurn.programs.slice(0, TURN_CARDS)) : []
+  const cards = currentTurn?.programs ?? []
+  const name = program ? programName(program) : null
+
+  // The strip scrolls sideways; keep the selected run in view.
+  useEffect(() => {
+    cardsRef.current?.querySelector<HTMLElement>('[aria-current="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [program?.seq])
 
   return <div className={clsx(styles.root, listOpen && styles.listOpen, contextOpen && styles.contextOpen, chatOpen && draft && styles.chatSpace)}>
     <aside className={styles.list} aria-label="工作台会话">
@@ -252,7 +256,7 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
         <span>查看它运行过的流程代码、当时的用户请求和运行结果，再把流程整理成可复用的技能草稿。</span>
       </div> : <>
         <header className={styles.header}>
-          <span className={styles.headerIcon}><Icon name="file" size={22} /></span>
+          <span className={styles.headerIcon}><Icon name="file" size={24} /></span>
           <h2 title={taskTitle(task)}>{taskTitle(task)}</h2>
           {task.plugin_id ? <span className={styles.badge} title={plugin ? undefined : '这个插件现在没有连接或没有安装，名称显示为它的标识'}><Icon name="plug" size={15} />{pluginTitle} · {plugin?.origin === 'builtin' ? '内置插件' : plugin?.origin === 'external' ? '外部插件' : '插件'}</span>
             : task.kind === 'chat' ? <span className={styles.badge}><Icon name="chat" size={15} />普通聊天</span>
@@ -302,37 +306,38 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
                 </button>
               })}
             </div>}
-            <div className={styles.cards}>
+            <div ref={cardsRef} className={styles.cards} aria-label={`第 ${current.turn.turn} 轮的程序`}>
               {cards.map((item, index) => {
                 const tone = statusOf(item)
                 const of = rewriteIndex(item.rewrite_of)
-                return <button key={item.seq} type="button" onClick={() => selectProgram(item.seq)} className={clsx(styles.card, item.seq === program.seq && !filePath && styles.cardActive)}>
-                  <span className={clsx(styles.cardIcon, TONE_CLASS[tone.tone])}><Icon name={TONE_ICON[tone.tone]} size={20} /></span>
+                const label = programName(item)
+                const active = item.seq === program.seq && !filePath
+                return <button key={item.seq} type="button" onClick={() => selectProgram(item.seq)} aria-current={active}
+                  title={[label && `第 ${index + 1} 段：${label}`, item.note && `AI 交出时说：${item.note}`, item.calls.map(call => `${call.name} ×${call.count}`).join('\n')].filter(Boolean).join('\n\n')}
+                  className={clsx(styles.card, active && styles.cardActive)}>
+                  <span className={clsx(styles.cardIcon, TONE_CLASS[tone.tone])}><Icon name={TONE_ICON[tone.tone]} size={18} /></span>
                   <span className={styles.cardMain}>
-                    <span className={styles.cardTop}><strong>{programTurns.length > 1 ? '' : `第 ${current.turn.turn} 轮 · `}第 {index + 1} 段</strong><Status tone={tone.tone} label={tone.label} /></span>
-                    <span className={styles.cardCalls} title={item.calls.map(call => `${call.name} ×${call.count}`).join('\n')}>{callSummary(item)}</span>
+                    <span className={styles.cardTop}><strong>{label ?? `第 ${index + 1} 段`}</strong><Status tone={tone.tone} label={tone.label} /></span>
+                    <span className={styles.cardCalls}>{label && <em>第 {index + 1} 段</em>}<code>{callSummary(item, 2)}</code></span>
                     {(of || item.rejected.length > 0) && <span className={styles.cardNote}>
                       {of && `改写自第 ${of.index} 段`}{of && item.rejected.length > 0 && ' · '}{item.rejected.length > 0 && `交出前 ${item.rejected.length} 次未通过编译`}
                     </span>}
                   </span>
                 </button>
               })}
-              {currentTurn && currentTurn.programs.length > TURN_CARDS && <button type="button" className={styles.moreCards} onClick={() => setAllCards(value => !value)}>
-                {allCards ? '收起' : `显示这一轮全部 ${currentTurn.programs.length} 段`}
-              </button>}
             </div>
 
             <section className={styles.codePanel}>
               <div className={styles.codeHead}>
                 <div className={styles.codeTitle}>
-                  <h4>{filePath ?? `第 ${current.turn.turn} 轮 · 第 ${current.index} 段`}</h4>
+                  <h4 title={filePath ?? name ?? undefined}>{filePath ?? name ?? `第 ${current.turn.turn} 轮 · 第 ${current.index} 段`}</h4>
                   <div className={styles.codeMeta}>
                     {filePath ? <span>{file?.status === 'added' ? '草稿里新增的文件' : file?.status === 'deleted' ? '草稿里已删除' : '草稿文件'}</span> : <>
                       <Status tone={status.tone} label={status.label} />
+                      {name && <span>第 {current.turn.turn} 轮 · 第 {current.index} 段</span>}
                       {program.ended_at !== null && <span>用时 {duration(program.ended_at - program.time)}</span>}
-                      <span>{lineCount(program.source)} 行</span>
                       {callTotal > 0 && <span>调用 {callTotal} 次</span>}
-                      <span>{clock(program.time)}</span>
+                      <span title={`${clock(program.time)} 开始 · ${lineCount(program.source)} 行`}>{clock(program.time, false)}</span>
                     </>}
                   </div>
                   {!filePath && program.note && <p className={styles.codeNote} title={program.note}>AI 交出时说：{program.note}</p>}

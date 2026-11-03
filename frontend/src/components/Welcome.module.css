@@ -31,9 +31,6 @@
   display: block;
   width: 64px;
   height: 64px;
-  padding: 10px;
-  border-radius: 22px;
-  background: var(--sprout-soft, #e3f1ea);
   object-fit: contain;
   user-select: none;
 }

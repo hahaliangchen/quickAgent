@@ -18,6 +18,7 @@ import {
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Menu } from '../dsh/ui-primitives/Menu.tsx'
+import { IconPaperclipOutlineMedium } from '../dsh/ui-primitives/icons/index.tsx'
 import heroShellCss from '../dsh/conversation/HeroShell.module.css'
 import type { SettingsData } from '../api.ts'
 import { useAgentApi } from '../cordis/react.tsx'
@@ -60,9 +61,9 @@ function mentionInsert(path: string): string {
 
 export type DshPermissionMode = 'read_only' | 'workspace_write' | 'ask' | 'full_access'
 
-const FULL_ACCESS_ICON = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8l1-5.5Z" /></svg>
+const FULL_ACCESS_ICON = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8l1-5.5Z" /></svg>
 // Same shield as 仅可查看, with a question mark: commands and the browser ask first.
-const ASK_ICON = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><path d="M6.59624 2.14853C7.50155 1.80917 8.49914 1.80919 9.40444 2.14859L13.9245 3.84317V7.11961C13.9245 11.6089 10.5565 13.5975 8.00035 14.5779C5.44423 13.5975 2.07544 11.6089 2.07544 7.11961V3.84317L6.59624 2.14853Z" strokeLinejoin="round" /><path d="M6.6 6.55a1.45 1.45 0 0 1 2.82.48c0 .96-1.42 1.2-1.42 2.08" strokeLinecap="round" strokeLinejoin="round" /><circle cx="8" cy="11.15" r="0.55" fill="currentColor" stroke="none" /></svg>
+const ASK_ICON = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" aria-hidden="true"><path d="M6.59624 2.14853C7.50155 1.80917 8.49914 1.80919 9.40444 2.14859L13.9245 3.84317V7.11961C13.9245 11.6089 10.5565 13.5975 8.00035 14.5779C5.44423 13.5975 2.07544 11.6089 2.07544 7.11961V3.84317L6.59624 2.14853Z" strokeLinejoin="round" /><path d="M6.6 6.55a1.45 1.45 0 0 1 2.82.48c0 .96-1.42 1.2-1.42 2.08" strokeLinecap="round" strokeLinejoin="round" /><circle cx="8" cy="11.15" r="0.55" fill="currentColor" stroke="none" /></svg>
 
 export function Composer({
   variant,
@@ -550,7 +551,7 @@ export function Composer({
 
           <div className={codexCss.toolbar}>
             <div className={codexCss.leftControls}>
-              <button type='button' title='添加附件（支持拖拽、粘贴图片）' aria-label='添加附件' disabled={disabled||running||submitting} onClick={()=>fileInput.current?.click()} className={codexCss.micBtn}>📎</button>
+              <button type='button' title='添加附件（支持拖拽、粘贴图片）' aria-label='添加附件' disabled={disabled||running||submitting} onClick={()=>fileInput.current?.click()} className={codexCss.micBtn}><IconPaperclipOutlineMedium size={16}/></button>
 
               {/* Bare Plus Button matching media_1791084397752.png */}
               <Tooltip label="添加上下文或文件 (@)" side="top" delayMs={500}>
@@ -569,7 +570,7 @@ export function Composer({
                     })
                   }}
                 >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinejoin="round" strokeWidth="2.2" strokeLinecap="round">
                     <line x1="12" y1="5" x2="12" y2="19" />
                     <line x1="5" y1="12" x2="19" y2="12" />
                   </svg>
@@ -602,7 +603,7 @@ export function Composer({
                 )}
                 {permissionMode === 'workspace_write' && (
                   <>
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" strokeWidth="1.3">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6">
                       <path d="M6.4209 1.68067C7.43922 1.299 8.56177 1.29898 9.58008 1.68067L14.0996 3.375C14.2946 3.44811 14.4236 3.63455 14.4238 3.84278V6.89063C14.1115 6.71853 13.7761 6.58312 13.4238 6.48926V4.18946L9.22852 2.61621C8.43657 2.31947 7.56341 2.31939 6.77148 2.61621L2.5752 4.18946V7.11914C2.5752 11.1796 5.52369 13.056 8 14.0391C8.27653 13.9293 8.55827 13.8067 8.8418 13.6729C9.07101 13.9468 9.33228 14.1929 9.62012 14.4053C9.12409 14.6579 8.63578 14.8696 8.17871 15.0449C8.0637 15.0889 7.93628 15.0889 7.82129 15.0449C5.22011 14.0472 1.5752 11.9381 1.5752 7.11914V3.84278C1.57541 3.63469 1.70463 3.44821 1.89941 3.375L6.4209 1.68067Z" fill="currentColor" />
                       <path d="M5.26392 6.60339H10.7361" stroke="currentColor" strokeLinecap="round" />
                       <path d="M5.26392 9.86902H8.32833" stroke="currentColor" strokeLinecap="round" />
@@ -612,7 +613,7 @@ export function Composer({
                 )}
                 {permissionMode === 'read_only' && (
                   <>
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" strokeWidth="1.3" stroke="currentColor">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" stroke="currentColor">
                       <path d="M5.08545 8.13775L7.18455 10.2368C7.26636 10.3187 7.4003 10.3142 7.47649 10.2271L11.5148 5.61194" strokeLinecap="round" strokeLinejoin="round" />
                       <path d="M6.59624 2.14853C7.50155 1.80917 8.49914 1.80919 9.40444 2.14859L13.9245 3.84317V7.11961C13.9245 11.6089 10.5565 13.5975 8.00035 14.5779C5.44423 13.5975 2.07544 11.6089 2.07544 7.11961V3.84317L6.59624 2.14853Z" strokeLinejoin="round" />
                     </svg>
@@ -902,7 +903,7 @@ export function Composer({
               onClick={() => handleSelectPermission('read_only')}
             >
               <span className={codexCss.permOptionIcon}>
-                <svg width="18" height="18" viewBox="0 0 16 16" fill="none" strokeWidth="1.3" stroke="currentColor">
+                <svg width="18" height="18" viewBox="0 0 16 16" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" stroke="currentColor">
                   <path d="M5.08545 8.13775L7.18455 10.2368C7.26636 10.3187 7.4003 10.3142 7.47649 10.2271L11.5148 5.61194" strokeLinecap="round" strokeLinejoin="round" />
                   <path d="M6.59624 2.14853C7.50155 1.80917 8.49914 1.80919 9.40444 2.14859L13.9245 3.84317V7.11961C13.9245 11.6089 10.5565 13.5975 8.00035 14.5779C5.44423 13.5975 2.07544 11.6089 2.07544 7.11961V3.84317L6.59624 2.14853Z" strokeLinejoin="round" />
                 </svg>

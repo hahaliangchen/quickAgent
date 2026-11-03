@@ -1,6 +1,9 @@
 import clsx from 'clsx'
 import css from './CodexDock.module.css'
 
+/** The rail's icons: a 2px round stroke on a 24px grid, like the workbench's. */
+const STROKE = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { display: 'block' } } as const
+
 export type DockTab = 'home' | 'skills'
 
 interface CodexDockProps {
@@ -33,14 +36,9 @@ export function CodexDock({
             if (activeTab === 'home') onNewChat?.()
           }}
         >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-            style={{ display: 'block' }}
-          >
-            <path d="M12 3L3.5 10.5V20a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v5a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1V10.5L12 3z" />
+          <svg {...STROKE} aria-hidden="true">
+            <path d="M4 10.4a2 2 0 0 1 .7-1.5l6-5.2a2 2 0 0 1 2.6 0l6 5.2a2 2 0 0 1 .7 1.5V18a2.5 2.5 0 0 1-2.5 2.5H6.5A2.5 2.5 0 0 1 4 18z" />
+            <path d="M9.5 20.5v-5a1.5 1.5 0 0 1 1.5-1.5h2a1.5 1.5 0 0 1 1.5 1.5v5" />
           </svg>
         </button>
 
@@ -51,9 +49,9 @@ export function CodexDock({
           aria-label="技能工作台"
           onClick={() => onSelectTab?.('skills')}
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true">
-            <rect x="3.5" y="3.5" width="7" height="7" rx="1" /><rect x="13.5" y="3.5" width="7" height="7" rx="1" />
-            <rect x="3.5" y="13.5" width="7" height="7" rx="1" /><rect x="13.5" y="13.5" width="7" height="7" rx="1" />
+          <svg {...STROKE} aria-hidden="true">
+            <rect x="4" y="4" width="6.5" height="6.5" rx="2" /><rect x="13.5" y="4" width="6.5" height="6.5" rx="2" />
+            <rect x="4" y="13.5" width="6.5" height="6.5" rx="2" /><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="2" />
           </svg>
         </button>
 
@@ -67,16 +65,9 @@ export function CodexDock({
           title="设置与首选项"
           onClick={onOpenSettings}
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="4" x2="4" y1="21" y2="14" />
-            <line x1="4" x2="4" y1="10" y2="3" />
-            <line x1="12" x2="12" y1="21" y2="12" />
-            <line x1="12" x2="12" y1="8" y2="3" />
-            <line x1="20" x2="20" y1="21" y2="16" />
-            <line x1="20" x2="20" y1="12" y2="3" />
-            <line x1="1" x2="7" y1="14" y2="14" />
-            <line x1="9" x2="15" y1="8" y2="8" />
-            <line x1="17" x2="23" y1="16" y2="16" />
+          <svg {...STROKE} aria-hidden="true">
+            <path d="M10.3 3.9a1.8 1.8 0 0 1 3.4 0l.3.9a1.8 1.8 0 0 0 2.4 1l.9-.4a1.8 1.8 0 0 1 2.4 2.4l-.4.9a1.8 1.8 0 0 0 1 2.4l.9.3a1.8 1.8 0 0 1 0 3.4l-.9.3a1.8 1.8 0 0 0-1 2.4l.4.9a1.8 1.8 0 0 1-2.4 2.4l-.9-.4a1.8 1.8 0 0 0-2.4 1l-.3.9a1.8 1.8 0 0 1-3.4 0l-.3-.9a1.8 1.8 0 0 0-2.4-1l-.9.4a1.8 1.8 0 0 1-2.4-2.4l.4-.9a1.8 1.8 0 0 0-1-2.4l-.9-.3a1.8 1.8 0 0 1 0-3.4l.9-.3a1.8 1.8 0 0 0 1-2.4l-.4-.9a1.8 1.8 0 0 1 2.4-2.4l.9.4a1.8 1.8 0 0 0 2.4-1z" />
+            <circle cx="12" cy="12" r="3" />
           </svg>
         </button>
 
@@ -88,8 +79,8 @@ export function CodexDock({
           onClick={onToggleTheme}
         >
           {dark
-            ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>
-            : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" /></svg>}
+            ? <svg {...STROKE} aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>
+            : <svg {...STROKE} aria-hidden="true"><path d="M19.5 14.6A7.5 7.5 0 0 1 9.4 4.5a.4.4 0 0 0-.5-.5 8.5 8.5 0 1 0 11.1 11.1.4.4 0 0 0-.5-.5z" /></svg>}
         </button>
       </div>
     </aside>

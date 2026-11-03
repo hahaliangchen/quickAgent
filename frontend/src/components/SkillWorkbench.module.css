@@ -742,7 +742,7 @@
   height: 32px;
   padding: 0 10px;
   border: 1px solid var(--wb-line);
-  border-radius: 16px;
+  border-radius: 8px;
   background: var(--wb-card);
   color: var(--wb-text-2) !important;
   font-size: 13px !important;
@@ -765,7 +765,7 @@
 .turnCount {
   min-width: 18px;
   padding: 0 5px;
-  border-radius: 9px;
+  border-radius: 5px;
   background: var(--wb-soft-2);
   color: var(--wb-muted);
   font-size: 11px;
@@ -792,19 +792,26 @@
   background: var(--tone, var(--wb-faint));
 }
 
+/* One row of runs; a turn with more than fit scrolls sideways instead of pushing the code down. */
 .cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  display: flex;
   gap: 12px;
   margin-bottom: 18px;
+  padding: 2px 2px 6px;
+  overflow-x: auto;
+  scroll-padding-inline: 2px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
 }
 
 .card {
   display: flex;
+  flex: 0 0 clamp(240px, calc((100% - 24px) / 3), 340px);
   align-items: flex-start;
   gap: 12px;
   min-width: 0;
-  padding: 14px 16px;
+  padding: 13px 14px;
+  scroll-snap-align: start;
   border: 1px solid var(--wb-line);
   border-radius: 11px;
   background: var(--wb-card);
@@ -829,8 +836,8 @@
   display: grid;
   flex: none;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   margin-top: 1px;
   border-radius: 50%;
   background: var(--tone-soft, var(--wb-soft-2));
@@ -871,25 +878,28 @@
 .cardCalls {
   overflow: hidden;
   color: var(--wb-muted);
-  font-family: var(--wb-mono);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.cardCalls em {
+  font-style: normal;
+}
+
+.cardCalls em::after {
+  content: '·';
+  margin: 0 6px;
+  color: var(--wb-faint);
+}
+
+.cardCalls code {
+  font-family: var(--wb-mono);
+}
+
 .cardNote {
   color: var(--wb-faint);
   font-size: 12px;
-}
-
-.moreCards {
-  min-height: 60px;
-  border: 1px dashed var(--wb-line);
-  border-radius: 11px;
-  background: none;
-  color: var(--wb-link) !important;
-  font-size: 13px !important;
-  cursor: pointer;
 }
 
 .pill {
@@ -2147,12 +2157,13 @@
     left: 48px;
     z-index: 45;
     width: min(300px, calc(100vw - 64px));
-    box-shadow: 12px 0 32px rgba(15, 23, 42, 0.12);
     transform: translateX(calc(-100% - 48px));
     transition: transform 0.2s ease;
   }
 
+  /* Only the open drawer casts a shadow; a hidden one would shade the icon rail. */
   .listOpen .list {
+    box-shadow: 12px 0 32px rgba(15, 23, 42, 0.12);
     transform: none;
   }
 
@@ -2176,12 +2187,17 @@
     flex-direction: column;
   }
 
+  /* In a column the 440px basis would become a height. */
+  .codeTitle {
+    flex-basis: auto;
+  }
+
   .codeActions {
     justify-content: flex-start;
   }
 
-  .cards {
-    grid-template-columns: minmax(0, 1fr);
+  .card {
+    flex-basis: min(300px, 82%);
   }
 
   .owner {

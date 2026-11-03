@@ -4,7 +4,7 @@ import { zh as conversation } from './dsh/locale/conversation.ts'
 import type { Translate } from './dsh/contract/slots.ts'
 
 const app = {
-  'app.title': 'DeepSeek Harness',
+  'app.title': 'QuickAgent',
   'app.settings': '设置',
   'app.theme': '切换外观',
   'app.chat': '对话',

@@ -125,7 +125,33 @@ export function programEntries(turns: readonly SessionTurn[]): ProgramEntry[] {
   return turns.flatMap(turn => turn.programs.map((program, index) => ({ turn, program, index: index + 1 })))
 }
 
-export const draftFileOf = (seq: number): string => `programs/program-${seq}.js`
+/** A clause short enough to name a run: cut at the first sentence or clause break. */
+const clause = (text: string): string => text.trim().split(/[。；;：:，,\n]/, 1)[0]!.trim()
+
+/**
+ * The name a run's own record gives it, or null: the comment that opens the
+ * program (after its require/import lines), else what the AI said it would do
+ * when it handed the program in. Nothing is made up when neither exists.
+ */
+export function programName(program: SessionProgram): string | null {
+  const lines = program.source.replace(/\r\n/g, '\n').split('\n')
+  let at = 0
+  while (at < lines.length && (/^\s*$/.test(lines[at]!) || /^\s*(import\b|(const|let|var)\s+\w+\s*=\s*require\()[^;]*;?\s*$/.test(lines[at]!))) at++
+  const first = lines[at]?.trim() ?? ''
+  let comment = ''
+  if (first.startsWith('//')) comment = first.replace(/^\/\/+\s*/, '')
+  else if (first.startsWith('/*')) {
+    for (const line of lines.slice(at)) {
+      const text = line.replace(/^\s*\/\*+|\*+\/\s*$/g, '').replace(/^\s*\*\s?/, '').trim()
+      if (text && !text.startsWith('@')) { comment = text; break }
+      if (line.includes('*/')) break
+    }
+  }
+  const named = clause(comment) || clause((program.note ?? '').replace(/^(我会|我将|我先|我来|接下来)/, ''))
+  return named.length >= 2 ? named : null
+}
+
+export const draftFileOf =(seq: number): string => `programs/program-${seq}.js`
 
 /** An AI reply as a short plain-text preview: markdown marks dropped, link text kept. */
 export function plainText(markdown: string): string {

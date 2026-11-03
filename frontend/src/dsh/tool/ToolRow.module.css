@@ -410,8 +410,3 @@
 .root[data-tone][data-state='stopped'] .leading {
   opacity: 0.55;
 }
-
-/* 银杏 theme: task chips turn ginkgo gold (via --sprout-*), so edits move to
-   chestnut to stay distinguishable from them. Failed rows keep the error red. */
-:global(body[data-theme='ginkgo']) .root[data-tone='edit']:not([data-state='error']) { --tool-chip-bg: #f5ebe4; --tool-chip-fg: #8b5a3c; }
-:global(body[data-theme='ginkgo'][data-ds-dark-theme]) .root[data-tone='edit']:not([data-state='error']) { --tool-chip-bg: #33261f; --tool-chip-fg: #d9a688; }

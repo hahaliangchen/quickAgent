@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.ts'
 import clsx from 'clsx'
-import { Button, Menu, Modal, IconFolderCloseRegular, IconFolderOpenRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Menu, Modal, IconArchiveOutlineMedium, IconFolderCloseRegular, IconFolderOpenRegular, IconPlusOutlineMedium, IconUnarchiveOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Project, Task, TaskStatus } from '../api.ts'
 import { isChat, projectGroups, taskTitle, visibleTasks } from '../sidebarModel.ts'
 export { taskTitle, workspaceName } from '../sidebarModel.ts'
@@ -130,18 +130,18 @@ export function Sidebar({
   if (collapsed) return <div className={clsx(css.root, css.collapsedRoot)}><button type="button" className={css.iconBtn} title="展开侧边栏" onClick={onToggleCollapse}>☰</button></div>
   return <aside className={css.root} style={{width}} aria-label="会话侧栏">
     <div className={css.header}>
-      <span className={css.brandTitle}><img src={brandLogo} width={28} height={28} alt="" />Grow</span>
+      <span className={css.brandTitle}><img src={brandLogo} width={28} height={28} alt="" />QuickAgent</span>
       <div className={css.headerActions}>
         <button type="button" className={css.iconBtn} title="搜索会话" aria-label="搜索会话" onClick={() => {setSearchOpen(value => !value); window.setTimeout(() => searchRef.current?.focus(),0)}}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>
         </button>
         <button type="button" className={css.iconBtn} title="折叠侧边栏" aria-label="折叠侧边栏" onClick={onToggleCollapse}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"><rect x="3.5" y="4" width="17" height="16" rx="3.5"/><path d="M9.5 4v16"/></svg>
         </button>
       </div>
     </div>
     <div className={css.newChatRow}>
-      <button type="button" className={css.newChatBtn} onClick={onNew}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M16 3l5 5-9 9-5 1 1-5Z"/></svg>{mode === 'chat' ? '新聊天' : '新代码会话'}</button>
+      <button type="button" className={css.newChatBtn} onClick={onNew}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M16 3l5 5-9 9-5 1 1-5Z"/></svg>{mode === 'chat' ? '新聊天' : '新代码会话'}</button>
       <div className={css.modeSwitch} role="tablist" aria-label="会话类型">
         <button type="button" role="tab" aria-selected={mode === 'chat'} aria-label="聊天" title="聊天" className={clsx(css.modeButton, mode === 'chat' && css.modeActive)} onClick={() => onModeChange?.('chat')}>
           <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5c-5 0-9 3.4-9 7.6 0 2.2 1.1 4.2 2.9 5.6L5 20.5l4.3-2.1c.9.2 1.8.3 2.7.3 5 0 9-3.4 9-7.6s-4-7.6-9-7.6Z" style={{fill: 'var(--theme-leaf-light)'}}/><circle cx="8.2" cy="11.1" r="1.15" fill="#fff"/><circle cx="12" cy="11.1" r="1.15" fill="#fff"/><circle cx="15.8" cy="11.1" r="1.15" fill="#fff"/></svg>
@@ -156,8 +156,8 @@ export function Sidebar({
       <div className={css.sectionHeaderRow}>
         <span className={css.sectionTitleLeft}>{mode === 'code' ? '项目' : '聊天'}{archived ? ' · 已归档' : ''}</span>
         <div className={css.sectionActionsRight}>
-          <button type="button" className={css.sectionActionBtn} title={archived ? '返回未归档会话' : '查看已归档会话'} aria-label={archived ? '返回未归档会话' : '查看已归档会话'} onClick={() => setArchived(value => !value)}>▣</button>
-          {mode === 'code' && <button type="button" className={css.sectionActionBtn} title="添加项目" aria-label="添加项目" onClick={onAddWorkspace}>＋</button>}
+          <button type="button" className={css.sectionActionBtn} title={archived ? '返回未归档会话' : '查看已归档会话'} aria-label={archived ? '返回未归档会话' : '查看已归档会话'} onClick={() => setArchived(value => !value)}>{archived ? <IconUnarchiveOutlineMedium size={15}/> : <IconArchiveOutlineMedium size={15}/>}</button>
+          {mode === 'code' && <button type="button" className={css.sectionActionBtn} title="添加项目" aria-label="添加项目" onClick={onAddWorkspace}><IconPlusOutlineMedium size={15}/></button>}
         </div>
       </div>
       {mode === 'code' ? <>
