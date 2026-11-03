@@ -1,5 +1,5 @@
-// The pinwheel sits on a deep green tile: its pale folds vanish on a white page.
-import sproutIcon from './assets/pinwheel-tile.svg'
+// A spinning pinwheel, coloured deep enough that no blade fades on a white page.
+import sproutIcon from './assets/pinwheel-mark.svg'
 
 const KEY = 'agent-theme'
 
