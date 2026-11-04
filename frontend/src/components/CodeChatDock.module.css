@@ -4,6 +4,11 @@
   color: #fff; background: var(--codex-blue-primary); box-shadow: 0 6px 20px rgb(0 0 0 / 0.18);
 }
 .launcher:hover { background: var(--codex-blue-hover); }
+:global(body[data-garden-theme]) .launcher {
+  right: 26px; bottom: 112px; width: 54px; height: 54px; border-radius: 16px;
+  background: linear-gradient(160deg, #19b46e, #08955a); box-shadow: 0 4px 12px #0a7a4a40;
+}
+:global(body[data-garden-theme]) .launcher svg { width: 24px; height: 24px; }
 
 .panel {
   position: relative; flex-shrink: 0; height: 100%; min-height: 0; max-width: 60%;
@@ -16,7 +21,13 @@
 .dropping { outline: 2px dashed var(--codex-blue-primary); outline-offset: -3px; }
 .head { display: flex; align-items: center; gap: 8px; height: 48px; box-sizing: border-box; padding: 0 10px 0 14px; border-bottom: 1px solid var(--codex-border-subtle); }
 .head strong { font-size: 14.5px; }
-.repo { color: var(--codex-text-muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sparkle { color: #e6a817; flex-shrink: 0; }
+.repoRow { display: flex; align-items: center; padding: 10px 14px 0; }
+.repo {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; padding: 3px 8px; border-radius: 7px;
+  border: 1px solid var(--codex-card-border); color: var(--codex-text-secondary); font-size: 12.5px; white-space: nowrap;
+}
+.repo svg { flex-shrink: 0; color: var(--codex-text-muted); }
 .grow { flex: 1; }
 .iconButton {
   width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px;
@@ -26,7 +37,9 @@
 .iconButton:disabled { opacity: .4; cursor: default; }
 .plus { font-size: 20px; line-height: 1; }
 .body { flex: 1; min-height: 0; overflow: auto; position: relative; }
-.hint { margin: 0; padding: 28px 22px; color: var(--codex-text-muted); line-height: 1.8; text-align: center; }
+.greeting { margin: 14px; padding: 14px 16px; border-radius: 12px; background: var(--codex-hover-bg); }
+.greeting strong { display: block; font-size: 14.5px; margin-bottom: 6px; }
+.greeting p { margin: 0; color: var(--codex-text-secondary); line-height: 1.7; }
 .dropMask {
   position: absolute; inset: 49px 0 0; display: flex; align-items: center; justify-content: center; pointer-events: none;
   font-weight: 600; color: var(--codex-blue-primary); background: color-mix(in srgb, var(--codex-blue-primary) 10%, var(--codex-bg-main));
@@ -42,17 +55,98 @@
 .tagName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag button { border: 0; background: none; padding: 1px; display: inline-flex; color: var(--codex-text-muted); cursor: pointer; border-radius: 4px; }
 .tag button:hover { color: var(--codex-text-primary); background: var(--codex-hover-bg); }
-.composer textarea {
-  resize: none; font: inherit; padding: 8px 10px; border-radius: 8px; outline: none;
-  border: 1px solid var(--codex-card-border); background: var(--codex-card-bg); color: var(--codex-text-primary);
+.inputCard { display: flex; flex-direction: column; border: 1px solid var(--codex-card-border); border-radius: 10px; background: var(--codex-card-bg); }
+.inputCard:focus-within { border-color: var(--codex-blue-primary); }
+.inputCard textarea {
+  resize: none; font: inherit; padding: 8px 10px 4px; border: 0; outline: none; background: none; color: var(--codex-text-primary);
 }
-.composer textarea:focus { border-color: var(--codex-blue-primary); }
 .error { margin: 0; color: var(--codex-diff-del); font-size: 12.5px; white-space: pre-wrap; }
-.actions { display: flex; align-items: center; justify-content: space-between; }
-.note { font-size: 12px; color: var(--codex-text-muted); }
+.actions { display: flex; align-items: center; gap: 6px; padding: 4px 6px 6px; }
+.toolButton {
+  width: 30px; height: 30px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; cursor: pointer;
+  border: 1px solid var(--codex-card-border); border-radius: 8px; background: none; color: var(--codex-text-secondary); font: inherit;
+}
+.toolButton:hover:not(:disabled) { background: var(--codex-hover-bg); color: var(--codex-text-primary); }
+.toolButton:disabled { opacity: .45; cursor: default; }
+.model {
+  display: inline-flex; align-items: center; gap: 5px; height: 30px; min-width: 0; padding: 0 6px 0 8px;
+  border: 1px solid var(--codex-card-border); border-radius: 8px; color: var(--codex-text-secondary);
+}
+.model svg { flex-shrink: 0; }
+.model select { min-width: 0; max-width: 150px; font: inherit; font-size: 12.5px; border: 0; outline: none; background: none; color: var(--codex-text-primary); cursor: pointer; }
 .send, .stop {
   display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 14px; border-radius: 8px; border: 0; cursor: pointer; font: inherit; font-weight: 600;
 }
-.send { color: #fff; background: var(--codex-blue-primary); }
+.send { color: #fff; background: var(--codex-blue-primary); padding: 0 12px; }
 .send:disabled { opacity: .45; cursor: default; }
 .stop { color: var(--codex-diff-del); background: color-mix(in srgb, var(--codex-diff-del) 12%, transparent); }
+
+
+/* Garden: a paper card floating below the page's title row and above the grass. */
+:global(body[data-garden-theme]) .panel {
+  position: absolute; top: 96px; right: 18px; bottom: max(120px, 13vh); height: auto; max-width: 70%;
+  /* Nearly see-through: the paper backdrop shows, only the outline marks the card. */
+  border: 1.5px solid #d9cfb2; border-radius: 18px; background: #fffcf424; box-shadow: none;
+  font-size: 15.5px; font-weight: 500; color: #1f1c17; overflow: hidden;
+  /* The transcript inside sits flush with the card, not inset for a full-page composer. */
+  --dsh-composer-side-clearance: 0px;
+  --dsh-content-font-size: 15px;
+  --dsh-content-font-delta: 1px;
+}
+:global(body[data-garden-theme]) .resizer { left: 0; }
+:global(body[data-garden-theme]) .head { height: 56px; padding: 6px 12px 0 18px; gap: 10px; border-bottom: 0; }
+:global(body[data-garden-theme]) .sparkle { width: 26px; height: 26px; color: #f0b429; }
+:global(body[data-garden-theme]) .head strong { font-size: 22px; font-weight: 700; }
+:global(body[data-garden-theme]) .iconButton { width: 34px; height: 34px; border-radius: 9px; color: #2b2721; }
+:global(body[data-garden-theme]) .iconButton:hover:not(:disabled) { background: #eef5e2; color: #1f7a3f; }
+:global(body[data-garden-theme]) .repoRow { position: relative; padding: 2px 18px 6px; min-height: 48px; }
+/* A flower tuft beside the repository chip. */
+:global(body[data-garden-theme]) .repoRow::after {
+  content: ''; position: absolute; right: 22px; bottom: 0; width: 120px; height: 44px; pointer-events: none;
+  background: url('../assets/illustrations/garden-tuft.png') right bottom / contain no-repeat;
+}
+:global(body[data-garden-theme]) .repo {
+  height: 36px; padding: 0 12px; gap: 8px; max-width: calc(100% - 140px); border: 1.5px solid #e2d8be; border-radius: 10px;
+  background: #fffaf0; color: #1f1c17; font-size: 15px;
+}
+:global(body[data-garden-theme]) .repo svg { color: #4f4a42; }
+/* A soft green watercolour wash. */
+:global(body[data-garden-theme]) .greeting {
+  margin: 10px 16px 14px; padding: 16px 22px 18px; color: #1f1c17;
+  border-radius: 34px 44px 38px 40px / 40px 30px 44px 32px;
+  background:
+    radial-gradient(ellipse 30% 70% at 6% 70%, #c9e79acc, transparent 70%),
+    radial-gradient(ellipse 26% 70% at 96% 22%, #b7df73cc, transparent 70%),
+    radial-gradient(ellipse 70% 90% at 50% 50%, #f3f9df, #e9f5cc 80%);
+  box-shadow: 0 0 10px 4px #eef7d6 inset;
+}
+:global(body[data-garden-theme]) .greeting strong { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+:global(body[data-garden-theme]) .greeting p { font-size: 15.5px; line-height: 1.6; color: #2b2721; }
+:global(body[data-garden-theme]) .dropMask { inset: 56px 0 0; color: #1f7a3f; background: #eef7e2e6; }
+:global(body[data-garden-theme]) .dropping { outline-color: #48bd76; }
+
+:global(body[data-garden-theme]) .composer { border-top: 0; padding: 8px 14px 14px; gap: 8px; }
+:global(body[data-garden-theme]) .tag { padding: 3px 6px 3px 10px; border-radius: 8px; border-color: #c3dfab; background: #eef7e2; font-size: 14px; color: #1f5e34; }
+:global(body[data-garden-theme]) .inputCard {
+  border: 2px solid #48bd76; border-radius: 16px; background: #fffef9; box-shadow: 0 3px 10px rgba(92, 128, 63, 0.10);
+}
+:global(body[data-garden-theme]) .inputCard:focus-within { border-color: #2ea25e; }
+:global(body[data-garden-theme]) .inputCard textarea { padding: 12px 16px 4px; font-size: 16px; line-height: 1.5; }
+:global(body[data-garden-theme]) .inputCard textarea::placeholder { color: #8a8170; }
+:global(body[data-garden-theme]) .actions { gap: 10px; padding: 6px 10px 10px; }
+:global(body[data-garden-theme]) .toolButton { width: 38px; height: 38px; border: 0; border-radius: 10px; background: center / contain no-repeat; }
+:global(body[data-garden-theme]) .toolButton > * { visibility: hidden; }
+:global(body[data-garden-theme]) .newChat { background-image: url('../assets/illustrations/garden-plus.png'); }
+:global(body[data-garden-theme]) .attach { background-image: url('../assets/illustrations/garden-attach.png'); }
+:global(body[data-garden-theme]) .toolButton:hover:not(:disabled) { background-color: transparent; filter: brightness(.97) saturate(1.2); }
+:global(body[data-garden-theme]) .model { height: 38px; gap: 8px; padding: 0 10px 0 12px; border: 1.5px solid #e2d8be; border-radius: 10px; background: #fffaf0; color: #2b2721; }
+:global(body[data-garden-theme]) .model select { font-size: 14.5px; font-weight: 500; max-width: 170px; }
+/* Send and stop are the painted buttons; their icon and label stay for screen readers only. */
+:global(body[data-garden-theme]) .send,
+:global(body[data-garden-theme]) .stop { width: 74px; height: 40px; padding: 0; border-radius: 12px; background: center / contain no-repeat; box-shadow: none; color: transparent; }
+:global(body[data-garden-theme]) .send { background-image: url('../assets/illustrations/garden-chat-send.png'); }
+:global(body[data-garden-theme]) .stop { background-image: url('../assets/illustrations/garden-chat-stop.png'); }
+:global(body[data-garden-theme]) .send svg, :global(body[data-garden-theme]) .stop svg { visibility: hidden; }
+:global(body[data-garden-theme]) .send:hover:not(:disabled), :global(body[data-garden-theme]) .stop:hover { filter: brightness(1.04) saturate(1.1); }
+:global(body[data-garden-theme]) .send:disabled { opacity: .5; }
+:global(body[data-garden-theme]) .error { font-size: 13.5px; }

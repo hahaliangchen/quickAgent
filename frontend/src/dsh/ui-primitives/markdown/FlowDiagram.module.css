@@ -1,0 +1,14 @@
+.figure { margin: 1em 0; border: 1px solid #e5f0ea; border-radius: 14px; overflow: hidden; background: #f7fbf8; }
+.header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; color: #668276; font-size: 12px; border-bottom: 1px solid #e5f0ea; }
+.header button { border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.canvas { width: 100%; min-height: 260px; background: radial-gradient(circle at 74% 20%, #e5f4eb 0, #e5f4eb 115px, transparent 116px), radial-gradient(circle at 59% 88%, #edf8f1 0, #edf8f1 100px, transparent 101px), #f7fbf8; }
+.canvas :global(.react-flow__node-default) { border: 1.5px solid #a0d7bd; border-radius: 13px; background: #fff; color: #285d4c; font-size: 13px; font-weight: 600; box-shadow: none; padding: 12px 14px; }
+.canvas :global(.react-flow__handle) { opacity: 0; }
+.canvas :global(.react-flow__edge-textbg) { fill: #fff; }
+.source { margin: 0; padding: 12px 14px; overflow: auto; font-size: 12px; border-top: 1px solid #e4ebe9; }
+.edgeLabel { position: absolute; padding: 2px 5px; border-radius: 4px; background: #f7fbf8; color: #43836a; font-size: 11px; pointer-events: none; }
+:global([data-ds-dark-theme]) .figure { background: #15271f; border-color: #315a46; }
+:global([data-ds-dark-theme]) .header { color: #aacbb9; border-color: #315a46; }
+:global([data-ds-dark-theme]) .canvas { background: radial-gradient(circle at 74% 20%, #213f30 0, #213f30 115px, transparent 116px), radial-gradient(circle at 59% 88%, #1b3529 0, #1b3529 100px, transparent 101px), #15271f; }
+:global([data-ds-dark-theme]) .canvas :global(.react-flow__node-default) { background: #1c3026; color: #d9f4e6; border-color: #579d79; }
+:global([data-ds-dark-theme]) .edgeLabel { background: #15271f; color: #a6d2b7; }

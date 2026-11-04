@@ -2,6 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetSta
 import clsx from 'clsx'
 import heroDay from '../assets/illustrations/hero-day.webp'
 import heroNight from '../assets/illustrations/hero-night.webp'
+import gardenWindmill from '../assets/illustrations/garden-windmill.png'
+import gardenTitle from '../assets/illustrations/garden-title.png'
+import gardenDoodles from '../assets/illustrations/garden-doodles.png'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
 import { latestContextUsage } from './ContextRing.tsx'
 import { SkillPagesView } from './SkillPagesView.tsx'
@@ -28,6 +31,14 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
   return (
     <main className={welcomeCss.page} data-phase="hero">
       <div className={welcomeCss.welcome}>
+        <div className={welcomeCss.gardenHeading}>
+          <h1 className={welcomeCss.gardenTitle}><img src={gardenTitle} alt="QuickAgent：今天想创造点什么？" /></h1>
+          <p>和 <strong>QuickAgent</strong> 一起，把灵感变成可运行的成果 <span aria-hidden="true">✦</span></p>
+          <div className={welcomeCss.gardenScene}>
+            <img className={welcomeCss.gardenIllustration} src={gardenWindmill} alt="" />
+            <img className={welcomeCss.gardenDoodles} src={gardenDoodles} alt="" />
+          </div>
+        </div>
         <div className={welcomeCss.heading}>
           {/* The same windmill by day and by night; the theme decides which shows. */}
           <img src={heroDay} className={clsx(welcomeCss.hero, welcomeCss.heroDay)} alt="" />

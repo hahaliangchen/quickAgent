@@ -61,6 +61,23 @@
   --wb-badge: #c4c4cc;
 }
 
+:global(body[data-garden-theme]) .root {
+  --wb-side: transparent;
+  --wb-card: #fffdf6;
+  --wb-soft: #f8f1e2;
+  --wb-soft-2: #efe8d5;
+  --wb-line: #e8dabc;
+  --wb-line-soft: #eee3cd;
+  --wb-text-2: #514839;
+  --wb-muted: #786e5e;
+  --wb-faint: #918571;
+  --wb-accent-soft: #e4f1dd;
+  --wb-accent-bg: #eff8e9;
+  --wb-link: #168663;
+  --wb-badge: #6d735c;
+  background: transparent;
+}
+
 .root *,
 .root *::before,
 .root *::after {

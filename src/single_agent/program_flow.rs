@@ -53,11 +53,25 @@ pub(super) fn requirable(s: &Session<'_>, definitions: &[Value]) -> BTreeMap<Str
         else {
             continue;
         };
-        if !static_names.contains_key(&name) {
+        if !static_names.contains_key(&name) && (s.plugin.is_none() || library_catalog(s, definitions).contains_key(&name) || package["id"].as_str() == s.plugin.as_deref()) {
             result.insert(name, package["description"].as_str().unwrap_or("").to_owned());
         }
     }
     result
+}
+
+/// Package IDs address skill instructions; library names address require().
+/// Project skills take precedence in read_skill, so never advertise a shadowed ID.
+pub(super) fn skill_library_names(s: &Session<'_>) -> Vec<(String, String)> {
+    if s.plugin.is_some() { return Vec::new(); }
+    let project_names = super::skill_scope::project_skills(s).into_iter().map(|(name, _)| name).collect::<BTreeSet<_>>();
+    packages(s).as_array().into_iter().flatten()
+        .filter(|p| p["enabled"] == true && p["has_skill"] == true)
+        .filter_map(|p| {
+            let id = p["id"].as_str()?;
+            let library = p["library"].as_str().map(str::to_owned).unwrap_or_else(|| agent_program::libraries::namespace(id));
+            (!project_names.contains(id) && agent_program::libraries::valid_namespace(&library)).then(|| (id.to_owned(), library))
+        }).collect()
 }
 /// What require gives: the methods of a library as they are when the line
 /// runs, or an error that names what can be required. The host's own

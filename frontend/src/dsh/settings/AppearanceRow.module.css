@@ -400,6 +400,8 @@ details[open] > .modelSummary::before {
 }
 
 @media (max-width: 720px) {
+  .row:has(.segmented) { flex-wrap: wrap; }
+  .segmented { max-width: 100%; flex-wrap: wrap; }
   .control { width: 100%; }
   .checkGrid { grid-template-columns: minmax(0, 1fr); }
 }

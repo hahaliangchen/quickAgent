@@ -14,6 +14,8 @@
   margin: 0 auto;
 }
 
+:global(body[data-garden-theme]) .hero { z-index: 4; }
+
 .notice {
   box-sizing: border-box;
   width: 100%;
@@ -217,6 +219,14 @@
 .hero .card:hover,
 .hero .card:focus-within {
   box-shadow: 0 3px 16px rgba(32, 33, 36, 0.09);
+}
+
+:global(body[data-garden-theme]) .hero .card,
+:global(body[data-garden-theme]) .hero .card:hover,
+:global(body[data-garden-theme]) .hero .card:focus-within {
+  background: #fffef9;
+  border: 2px solid #48bd76;
+  box-shadow: 0 4px 14px rgba(92, 128, 63, 0.12);
 }
 
 :global(body[data-ds-dark-theme]) .hero .card,
@@ -747,3 +757,24 @@
   cursor: default;
   transform: none;
 }
+
+:global(body[data-garden-theme]) .actionBtn,
+:global(body[data-garden-theme]) .actionBtn:hover,
+:global(body[data-garden-theme]) .actionBtn:disabled,
+:global(body[data-garden-theme]) .actionBtn:disabled:hover {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: transparent url('../assets/illustrations/garden-send.png') center / contain no-repeat;
+}
+
+:global(body[data-garden-theme]) .actionBtn svg { visibility: hidden; }
+:global(body[data-garden-theme]) .actionBtn:disabled { opacity: .55; }
+
+:global(body[data-garden-theme]) .stopBtn {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: transparent url('../assets/illustrations/garden-stop.png') center / contain no-repeat;
+}
+:global(body[data-garden-theme]) .stopBtn svg { visibility: hidden; }

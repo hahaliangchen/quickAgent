@@ -305,6 +305,10 @@ impl Registry {
             package.scope.is_some() && package.manifest.tools.iter().any(|tool| tool == name)
         })
     }
+    pub fn builtin_tool(&self, name: &str) -> bool {
+        self.entries.read().unwrap().values().any(|package| package.scope.is_some()
+            && package.origin == Origin::Builtin && package.manifest.tools.iter().any(|tool| tool == name))
+    }
     /// When an enabled plugin declares `name` with `"executor": "page"`, the
     /// name its page knows the tool by (without the host's `plugin_id__` prefix):
     /// the plugin's page runs it, not the host or the plugin's service.
@@ -326,7 +330,7 @@ impl Registry {
     pub fn catalog(&self) -> Value {
         json!(self.entries.read().unwrap().values().map(|package|json!({
             "id":package.manifest.id,"name":package.manifest.id,"title":package.manifest.title,"library":package.manifest.library,
-            "description":package.description,"enabled":package.scope.is_some(),"scope":package.scope,
+            "description":package.description,"enabled":package.scope.is_some(),"scope":package.scope,"has_skill":!package.manifest.skill.trim().is_empty(),
             "tools":package.manifest.tools,"pages":package.manifest.pages,"package_root":package.root,"origin":package.origin,"inject":package.manifest.inject,"remote":package.remote.is_some(),
         })).collect::<Vec<_>>())
     }

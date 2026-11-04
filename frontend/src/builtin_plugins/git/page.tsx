@@ -153,7 +153,7 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
   useEffect(() => () => codeChat.setCurrent(undefined), [])
   const synced = data?.upstream && data.ahead === 0 && data.behind === 0
 
-  return <div className={css.root}>
+  return <div className={css.root} data-garden-page="git">
     {data && files && <FileTree repository={data.repository} paths={files.paths} truncated={files.truncated} changes={changeCodes}
       active={codeFile?.path} onOpen={path => setCodeFile({ path, commit: null })} dragPath={toWorkspace} />}
     <div className={css.content}>
@@ -162,6 +162,7 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
         <Icon name="folder" size={20} />
         <h1 title={data?.root ?? workspaceRoot}>{data?.repository ?? workspaceRoot.split(/[\\/]/).pop()}</h1>
         {data?.head && <span className={css.branchPill}><BranchIcon />{data.head}</span>}
+        <span className={css.tuft} aria-hidden="true" />
       </div>
       <div className={css.actions}>
         <button type="button" className={css.ghost} disabled={!!busy} onClick={() => { void load() }} title="刷新"><Icon name="refresh" size={15} />刷新</button>
@@ -194,9 +195,11 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
           <span className={css.sep} />
           <button type="button" className={css.linkButton} onClick={() => { setView('changes'); setSelected({ hash: null }) }}>
             <Icon name="code" size={14} />本地变更：<u>{data.changes.length} 个文件</u></button>
-          <span className={css.grow} />
-          <span className={css.muted}>远程 {data.upstream ?? '未设置上游'}</span>
-          {synced && <span className={css.synced}><Icon name="check" size={13} />已同步</span>}
+          {/* Remote and its sync state wrap together, to the right. */}
+          <span className={css.remote}>
+            <span className={css.muted}>远程 {data.upstream ?? '未设置上游'}</span>
+            {synced && <span className={css.synced}><Icon name="check" size={13} />已同步</span>}
+          </span>
         </div>}
 
         {view === 'graph' && <>
@@ -223,7 +226,7 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
               <span style={{ width: filtered ? laneX(graphWidth - 1) + 14 : 36 }}>图谱</span>
               <span className={css.colSubject}>提交信息（共 {visible.length} 条）</span>
               <span className={css.colAuthor}>作者</span><span className={css.colTime}>提交时间</span>
-              <span className={css.colHash}>提交哈希</span><span className={css.colRefs}>分支 / 标签</span><span className={css.colCloud} />
+              <span className={css.colHash}>提交哈希</span>
             </div>
             {busy === 'load' && !data && <p className={css.empty}>正在读取仓库…</p>}
             {data && commits.length === 0 && <p className={css.empty}>这个仓库还没有提交。</p>}
@@ -234,14 +237,14 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
                 {filtered ? <GraphCell row={row} width={graphWidth} /> : <span className={css.dot} />}
               </span>
               <span className={css.colSubject} title={commit.subject}>
-                {commit.parents.length > 1 ? <MergeIcon /> : <Icon name="file" size={15} />}<span className={css.ellipsis}>{commit.subject}</span>
+                {commit.parents.length > 1 ? <MergeIcon /> : <Icon name="file" size={15} />}
+                {data?.upstream && commit.refs.includes(data.upstream) && <span className={css.cloud} role="img" aria-label={`远程 ${data.upstream} 指向此提交`} title={`远程 ${data.upstream} 在这里：这个提交及更早的提交已推送`}><CloudIcon /></span>}
+                <RefBadges refs={commit.refs} upstream={data?.upstream ?? null} />
+                <span className={css.ellipsis}>{commit.subject}</span>
               </span>
               <span className={css.colAuthor}><Avatar name={commit.author} email={commit.email} /><span className={css.ellipsis}>{commit.author}</span></span>
               <span className={clsx(css.colTime, css.muted)} title={absoluteTime(commit.time)}>{relativeTime(commit.time)}</span>
               <span className={css.colHash}><code className={css.hash}>{commit.hash.slice(0, 7)}</code></span>
-              <span className={css.colRefs}><RefBadges refs={commit.refs} upstream={data?.upstream ?? null} /></span>
-              <span className={css.colCloud}>{data?.upstream && commit.refs.includes(data.upstream) &&
-                <span className={css.cloud} title={`远程 ${data.upstream} 在这里：这个提交及更早的提交已推送`}><CloudIcon /></span>}</span>
             </div>)}
           </div>
         </>}
@@ -288,7 +291,7 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
       <aside className={css.detail} aria-label="提交详情">
         {!selected && <p className={css.empty}>选择一个提交查看详情。</p>}
         {selected && <>
-          <section className={css.card}>
+          <section className={clsx(css.card, css.detailCard)}>
             <h2 className={css.cardTitle}><Icon name="info" size={17} />{selected.hash ? '提交详情' : '工作区变更'}</h2>
             {detailError && <p role="alert" className={css.error}>{detailError}</p>}
             {!detail && !detailError && <p className={css.muted}>正在读取…</p>}
@@ -334,8 +337,9 @@ function FileList({ files, openFile, onOpen }: { files: GitFile[]; openFile: str
     <div className={css.files}>
       {files.map(file => <button key={file.path} type="button" className={clsx(css.fileRow, openFile === file.path && css.fileRowActive)} onClick={() => onOpen(file.path)}>
         <Icon name={openFile === file.path ? 'chevronDown' : 'chevron'} size={13} /><Icon name="file" size={14} />
-        <span className={css.ellipsis} title={file.orig_path ? `${file.orig_path} → ${file.path}` : file.path}>{file.path}</span>
-        <span className={css.grow} />
+        {/* The name comes first; a long directory is what gets cut. */}
+        <span className={css.fileName} title={file.orig_path ? `${file.orig_path} → ${file.path}` : file.path}>
+          <span>{baseName(file.path)}</span><span className={clsx(css.muted, css.ellipsis)}>{dirName(file.path)}</span></span>
         {file.untracked ? <span className={css.muted}>新文件</span> : file.added === null ? <span className={css.muted}>二进制</span>
           : <><span className={css.add}>+{file.added}</span><span className={css.del}>-{file.deleted}</span></>}
       </button>)}
@@ -355,6 +359,9 @@ function Diff({ patch }: { patch: GitPatch }) {
     {patch.truncated && <p className={css.muted}>补丁太大，只显示了前一部分。</p>}
   </div>
 }
+
+const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+const dirName = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf('/')))
 
 function message(reason: unknown) { return String(reason instanceof Error ? reason.message : reason).replace(/^Error:\s*/, '') }
 

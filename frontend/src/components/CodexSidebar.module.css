@@ -12,6 +12,11 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+:global(body[data-garden-theme]) .root {
+  background: transparent;
+  border-right-color: #eadcc0;
+}
+
 :global(body[data-ds-dark-theme]) .root {
   background: var(--codex-sidebar-bg);
   border-right-color: #232a26;
@@ -109,6 +114,13 @@
 
 .newChatBtn:hover {
   background: var(--codex-hover-bg, #f4f4f5);
+}
+
+:global(body[data-garden-theme]) .newChatBtn {
+  border: 1px solid #ecd9b6;
+  background: #fffbf2b8;
+  border-radius: 10px;
+  box-shadow: 0 2px 5px #98743a12;
 }
 
 :global(body[data-ds-dark-theme]) .newChatBtn:hover {
@@ -249,6 +261,8 @@
 .projectHeaderRowActive {
   background: var(--codex-hover-bg, #f4f4f5);
 }
+
+:global(body[data-garden-theme]) .projectHeaderRowActive { background: #e2efd8; }
 
 .projectHeaderRowActive .projectTitle {
   color: var(--sprout-strong, #0f6e56);
@@ -447,6 +461,25 @@
 .modeSwitch { display: flex; flex-shrink: 0; gap: 2px; padding: 2px; border-radius: 9px; background: var(--codex-hover-bg, #efefef); }
 .modeButton { display: flex; align-items: center; justify-content: center; width: 34px; height: 29px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--codex-text-muted, #71717a); cursor: pointer; }
 .modeActive { background: var(--codex-card-bg, #fff); border-color: var(--codex-card-border, #e5e7eb); color: var(--sprout-strong, #0f6e56); box-shadow: 0 1px 2px rgba(16, 24, 40, 0.07); }
+:global(body[data-garden-theme]) .modeSwitch {
+  gap: 3px;
+  padding: 2px;
+  border: 1px solid #e6d2a8;
+  border-radius: 11px;
+  background: #f4ead2;
+  box-shadow: inset 0 1px 3px #99743917;
+}
+:global(body[data-garden-theme]) .modeButton {
+  border-radius: 8px;
+  color: #729777;
+}
+:global(body[data-garden-theme]) .modeButton:hover { background: #e6f1df; color: #168663; }
+:global(body[data-garden-theme]) .modeActive {
+  background: linear-gradient(155deg, #fffdf1, #e2f3dd);
+  border-color: #a9d5a0;
+  color: #10845e;
+  box-shadow: 0 2px 4px #72935b30;
+}
 .itemRow { display: flex; align-items: center; min-width: 0; border-radius: 6px; }
 .itemRow:hover { background: var(--codex-hover-bg, #f4f4f5); }
 .itemRow > .sessionRow, .itemRow > .recentRow { flex: 1; width: 0; min-width: 0; background: transparent; color: inherit; }

@@ -7,6 +7,8 @@
   background: var(--dsw-alias-bg-base);
 }
 
+:global(body[data-garden-theme]) .root:has([data-garden-page='plugins']) { background: transparent; }
+
 /* 76px with its rule: the height of the Sidebar's tab strip and header row
    (ui-dockkit `.tabStrip` 38px + the pane header's 38px), so the two rules
    meet at the column edge. The rows add up to it — 10px top inset, the 30px

@@ -30,6 +30,12 @@
   font-family: var(--codex-font-sans, system-ui, sans-serif);
 }
 
+.gardenPreview { display: none; }
+.previewSelect { display: none; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; font-size: 15px !important; font-weight: 650 !important; }
+.previewSelect:hover { color: var(--sp-accent-strong) !important; }
+:global(body[data-garden-theme]) .previewSelect { display: block; }
+:global(body[data-garden-theme]) .standardTitle { display: none; }
+
 :global(body[data-ds-dark-theme]) .root {
   --sp-side: #151917;
   --sp-card: #1c1f1e;
@@ -44,6 +50,25 @@
   --sp-accent-bg: #17261f;
   --sp-red: #f08080;
   --sp-red-soft: #3a2121;
+}
+
+:global(body[data-garden-theme]) .root {
+  --sp-side: #fbf4e4;
+  --sp-card: #fffdf6;
+  --sp-soft: #f8f1e2;
+  --sp-soft-2: #efe8d5;
+  --sp-line: #e8dabc;
+  --sp-line-soft: #eee3cd;
+  --sp-text-2: #514839;
+  --sp-muted: #786e5e;
+  --sp-faint: #918571;
+  --sp-accent-soft: #e4f1dd;
+  --sp-accent-bg: #eff8e9;
+  background: transparent;
+}
+
+:global(body[data-garden-theme]) .side {
+  background: transparent;
 }
 
 /* Only this page's own chrome is reset; a plugin's page keeps its own styles. */
@@ -548,4 +573,47 @@
   .main {
     min-height: 480px;
   }
+}
+
+/* Garden layout: the paper and meadow are supplied once by the application frame. */
+:global(body[data-garden-theme]) .header { height: 64px; padding: 0 28px; }
+:global(body[data-garden-theme]) .header h1 { font-size: 22px; }
+:global(body[data-garden-theme]) .back { border: 1px solid #b5d991; background: #fffdf2c9; color: #245b34 !important; }
+:global(body[data-garden-theme]) .body { padding: 10px 24px max(80px, 10vh); gap: 18px; }
+:global(body[data-garden-theme]) .side { flex: 1 1 52%; width: 52%; padding: 8px 0 24px; border: 0; }
+:global(body[data-garden-theme]) .sideHidden { display: none; }
+:global(body[data-garden-theme]) .main { flex: 1 1 48%; }
+:global(body[data-garden-theme]) .sectionHead h2 { color: #2e3026; font-size: 16px; }
+:global(body[data-garden-theme]) .card,
+:global(body[data-garden-theme]) .form {
+  border-color: #bdcf8d; background-color: #fffcf3db; box-shadow: 0 3px 7px #806b3210;
+}
+:global(body[data-garden-theme]) .card {
+  position: relative;
+  background-image: url('../assets/illustrations/garden-code-sign.png');
+  background-size: 145px auto; background-position: right 4px center; background-repeat: no-repeat;
+}
+:global(body[data-garden-theme]) .card .description { max-width: calc(100% - 110px); }
+:global(body[data-garden-theme]) .forms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+:global(body[data-garden-theme]) .form { min-width: 0; }
+:global(body[data-garden-theme]) .gardenPreview { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; padding: 10px; border: 1px solid #e8d9ac; border-radius: 16px; background: #fffaf0b8; }
+:global(body[data-garden-theme]) .gardenPreview + .empty { display: none; }
+:global(body[data-garden-theme]) .previewTop { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px; background: #e5f1d9; color: #176f45; font-weight: 700; }
+:global(body[data-garden-theme]) .previewCard { flex: 1; min-height: 0; overflow: auto; padding: 20px; border: 1px solid #8bc894; border-radius: 14px; background: #fffdf4e8; }
+:global(body[data-garden-theme]) .previewHero { display: flex; align-items: center; gap: 12px; padding-top: 68px; background: url('../assets/illustrations/garden-code-sign.png') right top / 160px auto no-repeat; }
+:global(body[data-garden-theme]) .previewHero h2 { margin: 0; font-size: 22px; }
+:global(body[data-garden-theme]) .previewCard p { color: var(--sp-text-2); line-height: 1.6; }
+:global(body[data-garden-theme]) .previewCard h3 { margin: 20px 0 8px; font-size: 15px; }
+:global(body[data-garden-theme]) .previewRow { box-sizing: border-box; width: 100%; display: flex; align-items: center; gap: 9px; padding: 10px; margin: 6px 0; border: 1px solid #e4d5b5; border-radius: 8px; background: #fffdf5; color: #285b3b; text-align: left; font: inherit; }
+:global(body[data-garden-theme]) button.previewRow { cursor: pointer; }
+:global(body[data-garden-theme]) .previewRow span { margin-left: auto; }
+@media (max-width: 1000px) {
+  :global(body[data-garden-theme]) .body { padding: 10px 16px 80px; }
+  :global(body[data-garden-theme]) .forms { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  :global(body[data-garden-theme]) .body { overflow: auto; }
+  :global(body[data-garden-theme]) .side { width: 100%; flex: none; }
+  :global(body[data-garden-theme]) .main { min-height: 400px; }
+  :global(body[data-garden-theme]) .sideHidden { display: none; }
 }

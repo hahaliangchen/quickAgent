@@ -3,6 +3,7 @@
   "id": "git",
   "library": "git",
   "title": "Git",
-  "tools": ["read_git", "sync_git"],
+  "skill": "SKILL.md",
+  "tools": ["read_git", "sync_git", "read_remote_git"],
   "pages": [{"id": "history", "title": "提交图谱", "entry": "git.history", "renderer": "react"}]
 }

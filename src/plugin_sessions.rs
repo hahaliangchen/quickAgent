@@ -164,6 +164,8 @@ pub(crate) async fn handle(state: AgentServiceState, id: &str, args: Value) -> R
                                 "user/message",
                                 "assistant/message",
                                 "assistant/delta",
+                                "task/node_started",
+                                "task/node_returned",
                                 "tool/call",
                                 "tool/result",
                                 "turn/start",
@@ -178,10 +180,16 @@ pub(crate) async fn handle(state: AgentServiceState, id: &str, args: Value) -> R
                     )?
                     .into_iter()
                     .map(|e| {
+                        let mut data = e.data()?;
+                        // Plugin pages need frame identity and the returned value, not
+                        // the potentially huge source HTML or captured inputs.
+                        if matches!(e.kind.as_str(), "task/node_started" | "task/node_returned") {
+                            data = json!({"node_id":data["node_id"],"task_node_id":data["task_node_id"],"parent_id":data["parent_id"],"metadata":data["metadata"],"title":data["title"],"goal":data["goal"],"result":data["result"],"turn":data["turn"]});
+                        }
                         Ok(agent_service::AgentEvent {
                             seq: e.seq,
                             time: e.time,
-                            data: e.data()?,
+                            data,
                             kind: e.kind,
                             surface_op: e.surface_op,
                         })
@@ -320,6 +328,15 @@ mod tests {
         .await;
         assert_eq!(history["events"].as_array().unwrap().len(), 1);
         assert_eq!(history["events"][0]["seq"], 1);
+        for (kind, result) in [("task/node_started", Value::Null), ("task/node_returned", json!({"result":"{\"saved\":true}"}))] {
+            agent_service::emit(&root, task, kind, json!({"node_id":"child","metadata":{"role":"temp"},"title":"author","inputs":{"html":"private large input"},"result":result})).await.unwrap();
+        }
+        let frames = body(handle(state.clone(), "code-flow", json!({"method":"events","package_scope":scope,"task_id":task,"after_seq":1})).await.unwrap()).await;
+        let frames = frames["events"].as_array().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["data"]["metadata"]["role"], "temp");
+        assert_eq!(frames[1]["data"]["result"]["result"], "{\"saved\":true}");
+        assert!(frames[1]["data"].get("inputs").is_none());
         for args in [
             json!({"method":"events","package_scope":scope,"task_id":"general-task"}),
             json!({"method":"create"}),

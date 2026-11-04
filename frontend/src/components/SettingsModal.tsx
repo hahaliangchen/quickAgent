@@ -440,12 +440,13 @@ export function SettingsModal({
                     <div className={appearanceCss.row}>
                       <div className={appearanceCss.rowText}>
                         <span className={appearanceCss.rowTitle}>外观模式</span>
-                        <span className={appearanceCss.rowHint}>浅色、深色，或跟随系统自动切换</span>
+                        <span className={appearanceCss.rowHint}>选择浅色、深色、花园，或跟随系统</span>
                       </div>
                       <div className={appearanceCss.segmented} role="radiogroup" aria-label="外观模式">
                         {([
                           { mode: 'light', label: '浅色', icon: <IconLightOutlineRegular size={16} /> },
                           { mode: 'dark', label: '深色', icon: <IconDarkOutlineRegular size={16} /> },
+                          { mode: 'garden', label: '花园', icon: <span aria-hidden="true">🌿</span> },
                           { mode: 'system', label: '跟随系统', icon: <IconSettingsOutlineRegular size={16} /> },
                         ] as const).map(option => (
                           <button

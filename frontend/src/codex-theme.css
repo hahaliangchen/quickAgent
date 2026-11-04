@@ -69,6 +69,35 @@
   --dsw-alias-state-business-primary: #1d9e75;
 }
 
+body[data-garden-theme] {
+  --codex-bg-main: #fff9ec;
+  --codex-dock-bg: #fcf5e6;
+  --codex-sidebar-bg: #fff9ed;
+  --codex-panel-bg: #fffaf0;
+  --codex-card-bg: #fffef9;
+  --codex-text-primary: #302a22;
+  --codex-text-secondary: #514839;
+  --codex-text-muted: #786e5e;
+  --codex-border-subtle: #eee3cd;
+  --codex-card-border: #e5dac3;
+  --codex-hover-bg: #f4eedc;
+  --codex-active-pill: #e4f1dd;
+  --codex-active-hover: #d8ebd1;
+  --codex-blue-primary: #188b65;
+  --codex-blue-hover: #116f52;
+  --sprout-strong: #147b58;
+  --sprout-soft: #e4f4e9;
+  --dsw-alias-bg-base: #fff9ec;
+  --dsw-specific-sidebar-fill: #fff9ed;
+  --dsw-alias-label-primary: #302a22;
+  --dsw-alias-label-secondary: #514839;
+  --dsw-alias-label-tertiary: #786e5e;
+  --dsw-alias-border-l2: #e5dac3;
+  --dsw-alias-border-l3: #eee3cd;
+  --dsw-alias-interactive-bg-hover: #f4eedc;
+  --dsw-alias-state-business-primary: #188b65;
+}
+
 body[data-ds-dark-theme] {
   --brand-mark: #6fb447;
   --codex-bg-main: #18181b;

@@ -10,6 +10,7 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
   const api = useAgentApi()
   const { packages, pages, errors } = usePluginPages()
   const [selected, setSelected] = useState<{ owner: string; page: string }>()
+  const [previewId, setPreviewId] = useState<string>()
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [installPath, setInstallPath] = useState('')
@@ -21,6 +22,7 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
   const page = owner?.pages.find(item => item.id === selected?.page)
   const contribution = pages.find(item => item.owner === owner?.id && item.scope === owner?.scope && item.id === page?.id)
   const Page = contribution?.component
+  const preview = packages.find(item => item.id === previewId) ?? packages[0]
   const problem = error || Object.values(errors).join('；')
   async function change(action: () => Promise<unknown>) {
     setBusy(true); setError('')
@@ -29,7 +31,7 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
     finally { setBusy(false) }
   }
 
-  return <div className={styles.root}>
+  return <div className={styles.root} data-garden-page="plugins">
     <header className={styles.header}>
       <button type="button" className={styles.back} onClick={onBack}><Icon name="back" size={16} />返回对话</button>
       <span className={styles.divider} />
@@ -47,7 +49,8 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
             <div className={styles.cardHead}>
               <span className={styles.cardIcon}><Icon name={item.origin === 'builtin' ? 'box' : 'plug'} size={19} /></span>
               <div className={styles.cardTitle}>
-                <strong title={item.title}>{item.title}</strong>
+                <strong className={styles.standardTitle} title={item.title}>{item.title}</strong>
+                <button type="button" className={styles.previewSelect} title={`查看${item.title}详情`} onClick={() => setPreviewId(item.id)}>{item.title}</button>
                 <span className={styles.badges}>
                   <span className={styles.badge}>{item.origin === 'builtin' ? '内置' : item.remote ? '远程' : '外部'}</span>
                   <span className={clsx(styles.state, item.enabled && styles.stateOn)}>{item.enabled ? '已启用' : '已停用'}</span>
@@ -75,6 +78,7 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
         </div>
 
         <div className={styles.sectionHead}><h2>添加插件</h2></div>
+        <div className={styles.forms}>
         <form className={styles.form} onSubmit={event => { event.preventDefault(); void change(() => api.installPackage(installPath.trim())) }}>
           <label className={styles.formTitle}><Icon name="folder" size={16} />本地技能包</label>
           <p className={styles.formHint}>包含 plugin.json 的目录。</p>
@@ -88,6 +92,7 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
           <input type="password" aria-label="远程服务凭证" placeholder="服务凭证" value={remoteToken} onChange={event => setRemoteToken(event.target.value)} />
           <button type="submit" className={styles.primary} disabled={busy || !remoteUrl.trim()}>握手并连接</button>
         </form>
+        </div>
       </aside>
 
       <main className={styles.main}>
@@ -103,11 +108,27 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
             {Page ? <Page key={`${owner.id}:${owner.scope}:${page.id}`} owner={owner} pageId={page.id} workspaceRoot={workspaceRoot} />
               : <p className={styles.hint}>等待插件注册页面…</p>}
           </div>
-        </> : <div className={styles.empty}>
+        </> : <>
+        {preview && <div className={styles.gardenPreview}>
+          <div className={styles.previewTop}><Icon name="file" size={18} />插件详情</div>
+          <div className={styles.previewCard}>
+            <div className={styles.previewHero}>
+              <span className={styles.cardIcon}><Icon name="box" size={21} /></span>
+              <h2>{preview.title}</h2>
+            </div>
+            <div className={styles.badges}><span className={styles.badge}>{preview.origin === 'builtin' ? '内置' : preview.remote ? '远程' : '外部'}</span><span className={clsx(styles.state, preview.enabled && styles.stateOn)}>{preview.enabled ? '已启用' : '已停用'}</span></div>
+            <p>{preview.description}</p>
+            <h3>工具（{preview.tools.length}）</h3>
+            {preview.tools.length ? preview.tools.map(tool => <div className={styles.previewRow} key={tool}><Icon name="code" size={16} />{tool}</div>) : <p className={styles.previewHint}>没有可用工具</p>}
+            <h3>页面（{preview.pages.length}）</h3>
+            {preview.pages.map(entry => <button className={styles.previewRow} key={entry.id} type="button" disabled={!preview.enabled} onClick={() => { setSelected({ owner: preview.id, page: entry.id }); setListOpen(false) }}><Icon name="file" size={16} />{entry.title} <span>›</span></button>)}
+          </div>
+        </div>}
+        <div className={styles.empty}>
           <span className={styles.emptyIcon}><Icon name="file" size={26} /></span>
           <strong>选择一个插件页面</strong>
           <span>在左侧已启用的插件下点页面名称，在这里打开。</span>
-        </div>}
+        </div></>}
       </main>
     </div>
   </div>

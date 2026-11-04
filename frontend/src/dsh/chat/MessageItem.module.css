@@ -385,3 +385,14 @@
   font-size: 12px;
   line-height: 15px;
 }
+
+/* Garden code chat: a green note with the asker's badge beside it. */
+:global(body[data-garden-theme] [data-code-chat]) .userRow { position: relative; padding-left: 46px; }
+:global(body[data-garden-theme] [data-code-chat]) .userRow::before {
+  content: ''; position: absolute; left: 0; top: 4px; width: 34px; height: 34px; border-radius: 50%;
+  background: #3a9a48 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='8.5' r='3.5'/%3E%3Cpath d='M5.5 19.5c1.2-3.2 3.7-4.8 6.5-4.8s5.3 1.6 6.5 4.8'/%3E%3C/svg%3E") center / 20px no-repeat;
+}
+:global(body[data-garden-theme] [data-code-chat]) .userStack { align-items: stretch; width: 100%; max-width: none; }
+:global(body[data-garden-theme] [data-code-chat]) .bubble {
+  max-width: none; border-radius: 14px; padding: 9px 14px; border: 1.5px solid #cfe5b8; background: #e6f3d6; color: #1f1c17;
+}

@@ -13,6 +13,136 @@
 
 .content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
+:global(body[data-garden-theme]) .root {
+  --git-row-active: #e9f5d6;
+  --git-line: #e2d8be;
+  --git-sep: #efe8d4;
+  --git-paper: #fefaf2;
+  --git-green: #1a8c51;
+  --codex-text-primary: #1f1c17;
+  --codex-text-secondary: #3a352d;
+  --codex-text-muted: #5f574a;
+  background: transparent;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+/* Garden: paper cards on the watercolour backdrop; sizes follow the design at 1672 px wide. */
+:global(body[data-garden-theme]) .tree { margin: 0 0 max(120px, 13vh) 6px; border: 0; background: transparent; }
+:global(body[data-garden-theme]) .treeBrand { display: flex; }
+:global(body[data-garden-theme]) .treeCard { border: 1px solid var(--git-line); border-radius: 18px; background: #fdf6ea; box-shadow: 0 2px 12px #b4a37a14; }
+:global(body[data-garden-theme]) .treeHead { padding: 16px 16px 8px 20px; }
+:global(body[data-garden-theme]) .treeHead h2 { font-size: 21px; }
+:global(body[data-garden-theme]) .treeHead .iconButton svg { width: 19px; height: 19px; }
+:global(body[data-garden-theme]) .treeBody { padding: 0 8px 12px; }
+:global(body[data-garden-theme]) .treeRow { height: 31px; gap: 8px; font-size: 17.5px; font-weight: 500; }
+:global(body[data-garden-theme]) .treeRoot { font-size: 17px; }
+:global(body[data-garden-theme]) .treeIcon { width: 19px; height: 19px; }
+:global(body[data-garden-theme]) .treeChevron { width: 16px; color: var(--codex-text-secondary); }
+:global(body[data-garden-theme]) .treeDot { width: 8px; height: 8px; background: #e48c15; margin-right: 10px; }
+
+:global(body[data-garden-theme]) .header { padding: 44px 34px 4px 30px; }
+:global(body[data-garden-theme]) .titleGroup { gap: 14px; }
+:global(body[data-garden-theme]) .titleGroup > svg { width: 32px; height: 32px; color: #6b5427; }
+:global(body[data-garden-theme]) .titleGroup h1 { font-size: 28px; font-weight: 700; color: #141210; }
+:global(body[data-garden-theme]) .branchPill {
+  height: 36px; padding: 0 16px; gap: 8px; border-radius: 9px; font-size: 18px; font-weight: 500;
+  border: 1.5px solid #d1d2b0; background: #f3f2e2;
+}
+:global(body[data-garden-theme]) .branchPill svg { width: 20px; height: 20px; }
+:global(body[data-garden-theme]) .tuft {
+  display: block; width: 124px; height: 44px; flex-shrink: 0; margin-left: 10px; pointer-events: none;
+  background: url('../../assets/illustrations/garden-tuft.png') left bottom / contain no-repeat;
+}
+:global(body[data-garden-theme]) .actions { gap: 12px; }
+:global(body[data-garden-theme]) .ghost,
+:global(body[data-garden-theme]) .primary {
+  height: 42px; padding: 0 20px; gap: 8px; border-radius: 10px; font-size: 18px; font-weight: 500;
+  border: 1.5px solid #dbd5c5; background: #fffcf5; color: #1f1c17; box-shadow: 0 2px 4px #c9bb9a33;
+}
+:global(body[data-garden-theme]) .ghost svg, :global(body[data-garden-theme]) .primary svg { width: 19px; height: 19px; }
+:global(body[data-garden-theme]) .primary { border-color: #a6ccA0; background: #e4f3dc; color: #0f6b35; }
+:global(body[data-garden-theme]) .primary:hover:not(:disabled) { background: #d7ecca; }
+
+:global(body[data-garden-theme]) .tabs { padding: 8px 30px 0; gap: 14px; border-bottom: 0; }
+:global(body[data-garden-theme]) .tab { font-size: 18px; font-weight: 500; padding: 7px 24px 9px; border: 0; border-radius: 10px; margin: 0; position: relative; color: #1f1c17; }
+:global(body[data-garden-theme]) .tabActive { background: #dfeeb0; color: #0b5e2a; font-weight: 700; }
+/* A brush stroke under the active tab. */
+:global(body[data-garden-theme]) .tabActive::after {
+  content: ''; position: absolute; left: 6px; right: 4px; bottom: -6px; height: 5px; border-radius: 5px 2px 6px 3px;
+  background: linear-gradient(90deg, #4e9a3c, #6aad45 55%, #4e9a3cbb); transform: rotate(-.6deg);
+}
+
+:global(body[data-garden-theme]) .body { gap: 20px; padding: 22px 26px max(120px, 13vh) 30px; }
+:global(body[data-garden-theme]) .main { gap: 14px; }
+:global(body[data-garden-theme]) .detail { width: 490px; gap: 18px; }
+:global(body[data-garden-theme]) .statusBar,
+:global(body[data-garden-theme]) .table,
+:global(body[data-garden-theme]) .list,
+:global(body[data-garden-theme]) .card,
+:global(body[data-garden-theme]) .codeView {
+  border: 1.5px solid var(--git-line); border-radius: 14px; background: var(--git-paper); box-shadow: 0 2px 8px #b4a37a12;
+}
+:global(body[data-garden-theme]) .statusBar { position: relative; padding: 12px 18px 12px 26px; font-size: 17px; row-gap: 6px; column-gap: 16px; }
+:global(body[data-garden-theme]) .statusBar::before {
+  content: ''; position: absolute; left: 8px; bottom: 2px; width: 100px; height: 34px; pointer-events: none;
+  background: url('../../assets/illustrations/garden-tuft.png') left bottom / contain no-repeat;
+}
+:global(body[data-garden-theme]) .statusBar svg { width: 19px; height: 19px; }
+:global(body[data-garden-theme]) .statusBar .muted { color: #3a352d; }
+:global(body[data-garden-theme]) .sep { height: 20px; background: #cfc6b0; }
+:global(body[data-garden-theme]) .code { font-family: inherit; font-size: 17px; font-weight: 500; padding: 2px 12px; border-radius: 8px; background: #d3ebcb; color: #0b5e2a; }
+:global(body[data-garden-theme]) .linkButton u { color: #12733f; text-decoration-color: #12733f; text-underline-offset: 4px; }
+:global(body[data-garden-theme]) .synced { font-size: 17px; color: #1a7a3f; }
+
+:global(body[data-garden-theme]) .toolbar { gap: 14px; }
+:global(body[data-garden-theme]) .select,
+:global(body[data-garden-theme]) .search { height: 40px; padding: 0 14px; gap: 10px; border-radius: 9px; border: 1.5px solid #e4e1d7; background: #fffcf6; font-size: 17px; color: #3a352d; }
+:global(body[data-garden-theme]) .select svg, :global(body[data-garden-theme]) .search svg { width: 19px; height: 19px; }
+:global(body[data-garden-theme]) .select select { min-width: 140px; font-weight: 500; }
+:global(body[data-garden-theme]) .search { min-width: 200px; }
+
+:global(body[data-garden-theme]) .tr { height: 45px; gap: 14px; padding: 0 16px; font-size: 17px; }
+:global(body[data-garden-theme]) .tr + .tr:not(.th) { border-top: 1px solid var(--git-sep); }
+:global(body[data-garden-theme]) .th { height: 46px; background: var(--git-paper); color: #1f1c17; border-bottom: 1px solid var(--git-sep); }
+:global(body[data-garden-theme]) .graphCol { height: 45px; }
+:global(body[data-garden-theme]) .graphCell path { stroke-width: 4; }
+:global(body[data-garden-theme]) .graphCell circle { stroke-width: 3.5; fill: #fbfbf3; }
+:global(body[data-garden-theme]) .colSubject svg { width: 18px; height: 18px; color: #4f4a42; }
+:global(body[data-garden-theme]) .trActive, :global(body[data-garden-theme]) .trActive:hover { background: var(--git-row-active); }
+:global(body[data-garden-theme]) .colAuthor { width: 140px; gap: 10px; }
+:global(body[data-garden-theme]) .colTime { width: 120px; }
+:global(body[data-garden-theme]) .colHash { width: 92px; }
+:global(body[data-garden-theme]) .colTime.muted { color: #3a352d; }
+:global(body[data-garden-theme]) .avatar { width: 27px; height: 27px; font-size: 14px; font-weight: 700; }
+:global(body[data-garden-theme]) .hash { font-size: 16px; color: #2b2721; }
+:global(body[data-garden-theme]) .ref { font-size: 13px; }
+
+:global(body[data-garden-theme]) .card { padding: 18px 20px; }
+:global(body[data-garden-theme]) .cardTitle { font-size: 22px; gap: 12px; margin-bottom: 16px; }
+:global(body[data-garden-theme]) .cardTitle svg { width: 24px; height: 24px; }
+:global(body[data-garden-theme]) .detailCard { position: relative; }
+/* The signpost sits in the card's top corner, behind the title. */
+:global(body[data-garden-theme]) .detailCard::before {
+  content: ''; position: absolute; top: -10px; right: 6px; width: 210px; height: 84px; pointer-events: none;
+  background: url('../../assets/illustrations/garden-sign-small.png') right top / contain no-repeat;
+}
+:global(body[data-garden-theme]) .subject { font-size: 18px; font-weight: 700; line-height: 1.5; margin-bottom: 14px; gap: 12px; }
+:global(body[data-garden-theme]) .subject svg { width: 20px; height: 20px; color: #1a8c51; }
+:global(body[data-garden-theme]) .meta { font-size: 16.5px; gap: 9px 26px; }
+:global(body[data-garden-theme]) .meta dt { gap: 10px; color: #4f4a42; }
+:global(body[data-garden-theme]) .meta dt svg { width: 17px; height: 17px; }
+:global(body[data-garden-theme]) .meta dd .muted { color: inherit; }
+:global(body[data-garden-theme]) .subTitle { font-size: 18px; font-weight: 700; gap: 10px; }
+:global(body[data-garden-theme]) .subTitle svg { width: 19px; height: 19px; }
+:global(body[data-garden-theme]) .message { font-size: 16px; line-height: 1.4; padding: 10px 16px; max-height: 150px; background: #f6f0de; border: 1px solid #efe7cf; color: #1f1c17; }
+:global(body[data-garden-theme]) .fileRow { padding: 6px 8px; font-size: 17px; border-top: 0; border-radius: 8px; }
+:global(body[data-garden-theme]) .fileRowActive { background: #e6f2d8; }
+:global(body[data-garden-theme]) .add, :global(body[data-garden-theme]) .del { font-size: 17px; font-weight: 600; }
+:global(body[data-garden-theme]) .add { color: #12733f; }
+:global(body[data-garden-theme]) .del { color: #c0362c; margin-left: 14px; }
+:global(body[data-garden-theme]) .fileName > span:last-child { font-size: 14px; }
+
 .tree {
   position: relative; flex-shrink: 0; display: flex; flex-direction: column; min-height: 0;
   border-right: 1px solid var(--codex-border-subtle); background: var(--codex-sidebar-bg, var(--codex-bg-main));
@@ -27,6 +157,8 @@
 }
 .treeSearch:focus { border-color: var(--git-accent); }
 .treeBody { flex: 1; min-height: 0; overflow: auto; padding: 0 6px 12px; }
+.treeBrand { align-items: center; height: 52px; padding: 0 6px 0 14px; flex-shrink: 0; }
+.treeBrand img { height: 40px; width: auto; display: block; }
 .treeRow {
   width: 100%; height: 28px; display: flex; align-items: center; gap: 6px; padding-right: 8px; border: 0; border-radius: 6px;
   background: none; font: inherit; font-size: 13.5px; color: var(--codex-text-primary); text-align: left; cursor: pointer;
@@ -97,7 +229,8 @@
 .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; padding: 1px 7px; border-radius: 5px; background: var(--git-accent-soft); color: var(--sprout-strong, var(--git-accent)); }
 .linkButton { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; color: inherit; }
 .linkButton u { color: var(--git-accent); }
-.synced { color: var(--git-accent); font-size: 12.5px; }
+.synced { display: inline-flex; align-items: center; gap: 4px; color: var(--git-accent); font-size: 12.5px; }
+.statusBar > .remote { margin-left: auto; gap: 14px; }
 
 .toolbar { display: flex; gap: 10px; flex-wrap: wrap; }
 .select, .search {
@@ -124,19 +257,19 @@
 .colAuthor { width: 110px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
 .colTime { width: 92px; flex-shrink: 0; }
 .colHash { width: 76px; flex-shrink: 0; }
-.colRefs { width: 180px; flex-shrink: 0; overflow: hidden; }
-.colCloud { width: 24px; flex-shrink: 0; display: flex; justify-content: center; }
 .cloud {
-  width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; flex-shrink: 0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
   color: #fff; background: #7c3aed;
 }
+.colSubject .cloud svg { color: #fff; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .avatar {
   width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
   color: #fff; font-size: 11.5px; font-weight: 600;
 }
 .hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--codex-text-secondary); }
-.refs { display: flex; gap: 6px; flex-wrap: nowrap; }
+.refs { display: flex; gap: 6px; flex-wrap: nowrap; flex-shrink: 0; }
+.refs:empty { display: none; }
 .ref { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
 .refHead, .refBranch { background: var(--git-accent-soft); color: var(--sprout-strong, var(--git-accent)); }
 .refHeadTag { border: 1px solid color-mix(in srgb, var(--git-accent) 50%, transparent); color: var(--git-accent); }
@@ -182,7 +315,15 @@
 .fileRow:first-child { border-top: 0; }
 .fileRow:hover, .fileRowActive { background: var(--codex-hover-bg); }
 .fileRow svg { flex-shrink: 0; color: var(--codex-text-muted); }
-.fileRow > span:not(.ellipsis) { flex-shrink: 0; white-space: nowrap; }
+.fileRow > span:not(.ellipsis, .fileName) { flex-shrink: 0; white-space: nowrap; }
+.fileName { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.fileName > span:first-child { flex-shrink: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.fileName > span:last-child { font-size: 12px; }
+.tuft, .treeBrand { display: none; }
+/* The code chat takes the right side; the commit graph keeps the room, details come back when it closes. */
+:global(body:has([data-code-chat])) .detail { display: none; }
+:global(body[data-garden-theme]:has([data-code-chat])) .body { padding-right: calc(var(--code-chat-width, 400px) + 40px); }
+.treeCard { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 .diff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.6; overflow-x: auto; border-radius: 8px; border: 1px solid var(--codex-border-subtle); }
 .diffLine { display: flex; min-width: max-content; }
@@ -217,5 +358,5 @@
   .main { overflow: visible; }
   .table, .list { max-height: 60vh; }
   .detail { width: auto; overflow: visible; }
-  .colRefs, .colHash { display: none; }
+  .colHash { display: none; }
 }
