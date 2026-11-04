@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "git",
+  "library": "git",
+  "title": "Git",
+  "tools": ["read_git", "sync_git"],
+  "pages": [{"id": "history", "title": "提交图谱", "entry": "git.history", "renderer": "react"}]
+}

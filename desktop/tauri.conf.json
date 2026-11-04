@@ -15,7 +15,8 @@
     "externalBin": ["binaries/grow-agent"],
     "resources": {
       "../frontend/dist/": "frontend/dist/",
-      "../src/builtin_plugins/code_flow/": "src/builtin_plugins/code_flow/"
+      "../src/builtin_plugins/code_flow/": "src/builtin_plugins/code_flow/",
+      "../src/builtin_plugins/git/": "src/builtin_plugins/git/"
     }
   }
 }

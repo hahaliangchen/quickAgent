@@ -4,7 +4,7 @@ import css from './CodexDock.module.css'
 /** The rail's icons: a 2px round stroke on a 24px grid, like the workbench's. */
 const STROKE = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { display: 'block' } } as const
 
-export type DockTab = 'home' | 'skills'
+export type DockTab = 'home' | 'skills' | 'git'
 
 interface CodexDockProps {
   activeTab?: DockTab
@@ -55,6 +55,18 @@ export function CodexDock({
           </svg>
         </button>
 
+        <button
+          type="button"
+          className={clsx(css.dockBtn, activeTab === 'git' && css.active)}
+          title="Git"
+          aria-label="Git"
+          onClick={() => onSelectTab?.('git')}
+        >
+          <svg {...STROKE} aria-hidden="true">
+            <circle cx="6.5" cy="5.5" r="2.5" /><circle cx="6.5" cy="18.5" r="2.5" /><circle cx="17.5" cy="7.5" r="2.5" />
+            <path d="M6.5 8v8M17.5 10c0 4-5 4-9.5 6.5" />
+          </svg>
+        </button>
       </div>
 
       <div className={css.bottomGroup}>

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "read_git",
+    "description": "Read a git repository through the local git binary. view=overview returns the current branch, upstream ahead/behind, working-tree changes, branches, stashes and the commit graph (each commit with its parents and refs). view=commit returns one commit's message and changed files with line counts; omit commit for the working tree against HEAD. view=files lists the repository's tracked and untracked files, without ignored ones, plus the workspace's prefix inside the repository. view=file returns one file's text: the working copy, or its content at commit when given (files over 1 MiB or binary are reported, not returned). view=file_diff returns the patch of one path in that commit, or in the working tree when commit is omitted. Reads only; it never fetches or changes the repository.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_root": {"type": "string"},
+        "view": {"type": "string", "enum": ["overview", "commit", "files", "file", "file_diff"]},
+        "commit": {"type": "string", "description": "Commit hash (4-64 hex characters)."},
+        "path": {"type": "string", "description": "Repository-relative path for file and file_diff."},
+        "branch": {"type": "string", "description": "Limit the overview graph to this branch; omit for all branches."},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 1000}
+      },
+      "required": ["view"]
+    }
+  },
+  {
+    "name": "sync_git",
+    "description": "Fetch, pull (fast-forward only) or push the current branch with the user's own git configuration and credential helper. Never prompts for a password: when git has no stored credential it fails and the error says so. Returns git's output with any credentials in URLs removed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_root": {"type": "string"},
+        "action": {"type": "string", "enum": ["fetch", "pull", "push"]}
+      },
+      "required": ["action"]
+    }
+  }
+]

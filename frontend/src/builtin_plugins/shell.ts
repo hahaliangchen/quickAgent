@@ -4,9 +4,10 @@ import { ChatView } from '../components/ChatView.tsx'
 import { Composer } from '../components/Composer.tsx'
 import { FlowView } from '../components/FlowView.tsx'
 import { Sidebar } from '../components/Sidebar.tsx'
+import { CodeChat } from '../codeChat.ts'
 
 declare module '@deepseek-ai/cordis' { interface Context { agentApi: typeof api } }
-export function AgentApiPlugin(ctx: Context): void { ctx.provide('agentApi', api) }
+export function AgentApiPlugin(ctx: Context): void { ctx.provide('agentApi', api); ctx.provide('codeChat', new CodeChat()) }
 export const shellPlugins = [
   { name: 'agent-sidebar', inject: ['slots'], apply(ctx: Context) { ctx.slots.register({ name: 'agent.sidebar' }, Sidebar) } },
   { name: 'agent-chat', inject: ['slots', 'agentApi'], apply(ctx: Context) { ctx.slots.register({ name: 'agent.chat' }, ChatView) } },
