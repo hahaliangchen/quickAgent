@@ -212,6 +212,19 @@
   box-shadow: 0 4px 22px 3px rgba(0, 0, 0, 0.6);
 }
 
+/* Keep the welcome illustration visually prominent, even when the input is focused. */
+.hero .card,
+.hero .card:hover,
+.hero .card:focus-within {
+  box-shadow: 0 3px 16px rgba(32, 33, 36, 0.09);
+}
+
+:global(body[data-ds-dark-theme]) .hero .card,
+:global(body[data-ds-dark-theme]) .hero .card:hover,
+:global(body[data-ds-dark-theme]) .hero .card:focus-within {
+  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.25);
+}
+
 .inputWrap {
   width: 100%;
   position: relative;

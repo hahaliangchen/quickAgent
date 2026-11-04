@@ -62,6 +62,17 @@
         "target/debug/codex-workspace-mcp"
       ],
       "port": 3001
+    },
+    {
+      "name": "agent-backend",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "WORKSPACE_ROOT=.",
+        "AGENT_BIND=127.0.0.1:3001",
+        "MCP_BIND=127.0.0.1:3000",
+        "target/debug/codex-workspace-mcp"
+      ],
+      "port": 3001
     }
   ]
 }
