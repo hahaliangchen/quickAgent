@@ -8,7 +8,7 @@ export { taskTitle, workspaceName } from '../sidebarModel.ts'
 import css from './CodexSidebar.module.css'
 import { ProjectNotesDialog } from './ProjectNotesDialog.tsx'
 import { MemoryDialog } from './MemoryDialog.tsx'
-import { useBrandIcon } from '../brand.ts'
+import { BrandMark } from './BrandMark.tsx'
 
 export function dotState(status: TaskStatus): 'done' | 'warning' | 'ongoing' | 'error' | 'idle' {
   switch (status) {
@@ -58,7 +58,6 @@ export function Sidebar({
   onToggleTheme?: (() => void) | undefined
   onOpenSettings?: (() => void) | undefined
 }) {
-  const brandLogo = useBrandIcon()
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [closed, setClosed] = useState<Record<string, boolean>>({})
@@ -130,7 +129,7 @@ export function Sidebar({
   if (collapsed) return <div className={clsx(css.root, css.collapsedRoot)}><button type="button" className={css.iconBtn} title="展开侧边栏" onClick={onToggleCollapse}>☰</button></div>
   return <aside className={css.root} style={{width}} aria-label="会话侧栏">
     <div className={css.header}>
-      <span className={css.brandTitle}><img src={brandLogo} width={28} height={28} alt="" />QuickAgent</span>
+      <span className={css.brandTitle}><BrandMark size={28} />QuickAgent</span>
       <div className={css.headerActions}>
         <button type="button" className={css.iconBtn} title="搜索会话" aria-label="搜索会话" onClick={() => {setSearchOpen(value => !value); window.setTimeout(() => searchRef.current?.focus(),0)}}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>

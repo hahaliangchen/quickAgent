@@ -27,15 +27,30 @@
   text-align: center;
 }
 
-.logo {
+.hero {
   display: block;
-  width: 64px;
-  height: 64px;
-  padding: 10px;
-  border-radius: 22px;
-  background: var(--sprout-soft, #e3f1ea);
+  width: min(320px, 38vh, 100%);
+  aspect-ratio: 1;
+  height: auto;
+  margin-bottom: -8px;
   object-fit: contain;
   user-select: none;
+  pointer-events: none;
+}
+
+/* Each picture fades to its theme's page colour, so only one shows at a time.
+   Lighten keeps the night picture's near-black edge from drawing a box. */
+.heroNight {
+  display: none;
+  mix-blend-mode: lighten;
+}
+
+:global(body[data-ds-dark-theme]) .heroDay {
+  display: none;
+}
+
+:global(body[data-ds-dark-theme]) .heroNight {
+  display: block;
 }
 
 .title {
@@ -64,5 +79,9 @@
 
   .title {
     font-size: 19px;
+  }
+
+  .hero {
+    width: min(260px, 34vh, 100%);
   }
 }

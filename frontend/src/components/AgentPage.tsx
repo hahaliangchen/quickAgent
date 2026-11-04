@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetStateAction } from 'react'
 import clsx from 'clsx'
-import { useBrandIcon } from '../brand.ts'
+import heroDay from '../assets/illustrations/hero-day.webp'
+import heroNight from '../assets/illustrations/hero-night.webp'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
 import { latestContextUsage } from './ContextRing.tsx'
 import { SkillPagesView } from './SkillPagesView.tsx'
@@ -23,13 +24,14 @@ interface PageProps {
 export function HeroPage({ workspace, renderSlot }: PageProps) {
   const currentWs = workspace.projects.find(project => project.path === workspace.activeWorkspace)?.path ?? ''
   const wsName = workspaceName(currentWs)
-  const logoImg = useBrandIcon()
 
   return (
     <main className={welcomeCss.page} data-phase="hero">
       <div className={welcomeCss.welcome}>
         <div className={welcomeCss.heading}>
-          <img src={logoImg} className={welcomeCss.logo} alt="" />
+          {/* The same windmill by day and by night; the theme decides which shows. */}
+          <img src={heroDay} className={clsx(welcomeCss.hero, welcomeCss.heroDay)} alt="" />
+          <img src={heroNight} className={clsx(welcomeCss.hero, welcomeCss.heroNight)} alt="" />
           <h1 className={welcomeCss.title}>
             {workspace.sidebarMode === 'chat' ? '今天想聊点什么？' : !currentWs ? '今天想一起做点什么？' : <>今天想在 <span className={welcomeCss.workspace}>{wsName}</span> 里种点什么？</>}
           </h1>

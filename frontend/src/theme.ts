@@ -1,5 +1,5 @@
-// A spinning pinwheel, coloured deep enough that no blade fades on a white page.
-import sproutIcon from './assets/pinwheel-mark.svg'
+// The windmill silhouette; the file follows the system's light or dark itself.
+import sproutIcon from './assets/windmill-mark.svg'
 
 const KEY = 'agent-theme'
 
