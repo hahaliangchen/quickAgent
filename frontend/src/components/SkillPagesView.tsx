@@ -64,8 +64,9 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
               })}
             </div>}
             <div className={styles.actions}>
-              <button type="button" disabled={busy} onClick={() => { void change(() => api.setPackageEnabled(item.id, !item.enabled)) }}>
-                <Icon name="power" size={14} />{item.enabled ? '停用' : '启用'}</button>
+              {/* Built-in plugins are part of the agent and always run. */}
+              {item.origin !== 'builtin' && <button type="button" disabled={busy} onClick={() => { void change(() => api.setPackageEnabled(item.id, !item.enabled)) }}>
+                <Icon name="power" size={14} />{item.enabled ? '停用' : '启用'}</button>}
               <button type="button" disabled={busy} onClick={() => { void change(() => api.reloadPackage(item.id)) }}><Icon name="refresh" size={14} />重载</button>
               {item.origin === 'external' && <button type="button" className={styles.danger} disabled={busy}
                 onClick={() => { void change(() => api.removePackage(item.id)) }}><Icon name="trash" size={14} />移除</button>}

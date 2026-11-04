@@ -327,14 +327,10 @@ mod tests {
         ] {
             assert!(handle(state.clone(), "code-flow", args).await.is_err());
         }
-        crate::skill_packages::set_enabled(
-            &runtime,
-            &state.tool_catalog.as_ref().unwrap().packages,
-            "code-flow",
-            false,
-            false,
-        )
-        .unwrap();
+        // Built-in plugins cannot be disabled; unmounting retires the scope just the same.
+        runtime
+            .unmount(serde_json::from_value(scope.clone()).unwrap())
+            .unwrap();
         assert!(
             handle(
                 state,

@@ -528,6 +528,7 @@ impl Plugin for PackagesPlugin {
         let registry = tools.packages.clone();
         ctx.effect(move || registry.entries.write().unwrap().clear());
         let config = settings()?;
+        // Built-in plugins are the agent's own periphery: active whenever it runs.
         for package in crate::builtin_plugins::packages()? {
             let id = package.manifest.id.clone();
             tools
@@ -536,9 +537,7 @@ impl Plugin for PackagesPlugin {
                 .write()
                 .unwrap()
                 .insert(id.clone(), package.clone());
-            if config.enabled.get(&id).copied().unwrap_or(true) {
-                ctx.mount(PackagePlugin(package))?;
-            }
+            ctx.mount(PackagePlugin(package))?;
         }
         let mut paths = config.packages;
         if let Some(path) = std::env::var_os("DSH_SKILL_PACKAGES_DIR") {
@@ -840,6 +839,10 @@ pub fn set_enabled(
         .get(id)
         .cloned()
         .context("package not found")?;
+    ensure!(
+        enabled || package.origin != Origin::Builtin,
+        "内置插件是 Agent 的核心部分，随 Agent 启动，不能停用：{id}"
+    );
     let parent = runtime
         .snapshot()
         .into_iter()
@@ -1213,7 +1216,13 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':r['params']}))
                 .len(),
             1
         );
-        set_enabled(&runtime, &tools.packages, "code-flow", false, false).unwrap();
+        assert!(
+            set_enabled(&runtime, &tools.packages, "code-flow", false, false).is_err(),
+            "built-in plugins stay active"
+        );
+        assert!(tools.contains("read_code_flow"));
+        let scope = tools.packages.entries.read().unwrap()["code-flow"].scope.unwrap();
+        runtime.unmount(scope).unwrap();
         assert!(!tools.contains("read_code_flow"));
         assert!(tools.packages.read("code-flow").is_err());
         assert!(tools.packages.skills().as_array().unwrap().is_empty());
