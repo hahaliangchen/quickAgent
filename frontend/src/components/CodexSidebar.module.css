@@ -117,11 +117,13 @@
 }
 
 :global(body[data-garden-theme]) .newChatBtn {
-  border: 1px solid #ecd9b6;
-  background: #fffbf2b8;
+  border: 1px solid #c3dfab;
+  background: linear-gradient(155deg, #fbfdf0, #e4f3dc);
   border-radius: 10px;
-  box-shadow: 0 2px 5px #98743a12;
+  box-shadow: 0 2px 4px #72935b26;
+  color: #145c33;
 }
+:global(body[data-garden-theme]) .newChatBtn:hover { background: linear-gradient(155deg, #f3f9e4, #d8edcc); border-color: #a9d5a0; }
 
 :global(body[data-ds-dark-theme]) .newChatBtn:hover {
   background: #27272a;
