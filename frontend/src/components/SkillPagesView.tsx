@@ -5,6 +5,9 @@ import { usePluginPages } from '../plugins/react.tsx'
 import { Icon } from './WorkbenchIcon.tsx'
 import styles from './SkillPagesView.module.css'
 
+/** Which garden illustration a plugin's card carries; plugins without their own get the default. */
+const art = (id: string) => id === 'git' ? 'git' : id === 'code-flow' ? 'code' : 'default'
+
 /** Installed skill packages with their pages, and the forms that add more. */
 export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: string; onBack: () => void }) {
   const api = useAgentApi()
@@ -45,15 +48,16 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
         {problem && <p role="alert" className={styles.error}>{problem}</p>}
         {packages.length === 0 && <p className={styles.hint}>还没有安装插件。</p>}
         <div className={styles.cards}>
-          {packages.map(item => <article key={item.id} className={clsx(styles.card, !item.enabled && styles.cardOff)}>
+          {packages.map(item => <article key={item.id} className={clsx(styles.card, !item.enabled && styles.cardOff)} data-art={art(item.id)}>
             <div className={styles.cardHead}>
-              <span className={styles.cardIcon}><Icon name={item.origin === 'builtin' ? 'box' : 'plug'} size={19} /></span>
+              <span className={styles.cardIcon} data-icon="box"><Icon name={item.origin === 'builtin' ? 'box' : 'plug'} size={19} /></span>
               <div className={styles.cardTitle}>
                 <strong className={styles.standardTitle} title={item.title}>{item.title}</strong>
                 <button type="button" className={styles.previewSelect} title={`查看${item.title}详情`} onClick={() => setPreviewId(item.id)}>{item.title}</button>
                 <span className={styles.badges}>
                   <span className={styles.badge}>{item.origin === 'builtin' ? '内置' : item.remote ? '远程' : '外部'}</span>
-                  <span className={clsx(styles.state, item.enabled && styles.stateOn)}>{item.enabled ? '已启用' : '已停用'}</span>
+                  {/* A built-in plugin is always on; only one that can be switched shows its state. */}
+                  {item.origin !== 'builtin' && <span className={clsx(styles.state, item.enabled && styles.stateOn)}>{item.enabled ? '已启用' : '已停用'}</span>}
                 </span>
               </div>
             </div>
@@ -62,7 +66,7 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
             {item.enabled && item.pages.length > 0 && <div className={styles.pages}>
               {item.pages.map(entry => {
                 const active = selected?.owner === item.id && selected.page === entry.id
-                return <button key={entry.id} type="button" aria-pressed={active} className={clsx(styles.pageChip, active && styles.pageChipActive)}
+                return <button key={entry.id} type="button" aria-pressed={active} className={clsx(styles.pageChip, active && styles.pageChipActive)} data-icon="file"
                   onClick={() => { setSelected({ owner: item.id, page: entry.id }); setListOpen(false) }}><Icon name="file" size={14} />{entry.title}</button>
               })}
             </div>}
@@ -70,7 +74,7 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
               {/* Built-in plugins are part of the agent and always run. */}
               {item.origin !== 'builtin' && <button type="button" disabled={busy} onClick={() => { void change(() => api.setPackageEnabled(item.id, !item.enabled)) }}>
                 <Icon name="power" size={14} />{item.enabled ? '停用' : '启用'}</button>}
-              <button type="button" disabled={busy} onClick={() => { void change(() => api.reloadPackage(item.id)) }}><Icon name="refresh" size={14} />重载</button>
+              <button type="button" data-icon="refresh" disabled={busy} onClick={() => { void change(() => api.reloadPackage(item.id)) }}><Icon name="refresh" size={14} />重载</button>
               {item.origin === 'external' && <button type="button" className={styles.danger} disabled={busy}
                 onClick={() => { void change(() => api.removePackage(item.id)) }}><Icon name="trash" size={14} />移除</button>}
             </div>
@@ -80,13 +84,13 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
         <div className={styles.sectionHead}><h2>添加插件</h2></div>
         <div className={styles.forms}>
         <form className={styles.form} onSubmit={event => { event.preventDefault(); void change(() => api.installPackage(installPath.trim())) }}>
-          <label className={styles.formTitle}><Icon name="folder" size={16} />本地技能包</label>
+          <label className={styles.formTitle} data-icon="folder"><Icon name="folder" size={16} />本地技能包</label>
           <p className={styles.formHint}>包含 plugin.json 的目录。</p>
           <input aria-label="本地技能包目录" placeholder="/path/to/skill-package" value={installPath} onChange={event => setInstallPath(event.target.value)} />
           <button type="submit" className={styles.primary} disabled={busy || !installPath.trim()}>安装技能包</button>
         </form>
         <form className={styles.form} onSubmit={event => { event.preventDefault(); void change(async () => { await api.connectRemotePackage(remoteUrl.trim(), remoteToken); setRemoteToken('') }) }}>
-          <label className={styles.formTitle}><Icon name="link" size={16} />远程插件服务</label>
+          <label className={styles.formTitle} data-icon="link"><Icon name="link" size={16} />远程插件服务</label>
           <p className={styles.formHint}>例如 PPT 服务的 …/aiPpt/plugin 地址。</p>
           <input aria-label="远程插件服务地址" placeholder="https://…/aiPpt/plugin" value={remoteUrl} onChange={event => setRemoteUrl(event.target.value)} />
           <input type="password" aria-label="远程服务凭证" placeholder="服务凭证" value={remoteToken} onChange={event => setRemoteToken(event.target.value)} />
@@ -110,18 +114,18 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
           </div>
         </> : <>
         {preview && <div className={styles.gardenPreview}>
-          <div className={styles.previewTop}><Icon name="file" size={18} />插件详情</div>
-          <div className={styles.previewCard}>
+          <div className={styles.previewTop} data-icon="monitor"><Icon name="file" size={18} />插件详情</div>
+          <div className={styles.previewCard} data-art={art(preview.id)}>
             <div className={styles.previewHero}>
-              <span className={styles.cardIcon}><Icon name="box" size={21} /></span>
+              <span className={styles.cardIcon} data-icon="box"><Icon name="box" size={21} /></span>
               <h2>{preview.title}</h2>
+              <div className={styles.badges}><span className={styles.badge}>{preview.origin === 'builtin' ? '内置' : preview.remote ? '远程' : '外部'}</span>{preview.origin !== 'builtin' && <span className={clsx(styles.state, preview.enabled && styles.stateOn)}>{preview.enabled ? '已启用' : '已停用'}</span>}</div>
             </div>
-            <div className={styles.badges}><span className={styles.badge}>{preview.origin === 'builtin' ? '内置' : preview.remote ? '远程' : '外部'}</span><span className={clsx(styles.state, preview.enabled && styles.stateOn)}>{preview.enabled ? '已启用' : '已停用'}</span></div>
             <p>{preview.description}</p>
-            <h3>工具（{preview.tools.length}）</h3>
-            {preview.tools.length ? preview.tools.map(tool => <div className={styles.previewRow} key={tool}><Icon name="code" size={16} />{tool}</div>) : <p className={styles.previewHint}>没有可用工具</p>}
-            <h3>页面（{preview.pages.length}）</h3>
-            {preview.pages.map(entry => <button className={styles.previewRow} key={entry.id} type="button" disabled={!preview.enabled} onClick={() => { setSelected({ owner: preview.id, page: entry.id }); setListOpen(false) }}><Icon name="file" size={16} />{entry.title} <span>›</span></button>)}
+            <h3 data-icon="tool">工具（{preview.tools.length}）</h3>
+            {preview.tools.length ? preview.tools.map(tool => <div className={styles.previewRow} key={tool} data-icon="code"><Icon name="code" size={16} />{tool}</div>) : <p className={styles.previewHint}>没有可用工具</p>}
+            <h3 data-icon="file">页面（{preview.pages.length}）</h3>
+            {preview.pages.map(entry => <button className={styles.previewRow} key={entry.id} type="button" data-icon="file" disabled={!preview.enabled} onClick={() => { setSelected({ owner: preview.id, page: entry.id }); setListOpen(false) }}><Icon name="file" size={16} />{entry.title} <span>›</span></button>)}
           </div>
         </div>}
         <div className={styles.empty}>

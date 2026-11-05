@@ -243,3 +243,18 @@
 :global([data-platform='darwin']) .overlay {
   -webkit-app-region: no-drag;
 }
+
+/* Garden: a paper card; the setting rows and the selected tab take the garden greens. */
+:global(body[data-garden-theme]) .panel {
+  border: 1.5px solid #e2d8be; background: #fdf6ea; box-shadow: 0 10px 40px #6b5a2a33;
+  --dsw-alias-bg-layer-1: #fffaf0;
+  --dsw-alias-bg-module-platform: #f6efdf;
+  --dsw-alias-interactive-bg-hover: #eef5e2;
+  --dsw-alias-brand-primary: #1a8c51;
+  --dsw-alias-border-l2: #e2d8be;
+  --dsw-alias-border-l3: #ece3cc;
+}
+:global(body[data-garden-theme]) .navTitle { font-size: 19px; font-weight: 700; }
+:global(body[data-garden-theme]) .navCell { font-size: 15.5px; font-weight: 500; }
+:global(body[data-garden-theme]) .navCell:hover { background: #eef5e2; }
+:global(body[data-garden-theme]) .navCell.active { background: #dfeeb0; color: #0b5e2a; font-weight: 700; }

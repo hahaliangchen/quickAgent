@@ -500,3 +500,16 @@
 @media (hover: none) { .rowMenu { opacity: 1; } }
 .awaitingMark { flex: none; margin-left: 4px; padding: 0 6px; border-radius: 6px; background: var(--sprout-soft, #e3f1ea); color: var(--sprout-strong, #0f6e56); font-size: 11px; line-height: 18px; }
 .searchSnippet { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; font-weight: 400; color: var(--codex-text-muted, #6b7280); }
+
+.brandLogo { display: none; }
+/* Garden: the painted logo and the larger type of the other garden pages. */
+:global(body[data-garden-theme]) .brandTitle { display: none; }
+:global(body[data-garden-theme]) .brandLogo { display: block; height: 38px; width: auto; }
+:global(body[data-garden-theme]) .header { height: 58px; padding: 10px 12px 2px 12px; }
+:global(body[data-garden-theme]) .newChatBtn { height: 40px; font-size: 15.5px; font-weight: 500; }
+:global(body[data-garden-theme]) .sectionTitleLeft { font-size: 16px; font-weight: 700; color: #1f1c17; }
+:global(body[data-garden-theme]) .projectHeaderRow { min-height: 36px; font-size: 15.5px; }
+:global(body[data-garden-theme]) .sessionRow,
+:global(body[data-garden-theme]) .recentRow { height: 34px; min-height: 34px; font-size: 15px; color: #2b2721; }
+:global(body[data-garden-theme]) .searchInput { font-size: 14.5px; }
+:global(body[data-garden-theme]) .emptyState { font-size: 14px; }

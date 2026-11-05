@@ -1,6 +1,6 @@
 ---
 name: git
-description: Inspect local Git repositories or read public and authorized private GitHub repositories directly from their URLs, including their file trees, source files and commit history, without cloning.
+description: 查看本地 Git 仓库，或直接通过链接读取公开及已授权的私有 GitHub 仓库，包括文件树、源码与提交历史，无需克隆。
 ---
 
 # Git repository inspection

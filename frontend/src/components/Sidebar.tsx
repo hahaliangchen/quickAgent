@@ -9,6 +9,7 @@ import css from './CodexSidebar.module.css'
 import { ProjectNotesDialog } from './ProjectNotesDialog.tsx'
 import { MemoryDialog } from './MemoryDialog.tsx'
 import { BrandMark } from './BrandMark.tsx'
+import gardenLogo from '../assets/illustrations/garden-logo.png'
 
 export function dotState(status: TaskStatus): 'done' | 'warning' | 'ongoing' | 'error' | 'idle' {
   switch (status) {
@@ -130,6 +131,8 @@ export function Sidebar({
   return <aside className={css.root} style={{width}} aria-label="会话侧栏">
     <div className={css.header}>
       <span className={css.brandTitle}><BrandMark size={28} />QuickAgent</span>
+      {/* The garden theme draws the painted logo instead. */}
+      <img className={css.brandLogo} src={gardenLogo} alt="QuickAgent" draggable={false} />
       <div className={css.headerActions}>
         <button type="button" className={css.iconBtn} title="搜索会话" aria-label="搜索会话" onClick={() => {setSearchOpen(value => !value); window.setTimeout(() => searchRef.current?.focus(),0)}}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></svg>

@@ -386,6 +386,9 @@
   line-height: 15px;
 }
 
+/* Garden: the user's words sit on a green note. */
+:global(body[data-garden-theme]) .bubble { background: #e6f3d6; border: 1.5px solid #cfe5b8; color: #1f1c17; }
+
 /* Garden code chat: a green note with the asker's badge beside it. */
 :global(body[data-garden-theme] [data-code-chat]) .userRow { position: relative; padding-left: 46px; }
 :global(body[data-garden-theme] [data-code-chat]) .userRow::before {

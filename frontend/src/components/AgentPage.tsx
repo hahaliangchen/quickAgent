@@ -123,7 +123,7 @@ export function ConversationPage({
   const currentTitle = task === undefined ? t('app.untitled') : taskTitle(task)
 
   return (
-    <main className={root.root} data-phase="active" style={{ background: 'var(--codex-bg-main, #ffffff)' }}>
+    <main className={root.root} data-phase="active">
       {/* Codex-style Top Header: [ 📄 Clarify request ]  [ 对话 | 流程图 ]  [ 耗时 12s | ⧉ | ... ] */}
       <header className={headerCss.header}>
         {/* Left: Document icon + Session title */}

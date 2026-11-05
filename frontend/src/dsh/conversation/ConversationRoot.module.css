@@ -7,7 +7,8 @@
   background: var(--dsw-alias-bg-base);
 }
 
-:global(body[data-garden-theme]) .root:has([data-garden-page='plugins']) { background: transparent; }
+/* Garden: every conversation page sits on the frame's paper and meadow. */
+:global(body[data-garden-theme]) .root { background: transparent; }
 
 /* 76px with its rule: the height of the Sidebar's tab strip and header row
    (ui-dockkit `.tabStrip` 38px + the pane header's 38px), so the two rules
@@ -452,6 +453,14 @@ button.crumb:hover {
     color-mix(in srgb, var(--dsw-alias-bg-base) 0%, transparent) 0px,
     var(--dsw-alias-bg-base) 36px
   );
+}
+
+/* Garden: the transcript only scrolls through the middle column, so the mask
+   covers just that band and the meadow on either side stays in view. */
+:global(body[data-garden-theme]) .root[data-phase='active'] .composerSeat {
+  background-size: min(100%, calc(var(--dsh-chat-content-width, 748px) + 64px)) 100%;
+  background-position: center top;
+  background-repeat: no-repeat;
 }
 
 /* An open @/slash menu (data-trigger-menu, ui-input-trigger) renders inside

@@ -579,8 +579,8 @@
 :global(body[data-garden-theme]) .header { height: 64px; padding: 0 28px; }
 :global(body[data-garden-theme]) .header h1 { font-size: 22px; }
 :global(body[data-garden-theme]) .back { border: 1px solid #b5d991; background: #fffdf2c9; color: #245b34 !important; }
-:global(body[data-garden-theme]) .body { padding: 10px 24px max(80px, 10vh); gap: 18px; }
-:global(body[data-garden-theme]) .side { flex: 1 1 52%; width: 52%; padding: 8px 0 24px; border: 0; }
+:global(body[data-garden-theme]) .body { padding: 10px 26px max(120px, 13vh) 22px; gap: 20px; }
+:global(body[data-garden-theme]) .side { flex: 1 1 52%; width: 52%; padding: 8px 4px 24px 0; border: 0; overflow: auto; }
 :global(body[data-garden-theme]) .sideHidden { display: none; }
 :global(body[data-garden-theme]) .main { flex: 1 1 48%; }
 :global(body[data-garden-theme]) .sectionHead h2 { color: #2e3026; font-size: 16px; }
@@ -590,8 +590,8 @@
 }
 :global(body[data-garden-theme]) .card {
   position: relative;
-  background-image: url('../assets/illustrations/garden-code-sign.png');
-  background-size: 145px auto; background-position: right 4px center; background-repeat: no-repeat;
+  background-image: url('../assets/illustrations/garden-plugin-default.png');
+  background-size: 150px auto; background-position: right 4px center; background-repeat: no-repeat;
 }
 :global(body[data-garden-theme]) .card .description { max-width: calc(100% - 110px); }
 :global(body[data-garden-theme]) .forms { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -600,7 +600,7 @@
 :global(body[data-garden-theme]) .gardenPreview + .empty { display: none; }
 :global(body[data-garden-theme]) .previewTop { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px; background: #e5f1d9; color: #176f45; font-weight: 700; }
 :global(body[data-garden-theme]) .previewCard { flex: 1; min-height: 0; overflow: auto; padding: 20px; border: 1px solid #8bc894; border-radius: 14px; background: #fffdf4e8; }
-:global(body[data-garden-theme]) .previewHero { display: flex; align-items: center; gap: 12px; padding-top: 68px; background: url('../assets/illustrations/garden-code-sign.png') right top / 160px auto no-repeat; }
+:global(body[data-garden-theme]) .previewHero { display: flex; align-items: center; gap: 12px; padding-top: 68px; background: url('../assets/illustrations/garden-plugin-banner-default.png') center top / 100% auto no-repeat; }
 :global(body[data-garden-theme]) .previewHero h2 { margin: 0; font-size: 22px; }
 :global(body[data-garden-theme]) .previewCard p { color: var(--sp-text-2); line-height: 1.6; }
 :global(body[data-garden-theme]) .previewCard h3 { margin: 20px 0 8px; font-size: 15px; }
@@ -617,3 +617,91 @@
   :global(body[data-garden-theme]) .main { min-height: 400px; }
   :global(body[data-garden-theme]) .sideHidden { display: none; }
 }
+
+/* Garden type scale: the same sizes as the Git page and code chat. */
+:global(body[data-garden-theme]) .root { font-weight: 500; }
+:global(body[data-garden-theme]) .header { height: 72px; }
+:global(body[data-garden-theme]) .header h1 { font-size: 25px; }
+:global(body[data-garden-theme]) .headerNote { font-size: 14.5px; }
+:global(body[data-garden-theme]) .back { height: 38px; padding: 0 14px; border-radius: 10px; font-size: 15px; }
+:global(body[data-garden-theme]) .sectionHead h2 { font-size: 19px; }
+:global(body[data-garden-theme]) .card { padding: 18px 20px; border-radius: 16px; }
+:global(body[data-garden-theme]) .cardIcon { width: 40px; height: 40px; border-radius: 50%; background: #e4f1dd; color: #1f7a3f; }
+:global(body[data-garden-theme]) .previewSelect { font-size: 20px !important; font-weight: 700 !important; }
+/* A fixed height with the text box collapsed to the glyph, so the label sits exactly in the middle. */
+:global(body[data-garden-theme]) .badge, :global(body[data-garden-theme]) .state { height: 24px; padding: 0 9px; border-radius: 7px; font-size: 13px; line-height: 1; }
+:global(body[data-garden-theme]) .description { font-size: 15px; line-height: 1.6; color: #3a352d; }
+:global(body[data-garden-theme]) .meta { font-size: 14px; color: #5f574a; }
+:global(body[data-garden-theme]) .pageChip { height: 36px; padding: 0 14px; border-radius: 10px; font-size: 15px; border: 1.5px solid #e2d8be; background: #fffaf0; }
+:global(body[data-garden-theme]) .pageChipActive { border-color: #8bc894; background: #e4f1dd; color: #0b5e2a; }
+:global(body[data-garden-theme]) .actions button { font-size: 14.5px; }
+:global(body[data-garden-theme]) .form { padding: 18px 20px; border-radius: 16px; }
+:global(body[data-garden-theme]) .formTitle { font-size: 17px; font-weight: 700; }
+:global(body[data-garden-theme]) .formHint { font-size: 14px; }
+:global(body[data-garden-theme]) .form input { height: 40px; border-radius: 10px; font-size: 15px; border: 1.5px solid #e2d8be; background: #fffef9; }
+:global(body[data-garden-theme]) .primary { height: 40px; border-radius: 11px; font-size: 15.5px; background: linear-gradient(160deg, #19b46e, #08955a); color: #fff; }
+:global(body[data-garden-theme]) .primary:disabled { opacity: .45; }
+:global(body[data-garden-theme]) .previewTop { font-size: 18px; padding: 10px 14px; }
+:global(body[data-garden-theme]) .previewHero h2 { font-size: 26px; }
+:global(body[data-garden-theme]) .previewCard p { font-size: 15.5px; }
+:global(body[data-garden-theme]) .previewCard h3 { font-size: 17px; }
+:global(body[data-garden-theme]) .previewRow { font-size: 15.5px; padding: 11px 14px; border-radius: 10px; }
+
+/* Garden cards are nearly the page's own paper: a faint lift and a soft grey-green outline. */
+:global(body[data-garden-theme]) .card,
+:global(body[data-garden-theme]) .form,
+:global(body[data-garden-theme]) .gardenPreview {
+  border: 1.5px solid #cdd1ad; background-color: #fffcf466; box-shadow: none;
+}
+:global(body[data-garden-theme]) .gardenPreview { padding: 0; overflow: hidden; }
+:global(body[data-garden-theme]) .previewTop { border-radius: 0; background: transparent; border-bottom: 1px solid #e4e2cc; color: #1f1c17; padding: 14px 20px; }
+:global(body[data-garden-theme]) .previewTop svg { color: #1a8c51; }
+:global(body[data-garden-theme]) .previewCard { border: 0; border-radius: 0; background: transparent; }
+:global(body[data-garden-theme]) .previewRow { border: 1.5px solid #e2dbc8; background: #fffcf480; color: #1f1c17; }
+:global(body[data-garden-theme]) .previewRow svg { color: #1a8c51; }
+:global(body[data-garden-theme]) .badge { background: #e5dbc3; color: #594d34; }
+:global(body[data-garden-theme]) .stateOn { background: #e4f4cd; color: #0b5e2a; }
+
+/* Each built-in plugin has its own garden sign; the details banner is shared. */
+:global(body[data-garden-theme]) .card[data-art='git'] { background-image: url('../assets/illustrations/garden-plugin-git.png'); }
+:global(body[data-garden-theme]) .card[data-art='code'] { background-image: url('../assets/illustrations/garden-plugin-code.png'); background-size: 130px auto; }
+:global(body[data-garden-theme]) .previewCard { padding-top: 0; }
+:global(body[data-garden-theme]) .previewHero { margin: 0 -20px; padding: 96px 24px 4px; min-height: 0; }
+
+/* Garden typography: title and badges on one line, text clear of the card's illustration, readable action sizes. */
+:global(body[data-garden-theme]) .cardHead { gap: 14px; }
+:global(body[data-garden-theme]) .cardIcon { width: 44px; height: 44px; }
+:global(body[data-garden-theme]) .cardTitle { flex-direction: row; align-items: center; gap: 10px; }
+:global(body[data-garden-theme]) .card .description { max-width: calc(100% - 160px); margin-top: 12px; line-height: 1.7; -webkit-line-clamp: 3; }
+:global(body[data-garden-theme]) .meta { margin-top: 8px; }
+:global(body[data-garden-theme]) .pages { margin-top: 14px; gap: 8px; }
+:global(body[data-garden-theme]) .pageChip { font-size: 15px !important; color: #1f1c17 !important; }
+:global(body[data-garden-theme]) .actions { margin-top: 14px; padding-top: 10px; border-top-color: #e4e2cc; }
+:global(body[data-garden-theme]) .actions button { height: 32px; font-size: 14.5px !important; color: #4f4a42 !important; }
+:global(body[data-garden-theme]) .previewHero { gap: 14px; }
+:global(body[data-garden-theme]) .previewHero h2 { white-space: nowrap; }
+:global(body[data-garden-theme]) .previewCard > p { margin: 16px 0 4px; line-height: 1.75; color: #2b2721; }
+:global(body[data-garden-theme]) .previewCard h3 { margin: 24px 0 10px; }
+:global(body[data-garden-theme]) .previewCard[data-art='code'] .previewHero { background-image: url('../assets/illustrations/garden-plugin-banner.png'); }
+:global(body[data-garden-theme]) .previewCard[data-art='git'] .previewHero { background-image: url('../assets/illustrations/garden-plugin-banner-git.png'); }
+
+/* Garden icons: painted PNGs take the place of the line icons wherever an element names one with data-icon. */
+:global(body[data-garden-theme]) .root [data-icon] > svg { display: none; }
+:global(body[data-garden-theme]) .root [data-icon]::before {
+  content: ''; flex-shrink: 0; width: 18px; height: 18px; background: var(--garden-icon) center / contain no-repeat;
+}
+:global(body[data-garden-theme]) .root [data-icon='box'] { --garden-icon: url('../assets/illustrations/garden-icons/box.png'); }
+:global(body[data-garden-theme]) .root [data-icon='tool'] { --garden-icon: url('../assets/illustrations/garden-icons/tool.png'); }
+:global(body[data-garden-theme]) .root [data-icon='file'] { --garden-icon: url('../assets/illustrations/garden-icons/file.png'); }
+:global(body[data-garden-theme]) .root [data-icon='book'] { --garden-icon: url('../assets/illustrations/garden-icons/book.png'); }
+:global(body[data-garden-theme]) .root [data-icon='monitor'] { --garden-icon: url('../assets/illustrations/garden-icons/monitor.png'); }
+:global(body[data-garden-theme]) .root [data-icon='code'] { --garden-icon: url('../assets/illustrations/garden-icons/code.png'); }
+:global(body[data-garden-theme]) .root [data-icon='folder'] { --garden-icon: url('../assets/illustrations/garden-icons/folder.png'); }
+:global(body[data-garden-theme]) .root [data-icon='link'] { --garden-icon: url('../assets/illustrations/garden-icons/link.png'); }
+:global(body[data-garden-theme]) .root [data-icon='refresh'] { --garden-icon: url('../assets/illustrations/garden-icons/refresh.png'); }
+:global(body[data-garden-theme]) .cardIcon[data-icon]::before { width: 22px; height: 22px; }
+:global(body[data-garden-theme]) .previewTop[data-icon]::before { width: 22px; height: 22px; }
+:global(body[data-garden-theme]) .previewCard h3[data-icon] { display: flex; align-items: center; gap: 8px; }
+:global(body[data-garden-theme]) .previewCard h3[data-icon]::before { width: 20px; height: 20px; }
+:global(body[data-garden-theme]) .formTitle[data-icon]::before { width: 20px; height: 20px; }
+:global(body[data-garden-theme]) .actions [data-icon]::before { width: 16px; height: 16px; }

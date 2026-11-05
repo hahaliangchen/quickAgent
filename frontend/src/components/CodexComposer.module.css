@@ -221,6 +221,9 @@
   box-shadow: 0 3px 16px rgba(32, 33, 36, 0.09);
 }
 
+:global(body[data-garden-theme]) .card,
+:global(body[data-garden-theme]) .card:hover,
+:global(body[data-garden-theme]) .card:focus-within,
 :global(body[data-garden-theme]) .hero .card,
 :global(body[data-garden-theme]) .hero .card:hover,
 :global(body[data-garden-theme]) .hero .card:focus-within {
