@@ -287,3 +287,25 @@
   height: 12px;
   color: var(--dsw-alias-label-tertiary);
 }
+
+/* Garden: a solid paper card with the beige outline; groups and the picked model take the garden greens. */
+:global(body[data-garden-theme]) .menu {
+  --dsw-specific-menu: #fdf6ea;
+  --dsw-alias-interactive-bg-hover: #eef5e2;
+  --dsw-alias-border-l2: #e2d8be;
+  padding: 6px;
+  border: 1.5px solid #e2d8be; border-radius: 16px;
+  background: #fdf6ea; backdrop-filter: none; box-shadow: 0 8px 28px #6b5a2a2e;
+  color: #1f1c17;
+}
+:global(body[data-garden-theme]) .groupTitle {
+  padding: 8px 10px 4px; font-size: 12.5px; font-weight: 600; color: #786e5e; background: #fdf6ea;
+}
+:global(body[data-garden-theme]) .option { min-height: 38px; padding: 7px 10px; border-radius: 10px; }
+:global(body[data-garden-theme]) .modelName { font-size: 15px; line-height: 20px; font-weight: 500; }
+:global(body[data-garden-theme]) .selected { background: #e4f1dd; color: #0b5e2a; }
+:global(body[data-garden-theme]) .selected .modelName { font-weight: 700; }
+:global(body[data-garden-theme]) .check { color: #1a8c51; }
+:global(body[data-garden-theme]) .cell { height: 38px; padding: 0 10px; border-radius: 10px; font-size: 15px; color: #1f1c17; }
+:global(body[data-garden-theme]) .cellValue { color: #5f574a; font-size: 14px; }
+:global(body[data-garden-theme]) .trigger { color: #2b2721; }
