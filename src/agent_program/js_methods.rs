@@ -931,17 +931,31 @@ fn number_method(heap: &mut Heap, value: f64, name: &str, args: &[VmValue]) -> R
     })
 }
 
-fn regex_method(heap: &mut Heap, pattern: &str, flags: &str, name: &str, args: &[VmValue]) -> Result<VmValue> {
+fn regex_method(heap: &mut Heap, id: HeapId, pattern: &str, flags: &str, name: &str, args: &[VmValue]) -> Result<VmValue> {
     let re = super::values::compile_regex(pattern, flags)?;
+    if name == "toString" {
+        return Ok(VmValue::String(format!("/{pattern}/{flags}")));
+    }
     let input = to_string(heap, &arg(args, 0))?;
     ensure!(input.len() <= 2 * 1024 * 1024, "RangeError: regex input exceeds 2 MiB");
+    let global = flags.contains('g');
+    let start = if global {
+        let index = to_number(heap, &heap.regex_last_index(id))?;
+        if index.is_nan() || index <= 0.0 { 0 } else if !index.is_finite() { usize::MAX } else { index.floor().min(usize::MAX as f64) as usize }
+    } else { 0 };
+    // String indices in this VM count Unicode scalar values, not UTF-16 units.
+    let byte_start = if start == 0 { Some(0) } else if start == input.chars().count() { Some(input.len()) } else { input.char_indices().nth(start).map(|(i, _)| i) };
+    let captures = byte_start.and_then(|offset| re.captures_at(&input, offset));
+    if global {
+        let end = captures.as_ref().and_then(|c| c.get(0)).map(|m| input[..m.end()].chars().count()).unwrap_or(0);
+        heap.set_property(id, "lastIndex".into(), number(end as f64))?;
+    }
     Ok(match name {
-        "test" => VmValue::Boolean(re.is_match(&input)),
-        "exec" => match re.captures(&input) {
+        "test" => VmValue::Boolean(captures.is_some()),
+        "exec" => match captures {
             Some(captures) => match_array(heap, &captures)?,
             None => VmValue::Null,
         },
-        "toString" => VmValue::String(format!("/{pattern}/{flags}")),
         _ => bail!("TypeError: regexp.{name} is not a function"),
     })
 }
@@ -961,7 +975,7 @@ pub(super) fn call_method(heap: &mut Heap, receiver: VmValue, name: &str, args: 
                 return array_method(heap, id, name, args);
             }
             if let Some((pattern, flags)) = heap.regex_parts(id) {
-                return regex_method(heap, &pattern, &flags, name, args);
+                return regex_method(heap, id, &pattern, &flags, name, args);
             }
             match name {
                 "toString" => Ok(VmValue::String(to_string(heap, &receiver)?)),

@@ -213,6 +213,8 @@ pub(super) fn search_events(
     task: &str,
     args: &Value,
     boundary: Option<i64>,
+    snapshot: i64,
+    project_cutoff: i64,
 ) -> Result<SearchSelection> {
     let scope = args["scope"].as_str().unwrap_or("conversation");
     ensure!(
@@ -293,10 +295,19 @@ pub(super) fn search_events(
                  WHEN e.kind IN ('program/require','asset/registered') OR e.kind LIKE 'context/%' THEN ''
                  ELSE e.data END AS search_text,
             -- History reads and their outputs would otherwise match their own query.
-            CASE WHEN e.kind='tool/call' THEN json_extract(e.data,'$.name')='read_session_history'
-                 WHEN e.kind='tool/result' THEN EXISTS(SELECT 1 FROM agent_task_events c WHERE c.task_id=e.task_id AND c.kind='tool/call'
+            CASE WHEN e.kind='assistant/message' AND json_extract(e.data,'$.message.content') IS NULL
+                   AND json_type(e.data,'$.message.tool_calls')='array'
+                   AND EXISTS(SELECT 1 FROM json_each(e.data,'$.message.tool_calls') j WHERE json_extract(j.value,'$.function.name')='read_session_history')
+                   AND NOT EXISTS(SELECT 1 FROM json_each(e.data,'$.message.tool_calls') j WHERE COALESCE(json_extract(j.value,'$.function.name'),'')!='read_session_history') THEN 1
+                 WHEN e.kind='tool/call' THEN json_extract(e.data,'$.name')='read_session_history'
+                 WHEN e.kind='tool/result' THEN COALESCE((SELECT json_extract(c.data,'$.name')='read_session_history' FROM agent_task_events c WHERE c.task_id=e.task_id AND c.kind='tool/call'
                     AND json_extract(c.data,'$.callId')=json_extract(e.data,'$.message.toolCallId') AND c.seq<e.seq
-                    AND json_extract(c.data,'$.name')='read_session_history')
+                    AND (COALESCE(e.node_id,json_extract(e.data,'$.task_node_id')) IS NULL OR COALESCE(c.node_id,json_extract(c.data,'$.task_node_id')) IS NULL OR COALESCE(e.node_id,json_extract(e.data,'$.task_node_id'))=COALESCE(c.node_id,json_extract(c.data,'$.task_node_id')))
+                    AND (COALESCE(e.node_id,json_extract(e.data,'$.task_node_id')) IS NOT NULL OR
+                        (SELECT COUNT(*) FROM agent_task_events pending WHERE pending.task_id=e.task_id AND pending.kind='tool/call'
+                         AND json_extract(pending.data,'$.callId')=json_extract(e.data,'$.message.toolCallId') AND pending.seq<e.seq
+                         AND pending.seq>COALESCE((SELECT MAX(previous.seq) FROM agent_task_events previous WHERE previous.task_id=e.task_id AND previous.kind='tool/result' AND json_extract(previous.data,'$.message.toolCallId')=json_extract(e.data,'$.message.toolCallId') AND previous.seq<e.seq),0))=1)
+                    ORDER BY c.seq DESC LIMIT 1),0)
                  WHEN e.kind='asset/registered' THEN json_extract(e.data,'$.reference.source_tool')='read_session_history'
                  ELSE 0 END AS history_read,
             COALESCE(e.node_id,json_extract(e.data,'$.nodeId'),json_extract(e.data,'$.flowNodeId'),
@@ -307,8 +318,10 @@ pub(super) fn search_events(
         FROM agent_task_events e WHERE (?1 IS NULL OR e.task_id=?1)
           AND (e.kind!='debug/context_request' OR ?6 IS NOT NULL OR ?12)
           AND (?14 IS NULL OR e.task_id!=?15 OR e.seq<?14)
+          AND (?1 IS NOT NULL OR e.rowid<=?18)
     ), filtered AS (SELECT * FROM history
-      WHERE (?6 IS NOT NULL OR NOT history_read)
+      WHERE (?16 OR NOT history_read)
+        AND (?1 IS NULL OR seq<=?17)
         AND (?2='all' OR role=?2) AND (?3='' OR instr(lower(search_text),?3)>0 {context_search})
         AND (?4='' OR node_id=?4 OR (?13 AND EXISTS(SELECT 1 FROM descendants d WHERE d.task_id=history.task_id AND d.id=history.node_id))
           OR EXISTS(SELECT 1 FROM agent_task_nodes n WHERE n.task_id=history.task_id AND n.node_id=?4 AND history.node_id=json_extract(n.data,'$.source.node_id') AND seq BETWEEN json_extract(n.data,'$.source.after_seq') AND json_extract(n.data,'$.source.through_seq')))
@@ -321,7 +334,7 @@ pub(super) fn search_events(
            COUNT(*) OVER(PARTITION BY task_id) AS matched_events FROM filtered)
          SELECT r.seq,r.timestamp,r.kind,r.data,r.role,r.node_id,r.task_id,t.prompt,t.status,r.matched_events
          FROM ranked r JOIN agent_tasks t ON t.id=r.task_id WHERE r.rank=1
-         ORDER BY t.updated_at DESC,t.id DESC LIMIT ?8 OFFSET ?9"
+         ORDER BY r.timestamp DESC,r.task_id DESC LIMIT ?8 OFFSET ?9"
     } else {
         " SELECT seq,timestamp,kind,data,role,node_id,task_id,NULL,NULL,NULL FROM filtered
           ORDER BY seq DESC LIMIT ?8 OFFSET ?9"
@@ -347,6 +360,9 @@ pub(super) fn search_events(
         SqlValue::Integer(i64::from(args["include_descendants"] == true)),
         number(boundary),
         SqlValue::Text(task.to_owned()),
+        SqlValue::Integer(i64::from(args["audit_history_reads"] == true)),
+        SqlValue::Integer(snapshot),
+        SqlValue::Integer(project_cutoff),
     ];
     let rows = query_events(conn, &format!("{base}{select}"), bindings, |row| {
         Ok((

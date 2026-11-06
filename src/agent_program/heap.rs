@@ -326,6 +326,11 @@ impl Heap {
     }
 
     pub(super) fn set_property(&mut self, id: HeapId, key: String, value: VmValue) -> Result<()> {
+        if key == "lastIndex" {
+            if let Some(descriptor) = self.regex_descriptor(id) {
+                return self.set_property(descriptor, key, value);
+            }
+        }
         match self.nodes.get_mut(&id).context("unknown heap reference")? {
             HeapNode::Object(properties) => {
                 if let Some((_, existing)) = properties.iter_mut().find(|(name, _)| name == &key) {
@@ -385,7 +390,7 @@ impl Heap {
     }
 
     /// A regular expression value is the object `{"$flow_regex": {pattern, flags}}`.
-    pub(super) fn regex_parts(&self, id: HeapId) -> Option<(String, String)> {
+    fn regex_descriptor(&self, id: HeapId) -> Option<HeapId> {
         let HeapNode::Object(properties) = self.get(id).ok()? else {
             return None;
         };
@@ -395,8 +400,20 @@ impl Heap {
         if key != "$flow_regex" {
             return None;
         }
-        let pattern = self.property(*descriptor, "pattern").ok()?;
-        let flags = self.property(*descriptor, "flags").ok()?;
+        Some(*descriptor)
+    }
+
+    pub(super) fn regex_last_index(&self, id: HeapId) -> VmValue {
+        self.regex_descriptor(id)
+            .and_then(|descriptor| self.property(descriptor, "lastIndex").ok())
+            .filter(|value| !matches!(value, VmValue::Undefined))
+            .unwrap_or(VmValue::Number(JsNumber::new(0.0)))
+    }
+
+    pub(super) fn regex_parts(&self, id: HeapId) -> Option<(String, String)> {
+        let descriptor = self.regex_descriptor(id)?;
+        let pattern = self.property(descriptor, "pattern").ok()?;
+        let flags = self.property(descriptor, "flags").ok()?;
         match (pattern, flags) {
             (VmValue::String(pattern), VmValue::String(flags)) => Some((pattern, flags)),
             _ => None,

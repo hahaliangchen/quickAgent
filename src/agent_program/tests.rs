@@ -63,7 +63,7 @@ fn regular_expressions_validate_limits_and_resume_with_saved_state() {
         returned(runtime(
             r"function main(){const r=/a/g;return [r.test('a'),r.test('a')];}"
         )),
-        json!([true, true])
+        json!([true, false])
     );
     let mut heap = heap::Heap::default();
     let plain = heap
@@ -84,6 +84,37 @@ fn regular_expressions_validate_limits_and_resume_with_saved_state() {
         serde_json::from_value(serde_json::to_value(&run).unwrap()).unwrap();
     restored.resume(json!({"content":"page42"}), false).unwrap();
     assert_eq!(returned(restored), json!(["42", "42"]));
+}
+
+#[test]
+fn global_regexp_exec_advances_resets_and_survives_suspension() {
+    // Minimized from scratch/regex-global-repro/original-turn-2-6.js.
+    let source = r#"function main() {
+        const html = '<div data-kind="text" data-name="first" style="x"></div><div data-kind="shape" data-name="second" style="y"></div>';
+        const re = /data-kind="([a-z]+)"\s+data-name="([^"]*)"[^>]*?style="([^"]*)"/g;
+        const rows = []; let m; let iterations = 0;
+        while ((m = re.exec(html)) && iterations < 5) { rows.push(m[2]); iterations++; }
+        return [rows, iterations, re.lastIndex];
+    }"#;
+    assert_eq!(returned(runtime(source)), json!([["first", "second"], 2, 0]));
+    assert_eq!(returned(runtime(r#"function main(){
+        const r=/a/g; const a=r.exec('aba'); const i=r.lastIndex;
+        const b=r.exec('aba'); const j=r.lastIndex; const c=r.exec('aba');
+        return [a[0],i,b[0],j,c,r.lastIndex];
+    }"#)), json!(["a",1,"a",3,null,0]));
+    assert_eq!(returned(runtime(r#"function main(){
+        const r=/a/g; r.lastIndex=2; const a=r.test('aba');
+        const i=r.lastIndex; r.lastIndex=99; const b=r.test('aba');
+        const plain=/a/; plain.lastIndex=2; const c=plain.test('aba');
+        return [a,i,b,r.lastIndex,c,plain.lastIndex];
+    }"#)), json!([true,3,false,0,true,2]));
+    assert_eq!(returned(runtime(r#"function main(){const r=/a/g; r.exec('中a中a'); const i=r.lastIndex; r.exec('中a中a'); return [i,r.lastIndex];}"#)), json!([2,4]));
+    assert_eq!(returned(runtime(r#"function main(){const r=/a*/g; const alias=r; r.exec('b'); const i=alias.lastIndex; alias.lastIndex=1; r.exec('b'); return [i,r.lastIndex];}"#)), json!([0,1]));
+    let mut run = runtime(r#"function main(){const r=/a/g; r.exec('aba'); io.read({path:'a'}); return [r.lastIndex,r.exec('aba')[0],r.lastIndex];}"#);
+    assert!(matches!(run.next(), State::Action(_)));
+    let mut restored: Runtime = serde_json::from_value(serde_json::to_value(&run).unwrap()).unwrap();
+    restored.resume(json!({}), false).unwrap();
+    assert_eq!(returned(restored), json!([1,"a",3]));
 }
 
 #[test]
@@ -3126,4 +3157,36 @@ fn a_module_takes_parameters_not_uses() {
 fn a_function_is_either_virtual_or_a_module() {
     let error = compile("const r = await f(1);\n\n/** @virtual @module */\nasync function f(x) {\n  // Do x. Returns {ok:boolean}.\n}").unwrap_err().to_string();
     assert!(error.contains("both @virtual and @module"), "{error}");
+}
+
+#[test]
+fn normal_function_can_chain_async_library_method_and_resume() {
+    let mut run = runtime(r#"async function main(){
+      const ppt=require('ppt/promises');
+      function dump(){return ppt.get_design({page:3}).then(d=>d.slides+1);}
+      return await dump();
+    }"#);
+    let State::Action(action) = run.next() else { panic!("require should link the library") };
+    assert!(matches!(&action.kind, ActionKind::Require { library } if library=="ppt/promises"));
+    run.resume(json!({"library":"ppt/promises","methods":{"get_design":"ppt_master__get_design"}}),false).unwrap();
+    let State::Action(action) = run.next() else { panic!("async library should issue the host call") };
+    assert!(matches!(&action.kind, ActionKind::Tool { name, .. } if name=="ppt_master__get_design"));
+    let mut run: Runtime = serde_json::from_value(serde_json::to_value(run).unwrap()).unwrap();
+    run.resume(json!({"slides":3}),false).unwrap();
+    assert_eq!(returned(run),json!(4));
+}
+
+#[test]
+fn synchronous_library_method_returns_plain_value_regardless_of_function_type() {
+    let mut run = runtime(r#"async function main(){
+      const ppt=require('ppt');
+      function dump(){return ppt.get_design({page:3}).then(d=>d.slides);}
+      try { return dump(); } catch (e) { return e.message; }
+    }"#);
+    assert!(matches!(run.next(), State::Action(_)));
+    run.resume(json!({"library":"ppt","methods":{"get_design":"ppt_master__get_design"}}),false).unwrap();
+    assert!(matches!(run.next(), State::Action(Action{kind:ActionKind::Tool{..},..})));
+    run.resume(json!({"slides":3}),false).unwrap();
+    let error = returned(run);
+    assert!(error.as_str().is_some_and(|s|s.contains("then") && s.contains("not a function")),"{error}");
 }

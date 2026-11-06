@@ -3,6 +3,9 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::Path;
+mod index;
+#[cfg(test)]
+mod regression_tests;
 mod store;
 pub use store::{EventQuery, load_events, tool_call_node};
 
@@ -14,7 +17,7 @@ pub fn saved_history_payload<'a>(kind: &str, data: &'a Value) -> Result<&'a Valu
         | "organizer/continuation_plan"
         | "organizer/context_note"
         | "visual/input_result" => &["/message"],
-        "tool/result" => &["/meta/result"],
+        "tool/result" | "tool/async_result" => &["/meta/result"],
         "worker/yield" => &[
             "/output/original_return",
             "/output/worker_return",
@@ -99,9 +102,10 @@ fn image_message(message: &Value) -> Option<Value> {
 
 pub fn tool() -> Value {
     json!({"type":"function","function":{"name":"read_session_history",
-    "description":"Read saved conversation history only when current inputs lack needed information. Default scope=conversation reads the current conversation or a returned task_id. scope=project searches conversations in this workspace, returning one dated matching excerpt and a read_reference per conversation. Filter by keyword, role, node or turn; keywords match message text, tool names/arguments and tool output, a matched call returns with its result, and history reads are never matched. Conversation records are chronological; before_seq pages toward older events, event_seq/char_offset retrieve exact text. Project results page with project_offset. Historical records do not prove current resource availability. This read does not create a Flow node or change execution.",
+    "description":"Read saved conversation history only when current inputs lack needed information. Set view=index for a compact, expandable table of contents: open a turn, then a task node, and follow read_reference for original evidence. Reads in the current user turn share a fixed snapshot; keep snapshot_seq while navigating or paging. To inspect work done after that snapshot, explicitly start a new snapshot. History-reading calls and results are excluded even by exact event_seq unless explicitly auditing them. Default scope=conversation reads the current conversation or a returned task_id. scope=project searches workspace conversations. Historical records do not prove current resource availability.",
     "parameters":{"type":"object","properties":{
         "scope":{"type":"string","enum":["conversation","project"]},
+        "view":{"type":"string","enum":["records","index"],"description":"index shows an expandable table of contents for a conversation; records reads actual historical entries."},
         "task_id":{"type":"string","description":"Conversation returned by project search; defaults to the current conversation. Only conversations saved in this workspace can be read."},
         "project_offset":{"type":"integer","minimum":0,"description":"Offset for project search; use the returned next_search."},
         "query":{"type":"string","maxLength":1000},
@@ -110,6 +114,10 @@ pub fn tool() -> Value {
         "include_descendants":{"type":"boolean","default":false,"description":"Include events owned by descendants of node_id. Split nodes also expose their explicit source interval."},
         "request_id":{"type":"integer","minimum":1,"description":"Goal ID from task history_reference, to restrict the saved event interval."},
         "before_seq":{"type":"integer","minimum":0},"after_seq":{"type":"integer","minimum":-1,"description":"Exclusive lower bound from task history_reference; retain when paging within that human goal."},"event_seq":{"type":"integer","minimum":0},
+        "snapshot_seq":{"type":"integer","minimum":0,"description":"Inclusive upper bound returned by the first conversation history read; retain for pagination and exact reads."},
+        "snapshot_id":{"type":"integer","minimum":0,"description":"Project search snapshot; retain the value returned in next_search."},
+        "new_snapshot":{"type":"boolean","description":"Start an independent history browse including work completed since the previous snapshot. Do not set when paging or expanding its records."},
+        "audit_history_reads":{"type":"boolean","description":"Explicit audit only: include history-read calls and results. Ordinary history must leave this false."},
         "limit":{"type":"integer","minimum":1,"maximum":12},
         "char_offset":{"type":"integer","minimum":0},"max_chars":{"type":"integer","minimum":256,"maximum":12000},
         "include_event":{"type":"boolean","description":"Return the original event envelope instead of just the sender's message/return or tool output; useful for inspecting provenance."},
@@ -120,14 +128,19 @@ pub fn tool() -> Value {
 
 /// The programs this conversation ran: each turn's main program and the
 /// implementations its AI wrote for virtual functions, in the order they ran.
-fn read_programs(conn: &rusqlite::Connection, task: &str, args: &Value) -> Result<Value> {
+fn read_programs(
+    conn: &rusqlite::Connection,
+    task: &str,
+    args: &Value,
+    snapshot: i64,
+) -> Result<Value> {
     let task = args["task_id"].as_str().unwrap_or(task);
     let turn = args["turn"].as_i64();
     let limit = args["limit"].as_u64().unwrap_or(12).clamp(1, 12) as usize;
     let rows = conn
         .prepare("SELECT seq,data FROM agent_task_events WHERE task_id=?1 AND kind='program/start'
-            AND json_extract(data,'$.source') IS NOT NULL AND (?2 IS NULL OR json_extract(data,'$.turn')=?2) ORDER BY seq")?
-        .query_map(rusqlite::params![task, turn], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            AND json_extract(data,'$.source') IS NOT NULL AND (?2 IS NULL OR json_extract(data,'$.turn')=?2) AND seq<=?3 AND seq>?4 ORDER BY seq LIMIT ?5")?
+        .query_map(rusqlite::params![task, turn, snapshot, args["after_seq"].as_i64().unwrap_or(-1), (limit + 1) as i64], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let more = rows.len() > limit;
     let programs = rows
@@ -138,8 +151,15 @@ fn read_programs(conn: &rusqlite::Connection, task: &str, args: &Value) -> Resul
             json!({"event_seq":seq,"turn":data["turn"],"function":data["function"],"frame":data["task_node_id"],"source":data["source"]})
         })
         .collect::<Vec<_>>();
-    Ok(json!({"programs":programs,"more":more,
-        "note":"function is null for a turn's main program, else the virtual function this code implements. A program records how work was done; check current files for their present state."}))
+    let next_page = if more {
+        json!({"programs":true,"scope":"conversation","task_id":task,"turn":turn,"snapshot_seq":snapshot,"after_seq":programs.last().map(|p|p["event_seq"].clone()),"limit":limit})
+    } else {
+        Value::Null
+    };
+    Ok(
+        json!({"programs":programs,"more":more,"next_page":next_page,"snapshot_seq":snapshot,
+        "note":"function is null for a turn's main program, else the virtual function this code implements. A program records how work was done; check current files for their present state."}),
+    )
 }
 
 #[cfg(test)]
@@ -176,7 +196,37 @@ pub async fn read_for_call(
             .map(|event| event.seq),
             None => None,
         };
-        read_saved(&conn, &task, &args, boundary)
+        // Reads share the first cutoff in this user turn. Intervening tool
+        // activity must not silently advance it; a new user message or an
+        // explicit new_snapshot starts another browsing session.
+        let first_read = if let Some(current) = boundary {
+            let last_action: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(seq),0) FROM agent_task_events WHERE task_id=?1 AND seq<?2 AND kind='user/message'",
+                rusqlite::params![task, current], |r| r.get(0))?;
+            let mut query = conn.prepare("SELECT seq,COALESCE(json_extract(data,'$.arguments'),'{}') FROM agent_task_events WHERE task_id=?1 AND seq>?2 AND seq<=?3 AND kind='tool/call' AND json_extract(data,'$.name')='read_session_history' ORDER BY seq")?;
+            let calls = query.query_map(rusqlite::params![task,last_action,current], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut first = calls.first().map(|call|call.0).unwrap_or(current);
+            for (seq, raw) in calls {
+                if serde_json::from_str::<Value>(&raw).is_ok_and(|v|v["new_snapshot"]==true) { first=seq; }
+            }
+            first
+        } else { i64::MAX };
+        let target = args["task_id"].as_str().unwrap_or(&task);
+        let available: i64 = if first_read == i64::MAX {
+            conn.query_row("SELECT COALESCE(MAX(seq),0) FROM agent_task_events WHERE task_id=?1", [target], |r| r.get(0))?
+        } else if target == task {
+            first_read.saturating_sub(1)
+        } else {
+            conn.query_row("SELECT COALESCE(MAX(seq),0) FROM agent_task_events WHERE task_id=?1 AND rowid < (SELECT rowid FROM agent_task_events WHERE task_id=?2 AND seq=?3)", rusqlite::params![target,task,first_read], |r| r.get(0))?
+        };
+        let snapshot = args["snapshot_seq"].as_i64().map_or(available, |requested| requested.min(available)).max(0);
+        let cutoff: i64 = if first_read == i64::MAX {
+            conn.query_row("SELECT COALESCE(MAX(rowid),0) FROM agent_task_events", [], |r| r.get(0))?
+        } else {
+            conn.query_row("SELECT rowid-1 FROM agent_task_events WHERE task_id=?1 AND seq=?2", rusqlite::params![task,first_read], |r| r.get(0))?
+        };
+        let cutoff = args["snapshot_id"].as_i64().map_or(cutoff, |t| t.min(cutoff));
+        read_saved(&conn, &task, &args, boundary.map(|_| first_read), snapshot, cutoff)
     })
     .await?
 }
@@ -195,13 +245,18 @@ fn paired_event(
         "tool/call" => (
             "SELECT seq,kind,data FROM agent_task_events WHERE task_id=?1 AND seq>?2 AND (?4 IS NULL OR seq<?4)
                AND ((kind='tool/result' AND json_extract(data,'$.message.toolCallId')=?3)
-                 OR (kind='tool/async_result' AND json_extract(data,'$.meta.result.original_call_id')=?3))
+                 OR (kind='tool/async_result' AND COALESCE(json_extract(data,'$.original_call_id'),json_extract(data,'$.meta.result.original_call_id'))=?3))
+               AND NOT EXISTS (SELECT 1 FROM agent_task_events next_call WHERE next_call.task_id=?1 AND next_call.kind='tool/call' AND json_extract(next_call.data,'$.callId')=?3 AND next_call.seq>?2 AND next_call.seq<agent_task_events.seq)
              ORDER BY kind='tool/async_result' DESC,seq LIMIT 1",
             data["callId"].as_str(),
         ),
         "tool/result" => (
             "SELECT seq,kind,data FROM agent_task_events WHERE task_id=?1 AND seq<?2 AND (?4 IS NULL OR seq<?4)
-               AND kind='tool/call' AND json_extract(data,'$.callId')=?3 ORDER BY seq DESC LIMIT 1",
+               AND kind='tool/call' AND json_extract(data,'$.callId')=?3
+               AND (SELECT COUNT(*) FROM agent_task_events pending WHERE pending.task_id=?1 AND pending.kind='tool/call'
+                    AND json_extract(pending.data,'$.callId')=?3 AND pending.seq<?2
+                    AND pending.seq>COALESCE((SELECT MAX(previous.seq) FROM agent_task_events previous WHERE previous.task_id=?1 AND previous.kind='tool/result' AND json_extract(previous.data,'$.message.toolCallId')=?3 AND previous.seq<?2),0))=1
+             ORDER BY seq DESC LIMIT 1",
             data.pointer("/message/toolCallId").and_then(Value::as_str),
         ),
         _ => return Ok(None),
@@ -228,9 +283,14 @@ fn read_saved(
     task: &str,
     args: &Value,
     boundary: Option<i64>,
+    snapshot: i64,
+    project_cutoff: i64,
 ) -> Result<Value> {
+    if args["view"] == "index" {
+        return index::read(conn, task, args, snapshot);
+    }
     if args["programs"] == true {
-        return read_programs(conn, task, args);
+        return read_programs(conn, task, args, snapshot);
     }
     let store::SearchSelection {
         rows,
@@ -243,7 +303,7 @@ fn read_saved(
         max_chars,
         offset,
         project_offset,
-    } = store::search_events(conn, task, args, boundary)?;
+    } = store::search_events(conn, task, args, boundary, snapshot, project_cutoff)?;
     let scope = if project { "project" } else { "conversation" };
     let more = rows.len() > limit;
     let mut records = Vec::new();
@@ -254,6 +314,16 @@ fn read_saved(
     for (seq, time, kind, raw, actor, node_id, record_task, prompt, status, matched_events) in
         rows.into_iter().take(limit)
     {
+        let reference_snapshot = if project {
+            let max: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(seq),0) FROM agent_task_events WHERE task_id=?1 AND rowid<=?2",
+                rusqlite::params![record_task, project_cutoff],
+                |r| r.get(0),
+            )?;
+            json!(max)
+        } else {
+            json!(snapshot)
+        };
         let mut data: Value = serde_json::from_str(&raw)?;
         saved_history_payload(&kind, &data)?;
         if kind == "debug/context_request" {
@@ -339,15 +409,17 @@ fn read_saved(
             "content":slice,"content_format":if payload.is_string(){"text"}else{"json"},
             "total_chars":total,"char_offset":record_offset,"returned_chars":returned,"omitted_chars":total.saturating_sub(returned),
             "next_char_offset":if next<total{Some(next)}else{None},
-            "read_reference":{"scope":"conversation","task_id":record_task,"event_seq":seq,"include_event":args["include_event"]==true},
-            "next_read":if next<total{json!({"task_id":record_task,"event_seq":seq,"char_offset":next,"include_event":args["include_event"]==true})}else{Value::Null}});
-        let pair_boundary = boundary.filter(|_| record_task == task);
+            "read_reference":{"scope":"conversation","task_id":record_task,"event_seq":seq,"snapshot_seq":reference_snapshot,"include_event":args["include_event"]==true,"audit_history_reads":args["audit_history_reads"]==true},
+            "next_read":if next<total{json!({"task_id":record_task,"event_seq":seq,"snapshot_seq":reference_snapshot,"char_offset":next,"include_event":args["include_event"]==true,"audit_history_reads":args["audit_history_reads"]==true})}else{Value::Null}});
+        record["source"]["history_reference"]["snapshot_seq"] = reference_snapshot.clone();
+        record["source"]["history_reference"]["audit_history_reads"] =
+            json!(args["audit_history_reads"] == true);
+        let pair_boundary = reference_snapshot.as_i64().map(|s| s.saturating_add(1));
         if args["include_event"] != true
             && let Some((pair_seq, pair_kind, pair)) =
                 paired_event(conn, &record_task, &kind, seq, &data, pair_boundary)?
         {
-            let reference =
-                json!({"scope":"conversation","task_id":record_task,"event_seq":pair_seq});
+            let reference = json!({"scope":"conversation","task_id":record_task,"event_seq":pair_seq,"snapshot_seq":reference_snapshot});
             if kind == "tool/call" {
                 let result = saved_history_payload(&pair_kind, &pair).unwrap_or(&pair);
                 let text = result
@@ -388,7 +460,7 @@ fn read_saved(
     }
     let next_search = if project && more {
         json!({"scope":"project","query":args["query"],"role":role,"node_id":args["node_id"],"turn":turn,
-                "project_offset":project_offset+limit as i64,"limit":limit,"max_chars":max_chars,"include_event":args["include_event"]==true,"include_context":args["include_context"]==true})
+                "project_offset":project_offset+limit as i64,"snapshot_id":project_cutoff,"limit":limit,"max_chars":max_chars,"include_event":args["include_event"]==true,"include_context":args["include_context"]==true})
     } else {
         Value::Null
     };
@@ -396,9 +468,9 @@ fn read_saved(
         "No saved {scope} record before this request matches \"{query}\". History reads are not searched, and history only holds past events: it cannot show current state. To get current data, call the tool that reads it instead of searching history again."
     ));
     Ok(
-        json!({"records":records,"has_more":more,"next_before_seq":next_before,"next_search":next_search,"no_match":no_match,
-        "scope":scope,"task_id":if project{None}else{Some(target)},
-        "history_note":"Saved records in this workspace, not assertions about present resource availability. Project search returns the latest matching event per conversation, ordered by conversation update time; use read_reference to read that event or task_id with query/before_seq to read other records. Conversation records are chronological. Keywords match message text, tool names and arguments, and tool output; history reads themselves are not searched. A matched tool call carries its tool_result, a matched result its tool_call. Excerpts preserve original content; event_seq/char_offset retrieve omitted text. Records written after this request began are excluded; project pagination can shift if other conversations change during a search.",
+        json!({"records":records,"has_more":more,"next_before_seq":next_before,"snapshot_seq":if project {None} else {Some(snapshot)},"next_search":next_search,"no_match":no_match,
+        "scope":scope,"task_id":if project{None}else{Some(target)},"snapshot_id":if project {Some(project_cutoff)} else {None},
+        "history_note":"Conversation records are chronological and bounded by snapshot_seq; keep it for further pages or exact reads. History-reading calls and results are excluded unless audit_history_reads is explicitly requested. A new user message or explicit new_snapshot starts a new browsing session. Saved history does not prove current resource availability. Project search and pagination keep a fixed event cutoff.",
         "returned_chars":max_chars-remaining,"max_chars":max_chars}),
     )
 }
@@ -472,10 +544,19 @@ mod tests {
         );
         // A tool's schema description is not searchable text either.
         assert_eq!(search("x", "h2").await["records"], json!([]));
-        // Exact reads still return the original history-read events in full.
-        let exact = read(&root, "t", &json!({"event_seq":2,"include_event":true}))
+        // History's own reads are invisible even to ordinary exact reads;
+        // explicit audit can still inspect the original event.
+        let ordinary = read(&root, "t", &json!({"event_seq":2,"include_event":true}))
             .await
             .unwrap();
+        assert_eq!(ordinary["records"], json!([]));
+        let exact = read(
+            &root,
+            "t",
+            &json!({"event_seq":2,"include_event":true,"audit_history_reads":true}),
+        )
+        .await
+        .unwrap();
         assert_eq!(exact["records"][0]["seq"], 2);
         assert!(
             exact["records"][0]["content"]
@@ -498,7 +579,10 @@ mod tests {
             &json!({"actor":"agent","turn":2,"message":{"role":"tool","toolCallId":"p1","isError":true,
             "content":[{"type":"text","text":"{\"error\":\"PAGE_CLOSED\"}"}]},"meta":{"result":{"error":"PAGE_CLOSED"}}}),
         );
-        insert(8, "tool/call", &history_call("h3", "get_design"));
+        let mut fresh_call = history_call("h3", "get_design");
+        fresh_call["arguments"] =
+            json!(json!({"query":"get_design","limit":1,"new_snapshot":true}).to_string());
+        insert(8, "tool/call", &fresh_call);
         let found = search("get_design", "h3").await;
         let record = &found["records"][0];
         assert_eq!(found["records"].as_array().unwrap().len(), 1);
@@ -527,5 +611,355 @@ mod tests {
         assert_eq!(search("get_design", "h2").await["records"], json!([]));
         drop(conn);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn browsing_snapshot_excludes_new_events_and_history_results_until_new_work() {
+        let root = std::env::temp_dir().join(format!(
+            "history-snapshot-{}",
+            crate::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::agent_service::open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','test','test','running',1,1)", []).unwrap();
+        let insert = |seq: i64, kind: &str, data: Value| {
+            conn.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('t',?1,?1,?2,?3)", rusqlite::params![seq,kind,data.to_string()]).unwrap();
+        };
+        let history =
+            |id: &str| json!({"name":"read_session_history","callId":id,"arguments":"{}"});
+        insert(1, "user/message", json!({"message":{"content":"original"}}));
+        insert(2, "tool/call", history("h1"));
+        insert(
+            3,
+            "tool/result",
+            json!({"message":{"toolCallId":"h1"},"meta":{"result":{"records":["original"]}}}),
+        );
+        insert(4, "context/usage", json!({"counter":123}));
+        insert(5, "tool/call", history("h2"));
+        let first = read_for_call(&root, "t", &json!({}), Some("h1"))
+            .await
+            .unwrap();
+        let second = read_for_call(&root, "t", &json!({}), Some("h2"))
+            .await
+            .unwrap();
+        assert_eq!(first["snapshot_seq"], 1);
+        assert_eq!(second["snapshot_seq"], 1);
+        assert_eq!(
+            second["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["seq"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        let own = read_for_call(
+            &root,
+            "t",
+            &json!({"event_seq":3,"include_event":true}),
+            Some("h2"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(own["records"], json!([]));
+        // An intervening tool does not move the boundary. An explicit new
+        // browse does; earlier history reads stay excluded unless auditing.
+        insert(6, "tool/call", json!({"name":"real_tool","callId":"work"}));
+        insert(
+            7,
+            "tool/result",
+            json!({"message":{"toolCallId":"work"},"meta":{"result":{"value":1}}}),
+        );
+        insert(8, "tool/call", history("h3"));
+        let still_old = read_for_call(&root, "t", &json!({}), Some("h3"))
+            .await
+            .unwrap();
+        assert_eq!(still_old["snapshot_seq"], 1);
+        insert(
+            9,
+            "tool/call",
+            json!({"name":"read_session_history","callId":"h4","arguments":json!({"new_snapshot":true}).to_string()}),
+        );
+        let fresh = read_for_call(&root, "t", &json!({"new_snapshot":true}), Some("h4"))
+            .await
+            .unwrap();
+        assert_eq!(fresh["snapshot_seq"], 8);
+        assert!(
+            fresh["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["seq"] == 7)
+        );
+        let blocked = read_for_call(&root, "t", &json!({"event_seq":3}), Some("h4"))
+            .await
+            .unwrap();
+        assert_eq!(blocked["records"], json!([]));
+        let audit = read_for_call(
+            &root,
+            "t",
+            &json!({"event_seq":3,"audit_history_reads":true}),
+            Some("h4"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(audit["records"][0]["seq"], 3);
+        // An explicit old snapshot cannot be widened after the new work.
+        let old = read_for_call(&root, "t", &json!({"snapshot_seq":1}), Some("h4"))
+            .await
+            .unwrap();
+        assert!(
+            old["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["seq"].as_i64().unwrap() <= 1)
+        );
+        insert(
+            10,
+            "user/message",
+            json!({"message":{"content":"new turn"}}),
+        );
+        insert(11, "tool/call", history("h5"));
+        let next_turn = read_for_call(&root, "t", &json!({}), Some("h5"))
+            .await
+            .unwrap();
+        assert_eq!(next_turn["snapshot_seq"], 10);
+        assert!(
+            next_turn["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["seq"] == 10)
+        );
+        insert(
+            12,
+            "assistant/message",
+            json!({"message":{"role":"assistant","content":null,"tool_calls":[{"function":{"name":"read_session_history","arguments":"{}"}}]}}),
+        );
+        let ordinary = read(&root, "t", &json!({"event_seq":12})).await.unwrap();
+        assert_eq!(ordinary["records"], json!([]));
+        let audited = read(
+            &root,
+            "t",
+            &json!({"event_seq":12,"audit_history_reads":true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(audited["records"][0]["seq"], 12);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn history_pages_and_exact_references_keep_the_original_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "history-pages-{}",
+            crate::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::agent_service::open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','test','test','running',1,1)",[]).unwrap();
+        let insert = |seq: i64, kind: &str, data: Value| {
+            conn.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('t',?1,?1,?2,?3)",rusqlite::params![seq,kind,data.to_string()]).unwrap();
+        };
+        for i in 1..=20 {
+            insert(
+                i,
+                "user/message",
+                json!({"message":{"content":format!("message {i}")}}),
+            );
+        }
+        insert(
+            21,
+            "tool/call",
+            json!({"name":"read_session_history","callId":"h1"}),
+        );
+        let first = read_for_call(&root, "t", &json!({"limit":10}), Some("h1"))
+            .await
+            .unwrap();
+        assert_eq!(first["snapshot_seq"], 20);
+        assert_eq!(first["next_before_seq"], 11);
+        let reference = first["records"][0]["read_reference"].clone();
+        assert_eq!(reference["snapshot_seq"], 20);
+        insert(
+            22,
+            "tool/result",
+            json!({"message":{"toolCallId":"h1"},"meta":{"result":first}}),
+        );
+        insert(
+            23,
+            "tool/call",
+            json!({"name":"read_session_history","callId":"h2"}),
+        );
+        let next = read_for_call(&root, "t", &json!({"limit":10,"before_seq":11}), Some("h2"))
+            .await
+            .unwrap();
+        assert_eq!(next["snapshot_seq"], 20);
+        assert_eq!(
+            next["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["seq"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            (1..=10).collect::<Vec<_>>()
+        );
+        assert_eq!(next["has_more"], false);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn history_index_navigates_recorded_tasks_with_snapshot_and_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "history-index-{}",
+            crate::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::agent_service::open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','test','test','running',1,1)",[]).unwrap();
+        let insert = |seq: i64, kind: &str, data: Value| {
+            conn.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('t',?1,?1,?2,?3)",rusqlite::params![seq,kind,data.to_string()]).unwrap();
+        };
+        insert(
+            1,
+            "user/message",
+            json!({"turn":1,"model_content":"请分析材料\n附加信息","message":{"content":"请分析材料"}}),
+        );
+        insert(
+            2,
+            "task/node_planned",
+            json!({"turn":1,"kind":"task","node_id":"main","parent_id":"n0","title":"分析材料"}),
+        );
+        insert(
+            3,
+            "program/start",
+            json!({"turn":1,"task_node_id":"main","source":"PRIVATE LONG SOURCE"}),
+        );
+        insert(
+            4,
+            "tool/call",
+            json!({"turn":1,"task_node_id":"main","name":"read_file","callId":"c1","arguments":"{\"path\":\"private.txt\",\"page\":4}"}),
+        );
+        insert(
+            5,
+            "tool/result",
+            json!({"turn":1,"message":{"toolCallId":"c1","isError":true},"meta":{"result":{"text":"original evidence"}}}),
+        );
+        insert(
+            6,
+            "task/node_planned",
+            json!({"turn":1,"kind":"task","node_id":"child","parent_id":"main","title":"检查"}),
+        );
+        insert(
+            7,
+            "program/error",
+            json!({"turn":1,"task_node_id":"child","error":{"message":"检查失败"}}),
+        );
+        insert(
+            8,
+            "tool/call",
+            json!({"turn":1,"task_node_id":"main","name":"read_session_history","callId":"h1","arguments":"{}"}),
+        );
+        insert(
+            9,
+            "tool/result",
+            json!({"turn":1,"message":{"toolCallId":"h1"},"meta":{"result":{"records":["self"]}}}),
+        );
+        insert(
+            10,
+            "user/message",
+            json!({"turn":2,"model_content":"后来的请求","message":{"content":"后来的请求"}}),
+        );
+        let contents = read(&root, "t", &json!({"view":"index","snapshot_seq":9}))
+            .await
+            .unwrap();
+        assert_eq!(contents["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(contents["entries"][0]["kind"], "turn");
+        assert_eq!(contents["entries"][0]["label"], "请分析材料");
+        let chapter = read(&root, "t", &contents["entries"][0]["expand"])
+            .await
+            .unwrap();
+        assert_eq!(chapter["snapshot_seq"], 9);
+        let task = chapter["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "task")
+            .unwrap();
+        assert_eq!(task["label"], "分析材料");
+        let mut open = task["expand"].clone();
+        open["limit"] = json!(2);
+        let page = read(&root, "t", &open).await.unwrap();
+        assert_eq!(page["entries"][0]["kind"], "program");
+        assert_eq!(page["entries"][1]["label"], "read_file");
+        assert_eq!(page["entries"][1]["numeric_arguments"]["page"], 4);
+        assert_eq!(page["entries"][1]["outcome"], "error");
+        assert_eq!(page["entries"][1]["result_reference"]["event_seq"], 5);
+        assert!(page["has_more"] == true && !page.to_string().contains("PRIVATE LONG SOURCE"));
+        let evidence = read(&root, "t", &page["entries"][1]["read_reference"])
+            .await
+            .unwrap();
+        assert_eq!(evidence["records"][0]["seq"], 4);
+        assert!(
+            evidence["records"][0]["tool_result"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("original evidence")
+        );
+        let next = read(&root, "t", &page["next_page"]).await.unwrap();
+        assert_eq!(next["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(next["entries"][0]["label"], "检查");
+        let child = read(&root, "t", &next["entries"][0]["expand"])
+            .await
+            .unwrap();
+        assert_eq!(child["entries"][0]["kind"], "error");
+        assert_eq!(child["entries"][0]["label"], "检查失败");
+        let pending = read(
+            &root,
+            "t",
+            &json!({"view":"index","node_id":"main","snapshot_seq":4}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending["entries"][1]["outcome"], "pending");
+        assert!(pending["entries"][1].get("result_reference").is_none());
+        assert!(
+            read(
+                &root,
+                "t",
+                &json!({"view":"index","node_id":"missing","snapshot_seq":9})
+            )
+            .await
+            .is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn history_index_groups_multiple_user_messages_by_turn() {
+        let root = std::env::temp_dir().join(format!(
+            "history-index-turns-{}",
+            crate::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::agent_service::open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','test','test','running',1,1)",[]).unwrap();
+        for (seq, turn, text) in [(1, 1, "最初需求"), (2, 1, "补充要求"), (3, 2, "新的问题")]
+        {
+            conn.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('t',?1,?1,'user/message',?2)", rusqlite::params![seq,json!({"turn":turn,"model_content":text,"message":{"content":text}}).to_string()]).unwrap();
+        }
+        let index = read(&root, "t", &json!({"view":"index","limit":1}))
+            .await
+            .unwrap();
+        assert_eq!(index["entries"][0]["label"], "最初需求");
+        let chapter = read(&root, "t", &index["entries"][0]["expand"])
+            .await
+            .unwrap();
+        assert_eq!(chapter["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(chapter["entries"][1]["label"], "补充要求");
+        let next = read(&root, "t", &index["next_page"]).await.unwrap();
+        assert_eq!(next["entries"][0]["label"], "新的问题");
+        assert_eq!(next["has_more"], false);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

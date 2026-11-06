@@ -83,7 +83,7 @@ pub(super) fn member(heap: &Heap, object: &VmValue, key: &VmValue) -> Result<VmV
                         "multiline" => VmValue::Boolean(flags.contains('m')),
                         "dotAll" => VmValue::Boolean(flags.contains('s')),
                         "unicode" => VmValue::Boolean(flags.contains('u')),
-                        "lastIndex" => number(0.0),
+                        "lastIndex" => heap.regex_last_index(*id),
                         _ => VmValue::Undefined,
                     });
                 }

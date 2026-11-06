@@ -2003,10 +2003,16 @@ mod tests {
         let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
             let turn2 = body["messages"].to_string().contains("What did the last program do");
             let answer = match role_of(&body).as_str() {
-                "main" if !turn2 => reply(TWO_LEVEL_MAIN.into()),
+                "main" if !turn2 => {
+                    if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") {
+                        reply("Finished summarizing the files.".into())
+                    } else {
+                        reply(TWO_LEVEL_MAIN.into())
+                    }
+                }
                 "main" => {
                     let messages = body["messages"].as_array().unwrap();
-                    match messages.iter().rev().find(|m| m["role"] == "tool") {
+                    match messages.iter().rev().find(|m| m["role"] == "tool" && m["tool_call_id"] == "history") {
                         None => {
                             let text = body.to_string();
                             assert!(!text.contains("texts.push(io.read") && !text.contains("await summarize("), "no earlier code sits in the new turn's context");
@@ -2033,10 +2039,15 @@ mod tests {
         let conn = agent_service::open_db(root.path()).unwrap();
         conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
         run_task(state.clone(), "task".into(), "fake".into(), "Summarize a and b".into(), 10, CancellationToken::new(), 1, false).await.unwrap();
+        let status: String = conn.query_row("SELECT status FROM agent_tasks WHERE id='task'", [], |r| r.get(0)).unwrap();
+        assert_eq!(status, "completed", "the first turn must finish before testing a fresh turn's history read");
+        assert_eq!(std::fs::read_to_string(root.path().join("out.txt")).unwrap(), "alpha+beta");
         run_task(state, "task".into(), "fake".into(), "What did the last program do?".into(), 10, CancellationToken::new(), 2, false).await.unwrap();
         server.abort();
+        let history_calls: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id='task' AND kind='tool/call' AND json_extract(data,'$.turn')=2 AND json_extract(data,'$.callId')='history' AND json_extract(data,'$.name')='read_session_history'", [], |r| r.get(0)).unwrap();
+        assert_eq!(history_calls, 1, "the second turn must execute the history tool");
         let read_back = read_back.lock().unwrap().clone().expect("the second turn read the history");
-        let programs = read_back["programs"].as_array().unwrap();
+        let programs = read_back["programs"].as_array().unwrap_or_else(|| panic!("history must return a programs array: {read_back}"));
         assert_eq!(programs.len(), 2, "the main program and the implementation it led to: {read_back}");
         assert!(programs[0]["function"].is_null() && programs[0]["source"].as_str().unwrap().contains("await summarize("));
         assert_eq!(programs[1]["function"], "summarize");
