@@ -20,6 +20,16 @@
   margin: 0;
   font-size: 12.5px;
   color: var(--codex-text-muted, #6b7280);
+  overflow-wrap: anywhere;
+}
+.warning {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-state-warn-label, #9a6700);
+  border-radius: 8px;
+  color: var(--dsw-alias-state-warn-label, #9a6700);
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 .input {
   width: 100%;

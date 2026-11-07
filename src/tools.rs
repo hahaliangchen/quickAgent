@@ -34,6 +34,10 @@ const DEFAULT_MAX_MATCHES: usize = 100;
 const DEFAULT_MAX_DEPTH: usize = 1;
 const DEFAULT_WRITE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SEARCH_FILE_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
+/// A matched line longer than this comes back as an excerpt around the match.
+const MATCH_TEXT_CHARS: usize = 400;
+/// How much of a long line before the match its excerpt keeps.
+const MATCH_CONTEXT_CHARS: usize = 100;
 const NOISE_DIRS: &[&str] = &[
     ".git",
     ".hg",
@@ -230,6 +234,9 @@ pub struct TextMatch {
     pub line: usize,
     pub column: usize,
     pub text: String,
+    /// The whole line's length in characters, given when `text` is an excerpt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1310,23 +1317,44 @@ fn scan_text_root(
                     truncated = true;
                     break 'outer;
                 }
+                // Paths use `/` on every platform, like list_dir and the
+                // symbol index matches this list is merged with.
                 let rel_path = path
                     .strip_prefix(&workspace_root)
                     .unwrap_or(path)
-                    .display()
-                    .to_string();
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 let column = line[..found.start()].chars().count() + 1;
+                let (text, line_chars) = match_excerpt(line, column - 1);
                 matches.push(TextMatch {
                     path: rel_path,
                     line: line_index + 1,
                     column,
-                    text: line.to_string(),
+                    text,
+                    line_chars,
                 });
             }
         }
     }
 
     (matches, truncated)
+}
+
+/// A matched line as it is returned: whole when short, otherwise the part
+/// around the match, so one long line (minified code, a JSON log record)
+/// cannot fill a reader's context. `at` is the match's character offset.
+fn match_excerpt(line: &str, at: usize) -> (String, Option<usize>) {
+    let total = line.chars().count();
+    if total <= MATCH_TEXT_CHARS {
+        return (line.to_owned(), None);
+    }
+    let start = at
+        .saturating_sub(MATCH_CONTEXT_CHARS)
+        .min(total - MATCH_TEXT_CHARS);
+    (
+        line.chars().skip(start).take(MATCH_TEXT_CHARS).collect(),
+        Some(total),
+    )
 }
 
 fn query_indexed_symbol_table(
@@ -1369,6 +1397,7 @@ fn query_indexed_symbol_table(
             line: start_line,
             column: 1,
             text: format!("[Symbol Definition ({} {})] {}", lang, kind, signature),
+            line_chars: None,
         });
         seen_symbols.insert((file_path, start_line));
     }
@@ -1619,6 +1648,76 @@ mod tests {
 
         assert_eq!(result.matches.len(), 0);
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// The 2026-11-06 desktop run: on Windows the text scan returned
+    /// `src\a.rs` while list_dir and the symbol index give `src/a.rs`, so a
+    /// program keying one by the other found nothing.
+    #[test]
+    fn search_paths_use_forward_slashes_like_list_dir() {
+        let root = temp_workspace("search_slashes");
+        fs::create_dir_all(root.join("nested").join("deeper")).unwrap();
+        fs::write(root.join("nested").join("deeper").join("file.txt"), "needle\n").unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+
+        let result = workspace
+            .search_text(SearchTextRequest {
+                workspace_root: None,
+                query: "needle".to_string(),
+                path: ".".to_string(),
+                paths: Vec::new(),
+                regex: false,
+                case_sensitive: false,
+                respect_gitignore: false,
+                max_matches: 10,
+            })
+            .unwrap();
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].path, "nested/deeper/file.txt");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The same run: 60 matches in old JSONL logs came back as 400,000
+    /// characters, because each match carried its whole line.
+    #[test]
+    fn search_returns_an_excerpt_of_a_long_line() {
+        let root = temp_workspace("search_long_line");
+        let long = format!("{}needle{}", "x".repeat(5_000), "y".repeat(5_000));
+        fs::write(root.join("log.jsonl"), format!("{long}\nshort needle\n")).unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+
+        let result = workspace
+            .search_text(SearchTextRequest {
+                workspace_root: None,
+                query: "needle".to_string(),
+                path: ".".to_string(),
+                paths: Vec::new(),
+                regex: false,
+                case_sensitive: false,
+                respect_gitignore: false,
+                max_matches: 10,
+            })
+            .unwrap();
+
+        assert_eq!(result.matches.len(), 2);
+        let cut = &result.matches[0];
+        assert_eq!((cut.line, cut.column, cut.line_chars), (1, 5_001, Some(10_006)));
+        assert_eq!(cut.text.chars().count(), MATCH_TEXT_CHARS);
+        assert!(cut.text.contains("needle"), "{}", cut.text);
+        let short = &result.matches[1];
+        assert_eq!((short.text.as_str(), short.line_chars), ("short needle", None));
+        assert!(serde_json::to_value(short).unwrap().get("line_chars").is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_long_line_excerpt_keeps_a_match_at_its_end() {
+        let line = format!("{}needle", "中".repeat(1_000));
+        let (text, total) = match_excerpt(&line, 1_000);
+        assert_eq!(total, Some(1_006));
+        assert_eq!(text.chars().count(), MATCH_TEXT_CHARS);
+        assert!(text.ends_with("needle"), "{text}");
     }
 
     #[test]

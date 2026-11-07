@@ -5,6 +5,20 @@ use super::heap::{Heap, HeapId, HeapNode, VmValue};
 use anyhow::Result;
 use std::collections::BTreeSet;
 
+pub(super) fn from_utf16(units: Vec<u16>) -> VmValue {
+    match String::from_utf16(&units) {
+        Ok(text) => VmValue::String(text),
+        Err(_) => VmValue::Utf16(units),
+    }
+}
+
+pub(super) fn string_units(heap: &Heap, value: &VmValue) -> Result<Vec<u16>> {
+    match value {
+        VmValue::Utf16(units) => Ok(units.clone()),
+        value => Ok(to_string(heap, value)?.encode_utf16().collect()),
+    }
+}
+
 /// WhiteSpace and LineTerminator code points, as trimmed by String.prototype.trim
 /// and skipped by StringToNumber.
 pub(super) fn is_js_whitespace(c: char) -> bool {
@@ -163,12 +177,15 @@ fn error_string(heap: &Heap, id: HeapId) -> Result<Option<String>> {
 }
 
 fn to_string_inner(heap: &Heap, value: &VmValue, active: &mut BTreeSet<HeapId>) -> Result<String> {
+    if let VmValue::Reference(id)=value && let Some(value)=heap.boxed_value(*id){return to_string_inner(heap,value,active);}
     Ok(match value {
+        VmValue::Symbol(_) => anyhow::bail!("TypeError: Cannot convert a Symbol value to a string"),
         VmValue::Undefined => "undefined".into(),
         VmValue::Null => "null".into(),
         VmValue::Boolean(value) => value.to_string(),
         VmValue::Number(value) => number_to_string(value.get()),
         VmValue::String(value) => value.clone(),
+        VmValue::Utf16(_) => anyhow::bail!("TypeError: unpaired UTF-16 surrogate cannot be converted to a Unicode scalar string"),
         VmValue::Promise(_) => "[object Promise]".into(),
         VmValue::Reference(id) => match heap.get(*id)? {
             HeapNode::Array(items) => {
@@ -191,7 +208,9 @@ fn to_string_inner(heap: &Heap, value: &VmValue, active: &mut BTreeSet<HeapId>) 
                 parts.join(",")
             }
             HeapNode::Object(_) => {
-                if let Some(text) = error_string(heap, *id)? {
+                if let Some(ms) = heap.date_value(*id) {
+                    super::js_date::display(ms)
+                } else if let Some(text) = error_string(heap, *id)? {
                     text
                 } else if heap.regex_parts(*id).is_some() {
                     let (pattern, flags) = heap.regex_parts(*id).unwrap();
@@ -200,10 +219,13 @@ fn to_string_inner(heap: &Heap, value: &VmValue, active: &mut BTreeSet<HeapId>) 
                     "[object Object]".into()
                 }
             }
+            HeapNode::Collection(c)=>format!("[object {}]",c.kind.name()),
+            HeapNode::Iterator(it)=>format!("[object {}]",it.tag),
             HeapNode::Closure { function, .. } => {
                 format!("function {}() {{ [flow code] }}", function_name(function))
             }
             HeapNode::Native(name) => format!("function {}() {{ [native code] }}", function_name(name)),
+            HeapNode::BoundFunction {..} => "function () { [native code] }".into(),
             HeapNode::PromiseResolver { .. } => "function () { [native code] }".into(),
             HeapNode::PromiseCapability { .. } => "[object Object]".into(),
             HeapNode::Promise { .. } => "[object Promise]".into(),
@@ -215,6 +237,7 @@ fn to_string_inner(heap: &Heap, value: &VmValue, active: &mut BTreeSet<HeapId>) 
 /// The `name` of a function value: "outer/inner@3:5" is "inner", "Math.max"
 /// is "max", "tool:read_file" is "read_file"; anonymous functions have "".
 pub(super) fn function_name(id: &str) -> &str {
+    if id=="Function.prototype" {return "";}
     let name = id.rsplit('/').next().unwrap_or(id);
     let name = name.split('@').next().unwrap_or(name);
     let name = name.rsplit(['.', ':']).next().unwrap_or(name);
@@ -229,15 +252,28 @@ pub(super) fn to_string(heap: &Heap, value: &VmValue) -> Result<String> {
 /// ToPrimitive: objects and arrays become their string form, as for plain
 /// objects whose valueOf returns the object itself.
 pub(super) fn to_primitive(heap: &Heap, value: &VmValue) -> Result<VmValue> {
+    if let VmValue::Reference(id)=value && let Some(value)=heap.boxed_value(*id){return Ok(value.clone());}
     Ok(match value {
         VmValue::Reference(_) | VmValue::Promise(_) => VmValue::String(to_string(heap, value)?),
         other => other.clone(),
     })
 }
 
+/// Date's default primitive hint is string; arithmetic and relational
+/// operations instead request its internal numeric time value.
+pub(super) fn to_numeric_primitive(heap: &Heap, value: &VmValue) -> Result<VmValue> {
+    if let VmValue::Reference(id) = value {
+        if let Some(ms) = heap.date_value(*id) {
+            return Ok(VmValue::Number(super::heap::JsNumber::new(ms)));
+        }
+    }
+    to_primitive(heap, value)
+}
+
 /// ToNumber, including ToPrimitive for objects and arrays.
 pub(super) fn to_number(heap: &Heap, value: &VmValue) -> Result<f64> {
     Ok(match value {
+        VmValue::Symbol(_) => anyhow::bail!("TypeError: Cannot convert a Symbol value to a number"),
         VmValue::Undefined => f64::NAN,
         VmValue::Null => 0.0,
         VmValue::Boolean(value) => {
@@ -249,9 +285,11 @@ pub(super) fn to_number(heap: &Heap, value: &VmValue) -> Result<f64> {
         }
         VmValue::Number(value) => value.get(),
         VmValue::String(value) => string_to_number(value),
-        VmValue::Reference(_) | VmValue::Promise(_) => {
-            string_to_number(&to_string(heap, value)?)
-        }
+        VmValue::Utf16(_) => f64::NAN,
+        VmValue::Reference(_) | VmValue::Promise(_) => match to_numeric_primitive(heap, value)? {
+            VmValue::Number(n) => n.get(),
+            value => string_to_number(&to_string(heap, &value)?),
+        },
     })
 }
 

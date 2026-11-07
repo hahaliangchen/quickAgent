@@ -1,0 +1,790 @@
+{
+  "stage": "4",
+  "scope": "Symbol identity/keys and synchronous iterable protocols, durable iteration and cleanup; not full ES2015",
+  "source_hashes": {
+    "src/agent_program.rs": "c77a9be43b126f57645f3a6dbeabbb8dc6405ead904e216c8ccc7a76ab57211e",
+    "src/agent_program/compiler.rs": "64a392a7b2b9c0deebe47b7b8445a0317e9797f28712538f74d3c34e11c2084f",
+    "src/agent_program/compiler_properties.rs": "bca2b1072707e3a6e01403593735d1d1837cd8107f8c45097c42badff715afe1",
+    "src/agent_program/compiler_iteration.rs": "80f44bc8bee41734579d4e26e0a641e9d129b0df9e56b33d2b748472ab57110c",
+    "src/agent_program/heap.rs": "917091894dc06ac34811fead64ac87d9c1e881d85f8350051200174789ffc303",
+    "src/agent_program/js_symbols.rs": "47265b49d4340469c374c5eff9627388c91052c75733df5c5de3346450dece1c",
+    "src/agent_program/js_descriptors.rs": "39730015aa60d5876f0b6834dce9413dc562588699eebb18ac104b53cb88f4e0",
+    "src/agent_program/js_prototypes.rs": "694b7bccb5dff5c5f3b87475a5f901cb51d061e1f23bb1d6e04fe13f8862741d",
+    "src/agent_program/js_functions.rs": "c25e054b013f58f9278455e958f809ffedece88a5e631f255408ad6d126fd6c4",
+    "src/agent_program/js_methods.rs": "7e4c7f222eb3a3d2fe0dc6dc9fb4bb3ff3d08125810efbe3b72d484a6d0aed77",
+    "src/agent_program/js_collections.rs": "9eda2dcb0cb3a17f90c5c8e5cca58dc4431ab4f0b056851a3b9ec27bdbbc3370",
+    "src/agent_program/js_value.rs": "b5ce285ce535d6540899d64f48b57a717cb8ad62468cdc5f2bf0bc9657c434b7",
+    "src/agent_program/vm_eval.rs": "2d0f5c9a3863027fd574d7a84f279191372ff79eeff43294fec7575333c30ee5",
+    "src/agent_program/runtime.rs": "879ec6fbfe7c5f320d53aa81fd308b320c45ec63a64cfc3b4d1b01bd34fbb9de",
+    "src/agent_program/prelude.js": "b51a9f39b522adf4723271473ff70903ec3d1f4dc920917a9edc58c2d931fc22",
+    "src/agent_program/tests.rs": "6c0ac58b0ff19e117937e1630a92a3e5f0499d5dd6db840b828768fb891662db",
+    "src/agent_program/tests_stage4.rs": "85a7847f173489f58fdf1e27bcea3e737471ccc9b02bae6a6fec6de73d7c2257",
+    "src/agent_program/conformance.rs": "c791b73209e4e954739c625bd8014c47933ce4a3708e6c18db4bec6cbbbb2eb6",
+    "prompts/flow_capabilities.md": "d0c8ef94d229a5e182e9dc5f53fef979885109b17b9f4de62e0d48d67a4b1554",
+    "prompts/flow_builtin_contracts.d.ts": "a9e245e5777aa6f110f63c29ebe2273c4014b3c37533155a36b6aeea3bbc1af2",
+    "docs/agent-program.md": "daac8857e684fe2c4e5e1112893fc2a03ba4755366373f64b14cad2b8db3f415"
+  },
+  "new_tests": [
+    "vm_stage4_array_from_mapper_errors_close_custom_iterator",
+    "vm_stage4_array_from_null_iterator_falls_back_and_for_of_rejects_async_only",
+    "vm_stage4_array_iterators_are_live_and_snapshot_the_cursor",
+    "vm_stage4_await_in_loop_body_preserves_cached_iterator_and_closes_once",
+    "vm_stage4_builtin_iterator_protocol_and_override",
+    "vm_stage4_collection_adder_failures_close_iterator",
+    "vm_stage4_collections_and_from_entries_use_custom_iterators",
+    "vm_stage4_continue_does_not_close_and_labelled_exit_does",
+    "vm_stage4_custom_iterable_for_of_spread_and_array_from",
+    "vm_stage4_destructuring_closes_partial_iteration_and_rest_exhausts",
+    "vm_stage4_destructuring_holes_do_not_read_value_getters",
+    "vm_stage4_for_in_and_object_rest_exclude_symbol_keys_correctly",
+    "vm_stage4_for_of_bindings_keep_tdz_and_fresh_closures",
+    "vm_stage4_internal_key_encoding_cannot_collide_with_user_strings",
+    "vm_stage4_iterating_closure_and_symbol_only_references_survive_gc",
+    "vm_stage4_iteration_break_return_and_throw_close_once",
+    "vm_stage4_iterator_close_preserves_throw_but_validates_normal_close",
+    "vm_stage4_iterator_next_and_close_survive_separate_host_suspensions",
+    "vm_stage4_iterator_next_is_cached_and_receiver_is_preserved",
+    "vm_stage4_iterator_protocol_validation_and_step_errors",
+    "vm_stage4_iterator_return_getter_error_does_not_replace_body_error",
+    "vm_stage4_iterator_value_error_does_not_close_and_return_result_is_checked",
+    "vm_stage4_promise_combinators_use_iterator_protocol",
+    "vm_stage4_removed_symbol_conversion_hook_uses_ordinary_methods",
+    "vm_stage4_string_iterator_borrowing_and_tag_deletion_follow_protocol",
+    "vm_stage4_symbol_descriptors_inheritance_copy_and_freeze",
+    "vm_stage4_symbol_identity_description_and_registry",
+    "vm_stage4_symbol_is_valid_as_new_target_but_construction_throws",
+    "vm_stage4_symbol_keys_are_distinct_and_enumerate_in_order",
+    "vm_stage4_symbol_metadata_and_primitive_wrapper",
+    "vm_stage4_symbol_returned_by_conversion_is_not_coerced_to_string",
+    "vm_stage4_symbol_state_and_keys_survive_gc_snapshot",
+    "vm_stage4_symbol_to_primitive_property_key",
+    "vm_stage4_symbol_to_string_tag_and_has_instance_hooks",
+    "vm_stage4_symbol_values_json_coercion_and_boxing",
+    "vm_stage4_symbols_work_as_collection_keys",
+    "vm_stage4_to_primitive_operator_hints_and_symbol_descriptions"
+  ],
+  "vm_suite": "test result: ok. 355 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 7.93s",
+  "full_suite": {
+    "baseline": "runs/codex-vm-stage3c-failure-comparison-20261107.json",
+    "current_log": "runs/codex-vm-stage4-full-20261107.txt",
+    "complete": true,
+    "summary": "test result: FAILED. 681 passed; 29 failed; 23 ignored; 0 measured; 0 filtered out; finished in 72.71s",
+    "baseline_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "current_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "new_failures": [],
+    "resolved_failures": []
+  },
+  "test262_comparisons": {
+    "default": {
+      "baseline": "tests/vm/test262-stage3c.json",
+      "current": "tests/vm/test262-stage4.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "17ef1cfab7e61db1b9c1a4a8c9fda1d4d4108b0b3fb116fc3046678adb0a3735",
+      "baseline_counts": {
+        "compile_rejected": 526,
+        "pass": 770,
+        "run_failed": 144,
+        "skipped": 316
+      },
+      "current_counts": {
+        "compile_rejected": 403,
+        "pass": 893,
+        "run_failed": 144,
+        "skipped": 316
+      },
+      "transitions": {
+        "compile_rejected -> pass": 111,
+        "compile_rejected -> run_failed": 12,
+        "run_failed -> pass": 12
+      }
+    },
+    "-functions": {
+      "baseline": "tests/vm/test262-stage3c-functions.json",
+      "current": "tests/vm/test262-stage4-functions.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "7c564b84eb966c6a1ed5344ad4315b33b3fa94573e56a84609a4abe74d812883",
+      "baseline_counts": {
+        "compile_rejected": 320,
+        "pass": 283,
+        "run_failed": 18,
+        "skipped": 17
+      },
+      "current_counts": {
+        "compile_rejected": 292,
+        "pass": 311,
+        "run_failed": 18,
+        "skipped": 17
+      },
+      "transitions": {
+        "compile_rejected -> pass": 28
+      }
+    },
+    "-prototypes": {
+      "baseline": "tests/vm/test262-stage3c-prototypes.json",
+      "current": "tests/vm/test262-stage4-prototypes.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "20986848b1d3cfaa5fd8fdbc989d3ac44b6fbddc0056883bc1faa565046b83b8",
+      "baseline_counts": {
+        "compile_rejected": 636,
+        "pass": 653,
+        "run_failed": 30,
+        "skipped": 334
+      },
+      "current_counts": {
+        "compile_rejected": 601,
+        "pass": 688,
+        "run_failed": 30,
+        "skipped": 334
+      },
+      "transitions": {
+        "compile_rejected -> pass": 35
+      }
+    },
+    "-descriptors": {
+      "baseline": "tests/vm/test262-stage3c-descriptors.json",
+      "current": "tests/vm/test262-stage4-descriptors.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "a3067f84145e9cec23c04418b7157c2d60f5cc6c3c7396d4365e12dd712070c1",
+      "baseline_counts": {
+        "compile_rejected": 1443,
+        "pass": 1864,
+        "run_failed": 126,
+        "skipped": 371
+      },
+      "current_counts": {
+        "compile_rejected": 1387,
+        "pass": 1915,
+        "run_failed": 131,
+        "skipped": 371
+      },
+      "transitions": {
+        "compile_rejected -> pass": 51,
+        "compile_rejected -> run_failed": 5
+      }
+    }
+  },
+  "test262_iteration": {
+    "selection": "tests/vm/test262-selection-stage4-iteration.json",
+    "report": "tests/vm/test262-stage4-iteration.json",
+    "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+    "selection_hash": "4510e253ce5df2b287db5c7fb6ddd23da242e8dd826b17168ba5ea5e6378ba91",
+    "counts": {
+      "compile_rejected": 517,
+      "pass": 348,
+      "run_failed": 13,
+      "skipped": 79
+    },
+    "groups": {
+      "built-ins/Symbol": {
+        "skipped": 34,
+        "compile_rejected": 33,
+        "pass": 30,
+        "run_failed": 1
+      },
+      "built-ins/ArrayIteratorPrototype": {
+        "compile_rejected": 12,
+        "pass": 5,
+        "skipped": 10
+      },
+      "built-ins/MapIteratorPrototype": {
+        "compile_rejected": 3,
+        "pass": 8
+      },
+      "built-ins/SetIteratorPrototype": {
+        "compile_rejected": 3,
+        "pass": 8
+      },
+      "built-ins/StringIteratorPrototype": {
+        "compile_rejected": 3,
+        "pass": 4
+      },
+      "language/statements/for-of": {
+        "compile_rejected": 438,
+        "pass": 266,
+        "skipped": 35,
+        "run_failed": 12
+      },
+      "language/expressions/array": {
+        "compile_rejected": 25,
+        "pass": 27
+      }
+    },
+    "first_measurement_no_prior_baseline": true,
+    "runtime_failure_ids": [
+      "test/built-ins/Symbol/species/builtin-getter-name.js",
+      "test/language/statements/for-of/dstr/const-ary-ptrn-elem-id-init-fn-name-arrow.js",
+      "test/language/statements/for-of/dstr/const-ary-ptrn-elem-id-init-fn-name-fn.js",
+      "test/language/statements/for-of/dstr/const-obj-ptrn-id-init-fn-name-arrow.js",
+      "test/language/statements/for-of/dstr/const-obj-ptrn-id-init-fn-name-fn.js",
+      "test/language/statements/for-of/dstr/let-ary-ptrn-elem-id-init-fn-name-arrow.js",
+      "test/language/statements/for-of/dstr/let-ary-ptrn-elem-id-init-fn-name-fn.js",
+      "test/language/statements/for-of/dstr/let-obj-ptrn-id-init-fn-name-arrow.js",
+      "test/language/statements/for-of/dstr/let-obj-ptrn-id-init-fn-name-fn.js",
+      "test/language/statements/for-of/dstr/var-ary-ptrn-elem-id-init-fn-name-arrow.js",
+      "test/language/statements/for-of/dstr/var-ary-ptrn-elem-id-init-fn-name-fn.js",
+      "test/language/statements/for-of/dstr/var-obj-ptrn-id-init-fn-name-arrow.js",
+      "test/language/statements/for-of/dstr/var-obj-ptrn-id-init-fn-name-fn.js"
+    ]
+  },
+  "extra_selections_overlap_and_must_not_be_added": true,
+  "corpus": {
+    "baseline": "tests/vm/corpus-stage3c.json",
+    "current": "tests/vm/corpus-stage4.json",
+    "comparison_passed": true,
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "revision": "1e73f5c9433e96739b9e41aa5711c74f9a367509c25cd4f68c605c4b7c430cd1",
+    "selection_hash": "6dad971b7155855075e7dd550de82f5c5033c7e1806f724a889d8c3fc882a38b",
+    "baseline_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "current_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "transitions": {}
+  },
+  "frozen_corpus_sha256": "1e73f5c9433e96739b9e41aa5711c74f9a367509c25cd4f68c605c4b7c430cd1",
+  "node_oracle": {
+    "node": "v22.5.1",
+    "passed": 31,
+    "total": 32,
+    "mismatches": [
+      {
+        "name": "vm_stage4_for_in_and_object_rest_exclude_symbol_keys_correctly",
+        "result": [
+          [
+            "a"
+          ],
+          7,
+          2,
+          0,
+          1
+        ],
+        "expected": [
+          [
+            "a"
+          ],
+          7,
+          1,
+          0,
+          1
+        ]
+      }
+    ],
+    "skipped": [
+      "vm_stage4_await_in_loop_body_preserves_cached_iterator_and_closes_once",
+      "vm_stage4_array_iterators_are_live_and_snapshot_the_cursor",
+      "vm_stage4_symbol_state_and_keys_survive_gc_snapshot",
+      "vm_stage4_iterator_next_and_close_survive_separate_host_suspensions",
+      "vm_stage4_iterating_closure_and_symbol_only_references_survive_gc"
+    ],
+    "results": [
+      {
+        "name": "vm_stage4_string_iterator_borrowing_and_tag_deletion_follow_protocol",
+        "result": [
+          [
+            "1",
+            "2",
+            "3"
+          ],
+          true,
+          "[object Object]"
+        ]
+      },
+      {
+        "name": "vm_stage4_symbol_is_valid_as_new_target_but_construction_throws",
+        "result": [
+          true,
+          7,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage4_removed_symbol_conversion_hook_uses_ordinary_methods",
+        "result": [
+          true,
+          123,
+          "Symbol()",
+          7,
+          123,
+          123
+        ]
+      },
+      {
+        "name": "vm_stage4_to_primitive_operator_hints_and_symbol_descriptions",
+        "result": [
+          8,
+          7,
+          true,
+          "text",
+          "text",
+          "text",
+          [
+            "default",
+            "number",
+            "number",
+            "string",
+            "string",
+            "string"
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage4_symbol_returned_by_conversion_is_not_coerced_to_string",
+        "result": [
+          4,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage4_for_in_and_object_rest_exclude_symbol_keys_correctly",
+        "result": [
+          [
+            "a"
+          ],
+          7,
+          2,
+          0,
+          1
+        ]
+      },
+      {
+        "name": "vm_stage4_symbol_metadata_and_primitive_wrapper",
+        "result": [
+          0,
+          1,
+          1,
+          false,
+          false,
+          false,
+          "[Symbol.hasInstance]",
+          1,
+          "[Symbol.toPrimitive]"
+        ]
+      },
+      {
+        "name": "vm_stage4_destructuring_holes_do_not_read_value_getters",
+        "result": [
+          7,
+          1,
+          1
+        ]
+      },
+      {
+        "name": "vm_stage4_for_of_bindings_keep_tdz_and_fresh_closures",
+        "result": [
+          true,
+          [
+            1,
+            2,
+            3
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage4_iterator_value_error_does_not_close_and_return_result_is_checked",
+        "result": [
+          2,
+          1
+        ]
+      },
+      {
+        "name": "vm_stage4_iterator_return_getter_error_does_not_replace_body_error",
+        "result": [
+          "TypeError",
+          1
+        ]
+      },
+      {
+        "name": "vm_stage4_array_from_null_iterator_falls_back_and_for_of_rejects_async_only",
+        "result": [
+          [
+            1,
+            2
+          ],
+          2
+        ]
+      },
+      {
+        "name": "vm_stage4_symbol_identity_description_and_registry",
+        "result": [
+          "symbol",
+          false,
+          "x",
+          true,
+          "",
+          true,
+          "shared",
+          true,
+          "Symbol(x)",
+          "symbol",
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage4_symbol_keys_are_distinct_and_enumerate_in_order",
+        "result": [
+          2,
+          3,
+          [
+            "x"
+          ],
+          [
+            "x"
+          ],
+          [
+            "a",
+            "b"
+          ],
+          [
+            "x",
+            "x",
+            "x"
+          ],
+          "{\"x\":1}",
+          true
+        ]
+      },
+      {
+        "name": "vm_stage4_internal_key_encoding_cannot_collide_with_user_strings",
+        "result": [
+          7,
+          [
+            0,
+            1,
+            2,
+            3
+          ],
+          [
+            "\u0000symbol:1",
+            "\u0000symbol:0",
+            "\u0000string:x",
+            "\u0000"
+          ],
+          true,
+          0,
+          11
+        ]
+      },
+      {
+        "name": "vm_stage4_symbol_descriptors_inheritance_copy_and_freeze",
+        "result": [
+          7,
+          7,
+          "function",
+          false,
+          false,
+          2,
+          false
+        ]
+      },
+      {
+        "name": "vm_stage4_symbol_values_json_coercion_and_boxing",
+        "result": [
+          5,
+          true,
+          "Symbol(s)",
+          "object",
+          true,
+          "{\"n\":1}",
+          "[null]",
+          true,
+          "[object Symbol]"
+        ]
+      },
+      {
+        "name": "vm_stage4_symbols_work_as_collection_keys",
+        "result": [
+          1,
+          2,
+          2,
+          2,
+          [
+            1,
+            2
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage4_custom_iterable_for_of_spread_and_array_from",
+        "result": [
+          [
+            1,
+            2,
+            3
+          ],
+          [
+            1,
+            2,
+            3
+          ],
+          [
+            2,
+            4,
+            6
+          ],
+          6
+        ]
+      },
+      {
+        "name": "vm_stage4_iterator_next_is_cached_and_receiver_is_preserved",
+        "result": [
+          [
+            1,
+            2
+          ],
+          1
+        ]
+      },
+      {
+        "name": "vm_stage4_builtin_iterator_protocol_and_override",
+        "result": [
+          true,
+          true,
+          true,
+          true,
+          [
+            9
+          ],
+          [
+            9
+          ],
+          [
+            "😀",
+            "x"
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage4_iteration_break_return_and_throw_close_once",
+        "result": [
+          1,
+          [
+            "close",
+            "close",
+            "close",
+            true
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage4_continue_does_not_close_and_labelled_exit_does",
+        "result": [
+          "inner",
+          "inner",
+          "outer"
+        ]
+      },
+      {
+        "name": "vm_stage4_iterator_close_preserves_throw_but_validates_normal_close",
+        "result": [
+          "TypeError",
+          "RangeError"
+        ]
+      },
+      {
+        "name": "vm_stage4_iterator_protocol_validation_and_step_errors",
+        "result": [
+          5,
+          0
+        ]
+      },
+      {
+        "name": "vm_stage4_destructuring_closes_partial_iteration_and_rest_exhausts",
+        "result": [
+          1,
+          2,
+          [
+            3
+          ],
+          1
+        ]
+      },
+      {
+        "name": "vm_stage4_array_from_mapper_errors_close_custom_iterator",
+        "result": [
+          true,
+          1,
+          [
+            7
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage4_collections_and_from_entries_use_custom_iterators",
+        "result": [
+          7,
+          {
+            "x": 7
+          },
+          [
+            1,
+            2
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage4_collection_adder_failures_close_iterator",
+        "result": [
+          true,
+          1
+        ]
+      },
+      {
+        "name": "vm_stage4_promise_combinators_use_iterator_protocol",
+        "result": [
+          [
+            1,
+            2
+          ],
+          [
+            {
+              "status": "fulfilled",
+              "value": 1
+            },
+            {
+              "status": "fulfilled",
+              "value": 2
+            }
+          ],
+          1,
+          1
+        ]
+      },
+      {
+        "name": "vm_stage4_symbol_to_string_tag_and_has_instance_hooks",
+        "result": [
+          "[object Custom]",
+          true,
+          false
+        ]
+      },
+      {
+        "name": "vm_stage4_symbol_to_primitive_property_key",
+        "result": [
+          7,
+          [
+            "string"
+          ]
+        ]
+      }
+    ],
+    "exit_code": 1,
+    "comparison_passed": false,
+    "normative_variance": {
+      "spec": "https://tc39.es/ecma262/2025/multipage/abstract-operations.html#sec-copydataproperties",
+      "interpretation": "CopyDataProperties skips excluded keys before Get; the explicit binding reads the getter once. Node 22.5.1 reads it twice in this case; VM retains the normative single read. Original mismatch and nonzero oracle exit are preserved.",
+      "vm_expected_value_not_changed_to_match_node": true
+    }
+  },
+  "production_check": "passed",
+  "builtin_contract_syntax_diagnostics": 0,
+  "real_models_called": false,
+  "abnormal_process_exits": [
+    {
+      "log": "runs/codex-vm-stage4-rustc-crash.txt",
+      "process": "rustc",
+      "code": "STATUS_ACCESS_VIOLATION",
+      "retry_completed": true,
+      "root_cause_confirmed": false
+    },
+    {
+      "log": "runs/codex-vm-stage4-vm-crash.txt",
+      "process": "VM test binary",
+      "code": "STATUS_ACCESS_VIOLATION",
+      "same_binary_retry_completed": true,
+      "root_cause_confirmed": false
+    }
+  ],
+  "limitations": [
+    "Only Symbol.iterator/asyncIterator/hasInstance/toPrimitive/toStringTag are provided; async iteration and generators remain later stages.",
+    "Symbol.species/isConcatSpreadable and regex symbol hooks, inferred anonymous function names and further builtin coercions remain gaps.",
+    "Symbol metadata and registry live within a Runtime and are serialized; tool/AI JSON boundaries do not carry Symbol identity.",
+    "Prelude hash changed; existing guards reject old-prelude Runtime snapshots while retaining source/output archives."
+  ]
+}

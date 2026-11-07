@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::Path;
+mod flow_folder;
 mod store;
 pub use store::{EventQuery, load_events, tool_call_node};
 
@@ -113,33 +114,95 @@ pub fn tool() -> Value {
         "limit":{"type":"integer","minimum":1,"maximum":12},
         "char_offset":{"type":"integer","minimum":0},"max_chars":{"type":"integer","minimum":256,"maximum":12000},
         "include_event":{"type":"boolean","description":"Return the original event envelope instead of just the sender's message/return or tool output; useful for inspecting provenance."},
-        "programs":{"type":"boolean","description":"Return the programs this conversation ran instead of messages: each turn's main program and the implementations written for its virtual functions, with their source. Filter with turn; read them only when earlier code matters to the current request."},
+        "programs":{"type":"boolean","description":"Inspect saved flow code when earlier work matters. Start with directory:'.' for the conversation's flow folder. Use turn to focus on an earlier turn."},
+        "directory":{"type":"string","enum":[".","modules"],"description":"With programs:true, list this directory without source or output. Use '.' for main flows and 'modules' for reusable modules. With program, open the returned path instead."},
+        "directory_offset":{"type":"integer","minimum":0,"description":"Use next_directory_offset to continue a flow directory listing."},
+        "program":{"type":"string","maxLength":200,"description":"With programs:true and directory:'.', open a flow path from the listing, such as turn-1-2.js or modules/review-<contract>.js. Source is paged by char_offset/max_chars. Legacy reads without directory also accept a main filename or module function."},
+        "version":{"type":"integer","minimum":1,"description":"Open this saved module version. Default is the latest visible version, as of turn if given."},
+        "start_line":{"type":"integer","minimum":1,"description":"First source line to read in a flow file (inclusive)."},
+        "end_line":{"type":"integer","minimum":1,"description":"Last source line to read in a flow file (inclusive)."},
+        "output":{"type":"boolean","description":"With programs:true and program, return that main program's full printed output and returned value instead of its source, paged by char_offset/max_chars."},
         "include_context":{"type":"boolean","description":"Include recorded model input views for audit, filterable by the receiving role. Default false. An exact event_seq also resolves a context reference. These views cite the shared history; they are not new actions or independent facts."}
     }}}})
 }
 
-/// The programs this conversation ran: each turn's main program and the
-/// implementations its AI wrote for virtual functions, in the order they ran.
+/// The programs this conversation ran, read in layers like peeling an onion
+/// (design guide §4): a list first, one line each; then one program's code;
+/// then a main program's whole output.
 fn read_programs(conn: &rusqlite::Connection, task: &str, args: &Value) -> Result<Value> {
     let task = args["task_id"].as_str().unwrap_or(task);
     let turn = args["turn"].as_i64();
-    let limit = args["limit"].as_u64().unwrap_or(12).clamp(1, 12) as usize;
-    let rows = conn
-        .prepare("SELECT seq,data FROM agent_task_events WHERE task_id=?1 AND kind='program/start'
-            AND json_extract(data,'$.source') IS NOT NULL AND (?2 IS NULL OR json_extract(data,'$.turn')=?2) ORDER BY seq")?
-        .query_map(rusqlite::params![task, turn], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let more = rows.len() > limit;
-    let programs = rows
+    let events = |kind: &str| -> Result<Vec<(i64, Value)>> {
+        Ok(conn
+            .prepare("SELECT seq,data FROM agent_task_events WHERE task_id=?1 AND kind=?2 ORDER BY seq")?
+            .query_map(rusqlite::params![task, kind], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|(seq, raw)| (seq, serde_json::from_str::<Value>(&raw).unwrap_or_default()))
+            .collect())
+    };
+    let starts = events("program/start")?
         .into_iter()
-        .take(limit)
-        .map(|(seq, raw)| {
-            let data: Value = serde_json::from_str(&raw).unwrap_or_default();
-            json!({"event_seq":seq,"turn":data["turn"],"function":data["function"],"frame":data["task_node_id"],"source":data["source"]})
+        .filter(|(_, data)| data["source"].is_string() && turn.is_none_or(|turn| data["turn"].as_i64() == Some(turn)))
+        .collect::<Vec<_>>();
+    let ends = events("program/end")?;
+    // A main program is named by its file, module code by its function.
+    let name = |data: &Value| {
+        data["path"].as_str()
+            .map(|path| path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned())
+            .or_else(|| data["function"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    };
+    let end_of = |start: i64, data: &Value| {
+        let file = name(data);
+        ends.iter().find(|(seq, end)| *seq > start && end["program"].as_str() == Some(file.as_str())).map(|(_, end)| end)
+    };
+    if let Some(wanted) = args["program"].as_str() {
+        let (seq, data) = starts
+            .iter()
+            .rev()
+            .find(|(_, data)| name(data) == wanted || data["path"].as_str() == Some(wanted))
+            .with_context(|| format!("no program named {wanted} here; list them with programs:true"))?;
+        if args["output"] != true {
+            return Ok(json!({"program":name(data),"turn":data["turn"],"function":data["function"],"event_seq":seq,"source":data["source"],
+                "note":"A program records how work was done; check current files for their present state."}));
+        }
+        let end = end_of(*seq, data)
+            .context("this program left no output record: it is module code, it is still running, or it ran before outputs were kept")?;
+        let text = program_output_text(end);
+        let offset = args["char_offset"].as_u64().unwrap_or(0) as usize;
+        let max = args["max_chars"].as_u64().unwrap_or(12_000).clamp(256, 12_000) as usize;
+        let total = text.chars().count();
+        return Ok(json!({"program":name(data),"turn":data["turn"],"ended":end["ended"],
+            "output":text.chars().skip(offset).take(max).collect::<String>(),"total_chars":total,
+            "next_char_offset":(offset + max < total).then_some(offset + max)}));
+    }
+    const LISTED: usize = 50;
+    let more = starts.len() > LISTED;
+    let programs = starts
+        .iter()
+        .take(LISTED)
+        .map(|(seq, data)| {
+            let end = end_of(*seq, data);
+            json!({"program":name(data),"turn":data["turn"],"function":data["function"],
+                "ended":end.map(|end| end["ended"].clone()).unwrap_or(Value::Null),
+                "code_chars":data["source"].as_str().map(|source| source.chars().count()),
+                "output_lines":end.and_then(|end| end["console"].as_array().map(Vec::len))})
         })
         .collect::<Vec<_>>();
     Ok(json!({"programs":programs,"more":more,
-        "note":"function is null for a turn's main program, else the virtual function this code implements. A program records how work was done; check current files for their present state."}))
+        "note":"function is null for a main program, named by its file; otherwise the module or virtual function this code implements. Read one with program for its code, or add output:true for a main program's full output."}))
+}
+
+fn program_output_text(end: &Value) -> String {
+    let mut text = end["console"]
+        .as_array()
+        .map(|lines| lines.iter().map(|line| line.as_str().map(str::to_owned).unwrap_or_else(|| line.to_string())).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default();
+    if let Some(result) = end["detail"].get("result").filter(|value| !value.is_null()) {
+        text.push_str(&format!("\n返回：{}", result.as_str().map(str::to_owned).unwrap_or_else(|| result.to_string())));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -230,6 +293,13 @@ fn read_saved(
     boundary: Option<i64>,
 ) -> Result<Value> {
     if args["programs"] == true {
+        if args["directory"].is_string()
+            || args["program"].as_str().is_some_and(flow_folder::is_module_path)
+            || args["start_line"].is_number() || args["end_line"].is_number()
+        {
+            let snapshot = conn.unchecked_transaction()?;
+            return flow_folder::read(&snapshot, task, args, boundary);
+        }
         return read_programs(conn, task, args);
     }
     let store::SearchSelection {

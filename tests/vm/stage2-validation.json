@@ -1,0 +1,158 @@
+{
+  "stage": 2,
+  "source_hashes": {
+    "src/agent_program/compiler.rs": "7a2038daf288daf1b3ed3cdbb999d1c962a5b7612d6c26a7898ee4494efa3d70",
+    "src/agent_program/runtime.rs": "19b93e93788c7c933ebc97fd487a090449d76018df5bb2232f5e88566a603242",
+    "src/agent_program/runtime_timers.rs": "e039558e8e18a27123e2616977189033447b7a549f0f5b7c67ec03312021de3e",
+    "src/agent_program/prelude.js": "c813f96e41db69f531f5099af892dbf75b3579171018f004492eeebfa2536e82",
+    "src/agent_program/tests.rs": "7a5a47ae078fbf34ee820c1d2e35de80d9e5f9984b0cff36a1fde6663b554c12",
+    "src/single_agent.rs": "03d966934a58f87b660eb71d3a1190c9267c0af56327d66e10b6f07c22dc8cb4",
+    "src/agent_service.rs": "ac00f8ecac56757fc9cdccb05facc118aeba8aeb92d24362efe34323ddf2b43d",
+    "prompts/flow_capabilities.md": "b734bbeda6eaf03ebced7f766d915e1ad60ac906a13063943c3ab67928c1a4f3",
+    "prompts/flow_environment.md": "3cb7bc380145671644958b20b7f31ced034176edd4dd41f819ca16f894e4f353",
+    "prompts/flow_builtin_contracts.d.ts": "7affd708e9dd1ca6ca1d74353dee3a3cd55fd7ea3141ee76b4c23c66d9c319df",
+    "docs/agent-program.md": "6d6adaef9bc35d5386986a48cb2f0cad956a5417d2ff4793c1ebc54a45bb4f13"
+  },
+  "new_timer_tests": [
+    "agent_program::tests::vm_stage2_cancel_clears_durable_callbacks_and_prevents_future_effects",
+    "agent_program::tests::vm_stage2_clear_handles_are_interchangeable_and_invalid_handles_are_noops",
+    "agent_program::tests::vm_stage2_delay_normalization_and_deadline_order",
+    "agent_program::tests::vm_stage2_interval_restore_fires_once_without_catching_up",
+    "agent_program::tests::vm_stage2_macro_and_microtasks_share_correct_fifo_checkpoints",
+    "agent_program::tests::vm_stage2_microtasks_survive_snapshot_and_gc_without_flushing_early",
+    "agent_program::tests::vm_stage2_pure_microtask_loop_still_hits_instruction_budget",
+    "agent_program::tests::vm_stage2_queue_microtask_can_be_a_promise_reaction",
+    "agent_program::tests::vm_stage2_scheduled_callbacks_are_gc_roots_after_their_creator_returns",
+    "agent_program::tests::vm_stage2_timeout_snapshot_preserves_absolute_deadline_and_live_closure",
+    "agent_program::tests::vm_stage2_timer_and_microtask_errors_are_uncaught",
+    "agent_program::tests::vm_stage2_timer_and_microtask_validate_callbacks_synchronously",
+    "agent_program::tests::vm_stage2_timer_callback_can_suspend_restore_and_resume_without_replay",
+    "agent_program::tests::vm_stage2_timer_keeps_root_result_and_arguments_alive",
+    "agent_program::tests::vm_stage2_timer_refreshes_instruction_segment_but_wall_deadline_still_applies",
+    "agent_program::tests::vm_stage2_timer_resolves_pending_promise_and_async_callbacks_do_not_block_ticks",
+    "agent_program::tests::vm_stage2_timers_progress_while_parallel_ai_calls_are_inflight",
+    "agent_program::tests::vm_stage2_unhandled_async_callback_rejection_stops_before_next_timer",
+    "single_agent::tests::vm_stage2_host_terminal_cleanup_cancels_all_saved_scopes",
+    "single_agent::tests::vm_stage2_host_wait_drives_timer_only_program_without_any_model",
+    "single_agent::tests::vm_stage2_host_wait_handles_child_completion_poll_and_cancellation"
+  ],
+  "full_suite": {
+    "baseline": "runs/codex-vm-stage1-failure-comparison-20261107.json",
+    "current_log": "runs/codex-vm-stage2-full-20261107.txt",
+    "complete": true,
+    "summary": "test result: FAILED. 568 passed; 29 failed; 23 ignored; 0 measured; 0 filtered out; finished in 48.18s",
+    "baseline_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "current_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "new_failures": [],
+    "resolved_failures": []
+  },
+  "vm_suite": "test result: ok. 242 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.30s",
+  "measurements": {
+    "test262": {
+      "counts": {
+        "compile_rejected": 959,
+        "pass": 407,
+        "run_failed": 74,
+        "skipped": 316
+      },
+      "changed_statuses": 0,
+      "same_selection_and_source_hashes": true
+    },
+    "corpus": {
+      "counts": {
+        "application": {
+          "compile_rejected": 2,
+          "pass": 25
+        },
+        "codex": {
+          "compile_rejected": 1434
+        }
+      },
+      "changed_statuses": 0,
+      "same_selection_and_source_hashes": true
+    }
+  },
+  "node_oracle": {
+    "version": "v22.5.1",
+    "log": "runs/codex-vm-stage2-node-order.txt",
+    "order": [
+      "sync",
+      "micro1",
+      "promise1",
+      "await",
+      "micro2",
+      "timer1",
+      "micro-in-timer",
+      "promise-in-timer",
+      "timer2"
+    ]
+  },
+  "production_check": "passed (2 pre-existing dead_code warnings)",
+  "builtin_contract_syntax_diagnostics": 0,
+  "real_models_called": false,
+  "notes": [
+    "Intermediate full run had one new test-fixture failure: missing agent_runtime_windows table. Fixed fixture and reran final full suite.",
+    "Numeric timer handles; no Node Timeout/ref/unref/refresh or callback this binding.",
+    "Prelude hash changed; old prelude snapshots are rejected by the existing policy."
+  ]
+}

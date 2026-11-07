@@ -3,6 +3,14 @@ name = "codex-workspace-mcp"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+vm-measurements = []
+
+[[bin]]
+name = "vm-measurements"
+path = "src/vm_measurements.rs"
+required-features = ["vm-measurements"]
+
 [dependencies]
 getrandom = "0.4.2"
 tower-http = { version = "0.6.11", features = ["cors", "fs", "trace"] }
@@ -43,7 +51,7 @@ jsonschema = { version = "0.60.2", default-features = false }
 tokio = { version = "1.52.3", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

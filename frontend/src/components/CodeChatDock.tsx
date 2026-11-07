@@ -8,6 +8,7 @@ import type { AgentSlotProps } from '../cordis/slot-contract.ts'
 import { randomId } from '../randomId.ts'
 import { useSession } from '../useSession.ts'
 import { Icon } from './WorkbenchIcon.tsx'
+import { ShellSetupDialog } from './ShellSetupDialog.tsx'
 import css from './CodeChatDock.module.css'
 
 /** One conversation per repository, remembered on this device. */
@@ -146,6 +147,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
 
   const shownModel = model || defaultModel
   return <section ref={panel} className={clsx(css.panel, dropping && css.dropping)} style={{ width }} aria-label="代码问答" data-code-chat="" {...dropProps}>
+    <ShellSetupDialog enabled={open && !!workspace} scope={workspace} onReady={session.reload} />
     <div className={css.resizer} title="拖动调整宽度" onPointerDown={resize} />
     <header className={css.head}>
       <SparkleIcon />

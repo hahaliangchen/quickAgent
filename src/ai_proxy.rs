@@ -96,6 +96,10 @@ fn agent_api(api_type: &str) -> bool {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct AiProxyConfig {
     #[serde(default)]
+    bash_path: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pwsh_path: Option<std::path::PathBuf>,
+    #[serde(default)]
     default_provider: Option<String>,
     #[serde(default)]
     orchestrator_provider: Option<String>,
@@ -449,6 +453,9 @@ pub(crate) fn load_config(config_path: &Path) -> anyhow::Result<AiProxyConfig> {
         config.default_provider = config.orchestrator_provider.clone();
     }
     let generation = read_yaml(&generation_settings_path(config_path), json!({}))?;
+    let shell = crate::shell_environment::read_settings(config_path)?;
+    config.bash_path = shell.bash_path;
+    config.pwsh_path = shell.pwsh_path;
     for (id, provider) in &mut config.providers {
         if let Some(prefix) =
             generation["provider_compatibility"][id]["prefix_system_messages"].as_bool()
@@ -560,6 +567,9 @@ fn settings_view(config: &AiProxyConfig, revision: String) -> Value {
     providers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     json!({
         "revision": revision,
+        "bash_path": config.bash_path,
+        "pwsh_path": config.pwsh_path,
+        "shell_environment": crate::shell_environment::cached_description(if cfg!(windows) { config.pwsh_path.as_deref() } else { config.bash_path.as_deref() }),
         "providers": providers,
         "orchestrator_provider": config.orchestrator_provider,
         "orchestrator_model": config.orchestrator_model,
@@ -772,6 +782,72 @@ async fn desktop_origin_guard(
     next.run(request).await
 }
 
+fn shell_response(result: anyhow::Result<Value>) -> Response {
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error":format!("{error:#}")}))).into_response(),
+    }
+}
+
+async fn get_shell_environment(State(state): State<AiProxyState>, headers: HeaderMap) -> Response {
+    if !trusted_settings_request(&headers) { return StatusCode::FORBIDDEN.into_response(); }
+    // Only the code-session UI or an explicit Settings redetect requests this.
+    let result = tokio::task::spawn_blocking(move || {
+        let settings = crate::shell_environment::read_settings(&state.config_path)?;
+        Ok(crate::shell_environment::detect_description(settings.active_path(), false))
+    }).await;
+    shell_response(result.unwrap_or_else(|error| Err(error.into())))
+}
+
+#[derive(Deserialize)]
+struct DetectShellInput { path: Option<String> }
+
+async fn detect_shell_environment(State(state): State<AiProxyState>, headers: HeaderMap, Json(input): Json<DetectShellInput>) -> Response {
+    if !trusted_settings_request(&headers) { return StatusCode::FORBIDDEN.into_response(); }
+    let _guard = state.settings_write.lock().await;
+    let config_path = state.config_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(path) = input.path {
+            let selected = if cfg!(windows) { crate::shell_environment::validate_pwsh_path(&path)? } else { crate::shell_environment::validate_bash_path(&path)? };
+            let generation_path = generation_settings_path(&config_path);
+            let revision = disk_revision(&config_path)?;
+            let mut generation = read_yaml(&generation_path, json!({}))?;
+            generation.as_object_mut().context("generation settings must be an object")?
+                .insert(if cfg!(windows) { "pwsh_path" } else { "bash_path" }.into(), json!(selected));
+            anyhow::ensure!(disk_revision(&config_path)? == revision, "settings changed while saving the shell path; retry");
+            write_yaml_atomic(&generation_path, &generation)?;
+        }
+        let config = load_config(&config_path)?;
+        let status = crate::shell_environment::detect_description(if cfg!(windows) { config.pwsh_path.as_deref() } else { config.bash_path.as_deref() }, true);
+        Ok::<_, anyhow::Error>((config, status))
+    }).await;
+    match result {
+        Ok(Ok((config, status))) => { *state.config.write().await = config; Json(status).into_response() }
+        Ok(Err(error)) => shell_response(Err(error)),
+        Err(error) => shell_response(Err(error.into())),
+    }
+}
+
+async fn get_shell_install(headers: HeaderMap) -> Response {
+    if !trusted_settings_request(&headers) { return StatusCode::FORBIDDEN.into_response(); }
+    Json(crate::shell_environment::installation_status()).into_response()
+}
+
+async fn start_shell_install(State(state): State<AiProxyState>, headers: HeaderMap) -> Response {
+    if !trusted_settings_request(&headers) { return StatusCode::FORBIDDEN.into_response(); }
+    shell_response(crate::shell_environment::start_installation(&state.config_path))
+}
+
+async fn cancel_shell_install(headers: HeaderMap) -> Response {
+    if !trusted_settings_request(&headers) { return StatusCode::FORBIDDEN.into_response(); }
+    Json(crate::shell_environment::cancel_installation()).into_response()
+}
+
+async fn open_shell_store(headers: HeaderMap) -> Response {
+    if !trusted_settings_request(&headers) { return StatusCode::FORBIDDEN.into_response(); }
+    shell_response(crate::shell_environment::open_store().await)
+}
+
 async fn get_agent_settings(State(state): State<AiProxyState>, headers: HeaderMap) -> Response {
     if !trusted_settings_request(&headers) {
         return (
@@ -823,6 +899,10 @@ struct ProviderEdit {
 #[derive(Deserialize)]
 struct SettingsEdit {
     revision: String,
+    #[serde(default)]
+    bash_path: Option<String>,
+    #[serde(default)]
+    pwsh_path: Option<String>,
     providers: Vec<ProviderEdit>,
     orchestrator_provider: Option<String>,
     orchestrator_model: Option<String>,
@@ -991,6 +1071,16 @@ fn save_settings(
         ));
     }
     let mut config = load_config(config_path)?;
+    if let Some(path) = request.bash_path.as_deref() {
+        config.bash_path = crate::shell_environment::validate_bash_path(path)?;
+    }
+    if let Some(path) = request.pwsh_path.as_deref() {
+        // Saving another settings tab must not start a PowerShell probe when
+        // the user has not changed the executable selection.
+        if config.pwsh_path.as_deref() != Some(Path::new(path.trim())) || path.trim().is_empty() {
+            config.pwsh_path = crate::shell_environment::validate_pwsh_path(path)?;
+        }
+    }
     let mut providers = HashMap::new();
     let mut model_capabilities = HashMap::new();
     let mut key_actions: HashMap<String, Option<String>> = HashMap::new();
@@ -1408,6 +1498,8 @@ fn save_settings(
     let original_generation = read_yaml(&generation_path, json!({}))?;
     let mut generation_settings = original_generation.clone();
     let current_generation = json!({
+        "bash_path": config.bash_path,
+        "pwsh_path": config.pwsh_path,
         "provider_compatibility":config.providers.iter().map(|(id,p)|(id.clone(),json!({"prefix_system_messages":p.extra.get("prefixSystemMessages").and_then(Value::as_bool).unwrap_or(false)}))).collect::<HashMap<_,_>>(),
         "reasoning_effort": config.reasoning_effort,
         "fast_mode": config.fast_mode,
@@ -2062,6 +2154,10 @@ pub async fn run(
             get(get_agent_settings).put(put_agent_settings),
         )
         .route("/agent/models", get(get_model_catalog))
+        .route("/agent/settings/shell", get(get_shell_environment))
+        .route("/agent/settings/shell/detect", post(detect_shell_environment))
+        .route("/agent/settings/shell/install", get(get_shell_install).post(start_shell_install).delete(cancel_shell_install))
+        .route("/agent/settings/shell/store", post(open_shell_store))
         .route("/agent/settings/discover", post(discover_agent_models))
         .route("/agent/settings/probe-image", post(probe_agent_image_input))
         .route("/agent/plugins", get(plugin_tree))
@@ -2225,6 +2321,84 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(root);
     }
+    #[test]
+    fn pwsh_settings_preserve_unchanged_without_probe_and_allow_clear() {
+        let root = std::env::temp_dir().join(crate::visual_artifacts::new_id());
+        let path = root.join("profiles/web/cordis.patch.yml");
+        let selected = root.join("not-installed/pwsh.exe");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_yaml_atomic(&path, &json!([])).unwrap();
+        write_yaml_atomic(&credentials_path(&path), &json!({"version":1,"refs":{},"records":{}})).unwrap();
+        write_yaml_atomic(&generation_settings_path(&path), &json!({"pwsh_path":selected,"other":{"keep":true}})).unwrap();
+        let mut payload = json!({"revision":disk_revision(&path).unwrap(),"providers":[],"orchestrator_provider":null,"orchestrator_model":null});
+        let (saved, revision) = save_settings(&path, serde_json::from_value(payload.clone()).unwrap()).unwrap().unwrap();
+        assert_eq!(saved.pwsh_path.as_ref(), Some(&selected));
+        // Re-saving an unchanged executable must not launch it, even when absent.
+        payload["pwsh_path"] = json!(selected);
+        payload["revision"] = json!(revision);
+        let (saved, revision) = save_settings(&path, serde_json::from_value(payload.clone()).unwrap()).unwrap().unwrap();
+        assert_eq!(settings_view(&saved, revision.clone())["pwsh_path"], json!(selected));
+        payload["pwsh_path"] = json!("");
+        payload["revision"] = json!(revision);
+        save_settings(&path, serde_json::from_value(payload.clone()).unwrap()).unwrap().unwrap();
+        assert!(load_config(&path).unwrap().pwsh_path.is_none());
+        payload["pwsh_path"] = json!("relative/pwsh.exe");
+        payload["revision"] = json!(disk_revision(&path).unwrap());
+        assert!(save_settings(&path, serde_json::from_value(payload).unwrap()).unwrap_err().to_string().contains("absolute"));
+        assert_eq!(read_yaml(&generation_settings_path(&path), json!({})).unwrap()["other"]["keep"], true);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bash_settings_roundtrip_preserve_omitted_clear_and_reject_invalid() {
+        let root = std::env::temp_dir().join(crate::visual_artifacts::new_id());
+        let path = root.join("profiles/web/cordis.patch.yml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_yaml_atomic(&path, &json!([])).unwrap();
+        write_yaml_atomic(&credentials_path(&path), &json!({"version":1,"refs":{},"records":{}})).unwrap();
+        write_yaml_atomic(&generation_settings_path(&path), &json!({"unrelated_setting":{"keep":true}})).unwrap();
+        let bash = if cfg!(windows) { root.join("Git with spaces/bin/bash.exe") } else { root.join("bash with spaces") };
+        std::fs::create_dir_all(bash.parent().unwrap()).unwrap();
+        std::fs::write(&bash, b"validation fixture, never executed").unwrap();
+        #[cfg(windows)]
+        {
+            let inner = root.join("Git with spaces/usr/bin/bash.exe");
+            std::fs::create_dir_all(inner.parent().unwrap()).unwrap();
+            std::fs::write(inner, b"inner bash fixture").unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bash, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let bash = crate::shell_environment::validate_bash_path(bash.to_str().unwrap()).unwrap().unwrap();
+        let mut payload = json!({"revision":disk_revision(&path).unwrap(),"providers":[],"orchestrator_provider":null,"orchestrator_model":null,"bash_path":bash});
+        let (saved, revision) = save_settings(&path, serde_json::from_value(payload.clone()).unwrap()).unwrap().unwrap();
+        assert_eq!(saved.bash_path.as_ref(), Some(&bash));
+        assert_eq!(settings_view(&saved, revision.clone())["bash_path"], json!(bash));
+        assert_eq!(crate::shell_environment::read_bash_path(&path).unwrap(), Some(bash.clone()));
+        assert_eq!(read_yaml(&generation_settings_path(&path), json!({})).unwrap()["unrelated_setting"]["keep"], true);
+        // Omitted fields from other settings clients preserve this local choice.
+        payload.as_object_mut().unwrap().remove("bash_path");
+        payload["revision"] = json!(revision);
+        save_settings(&path, serde_json::from_value(payload.clone()).unwrap()).unwrap().unwrap();
+        assert_eq!(load_config(&path).unwrap().bash_path, Some(bash));
+        let original = std::fs::read(generation_settings_path(&path)).unwrap();
+        payload["revision"] = json!(disk_revision(&path).unwrap());
+        payload["bash_path"] = json!("relative/not-bash");
+        assert!(save_settings(&path, serde_json::from_value(payload.clone()).unwrap()).unwrap_err().to_string().contains("absolute"));
+        assert_eq!(std::fs::read(generation_settings_path(&path)).unwrap(), original);
+        // Empty input restores discovery and changes the existing revision fence.
+        let stale = payload["revision"].clone();
+        payload["bash_path"] = json!("");
+        save_settings(&path, serde_json::from_value(payload.clone()).unwrap()).unwrap().unwrap();
+        assert!(load_config(&path).unwrap().bash_path.is_none());
+        assert!(crate::shell_environment::read_bash_path(&path).unwrap().is_none());
+        payload["revision"] = stale;
+        assert!(save_settings(&path, serde_json::from_value(payload).unwrap()).unwrap().is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn dedicated_model_settings_roundtrip_preserve_omitted_and_clear_explicitly() {
         let root = std::env::temp_dir().join(crate::visual_artifacts::new_id());

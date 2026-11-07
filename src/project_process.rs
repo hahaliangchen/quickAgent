@@ -289,12 +289,13 @@ pub fn is_execution(name: &str) -> bool {
     matches!(
         name,
         "run_program" | "install_dependencies" | "run_project_script" | "stop_project_process"
+            | "exec_command" | "write_stdin" | "kill_session"
     )
 }
 pub fn may_change_files(name: &str) -> bool {
     matches!(
         name,
-        "run_program" | "install_dependencies" | "run_project_script"
+        "run_program" | "install_dependencies" | "run_project_script" | "exec_command" | "write_stdin"
     )
 }
 pub fn check_key(name: &str, args: &Value) -> String {
@@ -387,6 +388,50 @@ struct Record {
     dir: PathBuf,
     stop: mpsc::UnboundedSender<String>,
     ended: Notify,
+}
+
+/// Shell sessions share the process panel and durable logs with project scripts.
+pub(crate) struct ShellRecord(Arc<Record>);
+impl ShellRecord {
+    pub(crate) async fn register(root: &Path, cwd: &Path, id: &str, pid: u32, command: &str,
+        sandboxed: bool, stop: mpsc::UnboundedSender<String>) -> Result<Self> {
+        let root = root.canonicalize()?;
+        let dir = root.join(".codex-workspace-mcp/project-processes");
+        tokio::fs::create_dir_all(&dir).await?;
+        let record = Arc::new(Record {
+            meta: Mutex::new(Meta {
+                process_id:id.into(), pid, root:root.clone(),
+                project_path:cwd.strip_prefix(&root).unwrap_or(cwd).to_string_lossy().replace('\\',"/"),
+                script:command.into(), args:vec![], operation:"shell".into(), check_key:id.into(),
+                running:true, ready:false, listener_owned:false, page_ready:false,
+                readiness_detail:String::new(), script_command:command.into(),
+                node_executable:String::new(), npm_cli:String::new(), ready_url:None, ready_port:None,
+                started_at:now(), ended_at:None, exit_code:None, termination_reason:None,
+                background:true, sandboxed,
+            }),
+            logs:Mutex::new(Logs::default()), persist_guard:Mutex::new(()),
+            dir, stop, ended:Notify::new(),
+        });
+        registry().lock().await.records.insert(id.into(), record.clone());
+        bump_process_event_generation();
+        record.persist().await;
+        Ok(Self(record))
+    }
+    pub(crate) async fn push(&self, stream: &str, text: String) {
+        self.0.push(stream, text).await;
+    }
+    pub(crate) async fn finish(&self, exit_code: Option<i32>, reason: Option<String>) {
+        {
+            let mut meta = self.0.meta.lock().await;
+            meta.running = false;
+            meta.exit_code = exit_code;
+            meta.ended_at = Some(now());
+            meta.termination_reason = reason;
+        }
+        bump_process_event_generation();
+        self.0.persist().await;
+        self.0.ended.notify_waiters();
+    }
 }
 #[derive(Default)]
 struct Registry {
@@ -752,7 +797,7 @@ async fn effective_npm_script_shell(
     ensure!(
         output.status.success(),
         "{}runtime_bootstrap: could not verify effective npm script-shell; refusing to start package scripts ({} {})",
-        if boundary == crate::process_sandbox::ExecutionBoundary::Workspace && String::from_utf8_lossy(&output.stderr).lines().any(|line| line.starts_with("bwrap:")) { "SANDBOX_UNAVAILABLE: " } else { "" },
+        if boundary != crate::process_sandbox::ExecutionBoundary::Host && String::from_utf8_lossy(&output.stderr).lines().any(|line| line.starts_with("bwrap:")) { "SANDBOX_UNAVAILABLE: " } else { "" },
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
@@ -2498,7 +2543,7 @@ async fn launch_with_boundary(
             let meta = existing.meta.lock().await.clone();
             if meta.running
                 && meta.root == root
-                && meta.sandboxed == (boundary == crate::process_sandbox::ExecutionBoundary::Workspace)
+                && meta.sandboxed == (boundary != crate::process_sandbox::ExecutionBoundary::Host)
                 && meta.project_path == relative
                 && meta.script == script
                 && meta.args == extra
@@ -2675,7 +2720,7 @@ async fn launch_with_boundary(
             exit_code: None,
             termination_reason: None,
             background,
-            sandboxed: boundary == crate::process_sandbox::ExecutionBoundary::Workspace,
+            sandboxed: boundary != crate::process_sandbox::ExecutionBoundary::Host,
         }),
         logs: Mutex::new(Logs::default()),
         persist_guard: Mutex::new(()),

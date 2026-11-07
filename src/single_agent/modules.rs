@@ -11,6 +11,14 @@ use tokio::sync::Notify;
 
 /// The message that makes a window a fixer's.
 pub(super) const FIX_INPUT: &str = "module_fix_input";
+const REVISION_INPUT: &str = "module_revision_input";
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Revision {
+    version: i64,
+    reason: String,
+}
 
 fn schema(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(
@@ -45,8 +53,32 @@ pub(super) fn is_module(w: &Window) -> bool {
     w.program_task.as_ref().is_some_and(|task| task["module"] == true)
 }
 
-fn file_name(name: &str, key: &str) -> String {
+pub(crate) fn file_name(name: &str, key: &str) -> String {
     format!("{name}-{key}.js")
+}
+
+/// A main flow can ask to improve an existing implementation of the same contract.
+pub(super) fn revisions(
+    s: &Session<'_>, program: &crate::agent_program::Program, requests: &Value,
+) -> Result<BTreeMap<String, Revision>> {
+    let requests: BTreeMap<String, Revision> = serde_json::from_value(requests.clone())
+        .context("revise_modules must map module names to {version, reason}")?;
+    let mut revisions = BTreeMap::new();
+    for (name, revision) in requests {
+        let function = program.functions.get(&name).filter(|function| function.module_task)
+            .with_context(|| format!("revise_modules requires a top-level @module named {name}"))?;
+        ensure!(!revision.reason.trim().is_empty() && revision.reason.chars().count() <= 2000,
+            "give a concrete reason of up to 2000 characters to revise {name}");
+        let args = vec![Value::Null; function.params.len()];
+        let declaration = program_flow::function_task(program, &name, &args, &BTreeMap::new())?;
+        let contract = contract(&declaration)?;
+        let current = latest(s.state.workspace.root(), s.task, &contract.key)?
+            .with_context(|| format!("no saved implementation of {name} with this exact declaration; reuse its declaration or call this as a new contract"))?;
+        ensure!(current.0 == revision.version,
+            "{name} is now at version {}; inspect that version before revising it", current.0);
+        revisions.insert(contract.key, revision);
+    }
+    Ok(revisions)
 }
 
 /// The module file, relative to the workspace, as the fixer is told it.
@@ -76,7 +108,7 @@ pub(super) fn latest(root: &Path, task: &str, key: &str) -> Result<Option<(i64, 
 }
 
 /// Record a new version and write it as the module's file.
-async fn save(s: &Session<'_>, contract: &Contract, source: &str, fixed: bool) -> Result<i64> {
+async fn save(s: &Session<'_>, contract: &Contract, source: &str, fixed: bool, revised_from: Option<i64>) -> Result<i64> {
     let (task, turn) = (s.task.to_owned(), s.turn as i64);
     let row = (contract.key.clone(), contract.name.clone(), contract.signature.clone(), contract.description.clone(), source.to_owned());
     let version = db(s.state.workspace.root(), move |conn| {
@@ -87,6 +119,8 @@ async fn save(s: &Session<'_>, contract: &Contract, source: &str, fixed: bool) -
             params![task, row.0],
             |r| r.get(0),
         )?;
+        ensure!(revised_from.is_none_or(|base| base == version - 1),
+            "module changed while being edited; inspect the current version before retrying");
         tx.execute(
             "INSERT INTO agent_modules VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![task, turn, row.0, row.1, row.2, row.3, version, row.4, fixed as i64, agent_service::now()],
@@ -97,20 +131,21 @@ async fn save(s: &Session<'_>, contract: &Contract, source: &str, fixed: bool) -
     .await?;
     write_file(s.state.workspace.root(), s.task, &contract.name, &contract.key, source)?;
     append(s, "module/saved", json!({"function":contract.name,"contract":contract.key,"version":version,
-        "path":relative_path(s.state.workspace.root(), s.task, contract)?,"fixed":fixed}), false).await?;
+        "path":relative_path(s.state.workspace.root(), s.task, contract)?,"fixed":fixed,
+        "revised_from":revised_from.filter(|_| !fixed)}), false).await?;
     Ok(version)
 }
 
 /// The latest version of each module in this chat.
-fn latest_all(conn: &rusqlite::Connection, task: &str) -> Result<Vec<(String, String, String, String, String)>> {
+fn latest_all(conn: &rusqlite::Connection, task: &str) -> Result<Vec<(String, String, String, String, i64, String)>> {
     schema(conn)?;
     Ok(conn
         .prepare(
-            "SELECT m.contract,m.name,m.signature,m.description,m.source FROM agent_modules m
+            "SELECT m.contract,m.name,m.signature,m.description,m.version,m.source FROM agent_modules m
              WHERE m.task_id=?1 AND m.version=(SELECT MAX(version) FROM agent_modules WHERE task_id=m.task_id AND contract=m.contract)
              ORDER BY m.created_at, m.name",
         )?
-        .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -124,14 +159,15 @@ pub(super) fn system_message(root: &Path, task: &str) -> Option<Value> {
     }
     let declarations = modules
         .iter()
-        .map(|(_, _, signature, description, _)| {
+        .map(|(key, name, signature, description, version, _)| {
             let comment = description.lines().map(|line| format!("  // {line}")).collect::<Vec<_>>().join("\n");
-            format!("/** @module */\n{signature} {{\n{comment}\n}}")
+            let path = file_name(name, key);
+            format!("modules/{path} (version {version})\n/** @module */\n{signature} {{\n{comment}\n}}")
         })
         .collect::<Vec<_>>()
         .join("\n\n");
     Some(json!({"role":"system","name":"chat_modules","content":format!(
-        "Modules this chat already has. Declaring one again with the same name, parameters and contract comment runs its existing code instead of writing it again.\n\n{declarations}"
+        "Modules this chat already has. Use the exact declaration to reuse its implementation. Inspect source in the flow folder before proposing a revision.\n\n{declarations}"
     )}))
 }
 
@@ -144,7 +180,7 @@ pub(crate) fn rebuild(root: &Path, task: &str) -> Result<()> {
         std::fs::remove_dir_all(&dir)?;
     }
     let conn = agent_service::open_db(root)?;
-    for (key, name, _, _, source) in latest_all(&conn, task)? {
+    for (key, name, _, _, _, source) in latest_all(&conn, task)? {
         write_file(root, task, &name, &key, &source)?;
     }
     Ok(())
@@ -264,36 +300,72 @@ pub(super) async fn prepare(s: &Session<'_>, w: &mut Window) -> Result<bool> {
         return Ok(false);
     }
     let contract = contract(&task)?;
-    let key = claim_key(s, &format!("write:{}", contract.key));
+    let base = task["revision"]["version"].as_i64();
+    let key = author_claim(s, &contract, base);
     let me = owner(w);
     loop {
         if let Some((version, source)) = latest(s.state.workspace.root(), s.task, &contract.key)?
-            && install(s, w, version, &source).is_ok()
+            && base != Some(version)
         {
-            append(s, "module/loaded", json!({"function":contract.name,"contract":contract.key,"version":version}), false).await?;
-            save_window(s, w).await?;
-            return Ok(true);
+            let installed = install(s, w, version, &source);
+            if base.is_some() || installed.is_ok() {
+                installed?;
+                append(s, "module/loaded", json!({"function":contract.name,"contract":contract.key,"version":version}), false).await?;
+                save_window(s, w).await?;
+                return Ok(true);
+            }
         }
         match claim(s, &key, &me) {
-            Turn::Mine => return Ok(false),
             Turn::Wait(done) => wait(s, &done).await?,
+            Turn::Mine => {
+                if let Some(base) = base {
+                    let (version, source) = latest(s.state.workspace.root(), s.task, &contract.key)?
+                        .context("saved module is missing from this conversation")?;
+                    if version != base {
+                        release(&key, &me);
+                        continue;
+                    }
+                    if !w.messages.iter().any(|message| message["name"] == REVISION_INPUT) {
+                        let reason = &task["revision"]["reason"];
+                        let input = json!({"path":format!("modules/{}", file_name(&contract.name, &contract.key)),
+                            "version":version,"reason":reason,"source":source});
+                        let seq = append(s, "module/revision_started",
+                            json!({"function":contract.name,"contract":contract.key,"version":version,"reason":reason}), false).await?;
+                        w.messages.push(sourced(json!({"role":"user","name":REVISION_INPUT,"content":input.to_string()}), s.task, seq));
+                        save_window(s, w).await?;
+                    }
+                }
+                return Ok(false);
+            }
         }
     }
 }
 
+fn author_claim(s: &Session<'_>, contract: &Contract, base: Option<i64>) -> String {
+    match base {
+        Some(version) => claim_key(s, &format!("fix:{}:{version}", contract.key)),
+        None => claim_key(s, &format!("write:{}", contract.key)),
+    }
+}
+
+pub(super) fn revision_pending(w: &Window) -> bool {
+    w.program_task.as_ref().is_some_and(|task| task["revision"].is_object() && task["module_version"].is_null())
+}
+
 /// The AI that wrote a module replied with code that compiled: it is the
-/// module's first version, and calls waiting for it can run it.
+/// module's next saved version, and calls waiting for it can run it.
 pub(super) async fn authored(s: &Session<'_>, w: &mut Window, source: &str) -> Result<()> {
     let Some(task) = w.program_task.clone() else { return Ok(()) };
     if task["module"] != true || task["module_version"].is_number() || task["fix"].is_object() {
         return Ok(());
     }
     let contract = contract(&task)?;
-    let version = save(s, &contract, source, false).await?;
+    let base = task["revision"]["version"].as_i64();
+    let version = save(s, &contract, source, false, base).await?;
     if let Some(task) = w.program_task.as_mut() {
         task["module_version"] = json!(version);
     }
-    release(&claim_key(s, &format!("write:{}", contract.key)), &owner(w));
+    release(&author_claim(s, &contract, base), &owner(w));
     Ok(())
 }
 
@@ -405,7 +477,7 @@ pub(super) async fn fixed(s: &Session<'_>, w: &mut Window) -> Result<Option<Valu
         diagnostic["instruction"] = json!(format!("{path} does not compile yet. Keep fixing it with edit_file, then reply again."));
         return Ok(Some(diagnostic));
     }
-    let version = save(s, &contract, &source, true).await?;
+    let version = save(s, &contract, &source, true, Some(failed_version)).await?;
     append(s, "program/start", json!({"turn":s.turn,"function":contract.name,"source":source,"module_version":version,"fixed":true}), false).await?;
     install(s, w, version, &source)?;
     release(&claim_key(s, &format!("fix:{}:{failed_version}", contract.key)), &owner(w));

@@ -126,7 +126,7 @@ pub async fn execute_with_boundary(
         "args":request.args.clone(),
         "project_path":relative_project,
         "check_key":check_key,
-        "sandbox": if boundary == crate::process_sandbox::ExecutionBoundary::Workspace { "workspace-write" } else { "none" },
+        "sandbox": match boundary { crate::process_sandbox::ExecutionBoundary::Workspace => "workspace-write", crate::process_sandbox::ExecutionBoundary::ReadOnly => "read-only", crate::process_sandbox::ExecutionBoundary::Host => "none" },
         "timeout_seconds":timeout_seconds,
         "max_output_bytes":max_output_bytes,
     });
@@ -211,7 +211,7 @@ pub async fn execute_with_boundary(
                 elapsed_ms(started),
                 Some(&format!(
                     "{}Could not start '{}' in '{}': {error}",
-                    if boundary == crate::process_sandbox::ExecutionBoundary::Workspace { "SANDBOX_UNAVAILABLE: " } else { "" }, request.program, relative_project
+                    if boundary != crate::process_sandbox::ExecutionBoundary::Host { "SANDBOX_UNAVAILABLE: " } else { "" }, request.program, relative_project
                 )),
                 CapturedPipe::default(),
                 CapturedPipe::default(),
@@ -278,7 +278,7 @@ pub async fn execute_with_boundary(
     let stderr = collect_pipe(stderr_task).await;
     let exit_code = status.as_ref().and_then(ExitStatus::code);
     let process_success = outcome == "exited" && status.as_ref().is_some_and(ExitStatus::success);
-    let sandbox_error = boundary == crate::process_sandbox::ExecutionBoundary::Workspace
+    let sandbox_error = boundary != crate::process_sandbox::ExecutionBoundary::Host
         && !process_success
         && String::from_utf8_lossy(&stderr.0.bytes).lines().any(|line| line.starts_with("bwrap:"));
     let sandbox_message = if sandbox_error { Some("SANDBOX_UNAVAILABLE: bubblewrap could not start or apply its policy; see stderr. The command was not run if bubblewrap failed before executing it.") } else { error_message.as_deref() };

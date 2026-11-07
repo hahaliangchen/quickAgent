@@ -1,0 +1,20 @@
+.dialog { width: min(620px, calc(100vw - 32px)); color: var(--codex-text-primary); }
+.description, .hint { margin: 0 0 12px; line-height: 1.6; }
+.hint { color: var(--codex-text-muted); font-size: 13px; }
+.command { display: block; padding: 12px; border: 1px solid var(--codex-card-border); border-radius: 9px; background: var(--codex-card-bg); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--codex-font-mono, monospace); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.primary, .secondary { min-height: 34px; padding: 6px 12px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; }
+.primary { background: var(--codex-blue-primary, #1d9e75); border: 1px solid transparent; color: #fff; }
+.secondary { background: transparent; border: 1px solid var(--codex-card-border); color: var(--codex-text-primary); }
+.primary:hover, .secondary:hover { filter: brightness(.94); }
+.primary:disabled, .secondary:disabled { opacity: .55; cursor: default; }
+.manual { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; font-size: 13px; }
+.manual input { box-sizing: border-box; width: 100%; padding: 10px; border: 1px solid var(--codex-card-border); border-radius: 8px; background: var(--codex-card-bg); color: inherit; font: inherit; }
+.manualFooter { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.manualFooter small { color: var(--codex-text-muted); }
+.progress { padding-top: 4px; font-size: 13px; }
+.progress p { margin: 8px 0; }
+.progress pre { max-height: 180px; overflow: auto; padding: 10px; border-radius: 8px; background: var(--codex-card-bg); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--codex-font-mono, monospace); }
+.error { color: var(--dsw-alias-state-error-primary, #dc2626); overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.skip { margin-top: 12px; border: 0; background: transparent; color: var(--codex-text-muted); font: inherit; font-size: 12px; cursor: pointer; }
+.skip:hover { color: var(--codex-text-primary); }

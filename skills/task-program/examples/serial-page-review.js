@@ -17,7 +17,7 @@ function reviewPages(paths, requirements) {
   return inspectPages(pages, requirements);
 }
 
-/** @virtual */
+/** @module */
 function inspectPages(pages, requirements) {
   // 在这个 AI 上下文中按 pages 顺序检查 initial 的已读正文，不因进入函数重复读取。
   // 若 initial 表示内容被分页或截断，按回执只读取尚未取得的部分。

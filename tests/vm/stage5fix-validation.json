@@ -1,0 +1,666 @@
+{
+  "stage": "5 fixes",
+  "date": "2026-11-08",
+  "scope": "Promise callback dispatch/host JSON separation, anonymous names, diagnostics and Number.toExponential",
+  "source_hashes": {
+    "src/agent_program.rs": "c77a9be43b126f57645f3a6dbeabbb8dc6405ead904e216c8ccc7a76ab57211e",
+    "src/agent_program/compiler.rs": "479c6a595262d3f91a845e3497a96581860fabda157622d0a5b1c585a4e3894c",
+    "src/agent_program/compiler_classes.rs": "19cf2fbd020568b7407e8e38fb73b1ee0ac6890886813df46258a262dfdd5394",
+    "src/agent_program/compiler_properties.rs": "1c1db427c955da4448d159a14a567ae75e2dc8c884ecb2ea19e7f419a9322d7c",
+    "src/agent_program/compiler_iteration.rs": "80f44bc8bee41734579d4e26e0a641e9d129b0df9e56b33d2b748472ab57110c",
+    "src/agent_program/heap.rs": "6b478b60692157568d4513fd77860a149fc5f72de7dcea412b01b3ddf2c21f82",
+    "src/agent_program/js_classes.rs": "1e59fe5ba035ae8c815e983c4eb221b2b46b6c591249e043920ae2ce893c98f5",
+    "src/agent_program/js_descriptors.rs": "d5fb12018f83e2a56e453ddae119d7bbfaa47b7e4379fba71d38c38f7e2465ef",
+    "src/agent_program/js_prototypes.rs": "3bb9ac6d9657de775d96c08c389b1302be8f343c7fb63992353379eae44b458c",
+    "src/agent_program/js_functions.rs": "522e083d7a04cc174c5efe0f986d3a82117b1489fabeabe59a3b78ebe961010f",
+    "src/agent_program/js_methods.rs": "432a3c44376cb29ef92556b998d4c39f25acfed75b24ad2199c65aaa8650ca2b",
+    "src/agent_program/js_value.rs": "b5ce285ce535d6540899d64f48b57a717cb8ad62468cdc5f2bf0bc9657c434b7",
+    "src/agent_program/vm_eval.rs": "2d0f5c9a3863027fd574d7a84f279191372ff79eeff43294fec7575333c30ee5",
+    "src/agent_program/runtime.rs": "84498d75614102047aa95c585fb3ec7e6155bf4a083ab81a909641f120728c12",
+    "src/agent_program/runtime_timers.rs": "e039558e8e18a27123e2616977189033447b7a549f0f5b7c67ec03312021de3e",
+    "src/agent_program/prelude.js": "85eba0fb2c6cc3d89a5f9eeb980e8de0853536f1e592a86219d7e0e679732078",
+    "src/agent_program/builtins.rs": "dfb5144b4270c758d27e397168dad0c90000fc8b4f386b958a774e34196c0921",
+    "src/agent_program/conformance.rs": "46e26ba8b3415913133d800247d3c9efb145663891ed7b1c9048114515d27045",
+    "src/agent_program/tests.rs": "fd8caa6e89289c89f3eebcf2f627a5e84a5a5d35df14f2e02ce9c26b14d0bfd0",
+    "src/agent_program/tests_stage5_fixes.rs": "acc7edec986809c7b9beccaa984cf623c3fce640c39dc9a1467f9cb6aeabf015",
+    "prompts/flow_capabilities.md": "de4ad5fbf455ad77e973238cb44d1e71317d9f8bd87388f419b692bfde9e5197",
+    "prompts/flow_builtin_contracts.d.ts": "d596f34a460a416b115d3bf2b5231214c3f7d85d05f2d19fdb724ea67c44ada3",
+    "docs/agent-program.md": "e80f3725949c9de8cbbcf8787e9af15aec3887cec0ee6d94076c003a884a68be"
+  },
+  "unit_tests": [
+    "vm_stage5fix_array_pattern_default_names",
+    "vm_stage5fix_binding_function_arrow_names",
+    "vm_stage5fix_callback_async_order",
+    "vm_stage5fix_callback_dynamic_function_diagnostic",
+    "vm_stage5fix_callback_home_object",
+    "vm_stage5fix_callback_native_error_location",
+    "vm_stage5fix_callback_native_type_error_rejects",
+    "vm_stage5fix_callback_real_tool_boundary_kept",
+    "vm_stage5fix_callback_tool_error_location",
+    "vm_stage5fix_compound_assignment_does_not_infer_name",
+    "vm_stage5fix_computed_class_static_name_preserved",
+    "vm_stage5fix_exponential_argument_order",
+    "vm_stage5fix_exponential_basic",
+    "vm_stage5fix_exponential_brand_and_range",
+    "vm_stage5fix_exponential_conversion_snapshot",
+    "vm_stage5fix_exponential_extremes",
+    "vm_stage5fix_inferred_name_no_lexical_self",
+    "vm_stage5fix_logical_assignment_names",
+    "vm_stage5fix_method_symbol_names",
+    "vm_stage5fix_name_metadata_survives_snapshot",
+    "vm_stage5fix_name_utf16_and_symbol_accessors",
+    "vm_stage5fix_named_expression_preserved",
+    "vm_stage5fix_native_callback_class_guard",
+    "vm_stage5fix_native_callback_coercion",
+    "vm_stage5fix_native_callback_undefined",
+    "vm_stage5fix_native_coercion_snapshot",
+    "vm_stage5fix_object_pattern_default_names",
+    "vm_stage5fix_object_property_names",
+    "vm_stage5fix_parameter_default_names",
+    "vm_stage5fix_unknown_native_diagnostic_before_json"
+  ],
+  "harness_tests": [
+    "vm_stage5fix_harness_error_constructor_identity",
+    "vm_stage5fix_native_done_reaction_and_rejection"
+  ],
+  "new_test_count": 32,
+  "vm_suite": "test result: ok. 438 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 8.69s",
+  "full_suite": {
+    "baseline": "runs/codex-vm-stage5-failure-comparison-20261107.json",
+    "current_log": "runs/codex-vm-stage5fix-full-20261108.txt",
+    "complete": true,
+    "summary": "test result: FAILED. 764 passed; 29 failed; 23 ignored; 0 measured; 0 filtered out; finished in 68.77s",
+    "baseline_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "current_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "new_failures": [],
+    "resolved_failures": []
+  },
+  "test262_profiles": {
+    "default": {
+      "baseline": "tests/vm/test262-stage5.json",
+      "current": "tests/vm/test262-stage5fix.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "17ef1cfab7e61db1b9c1a4a8c9fda1d4d4108b0b3fb116fc3046678adb0a3735",
+      "baseline_counts": {
+        "compile_rejected": 389,
+        "pass": 900,
+        "run_failed": 151,
+        "skipped": 316
+      },
+      "current_counts": {
+        "compile_rejected": 389,
+        "pass": 924,
+        "run_failed": 127,
+        "skipped": 316
+      },
+      "transitions": {
+        "run_failed -> pass": 24
+      }
+    },
+    "-functions": {
+      "baseline": "tests/vm/test262-stage5-functions.json",
+      "current": "tests/vm/test262-stage5fix-functions.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "7c564b84eb966c6a1ed5344ad4315b33b3fa94573e56a84609a4abe74d812883",
+      "baseline_counts": {
+        "compile_rejected": 278,
+        "pass": 329,
+        "run_failed": 14,
+        "skipped": 17
+      },
+      "current_counts": {
+        "compile_rejected": 278,
+        "pass": 341,
+        "run_failed": 2,
+        "skipped": 17
+      },
+      "transitions": {
+        "run_failed -> pass": 12
+      }
+    },
+    "-prototypes": {
+      "baseline": "tests/vm/test262-stage5-prototypes.json",
+      "current": "tests/vm/test262-stage5fix-prototypes.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "20986848b1d3cfaa5fd8fdbc989d3ac44b6fbddc0056883bc1faa565046b83b8",
+      "baseline_counts": {
+        "compile_rejected": 588,
+        "pass": 693,
+        "run_failed": 38,
+        "skipped": 334
+      },
+      "current_counts": {
+        "compile_rejected": 588,
+        "pass": 720,
+        "run_failed": 11,
+        "skipped": 334
+      },
+      "transitions": {
+        "run_failed -> pass": 27
+      }
+    },
+    "-descriptors": {
+      "baseline": "tests/vm/test262-stage5-descriptors.json",
+      "current": "tests/vm/test262-stage5fix-descriptors.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "a3067f84145e9cec23c04418b7157c2d60f5cc6c3c7396d4365e12dd712070c1",
+      "baseline_counts": {
+        "compile_rejected": 1374,
+        "pass": 1920,
+        "run_failed": 139,
+        "skipped": 371
+      },
+      "current_counts": {
+        "compile_rejected": 1374,
+        "pass": 1948,
+        "run_failed": 111,
+        "skipped": 371
+      },
+      "transitions": {
+        "run_failed -> pass": 28
+      }
+    },
+    "-iteration": {
+      "baseline": "tests/vm/test262-stage5-iteration.json",
+      "current": "tests/vm/test262-stage5fix-iteration.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "4510e253ce5df2b287db5c7fb6ddd23da242e8dd826b17168ba5ea5e6378ba91",
+      "baseline_counts": {
+        "compile_rejected": 510,
+        "pass": 348,
+        "run_failed": 20,
+        "skipped": 79
+      },
+      "current_counts": {
+        "compile_rejected": 510,
+        "pass": 366,
+        "run_failed": 2,
+        "skipped": 79
+      },
+      "transitions": {
+        "run_failed -> pass": 18
+      }
+    },
+    "-classes": {
+      "baseline": "tests/vm/test262-stage5-classes.json",
+      "current": "tests/vm/test262-stage5fix-classes.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "1c395c1bc50fe3fb8baa5bd2bf5bfb9c0ef387487f8234b90683a89bd70842a4",
+      "baseline_counts": {
+        "compile_rejected": 1349,
+        "pass": 1150,
+        "run_failed": 107,
+        "skipped": 6030
+      },
+      "current_counts": {
+        "compile_rejected": 1349,
+        "pass": 1253,
+        "run_failed": 4,
+        "skipped": 6030
+      },
+      "transitions": {
+        "run_failed -> pass": 103
+      }
+    }
+  },
+  "remaining_class_failures": [
+    {
+      "id": "test/language/expressions/class/subclass-builtins/subclass-Function.js",
+      "detail": "{\"location\":{\"column\":115,\"line\":226},\"message\":\"Class extends value is not a constructor or null\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"$$createClass\",\"pc\":13},{\"function\":\"<module>\",\"pc\":1}]}"
+    },
+    {
+      "id": "test/language/statements/class/subclass-builtins/subclass-Function.js",
+      "detail": "{\"location\":{\"column\":115,\"line\":226},\"message\":\"Class extends value is not a constructor or null\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"$$createClass\",\"pc\":13},{\"function\":\"<module>\",\"pc\":2}]}"
+    },
+    {
+      "id": "test/language/statements/class/subclass/builtin-objects/Function/regular-subclassing.js",
+      "detail": "{\"location\":{\"column\":115,\"line\":226},\"message\":\"Class extends value is not a constructor or null\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"$$createClass\",\"pc\":13},{\"function\":\"<module>\",\"pc\":2}]}"
+    },
+    {
+      "id": "test/language/statements/class/subclass/builtin-objects/Function/super-must-be-called.js",
+      "detail": "{\"location\":{\"column\":115,\"line\":226},\"message\":\"Class extends value is not a constructor or null\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"$$createClass\",\"pc\":13},{\"function\":\"<module>\",\"pc\":2}]}"
+    }
+  ],
+  "exponential": {
+    "report": "tests/vm/test262-stage5fix-exponential.json",
+    "counts": {
+      "compile_rejected": 3,
+      "pass": 12
+    },
+    "rejected": [
+      {
+        "id": "test/built-ins/Number/prototype/toExponential/length.js",
+        "detail": "TS_PROGRAM 52:5: unknown variable arguments: declare it in this function or at the top level, or pass it as a parameter"
+      },
+      {
+        "id": "test/built-ins/Number/prototype/toExponential/name.js",
+        "detail": "TS_PROGRAM 52:5: unknown variable arguments: declare it in this function or at the top level, or pass it as a parameter"
+      },
+      {
+        "id": "test/built-ins/Number/prototype/toExponential/prop-desc.js",
+        "detail": "TS_PROGRAM 52:5: unknown variable arguments: declare it in this function or at the top level, or pass it as a parameter"
+      }
+    ]
+  },
+  "corpus": {
+    "baseline": "tests/vm/corpus-stage5.json",
+    "current": "tests/vm/corpus-stage5fix.json",
+    "comparison_passed": true,
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "revision": "1e73f5c9433e96739b9e41aa5711c74f9a367509c25cd4f68c605c4b7c430cd1",
+    "selection_hash": "6dad971b7155855075e7dd550de82f5c5033c7e1806f724a889d8c3fc882a38b",
+    "baseline_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "current_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "transitions": {}
+  },
+  "frozen_corpus_sha256": "1e73f5c9433e96739b9e41aa5711c74f9a367509c25cd4f68c605c4b7c430cd1",
+  "node_oracle": {
+    "node": "v22.5.1",
+    "passed": 21,
+    "total": 22,
+    "mismatches": [
+      {
+        "name": "vm_stage5fix_computed_class_static_name_preserved",
+        "result": {
+          "error": "TypeError",
+          "message": "o.C.name is not a function"
+        },
+        "expected": [
+          9,
+          1
+        ]
+      }
+    ],
+    "skipped": [
+      "vm_stage5fix_callback_real_tool_boundary_kept",
+      "vm_stage5fix_callback_dynamic_function_diagnostic",
+      "vm_stage5fix_native_coercion_snapshot",
+      "vm_stage5fix_unknown_native_diagnostic_before_json",
+      "vm_stage5fix_callback_native_error_location",
+      "vm_stage5fix_callback_tool_error_location",
+      "vm_stage5fix_exponential_conversion_snapshot",
+      "vm_stage5fix_name_metadata_survives_snapshot"
+    ],
+    "results": [
+      {
+        "name": "vm_stage5fix_native_callback_coercion",
+        "result": [
+          "ok",
+          7
+        ]
+      },
+      {
+        "name": "vm_stage5fix_native_callback_undefined",
+        "result": "done"
+      },
+      {
+        "name": "vm_stage5fix_native_callback_class_guard",
+        "result": true
+      },
+      {
+        "name": "vm_stage5fix_callback_home_object",
+        "result": 7
+      },
+      {
+        "name": "vm_stage5fix_callback_native_type_error_rejects",
+        "result": [
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5fix_callback_async_order",
+        "result": [
+          "callback",
+          "other",
+          7
+        ]
+      },
+      {
+        "name": "vm_stage5fix_binding_function_arrow_names",
+        "result": [
+          "f",
+          "g",
+          "h"
+        ]
+      },
+      {
+        "name": "vm_stage5fix_parameter_default_names",
+        "result": [
+          "fn",
+          "arrow",
+          "C"
+        ]
+      },
+      {
+        "name": "vm_stage5fix_array_pattern_default_names",
+        "result": [
+          "f",
+          "g",
+          "C"
+        ]
+      },
+      {
+        "name": "vm_stage5fix_object_pattern_default_names",
+        "result": [
+          "f",
+          "g",
+          "C",
+          "renamed"
+        ]
+      },
+      {
+        "name": "vm_stage5fix_named_expression_preserved",
+        "result": [
+          "Explicit",
+          "Explicit",
+          7
+        ]
+      },
+      {
+        "name": "vm_stage5fix_inferred_name_no_lexical_self",
+        "result": [
+          7,
+          8
+        ]
+      },
+      {
+        "name": "vm_stage5fix_object_property_names",
+        "result": [
+          "f",
+          "g",
+          "C",
+          "[key]"
+        ]
+      },
+      {
+        "name": "vm_stage5fix_computed_class_static_name_preserved",
+        "result": {
+          "error": "TypeError",
+          "message": "o.C.name is not a function"
+        }
+      },
+      {
+        "name": "vm_stage5fix_logical_assignment_names",
+        "result": [
+          "f",
+          "g",
+          "h"
+        ]
+      },
+      {
+        "name": "vm_stage5fix_method_symbol_names",
+        "result": [
+          "[key]",
+          "get x",
+          "set y"
+        ]
+      },
+      {
+        "name": "vm_stage5fix_exponential_basic",
+        "result": [
+          "1.23e+2",
+          "1.23e+2",
+          "1e+1",
+          "-1e+1",
+          "1.3e+1",
+          "0.00e+0"
+        ]
+      },
+      {
+        "name": "vm_stage5fix_exponential_extremes",
+        "result": [
+          "5e-324",
+          "1.80e+308",
+          "1.0000e-300",
+          "NaN",
+          "Infinity"
+        ]
+      },
+      {
+        "name": "vm_stage5fix_exponential_brand_and_range",
+        "result": [
+          4,
+          1,
+          105
+        ]
+      },
+      {
+        "name": "vm_stage5fix_exponential_argument_order",
+        "result": [
+          "1.25e+0",
+          1
+        ]
+      },
+      {
+        "name": "vm_stage5fix_name_utf16_and_symbol_accessors",
+        "result": [
+          7,
+          56320,
+          false,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5fix_compound_assignment_does_not_infer_name",
+        "result": [
+          "",
+          1
+        ]
+      }
+    ],
+    "exit_code": 1,
+    "comparison_passed": false,
+    "normative_variance": {
+      "spec_class": "https://tc39.es/ecma262/2025/multipage/ecmascript-language-functions-and-classes.html#sec-runtime-semantics-classdefinitionevaluation",
+      "spec_property": "https://tc39.es/ecma262/2025/multipage/ecmascript-language-expressions.html#sec-object-initializer-runtime-semantics-propertydefinitionevaluation",
+      "interpretation": "Property definitions use NamedEvaluation; class naming precedes evaluation of static methods. VM retains the class's static name method. Node 22.5.1 replaces it with a string for this computed-property case; original exception/nonzero exit are preserved. V8 internal root cause is not established.",
+      "raw_probe": {
+        "node": "v22.5.1",
+        "type": "string",
+        "name": "C",
+        "keyConversions": 1
+      }
+    },
+    "skip_reasons": {
+      "vm_stage5fix_callback_real_tool_boundary_kept": "real host tool contract",
+      "vm_stage5fix_callback_dynamic_function_diagnostic": "dynamic Function disabled by host policy",
+      "vm_stage5fix_native_coercion_snapshot": "VM host suspension and Runtime snapshot",
+      "vm_stage5fix_unknown_native_diagnostic_before_json": "Rust native dispatch diagnostic",
+      "vm_stage5fix_callback_native_error_location": "VM diagnostic location field",
+      "vm_stage5fix_callback_tool_error_location": "VM host tool diagnostic location",
+      "vm_stage5fix_exponential_conversion_snapshot": "VM host suspension and Runtime snapshot",
+      "vm_stage5fix_name_metadata_survives_snapshot": "VM Runtime snapshot"
+    }
+  },
+  "check_log": "runs/codex-vm-stage5fix-check.txt",
+  "contracts_syntax_errors": 0,
+  "diff_check_exit_code": 0,
+  "test_first_logs": [
+    "runs/codex-vm-stage5fix-red.txt",
+    "runs/codex-vm-stage5fix-extra-red.txt"
+  ],
+  "harness_correction": "Test262Error now has a proper prototype.constructor link; only test facilities changed, no production language rule is patched for test262.",
+  "stability": {
+    "root_cause_confirmed": false,
+    "fixed": false,
+    "new_full_run_complete_without_crash": true,
+    "prior_dump_analysis": {
+      "binary": "D:\\enterpriseProject\\codex-workspace-mcp\\target\\debug\\deps\\codex_workspace_mcp-af94e8aba721d3d4.exe",
+      "binary_sha256": "ab4f855d6717b98ef0cc6b54365577d919b3f9ceb49c74863fffc2dc90624068",
+      "fault_rva": "0x356370d",
+      "loaded_base": "0x7ff6974b0000",
+      "symbol_ok": true,
+      "error": null,
+      "symbol": "alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,alloc::string::String,enum2$<serde_json::value::Value>,enum2$<alloc::collections::btree::node::marker::Leaf> >::push_with_handle<alloc::string::String,enum2$<serde_json::value::Value> >",
+      "displacement": 573,
+      "file": "C:\\Users\\Admin\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\src\\rust\\library\\alloc\\src\\collections\\btree\\node.rs",
+      "line": 674,
+      "line_displacement": 117,
+      "dump": "C:\\Users\\Admin\\AppData\\Local\\CrashDumps\\codex_workspace_mcp-af94e8aba721d3d4.exe.27592.dmp",
+      "dump_sha256": "10b475eb83c08ccc147380b30436e8142baf644b682bc61f8b1800482836e74d",
+      "exception_code": "0xc0000005",
+      "access_type": 1,
+      "bad_address": "0x7",
+      "rip": "0x7ff69aa1370d",
+      "rsp": "0xa414d7ca70",
+      "stack": [
+        {
+          "address": "0x7ff69aa1370d",
+          "rva": "0x356370d",
+          "symbol": "alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,alloc::string::String,enum2$<serde_json::value::Value>,enum2$<alloc::collections::btree::node::marker::Leaf> >::push_with_handle<alloc::string::String,enum2$<serde_json::value::Value> >",
+          "displacement": 573,
+          "file": "C:\\Users\\Admin\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\src\\rust\\library\\alloc\\src\\collections\\btree\\node.rs",
+          "line": 674
+        },
+        {
+          "address": "0x7",
+          "rva": "-0x7ff6974afff9"
+        },
+        {
+          "address": "0x7ff69b389e90",
+          "rva": "0x3ed9e90",
+          "symbol": "impl$<ref$<tuple$<> >, core::fmt::Debug>::vtable$",
+          "displacement": 4352
+        },
+        {
+          "address": "0x217c870f2d0",
+          "rva": "-0x7ddeceda0d30"
+        },
+        {
+          "address": "0x8",
+          "rva": "-0x7ff6974afff8"
+        },
+        {
+          "address": "0x217c870f438",
+          "rva": "-0x7ddeceda0bc8"
+        },
+        {
+          "address": "0xa414d7cce0",
+          "rva": "-0x7f5282733320"
+        },
+        {
+          "address": "0xa414d7ccc0",
+          "rva": "-0x7f5282733340"
+        },
+        {
+          "address": "0xa414d7ccb0",
+          "rva": "-0x7f5282733350"
+        },
+        {
+          "address": "0xa414d7cc98",
+          "rva": "-0x7f5282733368"
+        },
+        {
+          "address": "0x217c870f2d0",
+          "rva": "-0x7ddeceda0d30"
+        }
+      ],
+      "stack_walk_reliable": false,
+      "stack_walk_note": "Only the fault instruction resolved reliably; subsequent frames were unresolved or data symbols. Do not treat them as an established call chain."
+    },
+    "event_log": "runs/codex-vm-stage5fix-windows-fault-events.json",
+    "dump_inventory": "runs/codex-vm-stage5fix-dump-inventory.json"
+  },
+  "intentionally_retained": [
+    "dynamic Function/eval restriction",
+    "public/private fields and static blocks",
+    "generators/async iteration and species algorithms",
+    "arguments and existing unrelated host test failures"
+  ]
+}

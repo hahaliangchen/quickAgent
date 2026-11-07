@@ -1,0 +1,275 @@
+{
+  "stage": "3b",
+  "scope": "prototype chains and ordinary construction; public descriptors/accessors and Reflect deferred",
+  "source_hashes": {
+    "src/agent_program.rs": "fbcd6ea67fbe603b9e2adca450c1379fa2bef2f56e9e0717d04f6ff648cddd29",
+    "src/agent_program/compiler.rs": "b223ab026b84f8349ebc7a0b7b27a0a69842cca3f220e256e31271f2cf9724f1",
+    "src/agent_program/heap.rs": "7e28b8dff4bcf41c4047de9c7163639a8705f17e078335557c981cf76d5cfd49",
+    "src/agent_program/js_prototypes.rs": "933b962f83efe5699b492991a0f9bc586474bd9b3e6e9cc502bf14ec34d99d96",
+    "src/agent_program/js_functions.rs": "6565f193882c03ceea851e3277e98581f1fc8b096c79f7d3cb102cfdf0a37aa1",
+    "src/agent_program/js_methods.rs": "678f6469ab6d711cf907cf72ad592ea0fe50d642f58aa21641a2d95f6d95ca12",
+    "src/agent_program/js_collections.rs": "0d7193f9ead3bcf681cb86e30858236fe62f88b86df89a9e18b4604405a432da",
+    "src/agent_program/js_value.rs": "d22a44cec2aca58bce26808453e74921688e3e7c3b8811d1fc5c8dac2574999b",
+    "src/agent_program/vm_eval.rs": "4aafa60e1b30086a085c34c4ea2ef8af458fb19b690bb2a7660ae1d3bf2ee3c2",
+    "src/agent_program/runtime.rs": "c317dab716aa481c2c94edc02c7a94f5ca2b4312330247232adbf5c16343855b",
+    "src/agent_program/prelude.js": "5dcc1ffd0e924c996b8a12321a7e8a9c51897a9cff12e903ea409d5de074765f",
+    "src/agent_program/tests.rs": "e961f8e6ab09fae6a46a9c7343d55e4702f168c8f2ed72d032b46630212c3041",
+    "src/agent_program/conformance.rs": "c791b73209e4e954739c625bd8014c47933ce4a3708e6c18db4bec6cbbbb2eb6",
+    "prompts/flow_capabilities.md": "baba67bc132f67d63dd56472a37720b0a0d8ae81fdefef384b0160263331d536",
+    "prompts/flow_builtin_contracts.d.ts": "6567bdf922344adb26d12339a14bd9547dae320f4bbad2916e33f3bfbe7acc3b",
+    "docs/agent-program.md": "37003236a7222d1c5de731f3018311bacc339348647fc86d2f55b0d906ff5640"
+  },
+  "new_prototype_tests": [
+    "vm_stage3b_array_holes_read_and_map_inherited_indices",
+    "vm_stage3b_array_json_reads_inherited_indices",
+    "vm_stage3b_bound_function_uses_target_internal_prototype_and_inherited_methods",
+    "vm_stage3b_builtin_instanceof_tracks_changes_without_granting_internal_slots",
+    "vm_stage3b_constructor_object_return_and_invalid_constructor",
+    "vm_stage3b_constructor_suspend_restore_preserves_instance_and_return_rules",
+    "vm_stage3b_frozen_and_immutable_prototypes",
+    "vm_stage3b_function_prototypes_new_and_bound_instanceof",
+    "vm_stage3b_inherited_array_indices_are_visible_to_all_builtin_iterators",
+    "vm_stage3b_inherited_async_method_keeps_receiver_through_await",
+    "vm_stage3b_inherited_enumeration_keeps_own_json_and_non_enumerable_intrinsics",
+    "vm_stage3b_inherited_properties_shadow_delete_and_original_receiver",
+    "vm_stage3b_instanceof_uses_actual_chain_and_runtime_rhs",
+    "vm_stage3b_intrinsic_prototype_hierarchy_and_callable_function_prototype",
+    "vm_stage3b_native_constructor_aliases_and_bound_promise",
+    "vm_stage3b_null_prototype_has_no_implicit_object_methods",
+    "vm_stage3b_object_literal_prototype_and_json_proto_key_are_distinct",
+    "vm_stage3b_own_only_json_round_trip_and_readonly_builtin_constructor_prototype",
+    "vm_stage3b_primitives_box_to_intrinsic_prototypes",
+    "vm_stage3b_prototype_method_changes_are_visible_and_overrides_win",
+    "vm_stage3b_prototype_only_references_survive_gc_and_snapshot",
+    "vm_stage3b_set_prototype_rejects_cycles_and_invalid_inputs",
+    "vm_stage3b_standard_function_prototype_call_apply_bind_and_static_values"
+  ],
+  "vm_suite": "test result: ok. 284 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 4.60s",
+  "full_suite": {
+    "baseline": "runs/codex-vm-stage3a-failure-comparison-20261107.json",
+    "current_log": "runs/codex-vm-stage3b-full-20261107.txt",
+    "complete": true,
+    "summary": "test result: FAILED. 610 passed; 29 failed; 23 ignored; 0 measured; 0 filtered out; finished in 62.71s",
+    "baseline_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "current_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "new_failures": [],
+    "resolved_failures": []
+  },
+  "test262_default": {
+    "baseline": "tests/vm/test262-stage3a.json",
+    "current": "tests/vm/test262-stage3b.json",
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "baseline_counts": {
+      "compile_rejected": 929,
+      "pass": 431,
+      "run_failed": 80,
+      "skipped": 316
+    },
+    "current_counts": {
+      "compile_rejected": 624,
+      "pass": 713,
+      "run_failed": 103,
+      "skipped": 316
+    },
+    "transitions": {
+      "compile_rejected -> pass": 269,
+      "compile_rejected -> run_failed": 36,
+      "run_failed -> pass": 13
+    },
+    "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+    "selection_hash": "17ef1cfab7e61db1b9c1a4a8c9fda1d4d4108b0b3fb116fc3046678adb0a3735"
+  },
+  "test262_functions": {
+    "baseline": "tests/vm/test262-stage3a-functions.json",
+    "current": "tests/vm/test262-stage3b-functions.json",
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "baseline_counts": {
+      "compile_rejected": 441,
+      "pass": 171,
+      "run_failed": 9,
+      "skipped": 17
+    },
+    "current_counts": {
+      "compile_rejected": 351,
+      "pass": 251,
+      "run_failed": 19,
+      "skipped": 17
+    },
+    "transitions": {
+      "compile_rejected -> pass": 80,
+      "compile_rejected -> run_failed": 10
+    },
+    "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+    "selection_hash": "7c564b84eb966c6a1ed5344ad4315b33b3fa94573e56a84609a4abe74d812883"
+  },
+  "test262_prototypes": {
+    "selection": "tests/vm/test262-selection-stage3b-prototypes.json",
+    "counts": {
+      "compile_rejected": 783,
+      "pass": 344,
+      "run_failed": 192,
+      "skipped": 334
+    },
+    "groups": {
+      "built-ins/Object/create": {
+        "pass": 35,
+        "run_failed": 171,
+        "compile_rejected": 113,
+        "skipped": 1
+      },
+      "built-ins/Object/getPrototypeOf": {
+        "pass": 34,
+        "compile_rejected": 4,
+        "run_failed": 1
+      },
+      "built-ins/Object/setPrototypeOf": {
+        "skipped": 2,
+        "compile_rejected": 8,
+        "pass": 2
+      },
+      "built-ins/Object/prototype/isPrototypeOf": {
+        "skipped": 1,
+        "compile_rejected": 7,
+        "pass": 2
+      },
+      "language/expressions/instanceof": {
+        "compile_rejected": 27,
+        "pass": 15,
+        "run_failed": 1
+      },
+      "language/expressions/new": {
+        "compile_rejected": 40,
+        "pass": 18,
+        "skipped": 1
+      },
+      "language/expressions/object": {
+        "compile_rejected": 584,
+        "pass": 238,
+        "skipped": 329,
+        "run_failed": 19
+      }
+    },
+    "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+    "selection_hash": "20986848b1d3cfaa5fd8fdbc989d3ac44b6fbddc0056883bc1faa565046b83b8",
+    "first_measurement_no_prior_baseline": true
+  },
+  "extra_selections_overlap_and_must_not_be_added": true,
+  "corpus": {
+    "baseline": "tests/vm/corpus-stage3a.json",
+    "current": "tests/vm/corpus-stage3b.json",
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "baseline_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "current_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "transitions": {},
+    "revision": "1e73f5c9433e96739b9e41aa5711c74f9a367509c25cd4f68c605c4b7c430cd1",
+    "selection_hash": "6dad971b7155855075e7dd550de82f5c5033c7e1806f724a889d8c3fc882a38b"
+  },
+  "frozen_corpus_sha256": "1e73f5c9433e96739b9e41aa5711c74f9a367509c25cd4f68c605c4b7c430cd1",
+  "node_oracle": {
+    "version": "v22.5.1",
+    "script": "tests/vm/prototypes-oracle.cjs",
+    "result": [
+      7,
+      7,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      [],
+      [
+        "read"
+      ]
+    ]
+  },
+  "production_check": "passed",
+  "builtin_contract_syntax_diagnostics": 0,
+  "real_models_called": false,
+  "notes": [
+    "A final full-test build crashed with STATUS_ACCESS_VIOLATION before tests; retained log and retried.",
+    "Default test262 exposed missing ArrayLike Iterator.prototype.next; fixed and reran all final measurements.",
+    "Prelude hash changed: old-prelude snapshots are rejected by existing guard; current snapshots round-trip.",
+    "Public descriptors/accessors, Reflect, Symbol iterator and class/new.target remain later stages."
+  ]
+}

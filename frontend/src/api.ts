@@ -171,6 +171,9 @@ export interface ModelCatalog {
 }
 
 export interface SettingsData {
+  readonly bash_path?: string | null
+  readonly pwsh_path?: string | null
+  readonly shell_environment?: import('./shellSetup.ts').ShellStatus
   readonly plugin_models?: Readonly<Record<string,readonly ModelRef[]>>
   readonly visual_tool?: ModelUseSettings
   readonly delegate_agent?: ModelUseSettings
@@ -195,6 +198,8 @@ export interface SaveProviderInput {
 }
 
 export interface SaveSettingsInput {
+  readonly bash_path?: string
+  readonly pwsh_path?: string
   readonly plugin_models?: Readonly<Record<string,readonly ModelRef[]>>
   readonly visual_tool?: ModelUseSettings
   readonly delegate_agent?: ModelUseSettings
@@ -469,7 +474,7 @@ export const api = {
   info: () => request<AgentInfo>('/agent/info'),
   listTasks: async (limit = 50) => (await request<{ tasks: Task[] }>(`/agent/tasks?limit=${limit}`)).tasks,
   projects: async () => (await request<{projects: Project[]}>('/agent/workspaces')).projects,
-  addProject: (path: string) => post<Project>('/agent/workspaces', {path}),
+  addProject: (path: string, title?: string) => post<Project>('/agent/workspaces', {path, title}),
   renameProject: (path: string, title: string) => patch('/agent/workspaces', {path, title}),
   removeProject: (path: string) => request('/agent/workspaces', {method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({path})}),
   updateSession: (id: string, payload: {title?: string; pinned?: boolean; archived?: boolean}) => patch(`/agent/sessions/${encodeURIComponent(id)}`, payload),

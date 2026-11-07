@@ -37,6 +37,12 @@ pub fn needs_approval(
     catalog: Option<&crate::builtin_plugins::ToolCatalog>,
     ban_execution: bool,
 ) -> bool {
+    if crate::shell_process::is_tool(name) {
+        return name != "kill_session" && (
+            (cfg!(windows) && (ban_execution || !matches!(mode, PermissionMode::FullAccess)))
+            || (!cfg!(windows) && matches!(mode, PermissionMode::Ask))
+        );
+    }
     matches!(mode, PermissionMode::Ask)
         && (crate::project_process::is_execution(name) || !(PermissionMode::WorkspaceWrite.allows(name)
             && catalog.is_none_or(|c| {
@@ -90,7 +96,10 @@ pub async fn wait(
 ) -> Result<()> {
     let root = state.workspace.root().to_path_buf();
     let project = crate::project_notes::task_project(&root, task)?;
-    let scopes = grant_scopes(task, project.as_deref());
+    let mut scopes = grant_scopes(task, project.as_deref());
+    if crate::shell_process::is_tool(name) {
+        scopes = scopes.into_iter().map(|scope| format!("shell:{scope}")).collect();
+    }
     if granted(&open(&root)?, &scopes)? {
         return Ok(());
     }
@@ -107,7 +116,10 @@ pub async fn wait(
         task,
         "approval/request",
         &json!({"call_id":call_id,"tool":name,"arguments":detail,"agent_id":agent_id,
-        "project":project}),
+        "project":project,
+        "full_arguments":crate::shell_process::is_tool(name).then_some(args),
+        "unsandboxed":crate::shell_process::is_tool(name) && cfg!(windows),
+        "shell":crate::shell_process::is_tool(name).then_some(if cfg!(windows) {"PowerShell 7"} else {"Bash"})}),
     )?;
     let waited: Result<String> = async {
         loop {
@@ -218,6 +230,50 @@ pub async fn decide(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_approvals_reflect_missing_windows_sandbox_and_keep_cleanup_free() {
+        for mode in [PermissionMode::ReadOnly, PermissionMode::WorkspaceWrite, PermissionMode::Ask, PermissionMode::FullAccess] {
+            assert!(mode.allows("exec_command"));
+            assert_eq!(needs_approval(mode,"exec_command",None,false), if cfg!(windows) {
+                !matches!(mode,PermissionMode::FullAccess)
+            } else { matches!(mode,PermissionMode::Ask) });
+            assert_eq!(needs_approval(mode,"exec_command",None,true), cfg!(windows) || matches!(mode,PermissionMode::Ask));
+            assert!(!needs_approval(mode,"kill_session",None,true));
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_does_not_reuse_browser_grants_and_shows_the_complete_command() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("shell-approval-{}",agent_service::uuid_like()));
+        std::fs::create_dir_all(&root)?;
+        let state = agent_service::tests::test_state(&root,"127.0.0.1:9".parse()?);
+        open(&root)?.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','','fake','running',0,0)",[])?;
+        open(&root)?.execute("INSERT INTO tool_approval_grants(scope) VALUES ('task:t')",[])?;
+        let command = format!("echo '{}tail'","x".repeat(2500));
+        let args = json!({"cmd":command,"workdir":"."});
+        let cancel = CancellationToken::new();
+        let waiter = wait(&state,"t",None,"shell-call","exec_command",&args,&cancel);
+        let decide = async {
+            for _ in 0..50 {
+                let conn = open(&root)?;
+                let pending: Option<String> = conn.query_row("SELECT data FROM agent_task_events WHERE task_id='t' AND kind='approval/request'",[],|r|r.get(0)).optional()?;
+                if let Some(raw) = pending {
+                    let event:Value = serde_json::from_str(&raw)?;
+                    assert_eq!(event["full_arguments"]["cmd"],command);
+                    assert_eq!(event["unsandboxed"],cfg!(windows));
+                    conn.execute("INSERT INTO tool_approvals VALUES ('t','shell-call','session')",[])?;
+                    return Ok::<_,anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            bail!("shell wrongly reused the existing generic approval grant")
+        };
+        let (a,b) = tokio::join!(waiter,decide);
+        a?; b?;
+        assert!(granted(&open(&root)?,&["shell:task:t".into()])?);
+        Ok(())
+    }
 
     #[test]
     fn ask_mode_gates_only_execution() {

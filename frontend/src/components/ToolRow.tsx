@@ -23,7 +23,7 @@ import { VisualArtifactPreview } from './VisualMaterials.tsx'
 import type { VisualRecord } from '../visual.ts'
 import { toolVisual } from './toolVisuals.tsx'
 
-const SUMMARY_FIELDS = ['path', 'file_path', 'TargetFile', 'AbsolutePath', 'query', 'pattern', 'command', 'CommandLine', 'program', 'symbol', 'symbol_id', 'name', 'prompt', 'area']
+const SUMMARY_FIELDS = ['path', 'file_path', 'TargetFile', 'AbsolutePath', 'query', 'pattern', 'cmd', 'command', 'CommandLine', 'program', 'symbol', 'symbol_id', 'name', 'prompt', 'area']
 
 function parse(raw: string): unknown {
   try { return JSON.parse(raw) } catch { return raw }
@@ -200,8 +200,19 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
   const { expanded, toggle } = useDisclosure()
   const args = useMemo(() => parse(rawArguments), [rawArguments])
   const visual = useMemo(() => toolVisual(name, args, result && !result.isError ? parse(result.text) : undefined), [name, args, result])
-  const state = result === undefined ? (stopped ? 'stopped' : 'running') : result.isError ? 'error' : 'ok'
+  const isShellSession = name === 'exec_command' || name === 'write_stdin' || name === 'kill_session'
+  const shellParsed = isShellSession && result ? parse(result.text) : undefined
+  const shellResult = typeof shellParsed === 'object' && shellParsed !== null && !Array.isArray(shellParsed)
+    ? shellParsed as Record<string, unknown> : undefined
+  const shellExitCode = typeof shellResult?.exit_code === 'number' ? shellResult.exit_code : null
+  const state = result === undefined ? (stopped ? 'stopped' : 'running')
+    : result.isError ? 'error'
+    : shellResult?.running === true ? 'running'
+    : isShellSession && shellExitCode !== null && shellExitCode !== 0 ? 'error' : 'ok'
   const running = state === 'running'
+  const shellStatus = running ? '运行中' : state === 'stopped' ? '已中断'
+    : shellExitCode !== null ? `退出码 ${shellExitCode}`
+    : state === 'error' ? '失败' : '已结束（无退出码）'
   const nativeParsed = name === 'run_program' && result ? parse(result.text) : undefined
   const nativeResult = typeof nativeParsed === 'object' && nativeParsed !== null ? nativeParsed as Record<string, unknown> : undefined
   const nativeDiagnostics = nativeResult
@@ -223,7 +234,7 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
     const value = result ? parse(result.text) as VisualRecord : null
     return value && typeof value === 'object' && value.visual_artifact ? value.visual_artifact as VisualRecord : undefined
   }, [result])
-  const errorLine = result?.isError === true ? result.text.split('\n')[0] ?? '' : ''
+  const errorLine = result?.isError === true && !shellResult ? result.text.split('\n')[0] ?? '' : ''
   const nativeSummary = nativeResult
     ? nativeResult.outcome === 'exited'
       ? `退出码 ${String(nativeResult.process_exit_code ?? '未知')}${nativeDiagnostics.length > 0 ? ` · ${nativeDiagnostics.length} 项输出诊断` : ''}`
@@ -231,7 +242,8 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
     : ''
   const ownSummary = name === 'run_program' ? nativeSummary : errorLine !== '' ? errorLine : visual.summary ?? summaryOf(args)
   const summaryText = line === undefined ? ownSummary : [`第 ${line} 行`, ownSummary].filter(Boolean).join(' · ')
-  const duration = result?.durationMs === undefined ? null : `${result.durationMs} ms`
+  const durationMs = result?.durationMs ?? (typeof shellResult?.duration_ms === 'number' ? shellResult.duration_ms : undefined)
+  const duration = durationMs === undefined ? null : `${durationMs} ms`
 
   const diffs = useMemo(() => extractDiffHunks(name, args, result), [name, args, result])
   const diffStats = useMemo(() => (diffs ? diffTotals(diffs) : undefined), [diffs])
@@ -304,12 +316,13 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
     expand: hidden => `⋯ 展开其余 ${hidden} 项`,
   }), [])
 
-  const collapsedContent = (summaryText !== '' || duration !== null || diffStats !== undefined) && (
+  const collapsedContent = (summaryText !== '' || duration !== null || diffStats !== undefined || isShellSession) && (
     <>
       <span className={css.sep} aria-hidden>·</span>
       <span className={clsx(css.summary, state === 'error' && css.errorSummary, state === 'stopped' && css.stoppedSummary)}>
         <TextShimmer active={running}>{summaryText}</TextShimmer>
       </span>
+      {isShellSession && <span className={clsx(css.shellState, state === 'error' && css.errorSummary)}>{shellStatus}</span>}
       {diffStats !== undefined && (diffStats.added > 0 || diffStats.removed > 0) && (
         <span className={css.diffStat}>
           {diffStats.added > 0 && <span className={css.diffAdd}>+{diffStats.added}</span>}
@@ -321,13 +334,17 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
   )
 
   const childTaskId = result?.childTaskId
-  const isCommand = name === 'run_program' || name === 'run_command' || /bash|shell|exec/.test(name)
+  const isCommand = isShellSession || name === 'run_program' || name === 'run_command' || /bash|shell|exec/.test(name)
   const cmdRecord = typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {}
   const nativeArgs = Array.isArray(cmdRecord.args) ? cmdRecord.args.map(value => JSON.stringify(String(value))).join(' ') : ''
   const commandStr = name === 'run_program'
     ? `${String(cmdRecord.program ?? '')}${nativeArgs ? ` ${nativeArgs}` : ''}`
-    : String(cmdRecord.command ?? cmdRecord.CommandLine ?? ownSummary)
-  const cwdStr = typeof cmdRecord.project_path === 'string'
+    : name === 'write_stdin' || name === 'kill_session'
+      ? `${name}(${String(cmdRecord.session_id ?? '未知')}${name === 'write_stdin' && typeof cmdRecord.chars === 'string' ? `, ${JSON.stringify(cmdRecord.chars)}` : ''})`
+      : String(cmdRecord.cmd ?? cmdRecord.command ?? cmdRecord.CommandLine ?? ownSummary)
+  const cwdStr = typeof cmdRecord.workdir === 'string'
+    ? cmdRecord.workdir
+    : typeof cmdRecord.project_path === 'string'
     ? cmdRecord.project_path
     : typeof cmdRecord.cwd === 'string'
     ? cmdRecord.cwd
@@ -340,6 +357,16 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
       .filter((part): part is string => typeof part === 'string' && part.length > 0).join('\n')
     : undefined
   const nativeExitCode = typeof nativeResult?.process_exit_code === 'number' ? nativeResult.process_exit_code : null
+  const shellOutput = shellResult && (typeof shellResult.stdout === 'string' || typeof shellResult.stderr === 'string')
+    ? [shellResult.stdout, shellResult.stderr].filter((part): part is string => typeof part === 'string' && part.length > 0).join('\n')
+    : result?.text
+  const shellSessionId = shellResult?.session_id ?? cmdRecord.session_id
+  const shellReferences = isShellSession && shellResult
+    ? (['output_asset', 'read_reference'] as const).flatMap(key => {
+        const value = shellResult[key]
+        return value === undefined || value === null ? [] : [`${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`]
+      })
+    : []
 
   return (
     <div className={css.root} data-variant="generic" data-tool={name} data-tone={visual.tone} data-state={state}>
@@ -362,14 +389,25 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
         {expanded && (
           <div className={css.bodyWrap}>
             {visualArtifact && <VisualArtifactPreview artifact={visualArtifact} />}
+            {isShellSession && (
+              <div className={css.shellMeta}>
+                <span>{typeof shellResult?.shell === 'string' ? shellResult.shell : 'Shell'} · {shellStatus}</span>
+                {cwdStr !== undefined && <span>工作目录：{cwdStr}</span>}
+                {shellSessionId !== undefined && shellSessionId !== null && <span>会话：{String(shellSessionId)}</span>}
+                {typeof shellResult?.encoding === 'string' && <span>编码：{shellResult.encoding}</span>}
+                {shellResult?.truncated === true && <span className={css.stoppedSummary}>输出已截断</span>}
+              </div>
+            )}
             {isCommand
               ? (
                   <TerminalBlock
                     command={commandStr}
                     cwd={cwdStr}
-                    output={name === 'run_program' ? nativeOutput : result?.text}
-                    exitCode={name === 'run_program' ? nativeExitCode : result === undefined ? undefined : result.isError ? 1 : 0}
+                    output={isShellSession ? shellOutput : name === 'run_program' ? nativeOutput : result?.text}
+                    exitCode={isShellSession ? running ? undefined : shellExitCode ?? undefined : name === 'run_program' ? nativeExitCode : result === undefined ? undefined : result.isError ? 1 : 0}
                     running={running}
+                    runStateDot={!isShellSession}
+                    className={isShellSession ? clsx(css.terminalBody, css.shellTerminal) : undefined}
                     labels={terminalLabels}
                   />
                 )
@@ -421,6 +459,7 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
                             badges={paramBadges}
                           />
                         )}
+            {shellReferences.length > 0 && <div className={css.searchRecovery}>{shellReferences.join('\n')}</div>}
             {childTaskId !== undefined && (
               <button type="button" className={css.inspectButton} onClick={() => { onOpenChild(childTaskId) }}>
                 {t('app.viewSubagent')}

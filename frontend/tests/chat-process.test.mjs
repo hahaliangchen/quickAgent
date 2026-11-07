@@ -36,6 +36,129 @@ test('completed turns can report tool failures without claiming they were not re
   assert.deepEqual(failedToolNames(items), ['browser'])
 })
 
+const shellRows = events => flattenItems(chatItems(events)).filter(item => item.kind === 'tool')
+
+test('shell end settles earlier running rows without replaying or mutating their output', () => {
+  seq = 0
+  const launch = { session_id: 's1', running: true, exit_code: null, stdout: 'initial output', stderr: '', truncated: true, output_asset: { asset_id: 'initial' } }
+  const events = [call('module', 'exec', 'exec_command', { cmd: 'npm run dev' }),
+    result('module', 'exec', JSON.stringify(launch)),
+    call('module', 'poll', 'write_stdin', { session_id: 's1', chars: '' }),
+    result('module', 'poll', JSON.stringify({ session_id: 's1', running: true, stdout: 'poll output', stderr: 'poll diagnostic' })),
+    event('shell/end', { session_id: 's1', exit_code: 9, termination_reason: 'process_exit', output_asset: { asset_id: 'final' }, errors: ['capture diagnostic'], stdout: 'must not replay' })]
+  events[1].data.meta = { durationMs: 12 }
+  const original = JSON.stringify(events)
+  const rows = shellRows(events)
+  assert.equal(rows.length, 2)
+  const [exec, poll] = rows.map(row => JSON.parse(row.result.text))
+  for (const value of [exec, poll]) {
+    assert.equal(value.running, false)
+    assert.equal(value.exit_code, 9)
+    assert.equal(value.termination_reason, 'process_exit')
+    assert.deepEqual(value.output_asset, { asset_id: 'final' })
+    assert.deepEqual(value.errors, ['capture diagnostic'])
+  }
+  assert.equal(exec.stdout, 'initial output')
+  assert.equal(exec.stderr, '')
+  assert.equal(exec.truncated, true, 'the launch row still holds a truncated capture')
+  assert.equal(poll.stdout, 'poll output')
+  assert.equal(poll.stderr, 'poll diagnostic')
+  assert.equal(rows[0].result.durationMs, 12)
+  assert.equal(rows[0].result.time, events[1].time)
+  assert.equal(JSON.stringify(events), original, 'the persisted log remains unchanged')
+  assert.deepEqual(shellRows(JSON.parse(original).reverse()), rows, 'history reload sorts by seq before projecting final state')
+})
+
+test('a completed poll or kill settles the launching row without a shell end event', () => {
+  for (const name of ['write_stdin', 'kill_session']) {
+    for (const session_id of ['s1', null, undefined]) {
+      seq = 0
+      const events = [call('module', 'exec', 'exec_command', { cmd: 'server' }),
+        result('module', 'exec', JSON.stringify({ session_id: 's1', running: true, stdout: 'launch' })),
+        call('other-frame', 'finish', name, { session_id: 's1', chars: '' }),
+        result('other-frame', 'finish', JSON.stringify({ session_id, running: false, exit_code: 0, stdout: 'final output', stderr: 'final diagnostic', output_asset: 'final-asset' }))]
+      const rows = shellRows(events)
+      const first = JSON.parse(rows[0].result.text)
+      assert.equal(first.running, false, `${name}: ${session_id}`)
+      assert.equal(first.exit_code, 0)
+      assert.equal(first.output_asset, 'final-asset')
+      assert.equal(first.stdout, 'launch')
+      assert.equal(first.stderr, undefined)
+      assert.equal(JSON.parse(rows[1].result.text).stdout, 'final output')
+    }
+  }
+})
+
+test('latest terminal metadata wins while later running snapshots cannot resurrect a session', () => {
+  seq = 0
+  const events = [call('module', 'exec', 'exec_command', { cmd: 'server' }),
+    result('module', 'exec', JSON.stringify({ session_id: 's1', running: true, stdout: 'launch' })),
+    event('shell/end', { session_id: 's1', exit_code: 1, errors: ['first'] }),
+    call('module', 'finish', 'kill_session', { session_id: 's1' }),
+    result('module', 'finish', JSON.stringify({ session_id: 's1', running: false, exit_code: 2, stdout: 'kill output' })),
+    event('shell/end', { session_id: 's1', exit_code: null, termination_reason: 'requested_stop', output_asset: 'last-asset', errors: [] }),
+    call('module', 'late', 'write_stdin', { session_id: 's1', chars: '' }),
+    result('module', 'late', JSON.stringify({ session_id: 's1', running: true, stdout: 'late capture' }))]
+  for (const row of shellRows(events)) {
+    const value = JSON.parse(row.result.text)
+    assert.equal(value.running, false)
+    assert.equal(value.exit_code, null, 'a killed session does not invent an exit code')
+    assert.equal(value.termination_reason, 'requested_stop')
+    assert.equal(value.output_asset, 'last-asset')
+    assert.deepEqual(value.errors, [])
+  }
+})
+
+test('shell completion stays scoped to its session and shell tool calls', () => {
+  seq = 0
+  const live = JSON.stringify({ session_id: 's2', running: true, stdout: 'keep running' })
+  const unrelated = JSON.stringify({ session_id: 's1', running: true, stdout: 'unrelated tool' })
+  const events = [call('module', 'one', 'exec_command', { cmd: 'first' }),
+    result('module', 'one', '{"session_id":"s1","running":true}'),
+    call('module', 'two', 'exec_command', { cmd: 'second' }), result('module', 'two', live),
+    call('module', 'read', 'read_file', { path: 'data.json' }), result('module', 'read', unrelated),
+    call('module', 'error', 'write_stdin', { session_id: 's1' }), result('module', 'error', 'session scope denied', true),
+    call('module', 'pending', 'exec_command', { cmd: 'pending' }),
+    event('shell/end', { session_id: 's1', exit_code: 0 })]
+  const rows = shellRows(events)
+  assert.equal(JSON.parse(rows[0].result.text).running, false)
+  assert.equal(rows[1].result.text, live)
+  assert.equal(rows[2].result.text, unrelated)
+  assert.equal(rows[3].result.text, 'session scope denied')
+  assert.equal(rows[3].result.isError, true)
+  assert.equal(rows[4].result, undefined)
+})
+
+test('a turn ending alone does not settle a live shell', () => {
+  seq = 0
+  const raw = '{"session_id":"s1","running":true,"exit_code":null,"stdout":"still alive"}'
+  const events = [call('module', 'exec', 'exec_command', { cmd: 'server' }), result('module', 'exec', raw),
+    event('turn/end', { reason: { kind: 'completed' } })]
+  assert.equal(shellRows(events)[0].result.text, raw)
+})
+
+test('numeric shell ids and structured call arguments can recover a finished session', () => {
+  seq = 0
+  const finish = call('module', 'finish', 'write_stdin', {})
+  finish.data.arguments = { session_id: 42, chars: '' }
+  const events = [call('module', 'exec', 'exec_command', { cmd: 'server' }),
+    result('module', 'exec', '{"session_id":42,"running":true,"stdout":"initial"}'), finish,
+    result('module', 'finish', '{"session_id":null,"running":false,"exit_code":0,"stdout":"finished"}'),
+    event('shell/end', { session_id: '', exit_code: 9 })]
+  assert.equal(JSON.parse(shellRows(events)[0].result.text).running, false)
+  assert.equal(JSON.parse(shellRows(events)[0].result.text).exit_code, 0)
+})
+
+test('a later opaque tool error is not replaced by an older shell snapshot', () => {
+  seq = 0
+  const events = [call('module', 'poll', 'write_stdin', { session_id: 's1' }),
+    result('module', 'poll', '{"session_id":"s1","running":true,"stdout":"old"}'),
+    result('module', 'poll', 'latest error', true), event('shell/end', { session_id: 's1', exit_code: 0 })]
+  const row = shellRows(events)[0]
+  assert.equal(row.result.text, 'latest error')
+  assert.equal(row.result.isError, true)
+})
+
 /** The shape of a real turn: the main AI looks around, writes a program, the program reads a file and calls a virtual function. */
 function turn() {
   seq = 0

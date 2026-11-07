@@ -30,7 +30,10 @@ fn new_array(heap: &mut Heap, items: Vec<VmValue>) -> Result<VmValue> {
 }
 fn array_items(heap: &Heap, id: HeapId) -> Result<Vec<VmValue>> {
     match heap.get(id)? {
-        HeapNode::Array(items) => Ok(items.clone()),
+        HeapNode::Array(items) => {
+            for i in 0..items.len(){ensure!(heap.descriptor_owner(id,&i.to_string())?.is_none_or(|(_,d)|d.accessor.is_none()),"TypeError: accessor needs resumable evaluation in this array builtin; materialize values with Array.from first");}
+            Ok(items.clone())
+        },
         _ => bail!("TypeError: receiver is not an array"),
     }
 }
@@ -47,9 +50,9 @@ fn same_value_zero(a: &VmValue, b: &VmValue) -> bool {
 pub(super) fn method_arity(name: &str) -> Option<(usize, usize)> {
     Some(match name {
         "at" | "repeat" | "search" | "match" | "matchAll" | "test" | "exec" => (1, 1),
-        "charAt" | "charCodeAt" | "codePointAt" | "toFixed" | "join" | "flat" | "toString"
+        "charAt" | "charCodeAt" | "codePointAt" | "toFixed" | "toExponential" | "join" | "flat" | "toString"
         | "toLowerCase" | "toUpperCase" | "toLocaleLowerCase" | "toLocaleUpperCase"
-        | "toLocaleString" => (0, 1),
+        => (0, 1),
         "includes" | "indexOf" | "lastIndexOf" | "startsWith" | "endsWith" | "padStart"
         | "padEnd" => (1, 2),
         "slice" | "split" | "substring" | "substr" => (0, 2),
@@ -59,6 +62,10 @@ pub(super) fn method_arity(name: &str) -> Option<(usize, usize)> {
         "concat" | "push" | "unshift" | "splice" => (0, 64),
         "fill" => (1, 3),
         "sort" | "toSorted" => (0, 1),
+        "getTime" | "toISOString" | "toJSON" | "getFullYear" | "getMonth" | "getDate"
+        | "getDay" | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds"
+        | "getUTCFullYear" | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours"
+        | "getUTCMinutes" | "getUTCSeconds" | "getUTCMilliseconds" => (0, 0),
         _ => return None,
     })
 }
@@ -68,6 +75,7 @@ pub(super) fn unavailable_method(name: &str) -> Option<&'static str> {
     Some(match name {
         "localeCompare" => "localeCompare depends on locale collation data that the flow runtime does not have; compare strings with < and > (code point order)",
         "normalize" => "String.prototype.normalize is unavailable in the flow runtime",
+        "toLocaleString" | "toLocaleDateString" | "toLocaleTimeString" => "toLocale* depends on locale data that the flow runtime does not have; use toISOString() or manually format the date components",
         _ => return None,
     })
 }
@@ -178,7 +186,7 @@ fn names_of(re: &regex::Regex, captures: &regex::Captures<'_>) -> Vec<(String, O
 }
 
 /// The match array of RegExpBuiltinExec, with undefined for unmatched groups.
-fn match_array(heap: &mut Heap, captures: &regex::Captures<'_>) -> Result<VmValue> {
+fn match_array(heap: &mut Heap, re: &regex::Regex, captures: &regex::Captures<'_>, input: &str) -> Result<VmValue> {
     ensure!(
         captures.len() <= REGEX_RESULT_LIMIT,
         "RangeError: regex capture result exceeds 10000 items"
@@ -190,7 +198,17 @@ fn match_array(heap: &mut Heap, captures: &regex::Captures<'_>) -> Result<VmValu
             None => VmValue::Undefined,
         })
         .collect();
-    new_array(heap, items)
+    let value = new_array(heap, items)?;
+    let VmValue::Reference(id) = value else { unreachable!() };
+    let names = names_of(re, captures);
+    let groups = if names.is_empty() { VmValue::Undefined } else {
+        let fields = names.into_iter().map(|(key, value)| (key, value.map(VmValue::String).unwrap_or(VmValue::Undefined))).collect();
+        VmValue::Reference(heap.allocate(HeapNode::Object(fields))?)
+    };
+    heap.set_property(id, "groups".into(), groups)?;
+    heap.set_property(id, "index".into(), number(char_index(input, captures.get(0).unwrap().start()) as f64))?;
+    heap.set_property(id, "input".into(), VmValue::String(input.to_owned()))?;
+    Ok(value)
 }
 
 /// A string pattern used where a RegExp is expected becomes `new RegExp(pattern)`.
@@ -464,7 +482,7 @@ fn string_method(heap: &mut Heap, text: &str, name: &str, args: &[VmValue]) -> R
                 if matches.is_empty() { VmValue::Null } else { new_array(heap, matches)? }
             } else {
                 match re.captures(text) {
-                    Some(captures) => match_array(heap, &captures)?,
+                    Some(captures) => match_array(heap, &re, &captures, text)?,
                     None => VmValue::Null,
                 }
             }
@@ -479,7 +497,7 @@ fn string_method(heap: &mut Heap, text: &str, name: &str, args: &[VmValue]) -> R
             let mut all = Vec::new();
             for captures in re.captures_iter(text) {
                 ensure!(all.len() < REGEX_RESULT_LIMIT, "RangeError: regex match result exceeds 10000 items");
-                all.push(match_array(heap, &captures)?);
+                all.push(match_array(heap, &re, &captures, text)?);
             }
             new_array(heap, all)?
         }
@@ -544,6 +562,7 @@ fn default_sort(heap: &Heap, items: Vec<VmValue>) -> Result<Vec<VmValue>> {
 /// Array.prototype methods that take no callback. Callback methods are
 /// compiled into the calling frame so that callbacks can suspend.
 fn array_method(heap: &mut Heap, id: HeapId, name: &str, args: &[VmValue]) -> Result<VmValue> {
+    if matches!(name,"keys"|"values"|"entries") {let kind=match name{"keys"=>super::js_collections::Iteration::Keys,"entries"=>super::js_collections::Iteration::Entries,_=>super::js_collections::Iteration::Values};return super::js_collections::iterator(heap,VmValue::Reference(id),Some(kind),false);}
     let items = array_items(heap, id)?;
     let holes = heap.holes(id);
     let len = items.len();
@@ -760,19 +779,6 @@ fn array_method(heap: &mut Heap, id: HeapId, name: &str, args: &[VmValue]) -> Re
             flatten(heap, id, depth, &mut out)?;
             new_array(heap, out)?
         }
-        "keys" => new_array(heap, (0..len).map(|i| number(i as f64)).collect())?,
-        "values" => new_array(
-            heap,
-            items.iter().enumerate().map(|(i, v)| if present(i) { v.clone() } else { VmValue::Undefined }).collect(),
-        )?,
-        "entries" => {
-            let mut out = Vec::with_capacity(len);
-            for (index, item) in items.iter().enumerate() {
-                let value = if present(index) { item.clone() } else { VmValue::Undefined };
-                out.push(new_array(heap, vec![number(index as f64), value])?);
-            }
-            new_array(heap, out)?
-        }
         "sort" | "toSorted" => {
             ensure!(
                 matches!(arg(args, 0), VmValue::Undefined),
@@ -898,8 +904,40 @@ fn locale_string(value: f64) -> String {
     }
 }
 
+/// Exact decimal rounding of the binary number, choosing the larger
+/// significand at ties. Rust precision formatting uses a different tie rule.
+fn to_exponential(value:f64, digits:Option<usize>)->String {
+    if !value.is_finite(){return number_to_string(value);}
+    let negative=value<0.0;
+    let abs=value.abs();
+    if digits.is_none(){
+        let text=format!("{abs:e}");let (mantissa,exponent)=text.split_once('e').unwrap();
+        let exponent:i32=exponent.parse().unwrap();return format!("{}{mantissa}e{exponent:+}",if negative{"-"}else{""});
+    }
+    let count=digits.unwrap()+1;
+    let exact=format!("{abs:.1100}");let (whole,fraction)=exact.split_once('.').unwrap();
+    let all:Vec<u8>=whole.bytes().chain(fraction.bytes()).map(|b|b-b'0').collect();
+    let first=all.iter().position(|n|*n!=0);
+    let mut exponent=first.map(|i|whole.len() as i32-i as i32-1).unwrap_or(0);
+    let mut out=if let Some(first)=first{all[first..].iter().copied().take(count).collect::<Vec<_>>()}else{vec![]};
+    out.resize(count,0);
+    if first.is_some_and(|first|all.get(first+count).is_some_and(|digit|*digit>=5)){
+        let mut i=count;loop{if i==0{out.insert(0,1);out.pop();exponent+=1;break;}i-=1;if out[i]==9{out[i]=0;}else{out[i]+=1;break;}}
+    }
+    let mut text=String::new();if negative{text.push('-');}text.push((b'0'+out[0])as char);
+    if count>1{text.push('.');text.extend(out[1..].iter().map(|n|(b'0'+*n)as char));}
+    format!("{text}e{exponent:+}")
+}
+
 fn number_method(heap: &mut Heap, value: f64, name: &str, args: &[VmValue]) -> Result<VmValue> {
     Ok(match name {
+        "toExponential"=>{
+            let argument=arg(args,0);
+            let digits=integer_or_infinity(to_number(heap,&argument)?);
+            if !value.is_finite(){return Ok(VmValue::String(number_to_string(value)));}
+            ensure!((0.0..=100.0).contains(&digits),"RangeError: Number.prototype.toExponential fractionDigits must be between 0 and 100");
+            VmValue::String(to_exponential(value,if argument==VmValue::Undefined{None}else{Some(digits as usize)}))
+        },
         "toFixed" => {
             let digits = integer_or_infinity(to_number(heap, &arg(args, 0))?);
             ensure!((0.0..=100.0).contains(&digits), "RangeError: toFixed() digits argument must be between 0 and 100");
@@ -938,7 +976,7 @@ fn regex_method(heap: &mut Heap, pattern: &str, flags: &str, name: &str, args: &
     Ok(match name {
         "test" => VmValue::Boolean(re.is_match(&input)),
         "exec" => match re.captures(&input) {
-            Some(captures) => match_array(heap, &captures)?,
+            Some(captures) => match_array(heap, &re, &captures, &input)?,
             None => VmValue::Null,
         },
         "toString" => VmValue::String(format!("/{pattern}/{flags}")),
@@ -948,8 +986,34 @@ fn regex_method(heap: &mut Heap, pattern: &str, flags: &str, name: &str, args: &
 
 /// Call `receiver.name(...args)` for a built-in receiver kind.
 pub(super) fn call_method(heap: &mut Heap, receiver: VmValue, name: &str, args: &[VmValue]) -> Result<VmValue> {
+    if name=="hasOwnProperty" {
+        let key=arg(args,0);
+        return builtin(heap,"Object.hasOwn",&[receiver,key]);
+    }
+    if name=="valueOf" && matches!(&receiver,VmValue::Reference(id) if heap.date_value(*id).is_none()) {return Ok(receiver);}
+    if matches!(&receiver,VmValue::Reference(id) if matches!(heap.get(*id),Ok(HeapNode::Collection(_) | HeapNode::Iterator(_)))) {
+        return super::js_collections::call(heap,receiver,name,args);
+    }
     match receiver {
         VmValue::String(text) => string_method(heap, &text, name, args),
+        VmValue::Utf16(units) => {
+            match name {
+                "valueOf" | "toString" => Ok(VmValue::Utf16(units)),
+                "charCodeAt" | "codePointAt" | "charAt" | "at" => {
+                    let index = integer_or_infinity(to_number(heap, &arg(args,0))?);
+                    let index = if name == "at" && index < 0.0 { units.len() as f64 + index } else { index };
+                    let value = if index >= 0.0 && index < units.len() as f64 { units.get(index as usize).copied() } else { None };
+                    Ok(match (name, value) {
+                        ("charCodeAt" | "codePointAt", Some(unit)) => number(unit as f64),
+                        ("charCodeAt", None) => number(f64::NAN),
+                        ("charAt", None) => VmValue::String(String::new()),
+                        (_, Some(unit)) => super::js_value::from_utf16(vec![unit]),
+                        _ => VmValue::Undefined,
+                    })
+                }
+                _ => bail!("TypeError: {name} on an ill-formed UTF-16 string is unavailable; preserve it with JSON.stringify"),
+            }
+        }
         VmValue::Number(value) => number_method(heap, value.get(), name, args),
         VmValue::Boolean(value) => match name {
             "toString" => Ok(VmValue::String(value.to_string())),
@@ -957,6 +1021,7 @@ pub(super) fn call_method(heap: &mut Heap, receiver: VmValue, name: &str, args: 
             _ => bail!("TypeError: boolean.{name} is not a function"),
         },
         VmValue::Reference(id) => {
+            if heap.date_value(id).is_some() { return super::js_date::method(heap, id, name, args); }
             if matches!(heap.get(id)?, HeapNode::Array(_)) {
                 return array_method(heap, id, name, args);
             }
@@ -978,6 +1043,7 @@ pub(super) fn call_method(heap: &mut Heap, receiver: VmValue, name: &str, args: 
         VmValue::Undefined | VmValue::Null => {
             bail!("TypeError: Cannot read properties of {} (reading '{name}')", if matches!(receiver, VmValue::Null) { "null" } else { "undefined" })
         }
+        VmValue::Symbol(_) => bail!("TypeError: incompatible Symbol method {name}"),
         VmValue::Promise(_) => bail!("TypeError: promise.{name} is not available"),
     }
 }
@@ -1074,6 +1140,9 @@ fn parse_float(text: &str) -> f64 {
 /// Own enumerable string keys in OrdinaryOwnPropertyKeys order: array
 /// indices ascending, then the rest in insertion order.
 fn own_keys(heap: &Heap, value: &VmValue) -> Result<Vec<(String, VmValue)>> {
+    if heap.has_realm() && let VmValue::Reference(id)=value {
+        return heap.own_names(*id)?.into_iter().filter(|key|!Heap::is_symbol_key(key)&&heap.enumerable(*id,key)).map(|key|Ok((match heap.key_value(&key){VmValue::String(key)=>key,_=>unreachable!()},heap.own_property(*id,&key)?.unwrap_or(VmValue::Undefined)))).collect();
+    }
     Ok(match value {
         VmValue::Reference(id) => match heap.get(*id)? {
             HeapNode::Object(properties) => {
@@ -1087,13 +1156,20 @@ fn own_keys(heap: &Heap, value: &VmValue) -> Result<Vec<(String, VmValue)>> {
             }
             HeapNode::Array(items) => {
                 let holes = heap.holes(*id);
-                items
+                let mut properties: Vec<_> = items
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| !holes.contains(i))
                     .map(|(i, v)| (i.to_string(), v.clone()))
-                    .collect()
+                    .collect();
+                properties.extend_from_slice(heap.array_properties(*id));
+                properties
             }
+            HeapNode::Collection(_) | HeapNode::Iterator(_) | HeapNode::Closure{..} | HeapNode::Native(_) | HeapNode::BoundFunction{..} | HeapNode::PromiseResolver{..}=>{
+                let mut properties=heap.array_properties(*id).to_vec();
+                properties.sort_by_key(|(key,_)|{let index=key.parse::<u32>().ok().filter(|n|*n!=u32::MAX && n.to_string()==*key);(index.is_none(),index.unwrap_or(0))});
+                properties
+            },
             _ => Vec::new(),
         },
         VmValue::String(text) => text.chars().enumerate().map(|(i, c)| (i.to_string(), VmValue::String(c.to_string()))).collect(),
@@ -1140,11 +1216,25 @@ fn json_stringify(heap: &Heap, value: &VmValue, keys: Option<&[String]>, gap: &s
                 if n.is_finite() { number_to_string(n) } else { "null".into() }
             }
             VmValue::String(s) => quote(s),
-            VmValue::Undefined => return Ok(None),
+            VmValue::Utf16(units) => {
+                let mut text = String::from("\"");
+                for decoded in char::decode_utf16(units.iter().copied()) {
+                    match decoded {
+                        Ok(c) => { let quoted=quote(&c.to_string());text.push_str(&quoted[1..quoted.len()-1]); }
+                        Err(error) => text.push_str(&format!("\\u{:04x}",error.unpaired_surrogate())),
+                    }
+                }
+                text.push('"'); text
+            },
+            VmValue::Undefined | VmValue::Symbol(_) => return Ok(None),
             VmValue::Promise(_) => "{}".into(),
             VmValue::Reference(id) => {
                 let node = heap.get(*id)?;
-                if matches!(node, HeapNode::Closure { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. }) {
+                if let Some(value)=heap.boxed_value(*id){return serialize(heap,value,keys,gap,indent,stack);}
+                if let Some(ms) = heap.date_value(*id) {
+                    return Ok(Some(if ms.is_finite() { quote(&super::js_date::iso(ms)?) } else { "null".into() }));
+                }
+                if matches!(node, HeapNode::Closure { .. } | HeapNode::BoundFunction { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. }) {
                     return Ok(None);
                 }
                 ensure!(!stack.contains(id), "TypeError: Converting circular structure to JSON");
@@ -1155,7 +1245,8 @@ fn json_stringify(heap: &Heap, value: &VmValue, keys: Option<&[String]>, gap: &s
                         let holes = heap.holes(*id);
                         let mut parts = Vec::with_capacity(items.len());
                         for (index, item) in items.iter().enumerate() {
-                            let item = if holes.contains(&index) { &VmValue::Undefined } else { item };
+                            let inherited=if holes.contains(&index){heap.lookup_property(*id,&index.to_string())?}else{None};
+                            let item=if holes.contains(&index){inherited.as_ref().unwrap_or(&VmValue::Undefined)}else{item};
                             parts.push(serialize(heap, item, keys, gap, &inner, stack)?.unwrap_or_else(|| "null".into()));
                         }
                         if parts.is_empty() {
@@ -1204,7 +1295,24 @@ fn json_stringify(heap: &Heap, value: &VmValue, keys: Option<&[String]>, gap: &s
 
 /// Global functions and static methods, by their dotted name.
 pub(super) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
+    if super::js_collections::NAMES.contains(&name) || name.strip_prefix("new ").is_some_and(|n|super::js_collections::NAMES.contains(&n)) {return Some((0,64));}
+    if matches!(name,"$$iterator"|"$$arrayFromIterator"|"$$collectionEntries"|"$$iteratorValue"|"$$iterableArray") {return Some((1,1));}
     Some(match name {
+        "$$functionName"=>(3,3),"$$rawExponential"=>(2,2),
+        "$$classSetup"|"$$classMethod"=>(5,5),"$$methodHome"|"$$classBinding"|"$$boxPrimitive"=>(2,2),"$$superBase"|"$$isDerived"=>(1,1),"$$superCallArray"=>(1,2),"$$superConstructor"=>(0,0),"$$constructReady"=>(4,4),
+        "$$rawLooseEqual"|"$$objectRest"=>(2,2),
+        "$$builtinStringIterator"|"$$rawDateConstruct"|"$$rawNumber"|"$$rawString"|"$$rawSymbol"|"$$rawSymbolFor"|"$$isDate"=>(1,1),
+        "$$getIterator"|"$$iteratorStep"|"$$iteratorCloseNormal"=>(1,1),"$$iteratorCloseThrow"=>(2,2),
+        "Symbol"=>(0,1),"Symbol.for"|"Symbol.keyFor"=>(1,1),
+        "Object.defineProperty"|"Reflect.defineProperty" => (3,3),
+        "Object.defineProperties"|"Object.getOwnPropertyDescriptor"|"Reflect.getOwnPropertyDescriptor" =>(2,2),
+        "Object.getOwnPropertyDescriptors"|"Object.getOwnPropertyNames"|"Object.getOwnPropertySymbols"|"Object.preventExtensions"|"Object.isExtensible"|"Object.seal"|"Object.isSealed"|"Object.isFrozen"|"Reflect.ownKeys"|"Reflect.isExtensible"|"Reflect.preventExtensions"|"Reflect.getPrototypeOf"=>(1,1),
+        "Reflect.has"|"Reflect.deleteProperty"|"Reflect.setPrototypeOf"=>(2,2),
+        "Reflect.get"=>(2,3),"Reflect.set"=>(3,4),"Reflect.apply"=>(3,3),"Reflect.construct"=>(2,3),
+        "$$keyOperation"=>(3,3),
+        "$$makeBound"=>(5,5),
+        "$$defineOwn"|"$$createData"=>(3,3),"$$literalAccessor"|"$$prepareSet"=>(4,4),"$$getProperty"=>(2,3),"$$constructWithTarget"|"$$invokeWithReceiver"=>(3,3),
+        "$$emptyCollection"|"$$defaultTag"|"$$iteratorPlan"|"$$arrayLikeOnly"|"$$boundTarget"|"$$propertyKey"|"$$requireCoercible"|"$$createObject"|"$$jsonUnbox"|"$$isObject"|"$$isConstructor"|"$$keys"=>(1,1),"$$rawStringify"=>(1,3),
         "Math.abs" | "Math.floor" | "Math.ceil" | "Math.round" | "Math.trunc" | "Math.sign"
         | "Math.sqrt" | "Math.cbrt" | "Math.exp" | "Math.log" | "Math.log2" | "Math.log10"
         | "Math.sin" | "Math.cos" | "Math.tan" | "Math.asin" | "Math.acos" | "Math.atan" => (1, 1),
@@ -1217,11 +1325,18 @@ pub(super) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
         | "Number.isSafeInteger" | "Number.isFinite" | "Number.isNaN" => (1, 1),
         "Object.keys" | "Object.values" | "Object.entries" | "Object.fromEntries" | "Array.isArray"
         | "Array.from" => (1, 1),
+        "Object"=>(0,1),"Function"=>(0,64),"Object.create"=>(1,2),"Object.getPrototypeOf"|"$$forInKeys"=>(1,1),"Object.setPrototypeOf"=>(2,2),
         "Object.assign" => (1, 64),
         "Array.of" => (0, 64),
+        "Array" | "new Array" | "String.fromCharCode" | "String.fromCodePoint" => (0, 64),
+        "Date" | "new Date" | "Date.UTC" => (0, 64),
+        "Date.now" => (0, 0),
+        "Date.parse" | "encodeURIComponent" | "decodeURIComponent" | "structuredClone"
+        | "Object.freeze" => (1, 1),
+        "Object.hasOwn" => (2, 2),
         "JSON.stringify" => (1, 3),
         "JSON.parse" => (1, 1),
-        "delete" | "$$has" | "$$sortWriteBack" => (2, 2),
+        "$$hasPrototype" | "delete" | "$$has" | "$$sortWriteBack" => (2, 2),
         "$$replacementMatches" => (3, 3),
         "$$textLimit" => (1, 1),
         _ if name.strip_prefix("new ").is_some_and(|class| super::vm_eval::ERROR_CLASSES.contains(&class)) => (0, 2),
@@ -1302,7 +1417,33 @@ pub(super) fn js_pow(base: f64, exponent: f64) -> f64 {
 }
 
 pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<VmValue> {
+    if name=="$$rawExponential" {let VmValue::Number(value)=args[0] else{bail!("TypeError: Number.prototype.toExponential requires a Number receiver")};return number_method(heap,value.get(),"toExponential",&args[1..]);}
+    if let Some(value)=heap.class_builtin(name,args)?{return Ok(value);}
+    if let Some(value)=heap.symbol_builtin(name,args)?{return Ok(value);}
+    if let Some(value)=heap.descriptor_builtin(name,args)?{return Ok(value);}
+    if let Some(value)=heap.prototype_builtin(name,args)?{return Ok(value);}
+    if name=="RegExp" {
+        if let Some(VmValue::Reference(id))=args.first() && heap.regex_parts(*id).is_some() && args.get(1).is_none_or(|v|*v==VmValue::Undefined){return Ok(VmValue::Reference(*id));}
+        return construct_regexp(heap,args);
+    }
+    if super::vm_eval::ERROR_CLASSES.contains(&name){return new_error(heap,name,&arg(args,0),&arg(args,1));}
+    if name=="$$iteratorValue" {
+        let VmValue::Reference(id)=arg(args,0) else {bail!("TypeError: iterator receiver is not an object")};
+        return Ok(super::js_collections::next(heap,id)?.unwrap_or(VmValue::Undefined));
+    }
+    if name=="$$iterableArray" {let values=super::js_collections::materialize(heap,arg(args,0),false)?;return new_array(heap,values);}
+    if let Some(kind)=name.strip_prefix("new ").filter(|n|super::js_collections::NAMES.contains(n)) {return super::js_collections::construct(heap,kind,args);}
+    if super::js_collections::NAMES.contains(&name) {bail!("TypeError: {name} constructor requires new");}
+    if name.contains(".prototype.") && (super::js_collections::NAMES.iter().any(|kind|name.starts_with(kind)) || name.contains(" Iterator.prototype.")) {bail!("TypeError: unbound collection method requires a compatible receiver");}
+    if matches!(name,"$$iterator"|"$$arrayFromIterator"|"$$collectionEntries") {
+        return super::js_collections::iterator(heap,arg(args,0),if name=="$$collectionEntries" {Some(super::js_collections::Iteration::Entries)}else{None},name=="$$arrayFromIterator");
+    }
+    #[cfg(test)]
+    if name=="test262.error" {return new_error(heap,"Test262Error",&arg(args,0),&arg(args,1));}
     let first = arg(args, 0);
+    if name == "new Date" { return super::js_date::construct(heap, args); }
+    if name == "Date" || name.starts_with("Date.") { return super::js_date::static_call(heap, name, args); }
+    if name == "new Array" { return builtin(heap, "Array", args); }
     if let Some(class) = name.strip_prefix("new ") {
         ensure!(super::vm_eval::ERROR_CLASSES.contains(&class), "TypeError: {class} is not a constructor");
         return new_error(heap, class, &first, &arg(args, 1));
@@ -1352,7 +1493,7 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
         "$$has" => {
             let VmValue::Reference(id) = first else { bail!("TypeError: receiver is not an array") };
             let index = to_number(heap, &arg(args, 1))?;
-            VmValue::Boolean(index >= 0.0 && index.fract() == 0.0 && heap.has_array_index(id, index as usize)?)
+            VmValue::Boolean(index >= 0.0 && index.fract() == 0.0 && heap.has_property(id,&(index as usize).to_string())?)
         }
         "$sortWriteBack" | "$$sortWriteBack" => {
             // sort() in place: the sorted values, then the original holes.
@@ -1368,7 +1509,7 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
         }
         "delete" => {
             if let VmValue::Reference(id) = first {
-                let key = to_string(heap, &arg(args, 1))?;
+                let key = heap.property_key(&arg(args, 1))?;
                 heap.delete_property(id, &key)?;
             }
             VmValue::Boolean(true)
@@ -1384,8 +1525,87 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
             number(math(name, &values))
         }
         "Number" => number(if args.is_empty() { 0.0 } else { to_number(heap, &first)? }),
-        "String" => VmValue::String(if args.is_empty() { String::new() } else { to_string(heap, &first)? }),
+        "String" if matches!(first,VmValue::Symbol(_))=>{let VmValue::Symbol(id)=first else{unreachable!()};heap.symbol_text(id)?},
+        "String" => if matches!(first, VmValue::Utf16(_)) { first } else { VmValue::String(if args.is_empty() { String::new() } else { to_string(heap, &first)? }) },
         "Boolean" => VmValue::Boolean(super::vm_eval::truthy(&first)),
+        "Array" => {
+            if args.len() == 1 && matches!(first, VmValue::Number(_)) {
+                let length = to_number(heap, &first)?;
+                ensure!(length.is_finite() && length >= 0.0 && length.fract() == 0.0 && length <= ARRAY_LIMIT as f64, "RangeError: Invalid array length (runtime limit 1000000)");
+                let value = new_array(heap, vec![VmValue::Undefined; length as usize])?;
+                let VmValue::Reference(id) = value else { unreachable!() };
+                for i in 0..length as usize { heap.set_hole(id, i); }
+                value
+            } else { new_array(heap, args.to_vec())? }
+        }
+        "String.fromCharCode" | "String.fromCodePoint" => {
+            let mut units = Vec::new();
+            for value in args {
+                let n = to_number(heap, value)?;
+                if name == "String.fromCharCode" {
+                    units.push(if n.is_finite() { n.trunc().rem_euclid(65536.0) as u16 } else { 0 });
+                } else {
+                    ensure!(n.is_finite() && n.fract() == 0.0 && (0.0..=0x10ffff as f64).contains(&n), "RangeError: Invalid code point");
+                    let code = n as u32;
+                    if code <= 0xffff { units.push(code as u16); }
+                    else { units.push(0xd800 + ((code - 0x10000) >> 10) as u16); units.push(0xdc00 + ((code - 0x10000) & 0x3ff) as u16); }
+                }
+            }
+            // Scalar strings never silently replace an unpaired surrogate.
+            super::js_value::from_utf16(units)
+        }
+        "encodeURIComponent" => {
+            if matches!(first, VmValue::Utf16(_)) { bail!("URIError: URI malformed (unpaired UTF-16 surrogate)"); }
+            let text = to_string(heap, &first)?;
+            let mut out = String::new();
+            for byte in text.bytes() {
+                if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) { out.push(byte as char); }
+                else { out.push_str(&format!("%{byte:02X}")); }
+                ensure!(out.len() <= TEXT_RESULT_LIMIT, "RangeError: URI result exceeds 4 MiB");
+            }
+            VmValue::String(out)
+        }
+        "decodeURIComponent" => {
+            let units: Vec<u16> = match &first {
+                VmValue::Utf16(units) => units.clone(),
+                value => to_string(heap, value)?.encode_utf16().collect(),
+            };
+            let mut out: Vec<u16> = Vec::new();
+            let mut i = 0;
+            while i < units.len() {
+                if units[i] == b'%' as u16 {
+                    let mut encoded = Vec::new();
+                    while units.get(i) == Some(&(b'%' as u16)) {
+                        let hi = units.get(i+1).and_then(|u| char::from_u32(*u as u32)).and_then(|c| c.to_digit(16));
+                        let lo = units.get(i+2).and_then(|u| char::from_u32(*u as u32)).and_then(|c| c.to_digit(16));
+                        let (Some(hi),Some(lo)) = (hi,lo) else { bail!("URIError: URI malformed"); };
+                        encoded.push((hi*16+lo) as u8); i+=3;
+                    }
+                    let decoded=std::str::from_utf8(&encoded).map_err(|_| anyhow::anyhow!("URIError: URI malformed"))?;
+                    out.extend(decoded.encode_utf16());
+                } else { out.push(units[i]); i += 1; }
+                ensure!(out.len() <= TEXT_RESULT_LIMIT, "RangeError: URI result exceeds runtime limit");
+            }
+            super::js_value::from_utf16(out)
+        }
+        "structuredClone" => {
+            heap.ensure_json_cloneable(&first,&mut Default::default())?;
+            let json = heap.to_json(&first)?;
+            heap.from_json(&json)?
+        }
+        "Object.freeze" => {
+            if let VmValue::Reference(id) = first { heap.freeze(id); }
+            first
+        }
+        "Object.hasOwn" => {
+            ensure!(!matches!(first, VmValue::Null | VmValue::Undefined), "TypeError: Cannot convert undefined or null to object");
+            let key = heap.property_key(&arg(args, 1))?;
+            VmValue::Boolean(match &first {
+                VmValue::Reference(id) => heap.own_property(*id, &key)?.is_some(),
+                VmValue::String(text) => key == "length" || key.parse::<usize>().ok().is_some_and(|i| i.to_string() == key && i < text.chars().count()),
+                _ => false,
+            })
+        }
         "parseInt" | "Number.parseInt" => {
             let text = to_string(heap, &first)?;
             let radix = match arg(args, 1) {
@@ -1408,30 +1628,7 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
         ),
         "Array.isArray" => VmValue::Boolean(matches!(&first, VmValue::Reference(id) if matches!(heap.get(*id), Ok(HeapNode::Array(_))))),
         "Array.of" => new_array(heap, args.to_vec())?,
-        "Array.from" => match &first {
-            VmValue::String(text) => new_array(heap, text.chars().map(|c| VmValue::String(c.to_string())).collect())?,
-            VmValue::Reference(id) => match heap.get(*id)? {
-                HeapNode::Array(items) => {
-                    let holes = heap.holes(*id);
-                    let items = items.iter().enumerate().map(|(i, v)| if holes.contains(&i) { VmValue::Undefined } else { v.clone() }).collect();
-                    new_array(heap, items)?
-                }
-                HeapNode::Object(_) => {
-                    // An array-like {length: n} produces n elements.
-                    let length = to_number(heap, &heap.property(*id, "length")?)?;
-                    let length = if length.is_nan() { 0.0 } else { integer_or_infinity(length).max(0.0) };
-                    ensure!(length <= ARRAY_LIMIT as f64, "RangeError: Invalid array length");
-                    let mut items = Vec::with_capacity(length as usize);
-                    for index in 0..length as usize {
-                        items.push(heap.property(*id, &index.to_string())?);
-                    }
-                    new_array(heap, items)?
-                }
-                _ => new_array(heap, Vec::new())?,
-            },
-            VmValue::Undefined | VmValue::Null => bail!("TypeError: Array.from requires an array-like object"),
-            _ => new_array(heap, Vec::new())?,
-        },
+        "Array.from" => {let values=super::js_collections::materialize(heap,first,true)?;new_array(heap,values)?},
         "Object.keys" | "Object.values" | "Object.entries" => {
             let properties = own_keys(heap, &first)?;
             let mut out = Vec::with_capacity(properties.len());
@@ -1445,18 +1642,15 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
             new_array(heap, out)?
         }
         "Object.fromEntries" => {
-            let VmValue::Reference(id) = first else {
-                bail!("TypeError: Object.fromEntries requires an array of entries")
-            };
-            let entries = array_items(heap, id)?;
+            let entries=super::js_collections::materialize(heap,first,false)?;
             let mut properties: Vec<(String, VmValue)> = Vec::new();
             for entry in entries {
-                let VmValue::Reference(pair) = entry else {
+                let VmValue::Reference(_) = &entry else {
                     bail!("TypeError: Iterator value is not an entry object")
                 };
-                let pair = array_items(heap, pair)?;
-                let key = to_string(heap, pair.first().unwrap_or(&VmValue::Undefined))?;
-                let value = pair.get(1).cloned().unwrap_or(VmValue::Undefined);
+                let property=super::vm_eval::member(heap,&entry,&VmValue::String("0".into()))?;
+                let key=to_string(heap,&property)?;
+                let value=super::vm_eval::member(heap,&entry,&VmValue::String("1".into()))?;
                 if let Some(existing) = properties.iter_mut().find(|(k, _)| *k == key) {
                     existing.1 = value;
                 } else {
@@ -1493,7 +1687,7 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
                     }
                     Some(keys)
                 }
-                VmValue::Reference(id) if matches!(heap.get(id)?, HeapNode::Closure { .. }) => {
+                ref value if super::vm_eval::callable(heap,value) => {
                     bail!("TypeError: JSON.stringify replacer functions are not available yet")
                 }
                 _ => None,
@@ -1515,7 +1709,9 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
             heap.from_json(&parsed)?
         }
         _ => {
-            // path.* and url.* keep their JSON implementation.
+            // Only the explicitly JSON-based library crosses this boundary.
+            // An unknown native must name itself before inspecting arguments.
+            ensure!(super::builtins::arity(name).is_some(),"TypeError: {name} is unavailable in the flow runtime; consult the program guide for supported functions");
             let mut values = Vec::with_capacity(args.len());
             for value in args {
                 values.push(heap.to_json(value)?);
@@ -1525,6 +1721,15 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
             heap.from_json(&result)?
         }
     })
+}
+
+pub(super) fn construct_regexp(heap:&mut Heap,args:&[VmValue])->Result<VmValue>{
+    let first=arg(args,0);
+    let existing=if let VmValue::Reference(id)=first{heap.regex_parts(id)}else{None};
+    let pattern=if let Some((pattern,_))=&existing{pattern.clone()}else if first==VmValue::Undefined{String::new()}else{to_string(heap,&first)?};
+    let flags=if arg(args,1)==VmValue::Undefined{existing.map(|(_,flags)|flags).unwrap_or_default()}else{to_string(heap,&arg(args,1))?};
+    let value=super::values::regexp(vec![serde_json::json!(pattern),serde_json::json!(flags)])?;
+    heap.from_json(&value)
 }
 
 /// `new Error(message, {cause})`: name and message are stored as properties

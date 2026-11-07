@@ -1,0 +1,775 @@
+{
+  "stage": "5",
+  "scope": "Class declarations/expressions, inheritance, methods/accessors, super, new.target and durable constructor state; not full ES2015",
+  "source_hashes": {
+    "src/agent_program.rs": "c77a9be43b126f57645f3a6dbeabbb8dc6405ead904e216c8ccc7a76ab57211e",
+    "src/agent_program/compiler.rs": "64f333209c7fd3b46da6c5ca841ff13164bb2bee7369aba86d668ab3ac2eb8b5",
+    "src/agent_program/compiler_properties.rs": "1c1db427c955da4448d159a14a567ae75e2dc8c884ecb2ea19e7f419a9322d7c",
+    "src/agent_program/compiler_iteration.rs": "80f44bc8bee41734579d4e26e0a641e9d129b0df9e56b33d2b748472ab57110c",
+    "src/agent_program/compiler_classes.rs": "3cd12e0fd0186759ce7eac7028ed103120fd87afbebef04b226af647d7c516b2",
+    "src/agent_program/heap.rs": "5f1c6d08dd12d782a5c2c4d87ad8043bf121323ba6884f7c473d036f55fc70e1",
+    "src/agent_program/js_classes.rs": "f0ed9cdc6ead5bb4fce68d7ec1f7510ee65dfc59bdd19b51368a0a1b94f59df7",
+    "src/agent_program/js_symbols.rs": "47265b49d4340469c374c5eff9627388c91052c75733df5c5de3346450dece1c",
+    "src/agent_program/js_descriptors.rs": "39730015aa60d5876f0b6834dce9413dc562588699eebb18ac104b53cb88f4e0",
+    "src/agent_program/js_prototypes.rs": "7fccce8fc6f534141d0920172640c682ae7774a8f71e8ddf6ddfe3bda82eb7ff",
+    "src/agent_program/js_functions.rs": "c25e054b013f58f9278455e958f809ffedece88a5e631f255408ad6d126fd6c4",
+    "src/agent_program/js_methods.rs": "b0c8fbe99a9fc515e78bf71eb1c3c6118536b764975edf6f5e036f621515790e",
+    "src/agent_program/js_collections.rs": "9eda2dcb0cb3a17f90c5c8e5cca58dc4431ab4f0b056851a3b9ec27bdbbc3370",
+    "src/agent_program/js_value.rs": "b5ce285ce535d6540899d64f48b57a717cb8ad62468cdc5f2bf0bc9657c434b7",
+    "src/agent_program/vm_eval.rs": "2d0f5c9a3863027fd574d7a84f279191372ff79eeff43294fec7575333c30ee5",
+    "src/agent_program/runtime.rs": "3e69851a27e470acce32207d94cdb03cb05f1b489394378203a161795fc1045d",
+    "src/agent_program/prelude.js": "14478ebe59d90fcfbfaa13587d789ff5fd042bf88f51dcd566b23ac868658453",
+    "src/agent_program/tests.rs": "9134fcc9f5932f4efd0afbc3ca46b3ff5553609f68b93a62dd28f5c02f392c29",
+    "src/agent_program/tests_stage5.rs": "f49d7e140e851c8bca5a7e0d291d22210b210f01d0318a08ebdf4e357a6a70c9",
+    "src/agent_program/conformance.rs": "c791b73209e4e954739c625bd8014c47933ce4a3708e6c18db4bec6cbbbb2eb6",
+    "prompts/flow_capabilities.md": "50ed4a937da5eb8382e87cb5971b96da597be29a45ff6b177c67918996cacf51",
+    "prompts/flow_builtin_contracts.d.ts": "7ee4ef5187f692bde67189f983a4758c1776003204a4b3f5fa3bf19021eabd8a",
+    "docs/agent-program.md": "4e52a4b45b54f50ab2c04b1bd77f12a0cf47c08a2cb3e085afd0ae13fbcaf902"
+  },
+  "new_tests": [
+    "vm_stage5_accessors",
+    "vm_stage5_anonymous_class_name",
+    "vm_stage5_base_class_new_target_undefined_in_methods",
+    "vm_stage5_basic",
+    "vm_stage5_boxed_constructor_conversion",
+    "vm_stage5_call_and_method_new",
+    "vm_stage5_class_name_immutable",
+    "vm_stage5_declaration_tdz",
+    "vm_stage5_default_derived",
+    "vm_stage5_default_derived_ignores_array_iterator",
+    "vm_stage5_derived_errors",
+    "vm_stage5_derived_null_return",
+    "vm_stage5_derived_snapshot",
+    "vm_stage5_descriptors",
+    "vm_stage5_double_super_runs_base_before_throw",
+    "vm_stage5_error",
+    "vm_stage5_error_location",
+    "vm_stage5_expression_tdz",
+    "vm_stage5_extends_null",
+    "vm_stage5_gc_extracted_home_snapshot",
+    "vm_stage5_getter_snapshot",
+    "vm_stage5_heritage_getter_snapshot",
+    "vm_stage5_home_object",
+    "vm_stage5_loop_classes",
+    "vm_stage5_method_target",
+    "vm_stage5_native_regexp_object_and_set",
+    "vm_stage5_native_slots",
+    "vm_stage5_new_target",
+    "vm_stage5_null_super_base_does_not_convert_key",
+    "vm_stage5_object_super",
+    "vm_stage5_promise_boxed",
+    "vm_stage5_reflect_prototype_getter_order",
+    "vm_stage5_reflect_target_getter_snapshot",
+    "vm_stage5_return_object_without_super_and_finally",
+    "vm_stage5_returns",
+    "vm_stage5_separate_class_evaluations",
+    "vm_stage5_static_super_set_and_computed",
+    "vm_stage5_strict_restricted_properties",
+    "vm_stage5_super_arrow",
+    "vm_stage5_super_assignment_converts_key_after_rhs",
+    "vm_stage5_super_constructor_selected_before_args",
+    "vm_stage5_super_dynamic",
+    "vm_stage5_super_key_conversion_after_base",
+    "vm_stage5_super_key_not_evaluated_before_this",
+    "vm_stage5_super_order",
+    "vm_stage5_super_receiver",
+    "vm_stage5_super_update",
+    "vm_stage5_super_update_key_conversion_twice",
+    "vm_stage5_super_write_receiver_and_missing_setter",
+    "vm_stage5_target_bound_reflect",
+    "vm_stage5_uninitialized_snapshot"
+  ],
+  "vm_suite": "test result: ok. 406 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 8.70s",
+  "full_suite": {
+    "baseline": "runs/codex-vm-stage4-failure-comparison-20261107.json",
+    "current_log": "runs/codex-vm-stage5-full-20261107.txt",
+    "complete": true,
+    "summary": "test result: FAILED. 732 passed; 29 failed; 23 ignored; 0 measured; 0 filtered out; finished in 67.60s",
+    "baseline_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "current_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "new_failures": [],
+    "resolved_failures": []
+  },
+  "test262_existing_profiles": {
+    "default": {
+      "baseline": "tests/vm/test262-stage4.json",
+      "current": "tests/vm/test262-stage5.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "17ef1cfab7e61db1b9c1a4a8c9fda1d4d4108b0b3fb116fc3046678adb0a3735",
+      "baseline_counts": {
+        "compile_rejected": 403,
+        "pass": 893,
+        "run_failed": 144,
+        "skipped": 316
+      },
+      "current_counts": {
+        "compile_rejected": 389,
+        "pass": 900,
+        "run_failed": 151,
+        "skipped": 316
+      },
+      "transitions": {
+        "run_failed -> pass": 1,
+        "compile_rejected -> run_failed": 8,
+        "compile_rejected -> pass": 6
+      }
+    },
+    "-functions": {
+      "baseline": "tests/vm/test262-stage4-functions.json",
+      "current": "tests/vm/test262-stage5-functions.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "7c564b84eb966c6a1ed5344ad4315b33b3fa94573e56a84609a4abe74d812883",
+      "baseline_counts": {
+        "compile_rejected": 292,
+        "pass": 311,
+        "run_failed": 18,
+        "skipped": 17
+      },
+      "current_counts": {
+        "compile_rejected": 278,
+        "pass": 329,
+        "run_failed": 14,
+        "skipped": 17
+      },
+      "transitions": {
+        "run_failed -> pass": 8,
+        "compile_rejected -> pass": 10,
+        "compile_rejected -> run_failed": 4
+      }
+    },
+    "-prototypes": {
+      "baseline": "tests/vm/test262-stage4-prototypes.json",
+      "current": "tests/vm/test262-stage5-prototypes.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "20986848b1d3cfaa5fd8fdbc989d3ac44b6fbddc0056883bc1faa565046b83b8",
+      "baseline_counts": {
+        "compile_rejected": 601,
+        "pass": 688,
+        "run_failed": 30,
+        "skipped": 334
+      },
+      "current_counts": {
+        "compile_rejected": 588,
+        "pass": 693,
+        "run_failed": 38,
+        "skipped": 334
+      },
+      "transitions": {
+        "compile_rejected -> run_failed": 8,
+        "compile_rejected -> pass": 5
+      }
+    },
+    "-descriptors": {
+      "baseline": "tests/vm/test262-stage4-descriptors.json",
+      "current": "tests/vm/test262-stage5-descriptors.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "a3067f84145e9cec23c04418b7157c2d60f5cc6c3c7396d4365e12dd712070c1",
+      "baseline_counts": {
+        "compile_rejected": 1387,
+        "pass": 1915,
+        "run_failed": 131,
+        "skipped": 371
+      },
+      "current_counts": {
+        "compile_rejected": 1374,
+        "pass": 1920,
+        "run_failed": 139,
+        "skipped": 371
+      },
+      "transitions": {
+        "compile_rejected -> run_failed": 8,
+        "compile_rejected -> pass": 5
+      }
+    },
+    "-iteration": {
+      "baseline": "tests/vm/test262-stage4-iteration.json",
+      "current": "tests/vm/test262-stage5-iteration.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "4510e253ce5df2b287db5c7fb6ddd23da242e8dd826b17168ba5ea5e6378ba91",
+      "baseline_counts": {
+        "compile_rejected": 517,
+        "pass": 348,
+        "run_failed": 13,
+        "skipped": 79
+      },
+      "current_counts": {
+        "compile_rejected": 510,
+        "pass": 348,
+        "run_failed": 20,
+        "skipped": 79
+      },
+      "transitions": {
+        "compile_rejected -> run_failed": 7
+      }
+    }
+  },
+  "test262_classes": {
+    "selection": "tests/vm/test262-selection-stage5-classes.json",
+    "report": "tests/vm/test262-stage5-classes.json",
+    "counts": {
+      "compile_rejected": 1349,
+      "pass": 1150,
+      "run_failed": 107,
+      "skipped": 6030
+    },
+    "groups": {
+      "language/statements/class": {
+        "compile_rejected": 686,
+        "pass": 606,
+        "skipped": 3071,
+        "run_failed": 56
+      },
+      "language/expressions/class": {
+        "pass": 468,
+        "compile_rejected": 632,
+        "skipped": 2958,
+        "run_failed": 51
+      },
+      "language/expressions/super": {
+        "pass": 65,
+        "compile_rejected": 28,
+        "skipped": 1
+      },
+      "language/expressions/new.target": {
+        "pass": 11,
+        "compile_rejected": 3
+      }
+    },
+    "runtime_failure_messages": {
+      "unsupported built-in": 4,
+      "undefined cannot cross the JSON host boundary": 50,
+      "assert.sameValue failed": 48,
+      "Class extends value is not a constructor or null": 4,
+      "toExponential is not a function": 1
+    }
+  },
+  "corpus": {
+    "baseline": "tests/vm/corpus-stage4.json",
+    "current": "tests/vm/corpus-stage5.json",
+    "comparison_passed": true,
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "revision": "1e73f5c9433e96739b9e41aa5711c74f9a367509c25cd4f68c605c4b7c430cd1",
+    "selection_hash": "6dad971b7155855075e7dd550de82f5c5033c7e1806f724a889d8c3fc882a38b",
+    "baseline_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "current_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "transitions": {}
+  },
+  "frozen_corpus_sha256": "1e73f5c9433e96739b9e41aa5711c74f9a367509c25cd4f68c605c4b7c430cd1",
+  "node_oracle": {
+    "node": "v22.5.1",
+    "passed": 41,
+    "total": 44,
+    "mismatches": [
+      {
+        "name": "vm_stage5_super_constructor_selected_before_args",
+        "result": "X",
+        "expected": "A"
+      },
+      {
+        "name": "vm_stage5_super_key_conversion_after_base",
+        "result": 9,
+        "expected": 7
+      },
+      {
+        "name": "vm_stage5_null_super_base_does_not_convert_key",
+        "result": [
+          true,
+          1
+        ],
+        "expected": [
+          true,
+          0
+        ]
+      }
+    ],
+    "skipped": [
+      "vm_stage5_derived_snapshot",
+      "vm_stage5_getter_snapshot",
+      "vm_stage5_uninitialized_snapshot",
+      "vm_stage5_heritage_getter_snapshot",
+      "vm_stage5_reflect_target_getter_snapshot",
+      "vm_stage5_gc_extracted_home_snapshot",
+      "vm_stage5_error_location"
+    ],
+    "results": [
+      {
+        "name": "vm_stage5_basic",
+        "result": [
+          7,
+          true,
+          "A",
+          1,
+          [],
+          false
+        ]
+      },
+      {
+        "name": "vm_stage5_accessors",
+        "result": [
+          8,
+          8,
+          "A",
+          [
+            "key"
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage5_call_and_method_new",
+        "result": [
+          3,
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_default_derived",
+        "result": [
+          4,
+          7,
+          true,
+          true,
+          true,
+          true,
+          0
+        ]
+      },
+      {
+        "name": "vm_stage5_super_receiver",
+        "result": [
+          [
+            8,
+            9
+          ],
+          "B"
+        ]
+      },
+      {
+        "name": "vm_stage5_home_object",
+        "result": [
+          5,
+          9
+        ]
+      },
+      {
+        "name": "vm_stage5_super_arrow",
+        "result": 9
+      },
+      {
+        "name": "vm_stage5_derived_errors",
+        "result": [
+          4,
+          9
+        ]
+      },
+      {
+        "name": "vm_stage5_returns",
+        "result": [
+          3,
+          9
+        ]
+      },
+      {
+        "name": "vm_stage5_extends_null",
+        "result": [
+          true,
+          true,
+          3,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_expression_tdz",
+        "result": [
+          true,
+          "undefined",
+          2
+        ]
+      },
+      {
+        "name": "vm_stage5_declaration_tdz",
+        "result": [
+          true,
+          3,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_new_target",
+        "result": [
+          true,
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_target_bound_reflect",
+        "result": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_super_dynamic",
+        "result": [
+          true,
+          7
+        ]
+      },
+      {
+        "name": "vm_stage5_error",
+        "result": [
+          true,
+          true,
+          "broken",
+          "Custom",
+          7,
+          "Custom: broken"
+        ]
+      },
+      {
+        "name": "vm_stage5_native_slots",
+        "result": [
+          2,
+          8,
+          true,
+          true,
+          3,
+          true,
+          "1970-01-01T00:00:00.000Z",
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_promise_boxed",
+        "result": [
+          true,
+          8,
+          4,
+          true,
+          "ok",
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_descriptors",
+        "result": [
+          false,
+          false,
+          false,
+          true,
+          true,
+          true,
+          false,
+          true,
+          true,
+          false
+        ]
+      },
+      {
+        "name": "vm_stage5_super_order",
+        "result": [
+          7,
+          [
+            "key",
+            "get",
+            "arg"
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage5_super_update",
+        "result": [
+          2,
+          6
+        ]
+      },
+      {
+        "name": "vm_stage5_object_super",
+        "result": [
+          8,
+          4
+        ]
+      },
+      {
+        "name": "vm_stage5_loop_classes",
+        "result": [
+          [
+            0,
+            1,
+            2
+          ],
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_derived_null_return",
+        "result": true
+      },
+      {
+        "name": "vm_stage5_method_target",
+        "result": [
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_super_constructor_selected_before_args",
+        "result": "X"
+      },
+      {
+        "name": "vm_stage5_anonymous_class_name",
+        "result": [
+          "A",
+          "B"
+        ]
+      },
+      {
+        "name": "vm_stage5_class_name_immutable",
+        "result": true
+      },
+      {
+        "name": "vm_stage5_return_object_without_super_and_finally",
+        "result": [
+          7,
+          9
+        ]
+      },
+      {
+        "name": "vm_stage5_double_super_runs_base_before_throw",
+        "result": [
+          2,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_super_write_receiver_and_missing_setter",
+        "result": true
+      },
+      {
+        "name": "vm_stage5_static_super_set_and_computed",
+        "result": [
+          7,
+          7,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_native_regexp_object_and_set",
+        "result": [
+          true,
+          true,
+          true,
+          true,
+          2,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_reflect_prototype_getter_order",
+        "result": [
+          1,
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_default_derived_ignores_array_iterator",
+        "result": 5
+      },
+      {
+        "name": "vm_stage5_separate_class_evaluations",
+        "result": [
+          1,
+          2,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_base_class_new_target_undefined_in_methods",
+        "result": [
+          true,
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_strict_restricted_properties",
+        "result": 4
+      },
+      {
+        "name": "vm_stage5_super_key_conversion_after_base",
+        "result": 9
+      },
+      {
+        "name": "vm_stage5_super_key_not_evaluated_before_this",
+        "result": 1
+      },
+      {
+        "name": "vm_stage5_boxed_constructor_conversion",
+        "result": [
+          7,
+          "ok",
+          2,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage5_super_assignment_converts_key_after_rhs",
+        "result": [
+          [
+            "rhs",
+            "key"
+          ],
+          7
+        ]
+      },
+      {
+        "name": "vm_stage5_super_update_key_conversion_twice",
+        "result": [
+          1,
+          2,
+          2
+        ]
+      },
+      {
+        "name": "vm_stage5_null_super_base_does_not_convert_key",
+        "result": [
+          true,
+          1
+        ]
+      }
+    ],
+    "exit_code": 1,
+    "comparison_passed": false,
+    "normative_variance": {
+      "spec_super": "https://tc39.es/ecma262/2025/multipage/ecmascript-language-expressions.html#sec-super-keyword-runtime-semantics-evaluation",
+      "spec_getvalue": "https://tc39.es/ecma262/2025/multipage/ecmascript-data-types-and-values.html#sec-getvalue",
+      "interpretation": "GetSuperConstructor precedes argument evaluation. MakeSuperPropertyReference captures the home prototype before key coercion; GetValue performs ToObject(base) before key coercion. VM follows those orders; Node 22.5.1 differs in three adversarial cases. No V8 root cause is established; raw mismatches and nonzero exit remain.",
+      "vm_expected_value_not_changed_to_match_node": true
+    }
+  },
+  "production_check": "runs/codex-vm-stage5-check.txt",
+  "contracts_syntax_errors": 0,
+  "diff_check_exit_code": 0,
+  "test_first_log": "runs/codex-vm-stage5-red.txt",
+  "host_snapshot_cases": [
+    "vm_stage5_derived_snapshot",
+    "vm_stage5_gc_extracted_home_snapshot",
+    "vm_stage5_getter_snapshot",
+    "vm_stage5_heritage_getter_snapshot",
+    "vm_stage5_reflect_target_getter_snapshot",
+    "vm_stage5_uninitialized_snapshot"
+  ],
+  "remaining_scope": [
+    "public/private fields and static blocks",
+    "generators and async iteration",
+    "dynamic Function/eval and species algorithms",
+    "arguments, complete name inference, generic built-in conversions and methods"
+  ],
+  "main_binary_sha256": "ab4f855d6717b98ef0cc6b54365577d919b3f9ceb49c74863fffc2dc90624068",
+  "abnormal_exit": {
+    "log": "runs/codex-vm-stage5-main-crash.txt",
+    "code": "0xc0000005 STATUS_ACCESS_VIOLATION",
+    "root_cause": "unconfirmed",
+    "retry": "same binary, full test list; no test excluded"
+  },
+  "verification_notes": [
+    "An intermediate link of the lightweight executable failed with LNK1104 because the same executable was still running a conformance task. This scheduling error was corrected by waiting for all users of the executable before relinking; no tests were excluded.",
+    "The intermediate full suite contained 48 new tests (729 pass, unchanged 29 failures); the final suite includes all 51 new tests."
+  ]
+}

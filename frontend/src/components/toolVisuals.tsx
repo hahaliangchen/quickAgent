@@ -104,6 +104,9 @@ const EXACT: Record<string, Omit<ToolVisual, 'summary'>> = {
   browser_screenshot: { tone: 'media', icon: <ImageIcon />, title: '截取了页面' },
   http_probe: { tone: 'web', icon: <IconApiOutlineMedium />, title: '探测了接口' },
   run_program: { tone: 'run', icon: <TerminalIcon />, title: '运行了程序' },
+  exec_command: { tone: 'run', icon: <TerminalIcon />, title: '运行了命令' },
+  write_stdin: { tone: 'run', icon: <TerminalIcon />, title: '写入了命令输入' },
+  kill_session: { tone: 'run', icon: <TerminalIcon />, title: '终止了命令会话' },
   // The host's own lookups while the AI gets to know the work.
   workspace_info: { tone: 'search', icon: <IconWorkspaceTreeOutlineMedium />, title: '查看了工作区' },
   read_tool_contracts: { tone: 'context', icon: <IconApiOutlineMedium />, title: '查看了库方法说明' },
@@ -142,6 +145,9 @@ const shortNode = (value: unknown) => text(value) === 'n0' ? '主任务' : `子�
 
 function summaryFor(name: string, args: Record<string, unknown>): string | undefined {
   switch (name) {
+    case 'exec_command': return text(args.cmd)
+    case 'write_stdin': return `会话 ${String(args.session_id ?? '未知')} · ${typeof args.chars === 'string' && args.chars.length > 0 ? JSON.stringify(args.chars) : '等待输出'}`
+    case 'kill_session': return `会话 ${String(args.session_id ?? '未知')}`
     case 'create_task': return [text(args.goal), text(args.reason) && `原因：${text(args.reason)}`].filter(Boolean).join(' · ')
     case 'create_step': return [text(args.result) && `完成：${text(args.result)}`, text(args.next) && `下一步：${text(args.next)}`].filter(Boolean).join(' · ')
     case 'plan_tasks': {
@@ -172,6 +178,9 @@ export function toolVisual(name: string, args: unknown, result?: unknown): ToolV
   if (name === 'return_task' && typeof result === 'object' && result !== null
     && (result as Record<string, unknown>).returned === 'n0') {
     base = { ...base, title: base.title.replace('子任务', '主任务') }
+  }
+  if (name === 'write_stdin' && (typeof record.chars !== 'string' || record.chars.length === 0)) {
+    base = { ...base, title: '读取了命令输出' }
   }
   return { ...base, summary: summaryFor(name, record) }
 }

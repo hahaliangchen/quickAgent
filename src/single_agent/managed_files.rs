@@ -14,7 +14,11 @@ fn connection(root: &Path) -> Result<rusqlite::Connection> {
         CREATE TABLE IF NOT EXISTS agent_file_writer_versions (
         task_id TEXT NOT NULL, workspace TEXT NOT NULL, path TEXT NOT NULL, owner TEXT NOT NULL,
         turn INTEGER NOT NULL, seq INTEGER NOT NULL,
-        PRIMARY KEY(task_id, workspace, path, owner, turn));")?;
+        PRIMARY KEY(task_id, workspace, path, owner, turn));
+        CREATE TABLE IF NOT EXISTS agent_file_writer_metadata (
+        task_id TEXT NOT NULL,workspace TEXT NOT NULL,path TEXT NOT NULL,owner TEXT NOT NULL,
+        turn INTEGER NOT NULL,seq INTEGER NOT NULL,metadata TEXT NOT NULL,
+        PRIMARY KEY(task_id,workspace,path,owner,turn));")?;
     Ok(conn)
 }
 
@@ -49,9 +53,72 @@ fn save(root: &Path, task: &str, workspace: &str, path: &str, bytes: Option<&[u8
 /// Each write takes the task's next write version. `owner` is the parallel
 /// function that wrote, or `@main` for the main program and its serial calls.
 fn record_writer(root: &Path, task: &str, workspace: &str, path: &str, owner: &str, turn: usize) -> Result<()> {
-    connection(root)?.execute("INSERT INTO agent_file_writer_versions(task_id,workspace,path,owner,turn,seq) VALUES (?1,?2,?3,?4,?5,(SELECT COALESCE(MAX(seq),0)+1 FROM agent_file_writer_versions WHERE task_id=?1)) ON CONFLICT(task_id,workspace,path,owner,turn) DO UPDATE SET seq=excluded.seq",
+    record_writer_on(&connection(root)?, task, workspace, path, owner, turn)
+}
+
+fn record_writer_on(conn: &rusqlite::Connection, task: &str, workspace: &str, path: &str, owner: &str, turn: usize) -> Result<()> {
+    conn.execute("INSERT INTO agent_file_writer_versions(task_id,workspace,path,owner,turn,seq) VALUES (?1,?2,?3,?4,?5,(SELECT COALESCE(MAX(seq),0)+1 FROM agent_file_writer_versions WHERE task_id=?1)) ON CONFLICT(task_id,workspace,path,owner,turn) DO UPDATE SET seq=excluded.seq",
         params![task, workspace, path, owner, turn as i64])?;
+    // A later ordinary write by this owner must not inherit shell provenance.
+    conn.execute("DELETE FROM agent_file_writer_metadata WHERE task_id=?1 AND workspace=?2 AND path=?3 AND owner=?4 AND turn=?5",
+        params![task, workspace, path, owner, turn])?;
     Ok(())
+}
+
+// The parent module deliberately stays private. These crate-scoped wrappers
+// allow shell tracking to use its captured bytes without exposing baseline
+// internals or reading every managed file a second time.
+impl crate::agent_service::AgentServiceState {
+    pub(crate) fn shell_matching_baselines(
+        &self,
+        task: &str,
+        workspace: &Path,
+        matches: impl Fn(&str, Option<&[u8]>) -> bool,
+    ) -> Result<Vec<String>> {
+        let work = workspace.canonicalize()?.to_string_lossy().into_owned();
+        let conn = connection(self.workspace.root())?;
+        let mut statement = conn.prepare("SELECT path,exists_at_baseline,bytes FROM agent_file_baselines WHERE task_id=?1 AND workspace=?2")?;
+        let mut rows = statement.query(params![task, work])?;
+        let mut files = Vec::new();
+        while let Some(row) = rows.next()? {
+            let path: String = row.get(0)?;
+            let exists: bool = row.get(1)?;
+            let bytes: Option<Vec<u8>> = row.get(2)?;
+            // Missing bytes for an existing baseline are not evidence of absence.
+            if (!exists || bytes.is_some()) && matches(&path, if exists { bytes.as_deref() } else { None }) {
+                files.push(path);
+            }
+        }
+        Ok(files)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn shell_adopt_baseline(
+        &self,
+        task: &str,
+        workspace: &Path,
+        turn: usize,
+        relative: &str,
+        before: Option<&[u8]>,
+        after: Option<&[u8]>,
+        attribution: &crate::workspace_changes::ShellAttribution,
+    ) -> Result<()> {
+        if before == after { return Ok(()); }
+        let work = workspace.to_string_lossy();
+        let mut conn = connection(self.workspace.root())?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Preserve a newer host baseline if it changed during the interval.
+        let changed = tx.execute("UPDATE agent_file_baselines SET exists_at_baseline=?4,bytes=?5 WHERE task_id=?1 AND workspace=?2 AND path=?3 AND exists_at_baseline=?6 AND bytes IS ?7",
+            params![task, work, relative, after.is_some(), after, before.is_some(), before])?;
+        if changed > 0 {
+            let owner = attribution.writer();
+            record_writer_on(&tx, task, &work, relative, &owner, turn)?;
+            tx.execute("INSERT INTO agent_file_writer_metadata(task_id,workspace,path,owner,turn,seq,metadata) SELECT task_id,workspace,path,owner,turn,seq,?6 FROM agent_file_writer_versions WHERE task_id=?1 AND workspace=?2 AND path=?3 AND owner=?4 AND turn=?5",
+                params![task, work, relative, owner, turn, attribution.metadata().to_string()])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 /// The task's latest write version. A function started at this version has
@@ -90,6 +157,7 @@ impl Untouched {
     /// After the command, what it changed becomes the baseline and counts as a
     /// write by whoever ran it, as its edits do.
     pub(super) fn adopt(self, root: &Path, task: &str, owner: Option<&str>, turn: usize) -> Result<()> {
+        crate::workspace_changes::invalidate_snapshot_cache(Path::new(&self.workspace));
         for (relative, path, before) in self.files {
             let Ok(after) = crate::file_edit::snapshot(&path) else { continue };
             if after == before {
@@ -124,6 +192,13 @@ pub(super) struct Prepared {
     proposed: Vec<u8>,
     request_only: bool,
     pub args: Value,
+}
+
+struct WriterConflict {
+    owner: String,
+    turn: usize,
+    seq: i64,
+    metadata: Option<Value>,
 }
 
 /// Compute the intended content from the saved baseline, never from a conflicting file.
@@ -179,11 +254,46 @@ impl Prepared {
     /// The host does not record what a function read, so a later read does not
     /// lift this. Writing back the current content cannot lose anything.
     pub(super) fn parallel_conflict(&self, root: &Path, task: &str, owner: &str, started: i64) -> Result<bool> {
-        if !self.request_only && self.base.as_deref() == Some(self.proposed.as_slice()) { return Ok(false); }
-        Ok(connection(root)?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agent_file_writer_versions WHERE task_id=?1 AND workspace=?2 AND path=?3 AND owner<>?4 AND seq>?5)",
-            params![task, self.workspace, self.relative, owner, started], |row| row.get(0),
-        )?)
+        Ok(self.conflicting_writer(root, task, owner, started)?.is_some())
+    }
+
+    fn conflicting_writer(&self, root: &Path, task: &str, owner: &str, started: i64) -> Result<Option<WriterConflict>> {
+        if !self.request_only && self.base.as_deref() == Some(self.proposed.as_slice()) { return Ok(None); }
+        let row = connection(root)?.query_row(
+            "SELECT v.owner,v.turn,v.seq,m.metadata FROM agent_file_writer_versions v
+             LEFT JOIN agent_file_writer_metadata m ON m.task_id=v.task_id AND m.workspace=v.workspace AND m.path=v.path AND m.owner=v.owner AND m.turn=v.turn AND m.seq=v.seq
+             WHERE v.task_id=?1 AND v.workspace=?2 AND v.path=?3 AND v.owner<>?4 AND v.seq>?5
+             ORDER BY CASE WHEN v.owner GLOB '@shared_shell:*' THEN 0 ELSE 1 END,v.seq DESC LIMIT 1",
+            params![task, self.workspace, self.relative, owner, started], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?))
+            },
+        ).optional()?;
+        row.map(|(owner, turn, seq, metadata)| -> Result<WriterConflict> {
+            Ok(WriterConflict { owner, turn, seq, metadata: metadata.map(|metadata| serde_json::from_str(&metadata)).transpose()? })
+        }).transpose()
+    }
+
+    /// Preserve the proposal and diagnose shared provenance without inventing
+    /// a file author. Participants retain the same version barrier as outsiders.
+    pub(super) fn parallel_conflict_result(&self, root: &Path, task: &str, owner: &str, started: i64) -> Result<Option<Value>> {
+        let Some(writer) = self.conflicting_writer(root, task, owner, started)? else { return Ok(None) };
+        let shared = writer.owner.starts_with("@shared_shell:");
+        let mut result = self.preserve_versions(root, None, if shared { "shared_interval" } else { "parallel" })?;
+        result["writer_owner"] = json!(writer.owner);
+        result["writer_turn"] = json!(writer.turn);
+        result["writer_seq"] = json!(writer.seq);
+        if let Some(metadata) = writer.metadata {
+            result["shell_interval"] = metadata;
+        } else if let Some(id) = writer.owner.strip_prefix("@shared_shell:") {
+            result["shell_interval"] = json!({"kind":"shared_shell_interval","interval_id":id,
+                "owners":[],"writer":writer.owner,"attribution":"unknown","shared":true});
+        }
+        result["message"] = json!(if shared {
+            "The file changed during a shared shell interval; the actual author is unknown. The current file and proposed version were preserved. Ask the user how to proceed; do not merge or retry automatically."
+        } else {
+            "Another function changed this file after this function started; the current file and proposed version were preserved."
+        });
+        Ok(Some(result))
     }
     pub(super) fn record_writer(&self, root: &Path, task: &str, owner: &str, turn: usize) -> Result<()> {
         record_writer(root, task, &self.workspace, &self.relative, owner, turn)
@@ -227,6 +337,7 @@ impl Prepared {
             "message":"The file changed outside this task. The current file and the proposed change are preserved; ask the user how to proceed. Do not merge or retry automatically."}))
     }
     pub(super) fn committed(&self, root: &Path, task: &str) -> Result<bool> {
+        crate::workspace_changes::invalidate_snapshot_cache(Path::new(&self.workspace));
         let current = crate::file_edit::snapshot(&self.target)?;
         if current.as_deref() != Some(self.proposed.as_slice()) {
             return Ok(false);
@@ -246,11 +357,106 @@ mod tests {
         path
     }
 
+    #[test]
+    fn shell_takeover_preserves_a_baseline_replaced_during_the_interval() -> Result<()> {
+        let root = root();
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let workspace = state.workspace.root();
+        let work = workspace.to_string_lossy();
+        save(&root, "task", &work, "document.txt", Some(b"before"), true)?;
+        let matching = state.shell_matching_baselines("task", workspace, |path, bytes| {
+            path == "document.txt" && bytes == Some(b"before".as_slice())
+        })?;
+        assert_eq!(matching, vec!["document.txt"]);
+        save(&root, "task", &work, "document.txt", Some(b"new host baseline"), true)?;
+        let attribution = crate::workspace_changes::ShellAttribution::new("test-cas", &["@main".into()])?;
+        state.shell_adopt_baseline("task", workspace, 1, "document.txt", Some(b"before"), Some(b"shell after"), &attribution)?;
+        assert_eq!(baseline(&root, "task", &work, "document.txt")?.flatten().as_deref(), Some(b"new host baseline".as_slice()));
+        assert_eq!(write_clock(&root, "task")?, 0);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
     fn commit_as(root: &Path, task: &str, owner: &str, content: &str, turn: usize) -> Result<()> {
         let p = prepare(root, task, root, "write_file", json!({"path":"document.txt","content":content}))?;
         fs::write(root.join("document.txt"), content)?;
         assert!(p.committed(root, task)?);
         p.record_writer(root, task, owner, turn)
+    }
+
+    fn adopt_shell(state: &crate::agent_service::AgentServiceState, id: &str, owners: &[&str]) -> Result<()> {
+        let workspace = state.workspace.root();
+        let work = workspace.to_string_lossy();
+        save(workspace, "task", &work, "document.txt", Some(b"before"), true)?;
+        fs::write(workspace.join("document.txt"), "shell")?;
+        let owners = owners.iter().map(|owner| (*owner).to_owned()).collect::<Vec<_>>();
+        let attribution = crate::workspace_changes::ShellAttribution::new(id, &owners)?;
+        state.shell_adopt_baseline("task", workspace, 1, "document.txt", Some(b"before"), Some(b"shell"), &attribution)
+    }
+
+    #[test]
+    fn a_single_shell_owner_can_write_again_without_a_false_parallel_conflict() -> Result<()> {
+        let root = root();
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let started = write_clock(&root, "task")?;
+        adopt_shell(&state, "own-shell", &["a", "a"])?;
+        let pending = write_as(&root, "after shell")?;
+        assert!(!pending.parallel_conflict(&root, "task", "a", started)?);
+        assert!(pending.parallel_conflict_result(&root, "task", "a", started)?.is_none());
+        let other = pending.parallel_conflict_result(&root, "task", "b", started)?.context("another owner must still conflict")?;
+        assert_eq!(other["reason"], "parallel");
+        assert_eq!(other["writer_owner"], "a");
+        assert_eq!(other["shell_interval"]["owners"], json!(["a"]));
+        assert_eq!(other["shell_interval"]["shared"], false);
+        assert!(pending.parallel_conflict_result(&root, "task", "b", write_clock(&root, "task")?)?.is_none());
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn shared_shell_writers_keep_the_barrier_and_report_unknown_authorship() -> Result<()> {
+        let root = root();
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let started = write_clock(&root, "task")?;
+        adopt_shell(&state, "mixed-shell", &["b", "a", "b", "@main"])?;
+        for owner in ["a", "b", "outsider"] {
+            let pending = write_as(&root, &format!("from {owner}"))?;
+            let result = pending.parallel_conflict_result(&root, "task", owner, started)?.context("shared version barrier missing")?;
+            assert_eq!(result["reason"], "shared_interval");
+            assert_eq!(result["writer_owner"], "@shared_shell:mixed-shell");
+            assert_eq!(result["shell_interval"]["owners"], json!(["@main", "a", "b"]));
+            assert_eq!(result["shell_interval"]["attribution"], "unknown");
+            assert!(result["message"].as_str().unwrap().contains("actual author is unknown"));
+            assert!(!result["message"].as_str().unwrap().contains("Another function"));
+            assert_eq!(fs::read_to_string(result["candidate_path"].as_str().unwrap())?, format!("from {owner}"));
+        }
+        assert_eq!(fs::read_to_string(root.join("document.txt"))?, "shell");
+        assert!(write_as(&root, "shell")?.parallel_conflict_result(&root, "task", "a", started)?.is_none());
+        // An owner's later precise edit must not hide the shared write that
+        // happened after this frame started.
+        commit_as(&root, "task", "a", "own later edit", 1)?;
+        let result = write_as(&root, "replace")?.parallel_conflict_result(&root, "task", "a", started)?.context("lost shared barrier")?;
+        assert_eq!(result["reason"], "shared_interval");
+        assert!(write_as(&root, "new frame")?.parallel_conflict_result(&root, "task", "a", write_clock(&root, "task")?)?.is_none());
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_writes_do_not_inherit_stale_shell_provenance() -> Result<()> {
+        let root = root();
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        adopt_shell(&state, "first-shell", &["a"])?;
+        commit_as(&root, "task", "a", "ordinary write", 1)?;
+        let result = write_as(&root, "from b")?.parallel_conflict_result(&root, "task", "b", 0)?.context("missing other writer")?;
+        assert_eq!(result["reason"], "parallel");
+        assert!(result.get("shell_interval").is_none());
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 
     fn write_as(root: &Path, content: &str) -> Result<Prepared> {
@@ -516,7 +722,7 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         let (one, two) = (session(&state, &cancel, Some("one")), session(&state, &cancel, Some("two")));
         super::super::business_tool(&one, "node", "read_file", json!({"path":"document.txt"}), "read").await?;
-        let ran = super::super::business_tool(&one, "node", "run_program", json!({"program":"python","args":["-c","import pathlib; pathlib.Path('document.txt').write_text('command')"]}), "run").await?;
+        let ran = super::super::business_tool_inner(&one, "node", "run_program", json!({"program":"python","args":["-c","import pathlib; pathlib.Path('document.txt').write_text('command')"]}), "run", true).await?;
         if ran["outcome"] == "spawn_failed" {
             // Python is not installed here.
             drop(conn);
@@ -553,7 +759,7 @@ mod tests {
         };
         let python = |code: &str| json!({"program":"python","args":["-c",format!("import pathlib; p = pathlib.Path('document.txt'); {code}")]});
         super::super::business_tool(&session, "node", "write_file", json!({"path":"document.txt","content":"second"}), "write").await?;
-        let ran = super::super::business_tool(&session, "node", "run_program", python("p.write_text('command')"), "run").await?;
+        let ran = super::super::business_tool_inner(&session, "node", "run_program", python("p.write_text('command')"), "run", true).await?;
         if ran["outcome"] == "spawn_failed" {
             // Python is not installed here.
             drop(conn);
@@ -567,7 +773,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&path)?, "agent");
         // A change made outside before the next command still stops the edit after it.
         fs::write(&path, "outside")?;
-        super::super::business_tool(&session, "node", "run_program", python("p.write_text(p.read_text() + '+command')"), "run again").await?;
+        super::super::business_tool_inner(&session, "node", "run_program", python("p.write_text(p.read_text() + '+command')"), "run again", true).await?;
         let conflict = super::super::business_tool(&session, "node", "edit_file", json!({"path":"document.txt","edits":[{"old_text":"agent","new_text":"again"}]}), "edit again").await?;
         assert_eq!(conflict["error_code"], "ASSET_CONFLICT", "{conflict}");
         assert_eq!(fs::read_to_string(&path)?, "outside+command");
@@ -599,7 +805,7 @@ mod tests {
         };
         super::super::business_tool(&session, "node", "read_file", json!({"path":"document.txt"}), "read").await?;
         let launch = json!({"project_path":".","script":"dev","background":true,"ready_url":format!("http://127.0.0.1:{port}/"),"wait_seconds":30});
-        let launched = match super::super::business_tool(&session, "node", "run_project_script", launch, "launch").await {
+        let launched = match super::super::business_tool_inner(&session, "node", "run_project_script", launch, "launch", true).await {
             Ok(launched) => launched,
             // Node and npm are not installed here.
             Err(error) if format!("{error:#}").contains("runtime_bootstrap") => {
@@ -612,7 +818,7 @@ mod tests {
         };
         let written = fs::read_to_string(&path)?;
         let conflict = super::super::business_tool(&session, "node", "edit_file", json!({"path":"document.txt","edits":[{"old_text":"background","new_text":"agent"}]}), "edit").await?;
-        super::super::business_tool(&session, "node", "stop_project_process", json!({"process_id":launched["process_id"]}), "stop").await?;
+        super::super::business_tool_inner(&session, "node", "stop_project_process", json!({"process_id":launched["process_id"]}), "stop", true).await?;
         assert_eq!(launched["running"], true, "{launched}");
         assert_eq!(written, "background");
         assert_eq!(conflict["error_code"], "ASSET_CONFLICT", "{conflict}");

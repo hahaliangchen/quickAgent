@@ -1,4 +1,5 @@
 import { randomId } from './randomId.ts'
+import { resolveEffort } from './reasoningEffort.ts'
 import type {AttachmentSubmission} from './components/Attachments'
 import { requestNotificationPermission, useTaskNotifications } from './useTaskNotifications.ts'
 import type { PermissionMode } from './api'
@@ -71,8 +72,8 @@ export function useAgentWorkspace() {
     try { localStorage.setItem('codex_active_workspace', ws) } catch {}
     openTask(undefined)
   }, [changeSidebarMode])
-  const addWorkspace = useCallback(async (path: string) => {
-    const project = await api.addProject(path.trim())
+  const addWorkspace = useCallback(async (path: string, title?: string) => {
+    const project = await api.addProject(path.trim(), title?.trim())
     await refreshProjects()
     selectWorkspace(project.path)
     setFolderDialogOpen(false)
@@ -208,7 +209,7 @@ export function useAgentWorkspace() {
     try {
       const latest = settings ?? await api.getSettings()
       const capability = latest.providers.find(p => p.id === providerId)?.model_capabilities[modelId]
-      const defaultEffort = capability?.default_effort ?? ''
+      const defaultEffort = resolveEffort(undefined, capability?.reasoning_efforts ?? [])
       setSelectedEffortOverride(defaultEffort || null)
       setSelectedFastModeOverride(false)
 
@@ -289,9 +290,11 @@ export function useAgentWorkspace() {
   const composerNote = !ready && info !== undefined ? t('app.notReady') : notice ?? session.error
 
   const modelName = selectedModelOverride ?? task?.model ?? info?.model ?? settings?.orchestrator_model
-  const reasoningEffort = selectedEffortOverride !== undefined
+  const requestedEffort = selectedEffortOverride !== undefined
     ? selectedEffortOverride
     : (task?.reasoning_effort ?? settings?.reasoning_effort ?? '')
+  const modelProvider = settings?.providers.find(p => p.models.includes(modelName ?? ''))
+  const reasoningEffort = resolveEffort(requestedEffort, modelProvider?.model_capabilities[modelName ?? '']?.reasoning_efforts ?? [])
   const fastMode = selectedFastModeOverride !== undefined
     ? selectedFastModeOverride
     : (task?.fast_mode ?? settings?.fast_mode ?? false)

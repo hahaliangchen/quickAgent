@@ -1,0 +1,257 @@
+{
+  "stage": "3a",
+  "scope": "this, function references, call/apply/bind; prototypes/descriptors/Reflect not started",
+  "source_hashes": {
+    "src/agent_program.rs": "53ed3d2ad9c201626ba5ed2af0777b8872a54ad9afe1bd702ed6f1ef85fff245",
+    "src/agent_program/compiler.rs": "580670b8a7b4499e55c1b079962c3d9ff7548ed5470fa43dffdc18a36d938fd1",
+    "src/agent_program/heap.rs": "eec983d18d3b33cc7a30d135aa74659c22b2bdb819d4e91efa90d721c4e9f9be",
+    "src/agent_program/js_functions.rs": "15eb374cde9f4fc050d1ac363933db65dbb6de269ded706176a91f01bb2f1bfa",
+    "src/agent_program/js_methods.rs": "5bb225b8ab6159a8fb66b2108c6038add106bebea8be525ec3539254a31ab103",
+    "src/agent_program/js_value.rs": "42a7115223d45fe82082ccfe4bb60f8e580d31793fd97efaa2b7df98e43b474f",
+    "src/agent_program/vm_eval.rs": "cf57f8902ed048ab68d04bc7ed60cd4bb58bb5e86e92b7ed72d064e978973ec4",
+    "src/agent_program/runtime.rs": "0179809c25321dc935f6eb2934ca43ae70ef3879ecd4a1b7435a1f4cf0c6c0ae",
+    "src/agent_program/prelude.js": "78456f67c8fc204b80d6fcc5282324400cf9e0514b55b37fef7a1d51aae57a97",
+    "src/agent_program/tests.rs": "cb3b10bd7e79327eeadde570c5241ed5fd91e44a23f8156b06a7137e85adb5b3",
+    "src/agent_program/conformance.rs": "698d0eff23767d51fed604ec44e23d240acf130be6f66949ee41800728773ea2",
+    "src/mcp.rs": "d70a2cdfe7b2fbe62063f9d29e3d8ab6f8a44b72590da99e8b6d085b54b50e91",
+    "prompts/flow_capabilities.md": "cfb8375407501afe47a0078c2534eebfea6e6906498fbffc115f71fa8b4fb414",
+    "prompts/flow_builtin_contracts.d.ts": "9d788b991675c7853a9526ae3c804bb24d64743c9e15ebac97115ffdc251634f",
+    "docs/agent-program.md": "ce3baf81a8c5de93271fee2dd71648a9c13ec5d728820bcb33b2df8452481ce6"
+  },
+  "new_function_tests": [
+    "agent_program::tests::vm_stage3a_apply_validation_and_bound_callback_failures_are_type_errors",
+    "agent_program::tests::vm_stage3a_arrow_this_is_lexical_including_parameters_and_blocks",
+    "agent_program::tests::vm_stage3a_bind_name_length_and_parameter_length",
+    "agent_program::tests::vm_stage3a_bound_and_lexical_timer_callbacks_keep_this_after_snapshot",
+    "agent_program::tests::vm_stage3a_bound_async_promise_and_executor_callbacks",
+    "agent_program::tests::vm_stage3a_bound_function_survives_host_suspend_gc_and_restore",
+    "agent_program::tests::vm_stage3a_call_apply_bind_and_rebinding_argument_order",
+    "agent_program::tests::vm_stage3a_callbacks_honor_this_arg_and_arrow_ignores_it",
+    "agent_program::tests::vm_stage3a_function_properties_override_intrinsics_and_survive_restore",
+    "agent_program::tests::vm_stage3a_method_is_read_before_argument_side_effects",
+    "agent_program::tests::vm_stage3a_native_optional_calls_and_borrowed_string_methods",
+    "agent_program::tests::vm_stage3a_native_tools_collections_and_extracted_call_apply",
+    "agent_program::tests::vm_stage3a_optional_calls_preserve_reference_and_short_circuit_arguments",
+    "agent_program::tests::vm_stage3a_ordinary_callbacks_receive_undefined_without_this_arg",
+    "agent_program::tests::vm_stage3a_own_methods_with_builtin_names_are_not_replaced_by_optimizations",
+    "agent_program::tests::vm_stage3a_parentheses_and_expression_callees_keep_js_reference_rules",
+    "agent_program::tests::vm_stage3a_parenthesized_optional_reference_keeps_receiver_but_not_outer_short_circuit",
+    "agent_program::tests::vm_stage3a_parenthesized_spread_and_reassigned_functions_use_current_value",
+    "agent_program::tests::vm_stage3a_strict_this_and_method_receivers"
+  ],
+  "vm_suite": "test result: ok. 261 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.73s",
+  "full_suite": {
+    "baseline": "runs/codex-vm-stage2-failure-comparison-20261107.json",
+    "current_log": "runs/codex-vm-stage3a-full-20261107.txt",
+    "complete": true,
+    "summary": "test result: FAILED. 587 passed; 29 failed; 23 ignored; 0 measured; 0 filtered out; finished in 64.75s",
+    "baseline_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "current_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "new_failures": [],
+    "resolved_failures": []
+  },
+  "measurements": {
+    "test262": {
+      "counts": {
+        "compile_rejected": 929,
+        "pass": 431,
+        "run_failed": 80,
+        "skipped": 316
+      },
+      "same_inputs": true,
+      "pass_regressions": [],
+      "transitions": {
+        "compile_rejected -> run_failed": 13,
+        "run_failed -> pass": 7,
+        "compile_rejected -> pass": 17
+      }
+    },
+    "corpus": {
+      "counts": {
+        "application": {
+          "compile_rejected": 2,
+          "pass": 25
+        },
+        "codex": {
+          "compile_rejected": 1434
+        }
+      },
+      "same_inputs": true,
+      "pass_regressions": [],
+      "transitions": {}
+    }
+  },
+  "extra_function_selection": {
+    "cases": 638,
+    "counts": {
+      "compile_rejected": 441,
+      "pass": 171,
+      "run_failed": 9,
+      "skipped": 17
+    },
+    "by_directory": {
+      "Function/apply": {
+        "compile_rejected": 44,
+        "pass": 1,
+        "skipped": 3
+      },
+      "Function/bind": {
+        "compile_rejected": 94,
+        "pass": 3,
+        "skipped": 3
+      },
+      "Function/call": {
+        "compile_rejected": 48,
+        "pass": 1
+      },
+      "expressions/arrow-function": {
+        "compile_rejected": 180,
+        "pass": 151,
+        "run_failed": 8,
+        "skipped": 4
+      },
+      "expressions/call": {
+        "compile_rejected": 71,
+        "pass": 14,
+        "skipped": 7
+      },
+      "expressions/this": {
+        "run_failed": 1,
+        "pass": 1,
+        "compile_rejected": 4
+      }
+    },
+    "overlaps_default_selection": true,
+    "not_counted_as_additional_passes": true,
+    "runtime_failure_ids": [
+      "test/language/expressions/arrow-function/dstr/ary-ptrn-elem-id-init-fn-name-arrow.js",
+      "test/language/expressions/arrow-function/dstr/ary-ptrn-elem-id-init-fn-name-fn.js",
+      "test/language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-id-init-fn-name-arrow.js",
+      "test/language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-id-init-fn-name-fn.js",
+      "test/language/expressions/arrow-function/dstr/dflt-obj-ptrn-id-init-fn-name-arrow.js",
+      "test/language/expressions/arrow-function/dstr/dflt-obj-ptrn-id-init-fn-name-fn.js",
+      "test/language/expressions/arrow-function/dstr/obj-ptrn-id-init-fn-name-arrow.js",
+      "test/language/expressions/arrow-function/dstr/obj-ptrn-id-init-fn-name-fn.js",
+      "test/language/expressions/this/11.1.1-1.js"
+    ]
+  },
+  "node_oracle": {
+    "version": "v22.5.1",
+    "script": "tests/vm/this-call-oracle.cjs",
+    "call_apply_bind_result": [
+      [
+        7,
+        1,
+        2,
+        3
+      ],
+      [
+        7,
+        1,
+        2,
+        3
+      ],
+      [
+        7,
+        null,
+        null,
+        null
+      ],
+      [
+        7,
+        1,
+        2,
+        3
+      ],
+      [
+        7,
+        1,
+        2,
+        4
+      ],
+      true,
+      true,
+      "function",
+      "{}"
+    ],
+    "ecmascript_length_values": [
+      1,
+      1,
+      1,
+      1
+    ],
+    "host_timer_length_difference": {
+      "node22_setTimeout_length": 5,
+      "vm_setTimeout_length": 2
+    }
+  },
+  "production_check": "passed, two pre-existing dead_code warnings",
+  "builtin_contract_syntax_diagnostics": 0,
+  "frozen_corpus_sha256": "1e73f5c9433e96739b9e41aa5711c74f9a367509c25cd4f68c605c4b7c430cd1",
+  "real_models_called": false,
+  "recovery_notes": [
+    "Discarded NUL-damaged log from power interruption; source scan and fresh test runs succeeded.",
+    "Interrupted MCP expiry test subtracted two hours from Windows Instant after recent boot, poisoning session mutex and aborting process during cleanup. Test now injects zero idle timeout into the same expiry implementation; production timeout remains two hours.",
+    "Prelude hash changed: existing policy rejects snapshots with old prelude; source/output archives remain."
+  ]
+}

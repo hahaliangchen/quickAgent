@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "agent-page",
+  "description": "The local agent page may open the system folder picker; nothing else is exposed to it.",
+  "windows": ["main"],
+  "remote": { "urls": ["http://127.0.0.1:*/*"] },
+  "permissions": ["dialog:allow-open"]
+}
