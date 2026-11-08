@@ -104,7 +104,7 @@
 
 常见语法归约为已有赋值、分支、跳转、调用和返回结构，不为每种写法新增调度协议。for 的 continue 进入 update 再检查条件；while 的 continue 进入条件；do/while 的 continue 进入末尾条件。break/continue 只退出其跨越的异常处理现场，保留外围 catch。
 
-顶层和 async 函数可以 await Promise；`Promise.all` 等组合子支持 async 虚函数与异步工具。Promise 回调和 await 恢复按 JS 微任务顺序执行：async 函数返回 Promise、`then` 回调返回 Promise 或 resolve 传入 Promise 时，与 JS 一样多等两轮。直接把顶层 async 函数（含 async 虚函数）或 `host:<库>/promises` 工具的调用结果当作值使用时编译失败，例如 `inspect(page).passed`、`if (inspect(page))`、`assert(inspect(page))`、`` `${work()}` `` 或参与运算；赋值保存、传给 `Promise.all`、调用 `then`/`catch`/`finally` 和 `void` 不受影响。局部函数值或变量保存的 Promise 在编译期无法识别，运行时读取 Promise 属性时报“this is a Promise; the value may need await”。运行时实现的是 JS 子集，不是完整 Node.js。支持对象和数组成员的赋值、复合赋值及自增自减；声明、普通函数参数和 catch 支持嵌套解构、默认值及解构剩余项，对象和数组字面量支持展开；支持可选函数调用、剩余参数及调用参数展开。非简单参数先在独立的参数作用域中初始化；默认值及其创建的闭包不会看到函数体内的同名绑定。其余仍禁止 function*/yield、call()/ai() 包装、除 host: 库之外的 import（第三方库用 require）和 export、TS 类型／断言、BigInt，以及 JS 全局环境。`new RegExp`、`new Promise`、`new Array`、`new Date`、`new Map/Set/WeakMap/WeakSet` 和内置 Error 类是构造例外。源码字符串里的这些词语只是数据，不按词语拦截。需要智能处理时声明注释任务；没有“计算失败后自动交给 AI”的路径。
+顶层和 async 函数可以 await Promise；`Promise.all` 等组合子支持 async 虚函数与异步工具。Promise 回调和 await 恢复按 JS 微任务顺序执行：async 函数返回 Promise、`then` 回调返回 Promise 或 resolve 传入 Promise 时，与 JS 一样多等两轮。直接把顶层 async 函数（含 async 虚函数）或 `host:<库>/promises` 工具的调用结果当作值使用时编译失败，例如 `inspect(page).passed`、`if (inspect(page))`、`assert(inspect(page))`、`` `${work()}` `` 或参与运算；赋值保存、传给 `Promise.all`、调用 `then`/`catch`/`finally` 和 `void` 不受影响。局部函数值或变量保存的 Promise 在编译期无法识别，运行时读取 Promise 属性时报“this is a Promise; the value may need await”。运行时实现的是 JS 子集，不是完整 Node.js。支持对象和数组成员的赋值、复合赋值及自增自减；声明、普通函数参数和 catch 支持嵌套解构、默认值及解构剩余项，对象和数组字面量支持展开；支持可选函数调用、剩余参数及调用参数展开。非简单参数先在独立的参数作用域中初始化；默认值及其创建的闭包不会看到函数体内的同名绑定。其余仍禁止 call()/ai() 包装、除 host: 库之外的 import（第三方库用 require）和 export、TS 类型／断言、BigInt，以及 JS 全局环境。`new RegExp`、`new Promise`、`new Array`、`new Date`、`new Map/Set/WeakMap/WeakSet` 和内置 Error 类是构造例外。源码字符串里的这些词语只是数据，不按词语拦截。需要智能处理时声明注释任务；没有“计算失败后自动交给 AI”的路径。
 
 函数是值：嵌套函数声明、函数表达式、箭头函数和对象方法简写创建闭包，可保存、传递和调用。数组回调支持同步函数值、多语句和嵌套调用，包括在回调中调用工具并跨存盘恢复；字符串 replace/replaceAll 的替换函数也支持此方式。数组 map 支持 async 回调；其他数组回调当前仍要求同步。支持通过索引赋值和 length 产生稀疏数组；数组字面量空位尚不支持；数组可保存非索引属性（包括正则结果的 groups/index/input），这些属性不改变 length，也不作为数组元素参与 JSON.stringify。
 
@@ -390,7 +390,7 @@ Symbol(description) 每次创建不同身份，description 可以相同；Symbol
 
 每次开始迭代时缓存 next 一次，验证返回对象并读取 done/value。正常耗尽后不再取值；break、return、跨层 continue、绑定/mapper/集合 adder 等消费步骤抛错时调用 return 清理，保留迭代器 receiver。next、done 或 value 读取本身失败时不重复关闭；已有原始异常优先于清理异常。数组解构部分消费会关闭，省略项不读 value，rest 正常耗尽。for-of 的 let/const 保留右侧 TDZ 和每轮的新绑定。
 
-迭代记录、缓存函数、游标、done 标记、闭包和部分执行的 next/return 都是 VM 值及普通帧，参与 GC 并随 Runtime 存盘。恢复后继续同一次调用，不重新取得迭代器、不重放 next 或 return。Symbol.asyncIterator 当前仅提供键；for-await、异步迭代器/生成器及 function*/yield 仍留到后续阶段。
+迭代记录、缓存函数、游标、done 标记、闭包和部分执行的 next/return 都是 VM 值及普通帧，参与 GC 并随 Runtime 存盘。恢复后继续同一次调用，不重新取得迭代器、不重放 next 或 return。Symbol.asyncIterator 已接通 for-await 和异步生成器，详见下文；同步 function*/yield 与 yield* 也可用。
 
 
 ### class、继承与构造目标（阶段 5）
@@ -416,7 +416,7 @@ console.log(result.summary());
 
 new.target 在普通调用和方法调用中是 undefined，在 new、绑定构造和 Reflect.construct 中指向有效构造目标；箭头函数从外围捕获。Error、Array、Map/Set/WeakMap/WeakSet、Date、RegExp、Promise、Object 和 Number/String/Boolean 子类保留内置槽位与相应原型关系。构造器、super 调用/访问器及 newTarget.prototype getter 可以在宿主调用处挂起；派生 this 的未初始化状态、home object、只读类名绑定和 new.target 都进入 GC 与 Runtime 快照，恢复后接着执行。JSON 只携带可枚举数据，不保留类身份或方法；变更 prelude 后沿用旧快照拒绝恢复的规则，历史源码与输出保留。
 
-本阶段不提供公有/私有字段、static 初始化块、动态 Function/eval、生成器或异步迭代。Promise/Array 等内置 species 算法、完整原型泛型借用、arguments、部分函数名推断及原生构造器的所有通用对象转换仍有缺口；支持继承不表示完整实现所有内置构造算法。对应限制与 test262 实际结果见 tests/vm/REPORT-stage5.md。
+类字段、私有字段、static 初始化块、动态 Function/eval 和异步迭代仍不提供；同步生成器见阶段 6。Promise/Array 等内置 species 算法、完整原型泛型借用、arguments、部分函数名推断及原生构造器的所有通用对象转换仍有缺口；支持继承不表示完整实现所有内置构造算法。对应限制与 test262 实际结果见 tests/vm/REPORT-stage5.md。
 
 
 ### 异步调用、名称推断与诊断修复（阶段 5 补充）
@@ -428,3 +428,39 @@ Promise 的本地回调统一经过正常 VM 调用入口；普通函数、绑�
 Number.prototype.toExponential(fractionDigits?) 支持普通/包装数字和 Number 子类。省略参数时输出最短指数形式；显式参数为 0..100，按实际二进制数的精确十进制展开取舍，不使用 Rust 默认的 ties-to-even 精度格式化替代 JS 规则。参数对象的转换可以挂起恢复，非 Number receiver 抛 TypeError，有限数的越界位数抛 RangeError，NaN/Infinity 的转换与检查顺序保留。
 
 未识别的内置方法会先报告具体方法名称，不再先尝试 JSON 转换而给出误导性边界错误。动态 Function/eval 仍按原约定禁用；Function 的子类构造限制仍在，不因本轮测试修复而开放动态代码生成。详细测试和剩余问题见 tests/vm/REPORT-stage5fix.md。
+
+
+### 同步生成器与持久化（阶段 6）
+
+支持 function* 声明/表达式、对象和类的生成器方法、yield、yield*，以及 next(value)、return(value)、throw(error)。调用时完成参数初始化，首次 next 才执行函数体，首次 next 的参数被忽略。每个实例都有独立的局部变量、闭包、this、home object、异常处理器和指令位置；生成器不能 new，重入 next/return/throw 抛 TypeError。
+
+next 返回 {value,done}；return 和 throw 可进入 finally，finally 内再次 yield 时保留尚未完成的返回值或异常。yield* 按迭代协议缓存 next，保留接收者、结果对象身份和访问器顺序，转发 return/throw；缺失 throw 时按规范关闭被委托迭代器。可供 for-of、展开、解构、Array.from 等既有同步迭代消费者使用。
+
+```js
+function* chunks(items, size) {
+  for (let i = 0; i < items.length; i += size) yield items.slice(i, i + size);
+}
+for (const batch of chunks([1, 2, 3], 2)) console.log(batch);
+```
+
+生成器的开始前状态、yield 暂停点、委托状态、finally 中待完成的返回/异常，以及执行到宿主调用时的全部调用帧，都参与 GC 和 Runtime 存盘恢复；恢复后继续执行，不重新创建生成器或重放已完成的副作用。JSON.stringify 只序列化可枚举数据，不保存生成器执行状态；structuredClone 不支持生成器，跨宿主边界请先物化需要的数据。异步生成器和 for-await 已在阶段 7 接通；动态 GeneratorFunction/AsyncGeneratorFunction 构造仍未开放。
+
+
+### 异步迭代、异步生成器与持久化（阶段 7）
+
+支持 async function* 声明/表达式、对象和类的 async 生成器方法、yield/yield*，以及 for await...of。调用生成器时初始化参数，首次 next 执行函数体；next/return/throw 总是返回 Promise。等待期间的调用按请求队列依次执行，重入调用会排队；不沿用同步生成器的“正在执行”错误。错误接收者通过 Promise 拒绝报告。
+
+yield 表达式和显式 return 表达式先 await 值；return; 和自然结束没有这次额外等待。return(value) 在开始前、yield 暂停或完成状态都会等待 value；等待拒绝可进入 yield 周围的 catch/finally。next(value) 和 throw(error) 不自动等待输入值。异步 yield* 优先使用 Symbol.asyncIterator，转发并等待 next/return/throw 的结果，但保留自定义异步迭代器结果中的 value（即使它是 Promise）。
+
+for await 优先使用 Symbol.asyncIterator；没有时回退到同步迭代器，并等待同步结果的 value。异步迭代器的 value 则原样传入循环体。next 只读取一次并缓存，校验结果对象；break、return 和循环体抛错执行异步 return 清理。正常耗尽和 next/done/value 读取失败不会额外清理；已有的异常优先于清理错误。协议调用保持规定的微任务等待顺序。
+
+```js
+async function* summarize(batches) {
+  for (const batch of batches) yield { count: batch.length };
+}
+const batches = [[1, 2], [3]];
+const summaries = [];
+for await (const result of summarize(batches)) summaries.push(result);
+```
+
+等待值、请求队列、当前调用帧、缓存 next、闭包、this/super、异常处理器和 finally 中待完成的返回/异常全部参与 GC 和 Runtime 存盘；恢复继续同一次调用，不重放已完成的副作用。JSON.stringify/structuredClone 不保存这些执行状态。await 的 PromiseResolve 边界会读取 Promise.constructor 并同化普通 thenable；getter 和 thenable 回调可经过宿主调用挂起恢复。Promise.resolve 与构造器 resolve 的一般 thenable 同化仍是已有独立限制，本轮没有把整个 Promise 实现声明为完整兼容。

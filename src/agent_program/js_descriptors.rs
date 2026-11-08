@@ -613,6 +613,7 @@ impl Heap {
             "$$isDate"=>VmValue::Boolean(target.is_some_and(|id|self.date_value(id).is_some())),
             "$$emptyCollection"=>{let name=super::super::js_value::to_string(self,&first)?;super::super::js_collections::construct(self,&name,&[])?},
             "$$defaultTag"=>VmValue::String(self.object_tag(&first)?),
+            "$$isPromise" => VmValue::Boolean(target.is_some_and(|id|matches!(self.get(id),Ok(HeapNode::Promise{..})))),
             "$$isObject" => VmValue::Boolean(target.is_some()),
             "$$isConstructor" => VmValue::Boolean(self.is_constructor_value(&first)?),
             "$$rawStringify" => {

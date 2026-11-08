@@ -1,0 +1,591 @@
+{
+  "stage": "6",
+  "date": "2026-11-08",
+  "scope": "synchronous generators and durable continuations; async generators and async iteration remain unavailable",
+  "source_hashes": {
+    "src/agent_program.rs": "ce0c9761c1f17577e8f85876556917766ad897f3f6af51a6160001e7ca6ad0a2",
+    "src/agent_program/compiler.rs": "f424a9152e747dfc848baaa9e20c359d515f9ddaf046344f68b4571312da0874",
+    "src/agent_program/compiler_properties.rs": "35f83f02ce96a5c67d872c5c008becc44626e4e76b24dddf67192a5084de4eec",
+    "src/agent_program/compiler_iteration.rs": "0e7f7f5b2665dd9fd5f5a327c3f42fa99c654036818fbca51e8142b8206f3d28",
+    "src/agent_program/compiler_generators.rs": "da638f9f37075ce457ed063d4e8655d6957d9d2a7c0d5966dfcbd011591c9d31",
+    "src/agent_program/heap.rs": "a17142deb8b4db63782126a91fcbf8bf743943b918e769faeb0d4c617c5d8299",
+    "src/agent_program/js_prototypes.rs": "6972300dbb01a05da16d2cb7e1b74e4abfa567e5a9ec21811b31cd4eca668000",
+    "src/agent_program/js_functions.rs": "c311c3c7f28d04abd5f2a5d70e14d76b2ee147cc8f9fdc80a49f4887f2c67a41",
+    "src/agent_program/runtime.rs": "0ee8ec3863c6641eb9772738980c27dc9e328568cfb215bb7d67a319f8029fe7",
+    "src/agent_program/runtime_generators.rs": "966efa35ac7376b9e5054f6e17f97c4d81de1a9a970290cc0bc19c51e275d57f",
+    "src/agent_program/tests.rs": "96490ae7d35c5ee5cf064b4bf21f4b7bc06f9441ba361402ba0302c6efe23ec9",
+    "src/agent_program/tests_stage6.rs": "c65620acca7a30eea117c3b15890b08f48ef0af52b6bb13ef22c4fef877a1b64",
+    "src/single_agent/program_flow.rs": "23882283ea4d51ef8e095bb43262213d53970ade14ed0036913451d4f278998b",
+    "prompts/flow_capabilities.md": "3505809e41124b0e9c550e89e66a95af6bde3669abf04498a2bda3484fdb6941",
+    "prompts/flow_builtin_contracts.d.ts": "9fbee24ab1842f2c81983bf03e0e5abf3228fdfca4a7158e4e8713106806bd22",
+    "docs/agent-program.md": "4e929f448e7480ec284e8c3e48f790962ee24543c1900005d16a435f1e763240",
+    "skills/task-program/SKILL.md": "b9a6a9febf34a658d9f4c0b833774dfd4d4b1509e17ffd7fe61eb1fcf0771d0c"
+  },
+  "unit_tests": [
+    "vm_stage6_async_generator_still_rejected",
+    "vm_stage6_bare_yield",
+    "vm_stage6_changed_generator_prototype",
+    "vm_stage6_completed_generators_stay_extensible",
+    "vm_stage6_destructuring_elision_propagates_generator_error",
+    "vm_stage6_destructuring_elisions_advance_generator",
+    "vm_stage6_elision_shape_preserves_comments_defaults_and_super",
+    "vm_stage6_expression_methods_this_and_closure",
+    "vm_stage6_finally_can_override_return_and_throw",
+    "vm_stage6_generator_descriptors",
+    "vm_stage6_generator_entry_returns_iterator_without_running_body",
+    "vm_stage6_generator_function_prototype_and_brand",
+    "vm_stage6_generator_getter_and_promise_callbacks",
+    "vm_stage6_generator_method_super",
+    "vm_stage6_instance_prototype_read_after_parameter_initialization",
+    "vm_stage6_interleaved_instances",
+    "vm_stage6_lazy_body_and_next_values",
+    "vm_stage6_parameters_initialize_at_call",
+    "vm_stage6_protocol_consumers_and_close",
+    "vm_stage6_reentrant_resume_is_type_error",
+    "vm_stage6_return_before_start",
+    "vm_stage6_return_pending_across_finally_yields",
+    "vm_stage6_return_replaces_pending_return",
+    "vm_stage6_return_runs_finally_without_catch",
+    "vm_stage6_snapshot_completed_generator_does_not_restart",
+    "vm_stage6_snapshot_executing_host_call_no_replay",
+    "vm_stage6_snapshot_finally_pending_return",
+    "vm_stage6_snapshot_generator_only_object_roots",
+    "vm_stage6_snapshot_host_error_is_caught_in_generator",
+    "vm_stage6_snapshot_parameter_initialization_before_instance_creation",
+    "vm_stage6_snapshot_pending_throw_through_finally",
+    "vm_stage6_snapshot_suspended_start_and_yield_with_gc",
+    "vm_stage6_snapshot_yield_getter_host_call",
+    "vm_stage6_snapshot_yield_star_nested_frames_and_throw",
+    "vm_stage6_throw_before_start_and_after_completion",
+    "vm_stage6_throw_is_catchable_and_preserves_identity",
+    "vm_stage6_yield_accessors_and_coercion",
+    "vm_stage6_yield_star_cached_next_and_lazy_value",
+    "vm_stage6_yield_star_close_error_precedence",
+    "vm_stage6_yield_star_missing_return_finishes_outer",
+    "vm_stage6_yield_star_missing_throw_closes",
+    "vm_stage6_yield_star_nested_and_completion",
+    "vm_stage6_yield_star_non_object_result_throws",
+    "vm_stage6_yield_star_preserves_result_identity_and_done_getter",
+    "vm_stage6_yield_star_return_done_false_resumes_normally",
+    "vm_stage6_yield_star_throw_and_return_forwarding"
+  ],
+  "host_tests": [
+    "single_agent::program_flow::tests::source_adapters_execute_synchronous_generators"
+  ],
+  "new_test_count": 47,
+  "snapshot_test_count": 10,
+  "test_first_logs": [
+    "runs/codex-vm-stage6-red.txt",
+    "runs/codex-vm-stage6-extra-red.txt",
+    "runs/codex-vm-stage6-order-red.txt",
+    "runs/codex-vm-stage6-property-red-confirmed.txt",
+    "runs/codex-vm-stage6-entry-red.txt",
+    "runs/codex-vm-stage6-elision-red.txt"
+  ],
+  "vm_suite": "test result: ok. 484 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 19.78s",
+  "vm_log": "runs/codex-vm-stage6-vm-final.txt",
+  "full_suite": {
+    "exit_code": 101,
+    "elapsed": 95.537,
+    "affinity": "0xffffcff",
+    "binary_sha256": "c18172930b4e144a6a734777781e9be135cd11c8ffb3cd4aecb3cffaf062f2fb",
+    "log": "runs/codex-vm-stage6-full-20261108.txt",
+    "summary": [
+      "test result: FAILED. 811 passed; 29 failed; 23 ignored; 0 measured; 0 filtered out; finished in 95.39s"
+    ],
+    "baseline_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "current_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "new_failures": [],
+    "resolved_failures": [],
+    "old_pass_regressions": []
+  },
+  "test262_profiles": {
+    "default": {
+      "baseline": "tests/vm/test262-stage5fix.json",
+      "current": "tests/vm/test262-stage6.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 389,
+        "pass": 924,
+        "run_failed": 127,
+        "skipped": 316
+      },
+      "current_counts": {
+        "compile_rejected": 333,
+        "pass": 980,
+        "run_failed": 127,
+        "skipped": 316
+      },
+      "transitions": {
+        "compile_rejected -> pass": 56
+      },
+      "newly_executable_runtime_failures": []
+    },
+    "-functions": {
+      "baseline": "tests/vm/test262-stage5fix-functions.json",
+      "current": "tests/vm/test262-stage6-functions.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 278,
+        "pass": 341,
+        "run_failed": 2,
+        "skipped": 17
+      },
+      "current_counts": {
+        "compile_rejected": 248,
+        "pass": 371,
+        "run_failed": 2,
+        "skipped": 17
+      },
+      "transitions": {
+        "compile_rejected -> pass": 30
+      },
+      "newly_executable_runtime_failures": []
+    },
+    "-prototypes": {
+      "baseline": "tests/vm/test262-stage5fix-prototypes.json",
+      "current": "tests/vm/test262-stage6-prototypes.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 588,
+        "pass": 720,
+        "run_failed": 11,
+        "skipped": 334
+      },
+      "current_counts": {
+        "compile_rejected": 388,
+        "pass": 920,
+        "run_failed": 11,
+        "skipped": 334
+      },
+      "transitions": {
+        "compile_rejected -> pass": 200
+      },
+      "newly_executable_runtime_failures": []
+    },
+    "-descriptors": {
+      "baseline": "tests/vm/test262-stage5fix-descriptors.json",
+      "current": "tests/vm/test262-stage6-descriptors.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 1374,
+        "pass": 1948,
+        "run_failed": 111,
+        "skipped": 371
+      },
+      "current_counts": {
+        "compile_rejected": 1175,
+        "pass": 2146,
+        "run_failed": 112,
+        "skipped": 371
+      },
+      "transitions": {
+        "compile_rejected -> run_failed": 1,
+        "compile_rejected -> pass": 198
+      },
+      "newly_executable_runtime_failures": [
+        {
+          "id": "test/built-ins/Object/seal/seal-generatorfunction.js",
+          "detail": "{\"location\":{\"column\":13,\"line\":42},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+        }
+      ]
+    },
+    "-iteration": {
+      "baseline": "tests/vm/test262-stage5fix-iteration.json",
+      "current": "tests/vm/test262-stage6-iteration.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 510,
+        "pass": 366,
+        "run_failed": 2,
+        "skipped": 79
+      },
+      "current_counts": {
+        "compile_rejected": 422,
+        "pass": 454,
+        "run_failed": 2,
+        "skipped": 79
+      },
+      "transitions": {
+        "compile_rejected -> pass": 88
+      },
+      "newly_executable_runtime_failures": []
+    },
+    "-classes": {
+      "baseline": "tests/vm/test262-stage5fix-classes.json",
+      "current": "tests/vm/test262-stage6-classes.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 1349,
+        "pass": 1253,
+        "run_failed": 4,
+        "skipped": 6030
+      },
+      "current_counts": {
+        "compile_rejected": 606,
+        "pass": 1994,
+        "run_failed": 6,
+        "skipped": 6030
+      },
+      "transitions": {
+        "compile_rejected -> pass": 741,
+        "compile_rejected -> run_failed": 2
+      },
+      "newly_executable_runtime_failures": [
+        {
+          "id": "test/language/statements/class/subclass/builtin-objects/GeneratorFunction/regular-subclassing.js",
+          "detail": "{\"location\":{\"column\":115,\"line\":226},\"message\":\"Class extends value is not a constructor or null\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"$$createClass\",\"pc\":13},{\"function\":\"<module>\",\"pc\":10}]}"
+        },
+        {
+          "id": "test/language/statements/class/subclass/builtin-objects/GeneratorFunction/super-must-be-called.js",
+          "detail": "{\"location\":{\"column\":115,\"line\":226},\"message\":\"Class extends value is not a constructor or null\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"$$createClass\",\"pc\":13},{\"function\":\"<module>\",\"pc\":10}]}"
+        }
+      ]
+    },
+    "-exponential": {
+      "baseline": "tests/vm/test262-stage5fix-exponential.json",
+      "current": "tests/vm/test262-stage6-exponential.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 3,
+        "pass": 12
+      },
+      "current_counts": {
+        "compile_rejected": 3,
+        "pass": 12
+      },
+      "transitions": {},
+      "newly_executable_runtime_failures": []
+    }
+  },
+  "generators": {
+    "baseline": "tests/vm/test262-stage6-generators-before.json",
+    "current": "tests/vm/test262-stage6-generators.json",
+    "comparison_passed": true,
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "baseline_counts": {
+      "compile_rejected": 621,
+      "pass": 73,
+      "skipped": 9
+    },
+    "current_counts": {
+      "compile_rejected": 170,
+      "pass": 516,
+      "run_failed": 8,
+      "skipped": 9
+    },
+    "transitions": {
+      "compile_rejected -> pass": 443,
+      "compile_rejected -> run_failed": 8
+    },
+    "newly_executable_runtime_failures": [
+      {
+        "id": "test/built-ins/GeneratorFunction/has-instance.js",
+        "detail": "{\"location\":{\"column\":3,\"line\":33},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":29}]}"
+      },
+      {
+        "id": "test/built-ins/GeneratorFunction/instance-construct-throws.js",
+        "detail": "{\"location\":{\"column\":16,\"line\":32},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+      },
+      {
+        "id": "test/built-ins/GeneratorFunction/instance-restricted-properties.js",
+        "detail": "{\"location\":{\"column\":17,\"line\":20},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":11}]}"
+      },
+      {
+        "id": "test/built-ins/GeneratorFunction/instance-yield-expr-in-param.js",
+        "detail": "{\"location\":{\"column\":1,\"line\":28},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+      },
+      {
+        "id": "test/built-ins/GeneratorFunction/invoked-as-constructor-no-arguments.js",
+        "detail": "{\"location\":{\"column\":9,\"line\":19},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+      },
+      {
+        "id": "test/built-ins/GeneratorFunction/invoked-as-function-multiple-arguments.js",
+        "detail": "{\"location\":{\"column\":9,\"line\":21},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":12}]}"
+      },
+      {
+        "id": "test/built-ins/GeneratorFunction/invoked-as-function-no-arguments.js",
+        "detail": "{\"location\":{\"column\":9,\"line\":19},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+      },
+      {
+        "id": "test/built-ins/GeneratorFunction/invoked-as-function-single-argument.js",
+        "detail": "{\"location\":{\"column\":9,\"line\":20},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+      }
+    ]
+  },
+  "remaining_generator_failures": [
+    {
+      "id": "test/built-ins/GeneratorFunction/has-instance.js",
+      "detail": "{\"location\":{\"column\":3,\"line\":33},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":29}]}"
+    },
+    {
+      "id": "test/built-ins/GeneratorFunction/instance-construct-throws.js",
+      "detail": "{\"location\":{\"column\":16,\"line\":32},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+    },
+    {
+      "id": "test/built-ins/GeneratorFunction/instance-restricted-properties.js",
+      "detail": "{\"location\":{\"column\":17,\"line\":20},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":11}]}"
+    },
+    {
+      "id": "test/built-ins/GeneratorFunction/instance-yield-expr-in-param.js",
+      "detail": "{\"location\":{\"column\":1,\"line\":28},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+    },
+    {
+      "id": "test/built-ins/GeneratorFunction/invoked-as-constructor-no-arguments.js",
+      "detail": "{\"location\":{\"column\":9,\"line\":19},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+    },
+    {
+      "id": "test/built-ins/GeneratorFunction/invoked-as-function-multiple-arguments.js",
+      "detail": "{\"location\":{\"column\":9,\"line\":21},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":12}]}"
+    },
+    {
+      "id": "test/built-ins/GeneratorFunction/invoked-as-function-no-arguments.js",
+      "detail": "{\"location\":{\"column\":9,\"line\":19},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+    },
+    {
+      "id": "test/built-ins/GeneratorFunction/invoked-as-function-single-argument.js",
+      "detail": "{\"location\":{\"column\":9,\"line\":20},\"message\":\"dynamic GeneratorFunction construction is disabled; declare function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+    }
+  ],
+  "corpus": {
+    "baseline": "tests/vm/corpus-stage5fix.json",
+    "current": "tests/vm/corpus-stage6.json",
+    "comparison_passed": true,
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "baseline_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "current_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "transitions": {},
+    "newly_executable_runtime_failures": []
+  },
+  "measurement_jobs": [
+    {
+      "name": "generators-before",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 0.836
+    },
+    {
+      "name": "generators",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 8.291,
+      "report": "tests/vm/test262-stage6-generators.json",
+      "baseline": null
+    },
+    {
+      "name": "default",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 72.207,
+      "report": "tests/vm/test262-stage6.json",
+      "baseline": "tests/vm/test262-stage5fix.json"
+    },
+    {
+      "name": "functions",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 5.663,
+      "report": "tests/vm/test262-stage6-functions.json",
+      "baseline": "tests/vm/test262-stage5fix-functions.json"
+    },
+    {
+      "name": "prototypes",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 17.484,
+      "report": "tests/vm/test262-stage6-prototypes.json",
+      "baseline": "tests/vm/test262-stage5fix-prototypes.json"
+    },
+    {
+      "name": "descriptors",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 49.25,
+      "report": "tests/vm/test262-stage6-descriptors.json",
+      "baseline": "tests/vm/test262-stage5fix-descriptors.json"
+    },
+    {
+      "name": "iteration",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 8.48,
+      "report": "tests/vm/test262-stage6-iteration.json",
+      "baseline": "tests/vm/test262-stage5fix-iteration.json"
+    },
+    {
+      "name": "classes",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 36.884,
+      "report": "tests/vm/test262-stage6-classes.json",
+      "baseline": "tests/vm/test262-stage5fix-classes.json"
+    },
+    {
+      "name": "exponential",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 0.357,
+      "report": "tests/vm/test262-stage6-exponential.json",
+      "baseline": "tests/vm/test262-stage5fix-exponential.json"
+    },
+    {
+      "name": "corpus",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 0.71
+    }
+  ],
+  "node_oracle": {
+    "node_version": "v22.5.1",
+    "total": 34,
+    "passed": 33,
+    "mismatches": [
+      {
+        "name": "vm_stage6_instance_prototype_read_after_parameter_initialization",
+        "result": [
+          false,
+          false,
+          null,
+          false
+        ],
+        "expected": [
+          true,
+          true,
+          7,
+          true
+        ]
+      }
+    ],
+    "snapshot_tests_not_comparable_in_node": 10,
+    "other_non_oracle_tests": [
+      "async generator compile rejection",
+      "Runtime generator entry"
+    ],
+    "comparison_passed": false,
+    "exit_code": 1,
+    "normative_variance": {
+      "spec": "https://tc39.es/ecma262/2025/multipage/ecmascript-language-functions-and-classes.html",
+      "section": "15.5.2 EvaluateGeneratorBody",
+      "test262_cases": [
+        "test/language/expressions/generators/generator-created-after-decl-inst.js",
+        "test/language/statements/generators/generator-created-after-decl-inst.js"
+      ],
+      "interpretation": "FunctionDeclarationInstantiation precedes generator instance creation. VM follows the specification and pinned test262; Node v22.5.1 captures the old prototype in this probe. The original mismatch and nonzero oracle exit remain recorded; no assertion was weakened to match Node."
+    }
+  },
+  "contracts_syntax_errors": 0,
+  "diff_check_exit_code": 0,
+  "temporary_cpu_mitigation": {
+    "excluded_windows_logical_processors": [
+      8,
+      9
+    ],
+    "mask": "0xffffcff",
+    "scope": "compilation and validation subprocesses only; no system-wide CPU configuration changes",
+    "hardware_fixed": false
+  },
+  "validation_corrections": [
+    "Parameter error fixture uses an explicit throwing initializer because undeclared identifiers are rejected by the compiler.",
+    "One LNK1104 came from recompiling a test executable while a measurement process was using it. Final measurements and full tests use separate executable copies.",
+    "Node oracle extraction now accepts rustfmt line breaks and asserts that every generator_test macro is included."
+  ],
+  "intentionally_retained": [
+    "async generators and for-await",
+    "dynamic Function/eval/GeneratorFunction construction",
+    "class fields/private fields/static blocks",
+    "arguments and unrelated existing compatibility limits",
+    "29 existing full-suite failures"
+  ]
+}

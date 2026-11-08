@@ -138,6 +138,7 @@ impl Compiler {
                     "$$getProperty"
                         | "$$constructWithTarget"
                         | "$$invokeWithReceiver"
+                        | "$$awaitSubscribe"
                         | "$$makeBound"
                         | "$$superCallArray"
                         | "$$superConstructor"
@@ -184,7 +185,8 @@ impl Compiler {
             | Op::Return(e)
             | Op::Throw(e)
             | Op::Branch(e, _)
-            | Op::Await { value: e, .. } => visit(e),
+            | Op::Await { value: e, .. }
+            | Op::Yield { value: e, .. } => visit(e),
             Op::SetMember { object, key, value } => {
                 visit(object);
                 visit(key);

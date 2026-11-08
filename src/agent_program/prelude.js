@@ -233,3 +233,52 @@ function $$dateSubclass(values){const proto=values.pop();let date;if(values.leng
 function $$boxedSubclass(kind,args,proto){let value;if(kind==='Number')value=args.length===0?0:$$numberBuiltin(args[0]);else if(kind==='String')value=args.length===0?'':$$stringConvert(args[0]);else value=args.length===0?false:Boolean(args[0]);return $$boxPrimitive(value,proto);}
 
 function $$numberExponential(value,digits){return $$rawExponential(value,digits===undefined?undefined:Number(digits));}
+
+// Async-from-sync adapts the iterator result's value, not an actual async
+// iterator's value. All accessors and awaits remain ordinary durable frames.
+function $$getAsyncIterator(value){
+  $$requireCoercible(value);const method=value[Symbol.asyncIterator];
+  if(method!==undefined&&method!==null)return $$getIteratorMethod(value,method);
+  const rec=$$getIterator(value);
+  const adapter={
+    [Symbol.asyncIterator](){return this;},
+    next(...args){try{if(this!==adapter)throw new TypeError('Invalid async iterator receiver');return $$asyncFromSyncResult($$invokeWithReceiver(rec.next,rec.iterator,args),rec,true);}catch(error){return Promise.reject(error);}},
+    return(...args){try{if(this!==adapter)throw new TypeError('Invalid async iterator receiver');const method=rec.iterator.return;if(method===undefined||method===null)return Promise.resolve({value:args[0],done:true});return $$asyncFromSyncResult($$invokeWithReceiver(method,rec.iterator,args),rec,false);}catch(error){return Promise.reject(error);}},
+    throw(...args){try{if(this!==adapter)throw new TypeError('Invalid async iterator receiver');const method=rec.iterator.throw;if(method===undefined||method===null){$$iteratorCloseNormal(rec);throw new TypeError('Iterator has no throw method');}return $$asyncFromSyncResult($$invokeWithReceiver(method,rec.iterator,args),rec,true);}catch(error){return Promise.reject(error);}}
+  };return {iterator:adapter,next:adapter.next,done:false};
+}
+function $$asyncFromSyncResult(step,rec,closeOnRejection){
+  return new Promise((resolve,reject)=>{
+    if(!$$isObject(step))throw new TypeError('Iterator result must be an object');
+    const done=!!step.done,normalized=$$awaitPromise(step.value);
+    const promise=$$isPromise(normalized)?normalized:Promise.resolve(normalized);
+    $$awaitSubscribe(promise,value=>resolve({value,done}),error=>{
+      try{if(!done&&closeOnRejection)$$iteratorCloseThrow(rec,error);}catch(ignored){}
+      reject(error);
+    });
+  });
+}
+
+// Await's PromiseResolve boundary runs accessors in normal serializable frames.
+// The non-Promise thenable job has its own already-called flag so resolving,
+// rejecting or throwing twice cannot change the original resolution.
+function $$awaitPromise(value){
+  if(!$$isObject(value))return value;
+  if($$isPromise(value)&&value.constructor===Promise)return value;
+  return new Promise((resolve,reject)=>$$resolveAwaitValue(value,resolve,reject));
+}
+function $$resolveAwaitValue(value,resolve,reject){
+  if(!$$isObject(value)){resolve(value);return;}
+  let then;
+  try{then=value.then;}catch(error){reject(error);return;}
+  if(typeof then!=='function'){resolve(value);return;}
+  queueMicrotask(()=>{
+    let called=false;
+    const ok=x=>{if(called)return;called=true;$$resolveAwaitValue(x,resolve,reject);};
+    const fail=x=>{if(called)return;called=true;reject(x);};
+    Object.defineProperty(ok,'name',{value:''});
+    Object.defineProperty(fail,'name',{value:''});
+    try{$$invokeWithReceiver(then,value,[ok,fail]);}catch(error){fail(error);}
+  });
+}
+async function $$asyncGeneratorAwaitReturn(value){return await value;}

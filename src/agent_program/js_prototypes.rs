@@ -3,6 +3,50 @@
 use super::*;
 
 impl Heap {
+    pub(crate) fn register_generator(&mut self, name: &str, enabled: bool, asynchronous: bool) {
+        if enabled { self.generator_functions.insert(name.into()); if asynchronous {self.async_generator_functions.insert(name.into());} }
+    }
+    pub(crate) fn new_generator(&mut self, callee: &VmValue, asynchronous: bool) -> Result<HeapId> {
+        let proto = if let VmValue::Reference(id) = callee { self.lookup_property(*id,"prototype")? } else { None };
+        let proto = match proto { Some(VmValue::Reference(id)) => id, _ => self.intrinsics[if asynchronous {"AsyncGenerator.prototype"}else{"Generator.prototype"}] };
+        let id = self.allocate(HeapNode::Object(vec![]))?;
+        self.prototypes.insert(id, Some(proto));
+        self.generators.insert(id, super::super::runtime::Generator::initializing(asynchronous));
+        Ok(id)
+    }
+    fn initialize_generators(&mut self) -> Result<()> {
+        let aip=self.allocate(HeapNode::Object(vec![]))?;
+        self.intrinsics.insert("AsyncIterator.prototype".into(),aip);
+        let identity=self.native("Iterator.identity")?;
+        let key=Self::symbol_storage_key(self.well_known_symbols["asyncIterator"]);
+        self.define_builtin(aip,&key,VmValue::Reference(identity))?;
+        for (kind,parent) in [("Generator","Iterator.prototype"),("AsyncGenerator","AsyncIterator.prototype")] {
+            let prototype=format!("{kind}.prototype");
+            let function_prototype=format!("{kind}Function.prototype");
+            let gp=self.allocate(HeapNode::Object(vec![]))?;
+            let fp=self.allocate(HeapNode::Object(vec![]))?;
+            self.intrinsics.insert(prototype.clone(),gp);
+            self.intrinsics.insert(function_prototype,fp);
+            self.prototypes.insert(gp,Some(self.intrinsics[parent]));
+            self.prototypes.insert(fp,Some(self.intrinsics["Function.prototype"]));
+            let ctor=self.native(&format!("{kind}Function"))?;
+            self.prototypes.insert(ctor,Some(self.intrinsics["Function"]));
+            self.define_builtin(ctor,"prototype",VmValue::Reference(fp))?;
+            self.define_builtin(fp,"constructor",VmValue::Reference(ctor))?;
+            self.define_builtin(fp,"prototype",VmValue::Reference(gp))?;
+            self.define_builtin(gp,"constructor",VmValue::Reference(fp))?;
+            for (id,key) in [(fp,"prototype"),(fp,"constructor"),(gp,"constructor")] {
+                self.descriptors.entry(id).or_default().insert(key.into(),PropertyMeta{writable:false,enumerable:false,configurable:true,accessor:None});
+            }
+            for key in ["next","return","throw"] {self.builtin_method(&prototype,key,&format!("{kind}.{key}"))?;}
+            let tag=Self::symbol_storage_key(self.well_known_symbols["toStringTag"]);
+            for (id,name) in [(gp,kind.into()),(fp,format!("{kind}Function"))] {
+                self.define_builtin(id,&tag,VmValue::String(name))?;
+                self.descriptors.entry(id).or_default().insert(tag.clone(),PropertyMeta{writable:false,enumerable:false,configurable:true,accessor:None});
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn readonly_constant(&self, id: HeapId, key: &str) -> bool {
         ["Math", "Number"].iter().any(|namespace| {
             self.intrinsics.get(*namespace) == Some(&id)
@@ -75,6 +119,16 @@ impl Heap {
             let prototype = self.allocate(HeapNode::Object(vec![]))?;
             self.define_builtin(id, "prototype", VmValue::Reference(prototype))?;
             self.define_builtin(prototype, "constructor", VmValue::Reference(id))?;
+        }
+        if matches!(self.get(id)?,HeapNode::Closure{function,..} if self.generator_functions.contains(function)) {
+            let asynchronous=matches!(self.get(id)?,HeapNode::Closure{function,..} if self.async_generator_functions.contains(function));
+            self.prototypes.insert(id,Some(self.intrinsics[if asynchronous {"AsyncGeneratorFunction.prototype"}else{"GeneratorFunction.prototype"}]));
+            if self.own_property(id,"prototype")?.is_none() {
+                let prototype=self.allocate(HeapNode::Object(vec![]))?;
+                self.prototypes.insert(prototype,Some(self.intrinsics[if asynchronous {"AsyncGenerator.prototype"}else{"Generator.prototype"}]));
+                self.define_builtin(id,"prototype",VmValue::Reference(prototype))?;
+                self.descriptors.entry(id).or_default().insert("prototype".into(),PropertyMeta{writable:true,enumerable:false,configurable:false,accessor:None});
+            }
         }
         Ok(())
     }
@@ -356,6 +410,7 @@ impl Heap {
             }
         }
         self.initialize_symbols()?;
+        self.initialize_generators()?;
         let poison=self.native("Function.restricted")?;
         self.raw_set_property(poison,"name".into(),VmValue::String(String::new()))?;
         self.prevent_extensions(poison);

@@ -126,6 +126,13 @@ pub(super) struct Heap {
     #[serde(default)]
     function_lengths: BTreeMap<String, usize>,
     #[serde(default)]
+    generator_functions: BTreeSet<String>,
+    #[serde(default)]
+    async_generator_functions: BTreeSet<String>,
+    /// Internal slots, not enumerable properties or JSON tool data.
+    #[serde(default)]
+    pub(super) generators: BTreeMap<HeapId, super::runtime::Generator>,
+    #[serde(default)]
     prototypes: BTreeMap<HeapId, Option<HeapId>>,
     #[serde(default)]
     intrinsics: BTreeMap<String, HeapId>,
@@ -179,6 +186,7 @@ impl Heap {
         let mut pending=if let VmValue::Reference(id)=value{vec![*id]}else{vec![]};
         while let Some(id)=pending.pop() {
             if !seen.insert(id){continue;}
+            ensure!(!self.generators.contains_key(&id), "TypeError: structuredClone cannot clone a generator; Runtime snapshots preserve its continuation");
             let mut visit=|value:&VmValue|if let VmValue::Reference(id)=value{pending.push(*id);};
             match self.get(id)? {
                 HeapNode::Collection(_) | HeapNode::Iterator(_)=>bail!("TypeError: structuredClone currently supports JSON values only; collection and iterator cloning is not implemented. Runtime snapshots preserve them in full."),
@@ -391,6 +399,9 @@ impl Heap {
             }
             pending.extend(self.prototypes.get(&id).copied().flatten());
             pending.extend(self.method_homes.get(&id).copied());
+            if let Some(generator) = self.generators.get(&id) {
+                pending.extend(generator.roots().iter().filter_map(|v| if let VmValue::Reference(id)=v {Some(*id)} else {None}));
+            }
             if let Some(props)=self.descriptors.get(&id){for d in props.values(){if let Some((g,s))=&d.accessor{for v in [g,s]{if let VmValue::Reference(child)=v{pending.push(*child);}}}}}
             if let Some(VmValue::Reference(value))=self.boxed.get(&id){pending.push(*value);}
             if let Some(properties) = self.array_properties.get(&id) {
@@ -445,6 +456,7 @@ impl Heap {
         self.array_properties.retain(|id, _| live.contains(id));
         self.frozen.retain(|id| live.contains(id));
         self.dates.retain(|id, _| live.contains(id));
+        self.generators.retain(|id, _| live.contains(id));
         self.prototypes.retain(|id,_|live.contains(id));
         self.class_constructors.retain(|id,_|live.contains(id));
         self.readonly_bindings.retain(|id,_|live.contains(id));

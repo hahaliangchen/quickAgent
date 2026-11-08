@@ -8,6 +8,10 @@ mod stage4;
 mod stage5;
 #[path="tests_stage5_fixes.rs"]
 mod stage5_fixes;
+#[path = "tests_stage6.rs"]
+mod stage6;
+#[path="tests_stage7.rs"]
+mod stage7;
 
 #[test]
 fn vm_stage3b_array_json_reads_inherited_indices() {
@@ -1216,7 +1220,7 @@ fn deterministic_expressions_return_without_model_actions() {
             );
         }
     }
-    assert!(compile("function* main(){yield io.read({path: 'x'});}").is_err());
+    assert!(compile("async function* main(){yield io.read({path: 'x'});}").is_ok());
     assert_eq!(
         returned(runtime(
             "function main(){return 'function* x(){yield call();}';}"
@@ -1684,7 +1688,7 @@ fn version_eight_rejects_javascript_extensions_at_every_source_entry() {
     // Valid-looking code can precede invalid syntax: compilation must reject
     // the entire source, including unused functions, before any effects run.
     for fragment in [
-        "function* hidden(){return 1;}",
+        "class Hidden { #field=1; }",
         "yield io.read({});",
         "yield* rows;",
         "await io.read({});",
@@ -1741,6 +1745,7 @@ fn version_eight_rejects_javascript_extensions_at_every_source_entry() {
         "const copy = [...[1,2]];",
         "Boolean(...[1]);",
         "async function hidden(){return 1;}",
+        "async function* hidden(){yield 1;}",
         "function hidden(){return 1;}",
         "const fn = function(){return 1;};",
         "const fn = () => 1;",
@@ -1761,8 +1766,8 @@ fn version_eight_rejects_javascript_extensions_at_every_source_entry() {
         compile_entry(&source, "work").unwrap_or_else(|e| panic!("{fragment}: {e}"));
     }
     for source in [
-        "function* main(){return 1;}",
-        "function main(){return 1;} function* unused(){return 1;}",
+        "class Hidden { #field=1; } function main(){return 1;}",
+        "function main(){return 1;} class Unused { field=1; }",
         "import {tools} from '@agent/runtime'; function main(){return 1;}",
         "export function main(){return 1;}",
         "type Result = string; function main(){return 1;}",

@@ -5,6 +5,9 @@ use super::vm_eval::{Locals, eval, is_temp};
 use std::collections::{BTreeSet, VecDeque};
 #[path = "runtime_timers.rs"]
 mod timers;
+#[path = "runtime_generators.rs"]
+mod generators;
+pub(super) use generators::Generator;
 
 /// Capture is program memory, independent of any AI's context budget.
 pub const CONSOLE_CAPTURE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -49,6 +52,12 @@ pub struct Frame {
     derived_env: Option<HeapId>,
     #[serde(default)]
     super_env: Option<HeapId>,
+    /// Root of a generator invocation, including call-time initialization.
+    #[serde(default)]
+    generator: Option<HeapId>,
+    /// Instance creation follows parameter evaluation, which may itself suspend.
+    #[serde(default)]
+    generator_function: Option<VmValue>,
 }
 impl Frame {
     fn locals(&self) -> Result<Locals<'_>> {
@@ -353,7 +362,11 @@ impl Runtime {
                 let mut next = true;
                 match &code[pc].op {
                     Op::Set(_, e) | Op::Declare(_, e) => expression(e, &mut live),
-                    Op::EnterScope(_) | Op::EnterFunctionBody | Op::LeaveScope | Op::CopyScope => {}
+                    Op::EnterScope(_) | Op::EnterFunctionBody | Op::LeaveScope | Op::CopyScope | Op::GeneratorStart => {}
+                    Op::Yield { value, return_target, delegated, .. } => {
+                        expression(value, &mut live);
+                        if !delegated { pending.push(*return_target); }
+                    }
                     Op::SetMember { object, key, value } => { expression(object, &mut live); expression(key, &mut live); expression(value, &mut live); }
                     Op::Await { value, .. } => expression(value, &mut live),
                     Op::Return(e) | Op::Throw(e) => {
@@ -465,7 +478,7 @@ impl Runtime {
         ensure!(program.prelude_hash == super::prelude::hash(), "program prelude changed");
         let mut heap = super::heap::Heap::default();
         super::js_functions::install(&mut heap)?;
-        for (id,function) in &program.functions {heap.register_function_length(id,function.length);heap.register_constructor(id,function.constructable);}
+        for (id,function) in &program.functions {heap.register_function_length(id,function.length);heap.register_constructor(id,function.constructable);heap.register_generator(id,function.is_generator,function.is_async);}
         heap.initialize_intrinsics()?;
         let inherited = if inherited_scope.is_empty() {
             None
@@ -481,7 +494,7 @@ impl Runtime {
             .map(|value| heap.from_json(value))
             .collect::<Result<Vec<_>>>()?;
         let module_entry = program.functions.get(entry).is_some_and(|f| f.module);
-        let (frame, module_env) = if module_entry {
+        let (mut frame, module_env) = if module_entry {
             let frame = Self::vm_frame(&program, &mut heap, inherited, entry, args, None)?;
             let env = frame.env.context("entry frame has no scope")?;
             (frame, env)
@@ -500,6 +513,9 @@ impl Runtime {
                 })?;
                 heap.define_binding(module_env, id, VmValue::Reference(closure))?;
             }
+        }
+        if program.functions[entry].is_generator {
+            frame.generator_function = Some(heap.lookup_binding(module_env, entry)?);
         }
         Ok(Self {
             program,
@@ -609,6 +625,8 @@ impl Runtime {
             diagnostic_at: None,
             derived_env: None,
             super_env: None,
+            generator: None,
+            generator_function: None,
         })
     }
     /// The object a required library gives: each method a tool value, async
@@ -727,7 +745,7 @@ impl Runtime {
         while let VmValue::Reference(id)=callback {
             match self.heap.get(*id)? {
                 HeapNode::BoundFunction{target,..}=>callback=target,
-                HeapNode::Closure{function,..}=>{ensure!(!self.program.functions[function].is_async,"async callbacks require Promise support");break;},
+                HeapNode::Closure{function,..}=>{ensure!(!self.program.functions[function].is_async || self.program.functions[function].is_generator,"async callbacks require Promise support");break;},
                 _=>break,
             }
         }
@@ -865,6 +883,7 @@ impl Runtime {
                 });
                 ensure!(self.frames.len() < 64, "program call depth limit");
                 let is_async = f.is_async;
+                let is_generator = f.is_generator;
                 let lexical_this=f.lexical_this;
                 let mut frame = Self::vm_frame(
                     &self.program,
@@ -880,9 +899,10 @@ impl Runtime {
                     self.heap.define_binding(frame.env.unwrap(),"\0home",home)?;
                 }
                 if let (Some(name), Some(env)) = (self_name, frame.env) {
-                    self.heap.define_binding(env, &name, callee)?;
+                    self.heap.define_binding(env, &name, callee.clone())?;
                 }
-                if is_async {
+                if is_generator { frame.generator_function = Some(callee.clone()); }
+                if is_async && !is_generator {
                     let promise = self.promises.create_heap_promise(&mut self.heap)?;
                     self.async_promises.push(promise);
                     self.store(frame.destination.take(), VmValue::Reference(promise))?;
@@ -898,11 +918,24 @@ impl Runtime {
                 Ok(None)
             }
             HeapNode::Native(name) => {
+                if matches!(name.as_str(),"AsyncGenerator.next"|"AsyncGenerator.return"|"AsyncGenerator.throw") {
+                    self.enqueue_async_generator(receiver,name.rsplit('.').next().unwrap(),args,destination)?;
+                    return Ok(None);
+                }
+                if name=="AsyncGeneratorFunction" {bail!("EvalError: dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source");}
+                if matches!(name.as_str(),"Generator.next"|"Generator.return"|"Generator.throw") {
+                    self.resume_generator(receiver, name.rsplit('.').next().unwrap(), args, destination)?;
+                    return Ok(None);
+                }
+                if name=="GeneratorFunction" {bail!("EvalError: dynamic GeneratorFunction construction is disabled; declare function* in source");}
                 if name=="Function.restricted" {bail!("TypeError: caller and arguments are unavailable on strict functions");}
                 if name=="$$coercePrimitive" {let value=args[0].clone();if !matches!(value,VmValue::Reference(_)){self.store(destination,value)?;return Ok(None);}let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$toPrimitiveHint",args,destination)?;self.frames.push(frame);return Ok(None);}
                 if matches!(name.as_str(),"$$looseEqual"|"$$looseNotEqual") {let (a,b)=(&args[0],&args[1]);let object=|v:&VmValue|matches!(v,VmValue::Reference(_));let null=|v:&VmValue|matches!(v,VmValue::Undefined|VmValue::Null);if object(a)!=object(b)&&!null(a)&&!null(b){let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$coercedEqual",vec![a.clone(),b.clone(),VmValue::Boolean(name=="$$looseNotEqual")],destination)?;self.frames.push(frame);return Ok(None);}let value=super::js_value::loose_equal(&self.heap,a,b)?;self.store(destination,VmValue::Boolean(if name=="$$looseNotEqual"{!value}else{value}))?;return Ok(None);}
                 if matches!(name.as_str(),"String"|"Symbol"|"Symbol.for")&&matches!(args.first(),Some(VmValue::Reference(_))) {let helper=match name.as_str(){"String"=>"$$stringConvert","Symbol"=>"$$symbolConvert",_=>"$$symbolForConvert"};let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,args,destination)?;self.frames.push(frame);return Ok(None);}
                 if matches!(name.as_str(),"Symbol.valueOf"|"Symbol.toPrimitive"|"Symbol.toString"|"getter:Symbol.description") {let id=self.heap.unbox_symbol(&receiver)?;let value=match name.as_str(){"Symbol.toString"=>self.heap.symbol_text(id)?,"getter:Symbol.description"=>self.heap.symbol_description(id),_=>VmValue::Symbol(id)};self.store(destination,value)?;return Ok(None);}
+                if name=="$$awaitSubscribe" {
+                    return self.invoke_method(args[0].clone(),"then",args[1..].to_vec(),destination,true);
+                }
                 if name=="Iterator.identity" {self.store(destination,receiver)?;return Ok(None);}
                 if name=="String.iterator" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$stringIterator",vec![receiver],destination)?;self.frames.push(frame);return Ok(None);}
 
@@ -1325,6 +1358,23 @@ impl Runtime {
     }
     /// Unwind to the nearest catch handler with the thrown value itself.
     fn throw(&mut self, value: VmValue, at: &Location) {
+        // An exception escaping a generator completes it before entering its
+        // caller's catch/finally. Promise boundaries nested inside it stay local.
+        let async_boundary = self.frames.iter().rposition(|f| f.completion.is_some() || f.executor.is_some()).unwrap_or(0);
+        if let Some(boundary) = self.frames.iter().rposition(|f| f.generator.is_some())
+            && boundary >= async_boundary
+            && !self.frames[boundary..].iter().any(|f| !f.handlers.is_empty())
+        {
+            let id = self.frames[boundary].generator.unwrap();
+            if self.is_async_generator(id) {self.record_async_generator_throw(id,&value,at);}
+            self.complete_generator(id);
+            self.frames.truncate(boundary);
+            if self.is_async_generator(id) {
+                let result=self.async_generator_complete_step(id,super::promise::Outcome::Rejected(value)).and_then(|_|self.drain_async_generator(id));
+                if let Err(error)=result {self.finished=true;self.error=Some(json!({"message":format!("{error:#}")}));}
+            }else{self.throw(value, at);}
+            return;
+        }
         // Keep the failed frames intact when nobody can catch the error. A
         // scoped AI continuation can inspect their actual locals without
         // replaying the instructions or their external effects.
@@ -1764,6 +1814,7 @@ impl Runtime {
                 });
                 let mut roots = self.promises.roots();
                 self.callback_roots(&mut roots);
+                roots.extend(self.heap.generators.iter().filter(|(_,g)|g.pending()).map(|(id,_)|VmValue::Reference(*id)));
                 roots.extend(self.async_promises.iter().copied().map(VmValue::Reference));
                 roots.extend(self.root_result.iter().cloned());
                 roots.extend(self.async_actions.iter().map(|action| VmValue::Reference(action.promise)));
@@ -1777,6 +1828,8 @@ impl Runtime {
                     roots.extend(reaction.origin.iter().copied().map(VmValue::Reference));
                 }
                 for frame in self.frames.iter().chain(self.continuations.values().flat_map(|c| c.frames.iter())) {
+                    roots.extend(frame.generator.map(VmValue::Reference));
+                    roots.extend(frame.generator_function.iter().cloned());
                     roots.extend(frame.constructed.iter().cloned());
                     roots.extend(frame.derived_env.map(VmValue::Reference));
                     roots.extend(frame.super_env.map(VmValue::Reference));
@@ -1940,7 +1993,7 @@ impl Runtime {
                         let value = eval(&value, locals, &mut self.heap)?;
                         let id = super::promise::ContinuationId(self.next_continuation);
                         self.next_continuation = self.next_continuation.checked_add(1).context("continuation id exhausted")?;
-                        let boundary = self.frames.iter().rposition(|frame| frame.completion.is_some()).unwrap_or(0);
+                        let boundary = self.frames.iter().rposition(|frame| frame.completion.is_some() || frame.generator.is_some_and(|id|self.is_async_generator(id))).unwrap_or(0);
                         let frames = self.frames.split_off(boundary);
                         self.continuations.insert(id, SuspendedCoroutine { frames, destination, at: at.clone() });
                         if let VmValue::Reference(promise) = value {
@@ -1949,10 +2002,27 @@ impl Runtime {
                             } else { self.promises.enqueue(id, super::promise::Outcome::Fulfilled(VmValue::Reference(promise))); }
                         } else { self.promises.enqueue(id, super::promise::Outcome::Fulfilled(value)); }
                     }
+                    Op::GeneratorStart => { self.suspend_generator_start()?; }
+                    Op::Yield { value, destination, return_target, delegated } => {
+                        let value = eval(&value, self.frames.last().unwrap().locals()?, &mut self.heap)?;
+                        self.suspend_generator_yield(value, destination, return_target, delegated)?;
+                    }
                     Op::Return(e) => {
                         let locals = self.frames.last().unwrap().locals()?;
                         let mut value = eval(&e, locals, &mut self.heap)?;
                         let frame = self.frames.pop().unwrap();
+                        if let Some(id) = frame.generator {
+                            self.complete_generator(id);
+                            if self.is_async_generator(id) {
+                                let result=self.generator_result(value,true)?;
+                                self.async_generator_complete_step(id,super::promise::Outcome::Fulfilled(result))?;
+                                self.drain_async_generator(id)?;
+                                return Ok(None);
+                            }
+                            let result = self.generator_result(value, true)?;
+                            self.store(frame.destination, result)?;
+                            return Ok(None);
+                        }
                         if let Some(env)=frame.derived_env && !matches!(value,VmValue::Reference(_)) {
                             ensure!(value==VmValue::Undefined,"TypeError: Derived constructors may only return object or undefined");
                             value=self.heap.lookup_binding(env,"\0this")?;

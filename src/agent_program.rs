@@ -108,6 +108,8 @@ pub struct Function {
     #[serde(default)]
     pub is_async: bool,
     #[serde(default)]
+    pub is_generator: bool,
+    #[serde(default)]
     pub lexical_this: bool,
     #[serde(default)]
     pub length: usize,
@@ -144,6 +146,9 @@ pub enum Op {
         destination: String,
     },
     Await { value: Expr, destination: String },
+    /// Parameter initializers run at call time; the body starts on first next().
+    GeneratorStart,
+    Yield { value: Expr, destination: String, return_target: usize, delegated: bool },
     Return(Expr),
     Branch(Expr, usize),
     Jump(usize),

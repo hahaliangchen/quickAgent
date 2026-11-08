@@ -12,6 +12,8 @@ mod properties;
 mod iteration;
 #[path="compiler_classes.rs"]
 mod classes;
+#[path = "compiler_generators.rs"]
+mod generators;
 
 struct Compiler {
     map: Lrc<SourceMap>,
@@ -37,6 +39,7 @@ struct Compiler {
     virtuals: BTreeSet<String>,
     /// Top-level async functions, whose calls return a Promise.
     async_functions: BTreeSet<String>,
+    async_generator: bool,
     code: Vec<Instruction>,
     temp: usize,
     loops: Vec<LoopContext>,
@@ -745,7 +748,7 @@ impl Compiler {
             }
             E::This(_)=>Expr::Variable("\0this".into()),
             E::Class(node)=>return self.error(node.class.span,"class 表达式在流程运行时里尚不支持"),
-            E::Yield(node)=>return self.error(node.span,"yield / 生成器在流程运行时里尚不支持"),
+            E::Yield(node)=>return self.error(node.span,"yield must pass through the resumable expression boundary"),
             E::TaggedTpl(node)=>return self.error(node.span,"通用标签模板在流程运行时里尚不支持；String.raw 标签模板可用"),
             E::MetaProp(node) if node.kind==ast::MetaPropKind::NewTarget=>Expr::Variable("\0newTarget".into()),
             E::MetaProp(node)=>return self.error(node.span,"import.meta 在流程运行时里尚不支持"),
@@ -820,9 +823,6 @@ impl Compiler {
     /// Compile a nested function, arrow or method into its own code unit and
     /// return its id. Its body sees every scope visible at this point.
     fn compile_function(&mut self, source: FunctionSource<'_>) -> Result<String> {
-        if source.is_generator {
-            return self.error(source.span, "generator functions are unsupported");
-        }
         let at = self.at(source.span);
         let id = format!(
             "{}/{}@{}:{}",
@@ -848,6 +848,7 @@ impl Compiler {
             nested: Vec::new(),
             virtuals: self.virtuals.clone(),
             async_functions: self.async_functions.clone(),
+            async_generator: source.is_async && source.is_generator,
             code: Vec::new(),
             temp: 0,
             loops: Vec::new(),
@@ -887,6 +888,7 @@ impl Compiler {
         for (pattern, argument) in parameter_patterns {
             c.bind_value(pattern, Expr::Variable(argument), true)?;
         }
+        if source.is_generator { c.emit(source.span, Op::GeneratorStart); }
         let (vars, lexical) = match &source.body {
             FunctionBody::Block(body) => {
                 let vars: Vec<String> = var_names(&body.stmts).into_iter()
@@ -907,6 +909,7 @@ impl Compiler {
         // A nested declaration marked @virtual or @module is AI work, as at the top level.
         let contract = source.name.as_ref().and_then(|_| self.contracts.get(&source.span.lo.0)).filter(|(v, _, _)| *v).cloned();
         let module_task = contract.as_ref().is_some_and(|(_, module, _)| *module);
+        if source.is_generator && contract.is_some() { return c.error(source.span,"@module and @virtual must not be generators"); }
         match source.body {
             FunctionBody::Block(body) if contract.is_some() => {
                 let (_, _, description) = contract.clone().unwrap();
@@ -966,6 +969,7 @@ impl Compiler {
                 lexical: lexical.into_iter().map(|(name, _)| name).collect(),
                 module: false,
                 is_async: source.is_async,
+                is_generator: source.is_generator,
                 lexical_this: source.lexical_this,
                 constructable: source.constructable,
                 length: source.params.iter().take_while(|p|!matches!(p,ast::Pat::Assign(_) | ast::Pat::Rest(_))).count(),
@@ -1228,6 +1232,14 @@ impl Compiler {
     /// Lower an expression. Arguments, keys and operands inside an optional
     /// chain are not part of it: their own chains short-circuit on their own.
     fn lower(&mut self, e: &ast::Expr) -> Result<Expr> {
+        if let ast::Expr::Yield(node) = e { return self.lower_yield(node); }
+        if let ast::Expr::Call(call) = e
+            && matches!(&call.callee, ast::Callee::Expr(c) if matches!(&**c, ast::Expr::Ident(i) if i.sym == *"$$generatorYieldResult"))
+        {
+            ensure!(call.args.len() == 1, "invalid internal generator yield");
+            let value = self.lower(&call.args[0].expr)?;
+            return self.generator_yield(value, call.span, true);
+        }
         let joins_chain = std::mem::take(&mut self.chain_object);
         if !joins_chain && self.chain_exits.is_some() {
             let saved = self.chain_exits.take();
@@ -1350,7 +1362,7 @@ impl Compiler {
     ) -> Result<Expr> {
         if method != "map" && CALLBACK_METHODS.contains(&method) && args.first().is_some_and(|a| match &*a.expr {
             ast::Expr::Arrow(f) => f.is_async,
-            ast::Expr::Fn(f) => f.function.is_async,
+            ast::Expr::Fn(f) => f.function.is_async && !f.function.is_generator,
             _ => false,
         }) {
             return self.error(span, "async callbacks require Promise support");
@@ -1495,9 +1507,7 @@ impl Compiler {
             }
             ast::Expr::Await(awaited) => {
                 let value = self.lower(&awaited.arg)?;
-                let destination = self.temp();
-                self.emit(awaited.span, Op::Await { value, destination: destination.clone() });
-                Ok(Expr::Variable(destination))
+                Ok(self.await_value(value,awaited.span))
             }
             ast::Expr::Bin(b) => {
                 let op = match b.op {
@@ -2019,7 +2029,8 @@ impl Compiler {
                 let value = self.snapshot(a.span, value);
                 let iterator=self.snapshot(a.span,Expr::NodeBuiltin("$$iterator".into(),vec![value]));
                 let thrown=self.temp();let caught=self.emit(a.span,Op::Catch{target:0,name:thrown.clone()});self.handlers+=1;
-                for item in &a.elems {
+                for index in 0..self.array_binding_len(a) {
+                    let item = a.elems.get(index).unwrap_or(&None);
                     if let Some(item)=item {
                         if let ast::Pat::Rest(rest)=item{let values=self.temp();self.emit(rest.span,Op::Effect(Some(values.clone()),Effect::Call("$$iteratorRest".into(),vec![iterator.clone()])));self.bind_value(&rest.arg,Expr::Variable(values),declare)?;}
                         else{let member=self.snapshot(item.span(),Expr::NodeBuiltin("$$iteratorValue".into(),vec![iterator.clone()]));self.bind_value(item,member,declare)?;}
@@ -2118,6 +2129,7 @@ impl Compiler {
                 } else {
                     Expr::Undefined
                 };
+                let value = if self.async_generator && r.arg.is_some() { self.await_value(value, r.span) } else { value };
                 let value = if self.finalizers.is_empty() { value } else { self.snapshot(r.span, value) };
                 self.emit_finalizers(None, r.span)?;
                 self.emit(r.span, Op::Return(value));
@@ -2679,7 +2691,7 @@ fn compile_inner(
     }
     let async_entry = declarations
         .iter()
-        .find(|f| f.ident.sym.as_ref() == entry && f.function.is_async)
+        .find(|f| f.ident.sym.as_ref() == entry && f.function.is_async && !f.function.is_generator)
         .map(|f| f.ident.sym.to_string());
     // A leading JSDoc and comments inside the body form the task contract.
     // Walk only adjacent comments: a tag inside the previous function must
@@ -2757,7 +2769,7 @@ fn compile_inner(
         .collect::<BTreeSet<_>>();
     let async_functions = declarations
         .iter()
-        .filter(|f| f.function.is_async)
+        .filter(|f| f.function.is_async && !f.function.is_generator)
         .map(|f| f.ident.sym.to_string())
         .collect::<BTreeSet<_>>();
     // Top-level declarations form the module scope. The top-level flow runs
@@ -2786,6 +2798,7 @@ fn compile_inner(
             nested: Vec::new(),
             virtuals: virtuals.clone(),
             async_functions: async_functions.clone(),
+            async_generator: false,
             code: Vec::new(),
             temp: 0,
             loops: Vec::new(),
@@ -2834,6 +2847,7 @@ fn compile_inner(
                 lexical: module_lexical.into_iter().map(|(name, _)| name).collect(),
                 module: true,
                 is_async: true,
+                is_generator: false,
                 lexical_this: false,
                 constructable: false,
                 length: 0,
@@ -2858,6 +2872,7 @@ fn compile_inner(
             nested: Vec::new(),
             virtuals: virtuals.clone(),
             async_functions: async_functions.clone(),
+            async_generator: f.function.is_async && f.function.is_generator,
             code: Vec::new(),
             temp: 0,
             loops: Vec::new(),
@@ -2869,9 +2884,6 @@ fn compile_inner(
             leaf_tools: leaf_tools.clone(),
             leaf_libraries: leaf_libraries.clone(),
         };
-        if f.function.is_generator {
-            return c.error(f.function.span, "generator functions are unsupported");
-        }
         let mut params = Vec::new();
         let mut parameter_names = Vec::new();
         let mut parameter_lexical = Vec::new();
@@ -2903,6 +2915,10 @@ fn compile_inner(
         }
         for (pattern, argument) in parameter_patterns {
             c.bind_value(pattern, Expr::Variable(argument), true)?;
+        }
+        if f.function.is_generator {
+            if virtual_task { return c.error(f.function.span,"@module and @virtual must not be generators"); }
+            c.emit(f.function.span, Op::GeneratorStart);
         }
         let vars: Vec<String> = var_names(&body.stmts).into_iter()
             .filter(|name| patterned || !parameter_names.contains(name)).collect();
@@ -2993,6 +3009,7 @@ fn compile_inner(
                 lexical: lexical.into_iter().map(|(name, _)| name).collect(),
                 module: false,
                 is_async: f.function.is_async,
+                is_generator: f.function.is_generator,
                 lexical_this: false,
                 constructable: !f.function.is_async && !f.function.is_generator,
                 length: f.function.params.iter().take_while(|p|!matches!(&p.pat,ast::Pat::Assign(_) | ast::Pat::Rest(_))).count(),

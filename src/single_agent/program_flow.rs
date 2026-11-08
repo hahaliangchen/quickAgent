@@ -1652,7 +1652,7 @@ mod tests {
     #[test]
     fn source_adapters_reject_extensions_without_installing_a_program() {
         for source in [
-            "function* work(){return 1;}",
+            "function work(){class Hidden { #field=1; } return 1;}",
             "function work(input: string){return input;}",
             "function work(){return ai({instruction:'value'});}",
             "function work(){return io.read({});} export function unused(){return 1;}",
@@ -1671,6 +1671,42 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn source_adapters_execute_synchronous_generators() {
+        let source = "function work(){function* values(){yield 1;yield 2;}return [...values()];}";
+        let mut main = Window::default();
+        install(&mut main, &json!({"source":format!("{source}\nconsole.log(work());")})).unwrap();
+        assert!(matches!(main.program.as_mut().unwrap().next(),State::Returned(v) if v.is_null()));
+        assert_eq!(main.program.as_ref().unwrap().logs(), &["[1,2]"]);
+        let mut child = Window {
+            program_task: Some(json!({"name":"work","parameters":[],"arguments":[]})),
+            ..Default::default()
+        };
+        install_body(&mut child, &json!({"source":source})).unwrap();
+        assert!(matches!(child.program.as_mut().unwrap().next(),State::Returned(v) if v==json!([1,2])));
+        let compiled=agent_program::compile_body(source,"work").unwrap();
+        let mut run=compiled_runtime(&json!({"program":{"compiled":compiled,"entry":"work","args":[]}})).unwrap();
+        assert!(matches!(run.next(),State::Returned(v) if v==json!([1,2])));
+    }
+
+    #[test]
+    fn source_adapters_execute_asynchronous_generators() {
+        let source = "async function work(){async function* values(){yield 1;yield 2;}const out=[];for await(const x of values())out.push(x);return out;}";
+        let mut main = Window::default();
+        install(&mut main, &json!({"source":format!("{source}\nconsole.log(await work());")})).unwrap();
+        assert!(matches!(main.program.as_mut().unwrap().next(),State::Returned(v) if v.is_null()));
+        assert_eq!(main.program.as_ref().unwrap().logs(), &["[1,2]"]);
+        let mut child = Window {
+            program_task: Some(json!({"name":"work","parameters":[],"arguments":[]})),
+            ..Default::default()
+        };
+        install_body(&mut child, &json!({"source":source})).unwrap();
+        assert!(matches!(child.program.as_mut().unwrap().next(),State::Returned(v) if v==json!([1,2])));
+        let compiled=agent_program::compile_body(source,"work").unwrap();
+        let mut run=compiled_runtime(&json!({"program":{"compiled":compiled,"entry":"work","args":[]}})).unwrap();
+        assert!(matches!(run.next(),State::Returned(v) if v==json!([1,2])));
     }
 
 

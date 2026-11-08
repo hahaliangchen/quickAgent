@@ -1302,7 +1302,8 @@ pub(super) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
         "$$classSetup"|"$$classMethod"=>(5,5),"$$methodHome"|"$$classBinding"|"$$boxPrimitive"=>(2,2),"$$superBase"|"$$isDerived"=>(1,1),"$$superCallArray"=>(1,2),"$$superConstructor"=>(0,0),"$$constructReady"=>(4,4),
         "$$rawLooseEqual"|"$$objectRest"=>(2,2),
         "$$builtinStringIterator"|"$$rawDateConstruct"|"$$rawNumber"|"$$rawString"|"$$rawSymbol"|"$$rawSymbolFor"|"$$isDate"=>(1,1),
-        "$$getIterator"|"$$iteratorStep"|"$$iteratorCloseNormal"=>(1,1),"$$iteratorCloseThrow"=>(2,2),
+        "$$awaitSubscribe"=>(3,3),
+        "$$getAsyncIterator"|"$$getIterator"|"$$iteratorStep"|"$$iteratorCloseNormal"=>(1,1),"$$iteratorCloseThrow"=>(2,2),
         "Symbol"=>(0,1),"Symbol.for"|"Symbol.keyFor"=>(1,1),
         "Object.defineProperty"|"Reflect.defineProperty" => (3,3),
         "Object.defineProperties"|"Object.getOwnPropertyDescriptor"|"Reflect.getOwnPropertyDescriptor" =>(2,2),
@@ -1312,7 +1313,7 @@ pub(super) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
         "$$keyOperation"=>(3,3),
         "$$makeBound"=>(5,5),
         "$$defineOwn"|"$$createData"=>(3,3),"$$literalAccessor"|"$$prepareSet"=>(4,4),"$$getProperty"=>(2,3),"$$constructWithTarget"|"$$invokeWithReceiver"=>(3,3),
-        "$$emptyCollection"|"$$defaultTag"|"$$iteratorPlan"|"$$arrayLikeOnly"|"$$boundTarget"|"$$propertyKey"|"$$requireCoercible"|"$$createObject"|"$$jsonUnbox"|"$$isObject"|"$$isConstructor"|"$$keys"=>(1,1),"$$rawStringify"=>(1,3),
+        "$$emptyCollection"|"$$defaultTag"|"$$iteratorPlan"|"$$arrayLikeOnly"|"$$boundTarget"|"$$propertyKey"|"$$requireCoercible"|"$$createObject"|"$$jsonUnbox"|"$$isPromise"|"$$isObject"|"$$isConstructor"|"$$keys"=>(1,1),"$$rawStringify"=>(1,3),
         "Math.abs" | "Math.floor" | "Math.ceil" | "Math.round" | "Math.trunc" | "Math.sign"
         | "Math.sqrt" | "Math.cbrt" | "Math.exp" | "Math.log" | "Math.log2" | "Math.log10"
         | "Math.sin" | "Math.cos" | "Math.tan" | "Math.asin" | "Math.acos" | "Math.atan" => (1, 1),

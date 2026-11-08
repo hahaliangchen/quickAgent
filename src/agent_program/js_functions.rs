@@ -63,6 +63,7 @@ pub(super) fn method(heap: &Heap, receiver: &VmValue, name: &str) -> Option<VmVa
 
 pub(super) fn native_length(id: &str) -> usize {
     match id {
+        "AsyncGenerator.next"|"AsyncGenerator.return"|"AsyncGenerator.throw"|"AsyncGeneratorFunction"|"Generator.next"|"Generator.return"|"Generator.throw"|"GeneratorFunction"=>return 1,
         "Symbol"=>return 0,"Symbol.for"|"Symbol.keyFor"|"Symbol.toPrimitive"|"Function.hasInstance"=>return 1,
         "Object.defineProperty"|"Reflect.defineProperty"|"Reflect.apply"|"Reflect.set"=>return 3,
         "Object.defineProperties"|"Object.getOwnPropertyDescriptor"|"Reflect.getOwnPropertyDescriptor"|"Reflect.get"|"Reflect.construct"|"Reflect.has"|"Reflect.deleteProperty"|"Reflect.setPrototypeOf"=>return 2,
@@ -193,6 +194,7 @@ pub(super) fn resumable_builtin(name:&str)->Option<&'static str>{Some(match name
     "Reflect.getOwnPropertyDescriptor"=>"$$reflectDescriptor",
     "new Map"=>"$$constructMap","new Set"=>"$$constructSet","new WeakMap"=>"$$constructWeakMap","new WeakSet"=>"$$constructWeakSet",
     "Object.fromEntries"=>"$$fromEntries",
+    "$$getAsyncIterator"=>"$$getAsyncIterator",
     "$$getIterator"=>"$$getIterator","$$iteratorStep"=>"$$iteratorStep","$$iteratorCloseNormal"=>"$$iteratorCloseNormal","$$iteratorCloseThrow"=>"$$iteratorCloseThrow",
     "$$iterator"=>"$$getIterator","$$iterableArray"=>"$$iterableToArray",
     "Array.from"=>"$$arrayFrom",

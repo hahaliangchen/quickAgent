@@ -1,0 +1,577 @@
+{
+  "stage": "7 (async iteration; moved ahead of the original stage-7 builtins scope by user request)",
+  "date": "2026-11-08",
+  "scope": "async iteration, async generators, durable requests/await continuations",
+  "source_hashes": {
+    "src/agent_program.rs": "ce0c9761c1f17577e8f85876556917766ad897f3f6af51a6160001e7ca6ad0a2",
+    "src/agent_program/compiler.rs": "a978cbabbfb3fa754046ecfa563a169eae805a9fc47b7705abbbb7442b79a449",
+    "src/agent_program/compiler_properties.rs": "fca9ef23a93eb2f38ceec99e7d0261f242facef685f53a3396581a0496951514",
+    "src/agent_program/compiler_iteration.rs": "84ce002ca8782f609b6a8828d5ff61d5748f04f0f8ac76ed7765eb77cbfef006",
+    "src/agent_program/compiler_generators.rs": "c34d05870e0102dcf7735e6baa64267f96a499556e5b7a64512cf251a8b71d20",
+    "src/agent_program/heap.rs": "2c6fd45edd0cd323c8b5fe90a5cc32ee2d0edd0278767d86c3d6e7e884195580",
+    "src/agent_program/js_prototypes.rs": "9361c3c8751616c3645981e101893527d9e8cdebdc7731f988e9fcfd4ca759bc",
+    "src/agent_program/js_functions.rs": "e64af80acfb0a93b99552a839903956ff1eea76fb7788be4bf9471c1e26edcfc",
+    "src/agent_program/js_methods.rs": "7d3b967c33444f440346bb29990630e1f84e0203857d0d5c82fa41ee5df6a0cd",
+    "src/agent_program/js_descriptors.rs": "a7fd003e935204e7580b7f544c24b3d7c9115935988f5e8c820def7630d93a1c",
+    "src/agent_program/prelude.js": "481c885840ee5655069317ee4df6c73519c98801e66ccc25cc9d62ecf99bdf0c",
+    "src/agent_program/runtime.rs": "fbf9028127911a151b51776d85c0fd2be50970251fa104fa3529e213eb9f4888",
+    "src/agent_program/runtime_generators.rs": "b46c8b9206dd08cdc9218247e2c30b3ba51acbf1d9b26876678c37acd23de6a5",
+    "src/agent_program/tests.rs": "9760e75e81f1b9b167f4c533f37e56cdd16d4a7ef444d8021d024e45ed6379ca",
+    "src/agent_program/tests_stage6.rs": "7f234a878d13ffb68a7168f41edc6cbd536bebc999b6eb4ea78cf408cf8159eb",
+    "src/agent_program/tests_stage7.rs": "d9348c0b494f762a340ad804ca62774170b9f5b4fcd214d49727a9e3471f6bc7",
+    "src/single_agent/program_flow.rs": "4e1b725cb13c11f9fd72b6d22d92bd5d0cb5616863b6742b7fc88d88e0cc466f",
+    "prompts/flow_capabilities.md": "ab2a9b8867cdd630ffb20672e68bd6c2d7e859e1f8e9fd239176ff6407d7f7e8",
+    "prompts/flow_builtin_contracts.d.ts": "5a5d2e47e73a01b7167caa334a2a95a0555c903f4a9122bd11db8b4089ae96ee",
+    "docs/agent-program.md": "82c0fe6417947f204a56325ac187e493b509fc42df21c7c2f1ca02c84a7cc407",
+    "skills/task-program/SKILL.md": "a1c18c921093de58876461af1e2ea512085017a56fec2dcdc5e0f46ac3de6428",
+    "docs/vm-compatibility.md": "1b06ffdd30048475698bb3c8b0391915ac0c6b6b8ccd946f6d8536c51cf252cc"
+  },
+  "unit_tests": [
+    "vm_stage7_async_preferred",
+    "vm_stage7_bare_return_ticks",
+    "vm_stage7_body_failure",
+    "vm_stage7_brand",
+    "vm_stage7_break_close",
+    "vm_stage7_close_rejection",
+    "vm_stage7_completed_queue",
+    "vm_stage7_delegate_missing_throw_closes",
+    "vm_stage7_delegate_return",
+    "vm_stage7_delegate_sync",
+    "vm_stage7_delegate_throw",
+    "vm_stage7_delegated_promise_identity",
+    "vm_stage7_done_getter_failure",
+    "vm_stage7_for_await_ticks",
+    "vm_stage7_generator_callback_is_not_async_callback",
+    "vm_stage7_invalid_next_result",
+    "vm_stage7_lazy_queue",
+    "vm_stage7_methods",
+    "vm_stage7_next_error_no_close",
+    "vm_stage7_next_input",
+    "vm_stage7_parameter_error_sync",
+    "vm_stage7_promise_constructor_getter",
+    "vm_stage7_prototypes",
+    "vm_stage7_queued_values_gc",
+    "vm_stage7_reentrant",
+    "vm_stage7_resolving_function_shape",
+    "vm_stage7_return_continue",
+    "vm_stage7_return_expression",
+    "vm_stage7_return_reject",
+    "vm_stage7_snapshot_async_next_promise",
+    "vm_stage7_snapshot_cached_next",
+    "vm_stage7_snapshot_close",
+    "vm_stage7_snapshot_completed_return_wait",
+    "vm_stage7_snapshot_constructor_getter",
+    "vm_stage7_snapshot_delegate",
+    "vm_stage7_snapshot_finally",
+    "vm_stage7_snapshot_gc",
+    "vm_stage7_snapshot_host_failure",
+    "vm_stage7_snapshot_queue",
+    "vm_stage7_snapshot_thenable",
+    "vm_stage7_sync_brand_rejects_async",
+    "vm_stage7_sync_fallback",
+    "vm_stage7_sync_fallback_ticks",
+    "vm_stage7_then_getter_throw",
+    "vm_stage7_thenable_yield",
+    "vm_stage7_throw_close",
+    "vm_stage7_throw_finally",
+    "vm_stage7_throw_promise_identity",
+    "vm_stage7_unhandled_generator_error_keeps_source_location",
+    "vm_stage7_value_getter_failure",
+    "vm_stage7_yield_reject"
+  ],
+  "host_tests": [
+    "single_agent::program_flow::tests::source_adapters_execute_asynchronous_generators"
+  ],
+  "new_test_count": 52,
+  "snapshot_test_count": 11,
+  "test_first_logs": [
+    "runs/codex-vm-stage7-red.txt",
+    "runs/codex-vm-stage7-edge-red.txt",
+    "runs/codex-vm-stage7-adapter-red.txt",
+    "runs/codex-vm-stage7-callback-red.txt",
+    "runs/codex-vm-stage7-diagnostic-red.txt"
+  ],
+  "vm_suite": "test result: ok. 535 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 21.84s",
+  "vm_log": "runs/codex-vm-stage7-vm-final.txt",
+  "full_suite": {
+    "exit_code": 101,
+    "elapsed": 98.177,
+    "affinity": "0xffffcff",
+    "binary_sha256": "9a28f1fe29e2c1172f0eb41442072b171f5104f8245c71a4f8a364fee393b5ec",
+    "log": "runs/codex-vm-stage7-full-20261108.txt",
+    "summary": [
+      "test result: FAILED. 863 passed; 29 failed; 23 ignored; 0 measured; 0 filtered out; finished in 98.00s"
+    ],
+    "baseline_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "current_failures": [
+      "agent_service::tests::terminal_cleanup_preserves_tools_flow_and_messages_after_completion_and_restart",
+      "agent_service::tests::tool_argument_progress_is_emitted_before_the_call_finishes",
+      "attachments::tests::attachments_pdf_text_and_visual_pages_share_the_same_source",
+      "browser_control::tests::legacy_conversation_page_identity_reconnects_its_exact_existing_chrome",
+      "browser_control::tests::partial_connection_keeps_original_mode_and_monotonic_counters",
+      "browser_control::tests::resumes_original_chrome_from_conversation_without_navigation_or_upload",
+      "browser_control::tests::unreachable_recorded_connection_reports_failure_without_replacement",
+      "interjections::tests::interjections_require_a_running_task_and_are_delivered_once",
+      "memory_panel::tests::memories_can_be_listed_corrected_and_forgotten",
+      "plugin_sessions::tests::scoped_page_api_resumes_owned_history_and_rejects_general_or_stale_sessions",
+      "request_context::tests::roles_record_exact_views_of_one_shared_fact_even_when_panel_is_hidden",
+      "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+      "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+      "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+      "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+      "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+      "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+      "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+      "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+      "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+      "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+      "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+      "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+      "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+      "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+      "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+      "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so",
+      "single_agent::project_flows::tests::flows_are_project_scoped_across_conversations_and_keep_versions",
+      "skill_packages::tests::dynamic_command_tools_are_owned_permission_gated_and_cancelled_on_unload"
+    ],
+    "new_failures": [],
+    "resolved_failures": [],
+    "old_pass_regressions": []
+  },
+  "test262_profiles": {
+    "default": {
+      "baseline": "tests/vm/test262-stage6.json",
+      "current": "tests/vm/test262-stage7.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 333,
+        "pass": 980,
+        "run_failed": 127,
+        "skipped": 316
+      },
+      "current_counts": {
+        "compile_rejected": 333,
+        "pass": 980,
+        "run_failed": 127,
+        "skipped": 316
+      },
+      "transitions": {},
+      "newly_executable_runtime_failures": []
+    },
+    "-functions": {
+      "baseline": "tests/vm/test262-stage6-functions.json",
+      "current": "tests/vm/test262-stage7-functions.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 248,
+        "pass": 371,
+        "run_failed": 2,
+        "skipped": 17
+      },
+      "current_counts": {
+        "compile_rejected": 248,
+        "pass": 371,
+        "run_failed": 2,
+        "skipped": 17
+      },
+      "transitions": {},
+      "newly_executable_runtime_failures": []
+    },
+    "-prototypes": {
+      "baseline": "tests/vm/test262-stage6-prototypes.json",
+      "current": "tests/vm/test262-stage7-prototypes.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 388,
+        "pass": 920,
+        "run_failed": 11,
+        "skipped": 334
+      },
+      "current_counts": {
+        "compile_rejected": 388,
+        "pass": 920,
+        "run_failed": 11,
+        "skipped": 334
+      },
+      "transitions": {},
+      "newly_executable_runtime_failures": []
+    },
+    "-descriptors": {
+      "baseline": "tests/vm/test262-stage6-descriptors.json",
+      "current": "tests/vm/test262-stage7-descriptors.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 1175,
+        "pass": 2146,
+        "run_failed": 112,
+        "skipped": 371
+      },
+      "current_counts": {
+        "compile_rejected": 1174,
+        "pass": 2146,
+        "run_failed": 113,
+        "skipped": 371
+      },
+      "transitions": {
+        "compile_rejected -> run_failed": 1
+      },
+      "newly_executable_runtime_failures": [
+        {
+          "id": "test/built-ins/Object/seal/seal-asyncgeneratorfunction.js",
+          "detail": "{\"location\":{\"column\":13,\"line\":42},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+        }
+      ]
+    },
+    "-iteration": {
+      "baseline": "tests/vm/test262-stage6-iteration.json",
+      "current": "tests/vm/test262-stage7-iteration.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 422,
+        "pass": 454,
+        "run_failed": 2,
+        "skipped": 79
+      },
+      "current_counts": {
+        "compile_rejected": 422,
+        "pass": 454,
+        "run_failed": 2,
+        "skipped": 79
+      },
+      "transitions": {},
+      "newly_executable_runtime_failures": []
+    },
+    "-classes": {
+      "baseline": "tests/vm/test262-stage6-classes.json",
+      "current": "tests/vm/test262-stage7-classes.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 606,
+        "pass": 1994,
+        "run_failed": 6,
+        "skipped": 6030
+      },
+      "current_counts": {
+        "compile_rejected": 606,
+        "pass": 1994,
+        "run_failed": 6,
+        "skipped": 6030
+      },
+      "transitions": {},
+      "newly_executable_runtime_failures": []
+    },
+    "-exponential": {
+      "baseline": "tests/vm/test262-stage6-exponential.json",
+      "current": "tests/vm/test262-stage7-exponential.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 3,
+        "pass": 12
+      },
+      "current_counts": {
+        "compile_rejected": 3,
+        "pass": 12
+      },
+      "transitions": {},
+      "newly_executable_runtime_failures": []
+    },
+    "-generators": {
+      "baseline": "tests/vm/test262-stage6-generators.json",
+      "current": "tests/vm/test262-stage7-generators.json",
+      "comparison_passed": true,
+      "same_case_ids_and_source_hashes": true,
+      "old_pass_regressions": [],
+      "baseline_counts": {
+        "compile_rejected": 170,
+        "pass": 516,
+        "run_failed": 8,
+        "skipped": 9
+      },
+      "current_counts": {
+        "compile_rejected": 170,
+        "pass": 516,
+        "run_failed": 8,
+        "skipped": 9
+      },
+      "transitions": {},
+      "newly_executable_runtime_failures": []
+    }
+  },
+  "async_iteration": {
+    "baseline": "tests/vm/test262-stage7-async-iteration-before.json",
+    "current": "tests/vm/test262-stage7-async-iteration.json",
+    "comparison_passed": true,
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "baseline_counts": {
+      "compile_rejected": 2065,
+      "pass": 191,
+      "skipped": 11
+    },
+    "current_counts": {
+      "compile_rejected": 693,
+      "pass": 1555,
+      "run_failed": 8,
+      "skipped": 11
+    },
+    "transitions": {
+      "compile_rejected -> pass": 1364,
+      "compile_rejected -> run_failed": 8
+    },
+    "newly_executable_runtime_failures": [
+      {
+        "id": "test/built-ins/AsyncGeneratorFunction/has-instance.js",
+        "detail": "{\"location\":{\"column\":3,\"line\":33},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":29}]}"
+      },
+      {
+        "id": "test/built-ins/AsyncGeneratorFunction/instance-await-expr-in-param.js",
+        "detail": "{\"location\":{\"column\":1,\"line\":29},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+      },
+      {
+        "id": "test/built-ins/AsyncGeneratorFunction/instance-construct-throws.js",
+        "detail": "{\"location\":{\"column\":16,\"line\":31},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+      },
+      {
+        "id": "test/built-ins/AsyncGeneratorFunction/instance-yield-expr-in-param.js",
+        "detail": "{\"location\":{\"column\":1,\"line\":29},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+      },
+      {
+        "id": "test/built-ins/AsyncGeneratorFunction/invoked-as-constructor-no-arguments.js",
+        "detail": "{\"location\":{\"column\":9,\"line\":20},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+      },
+      {
+        "id": "test/built-ins/AsyncGeneratorFunction/invoked-as-function-multiple-arguments.js",
+        "detail": "{\"location\":{\"column\":9,\"line\":22},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":12}]}"
+      },
+      {
+        "id": "test/built-ins/AsyncGeneratorFunction/invoked-as-function-no-arguments.js",
+        "detail": "{\"location\":{\"column\":9,\"line\":20},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+      },
+      {
+        "id": "test/built-ins/AsyncGeneratorFunction/invoked-as-function-single-argument.js",
+        "detail": "{\"location\":{\"column\":9,\"line\":21},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+      }
+    ]
+  },
+  "remaining_async_iteration_failures": [
+    {
+      "id": "test/built-ins/AsyncGeneratorFunction/has-instance.js",
+      "detail": "{\"location\":{\"column\":3,\"line\":33},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":29}]}"
+    },
+    {
+      "id": "test/built-ins/AsyncGeneratorFunction/instance-await-expr-in-param.js",
+      "detail": "{\"location\":{\"column\":1,\"line\":29},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+    },
+    {
+      "id": "test/built-ins/AsyncGeneratorFunction/instance-construct-throws.js",
+      "detail": "{\"location\":{\"column\":16,\"line\":31},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+    },
+    {
+      "id": "test/built-ins/AsyncGeneratorFunction/instance-yield-expr-in-param.js",
+      "detail": "{\"location\":{\"column\":1,\"line\":29},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+    },
+    {
+      "id": "test/built-ins/AsyncGeneratorFunction/invoked-as-constructor-no-arguments.js",
+      "detail": "{\"location\":{\"column\":9,\"line\":20},\"message\":\"value is not a constructor\",\"name\":\"TypeError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+    },
+    {
+      "id": "test/built-ins/AsyncGeneratorFunction/invoked-as-function-multiple-arguments.js",
+      "detail": "{\"location\":{\"column\":9,\"line\":22},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":12}]}"
+    },
+    {
+      "id": "test/built-ins/AsyncGeneratorFunction/invoked-as-function-no-arguments.js",
+      "detail": "{\"location\":{\"column\":9,\"line\":20},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":9}]}"
+    },
+    {
+      "id": "test/built-ins/AsyncGeneratorFunction/invoked-as-function-single-argument.js",
+      "detail": "{\"location\":{\"column\":9,\"line\":21},\"message\":\"dynamic AsyncGeneratorFunction construction is disabled; declare async function* in source\",\"name\":\"EvalError\",\"stack\":[{\"function\":\"<module>\",\"pc\":10}]}"
+    }
+  ],
+  "before_binary_sha256": "c18172930b4e144a6a734777781e9be135cd11c8ffb3cd4aecb3cffaf062f2fb",
+  "vm_binary_sha256": "05e6ad0fd3008d302c0c45e50ea431f31e6b09f77f5a6c8bd5ecb06541e5bff2",
+  "corpus": {
+    "baseline": "tests/vm/corpus-stage6.json",
+    "current": "tests/vm/corpus-stage7.json",
+    "comparison_passed": true,
+    "same_case_ids_and_source_hashes": true,
+    "old_pass_regressions": [],
+    "baseline_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "current_counts": {
+      "application": {
+        "compile_rejected": 2,
+        "pass": 25
+      },
+      "codex": {
+        "compile_rejected": 1434
+      }
+    },
+    "transitions": {},
+    "newly_executable_runtime_failures": []
+  },
+  "measurement_jobs": [
+    {
+      "name": "async-iteration",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 34.906,
+      "report": "tests/vm/test262-stage7-async-iteration.json",
+      "baseline": "tests/vm/test262-stage7-async-iteration-before.json"
+    },
+    {
+      "name": "generators",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 8.656,
+      "report": "tests/vm/test262-stage7-generators.json",
+      "baseline": "tests/vm/test262-stage6-generators.json"
+    },
+    {
+      "name": "default",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 82.655,
+      "report": "tests/vm/test262-stage7.json",
+      "baseline": "tests/vm/test262-stage6.json"
+    },
+    {
+      "name": "functions",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 6.298,
+      "report": "tests/vm/test262-stage7-functions.json",
+      "baseline": "tests/vm/test262-stage6-functions.json"
+    },
+    {
+      "name": "prototypes",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 20.505,
+      "report": "tests/vm/test262-stage7-prototypes.json",
+      "baseline": "tests/vm/test262-stage6-prototypes.json"
+    },
+    {
+      "name": "descriptors",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 51.932,
+      "report": "tests/vm/test262-stage7-descriptors.json",
+      "baseline": "tests/vm/test262-stage6-descriptors.json"
+    },
+    {
+      "name": "iteration",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 8.933,
+      "report": "tests/vm/test262-stage7-iteration.json",
+      "baseline": "tests/vm/test262-stage6-iteration.json"
+    },
+    {
+      "name": "classes",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 35.685,
+      "report": "tests/vm/test262-stage7-classes.json",
+      "baseline": "tests/vm/test262-stage6-classes.json"
+    },
+    {
+      "name": "exponential",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 0.327,
+      "report": "tests/vm/test262-stage7-exponential.json",
+      "baseline": "tests/vm/test262-stage6-exponential.json"
+    },
+    {
+      "name": "corpus",
+      "exit_code": 0,
+      "affinity": "0xffffcff",
+      "seconds": 0.659
+    }
+  ],
+  "node_oracle": {
+    "node_version": "v22.5.1",
+    "total": 39,
+    "passed": 39,
+    "mismatches": [],
+    "snapshot_tests_not_comparable_in_node": 11,
+    "other_non_oracle_tests": [
+      "unhandled rejection source location"
+    ]
+  },
+  "contracts_syntax_errors": 0,
+  "diff_check_exit_code": 0,
+  "temporary_cpu_mitigation": {
+    "excluded_windows_logical_processors": [
+      8,
+      9
+    ],
+    "mask": "0xffffcff",
+    "scope": "compilation and validation subprocesses only; no system-wide CPU settings changed",
+    "hardware_fixed": false
+  },
+  "validation_corrections": [
+    "Legacy async-generator syntax rejection fixtures now guard still-unsupported syntax/AI generator declarations; positive adapter tests cover all three source entries.",
+    "A documentation example referenced undefined batches/inspect; fixed the example instead of weakening the published-examples compiler test.",
+    "An intermediate measurement runner pointed to a nonexistent old toExponential selection filename; corrected to the existing frozen stage5fix selection and reran all final jobs.",
+    "Executables copied before measurement to avoid Windows linker/executable sharing conflicts.",
+    "Final prompt review removed a legacy unsupported-generators/thenables sentence; VM and full main tests rerun after the wording correction."
+  ],
+  "intentionally_retained": [
+    "dynamic Function/eval/GeneratorFunction/AsyncGeneratorFunction construction",
+    "general Promise.resolve/executor thenable assimilation and other existing Promise limits",
+    "arguments, class fields/private fields/static blocks and unrelated compatibility limits",
+    "29 existing full-suite failures"
+  ]
+}

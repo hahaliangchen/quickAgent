@@ -10,7 +10,7 @@ declare const Symbol: {
 };
 // Symbol identity, registry, symbol keys and iterator records survive Runtime snapshots.
 // new Symbol throws TypeError. Symbol can be used as Reflect.construct's newTarget.
-// Symbol.asyncIterator is available as a key; for-await and async generators are later stages.
+// Symbol.asyncIterator, for-await-of and async generators are available.
 // Symbol.species/isConcatSpreadable and regex well-known-symbol hooks are not provided yet.
 
 declare function Object(value?: unknown): object; // new Object(value) also works
@@ -172,7 +172,7 @@ declare const Date: {
 // Arrows capture this/new.target/super; ordinary calls observe new.target === undefined.
 // Derived this is initialized once by super(). Constructor/home-object state
 // survives GC, host suspension and Runtime snapshots; JSON carries only data.
-// Public/private fields, static blocks, Function/eval, generators and async iteration
+// Public/private fields, static blocks, Function/eval and async iteration
 // are not supported. Class name assignment throws TypeError at runtime.
 
 interface Number { toExponential(fractionDigits?: number): string; }
@@ -184,3 +184,30 @@ interface Number { toExponential(fractionDigits?: number): string; }
 // Promise callbacks use the normal VM call path. Local callbacks do not cross
 // a JSON boundary; real host calls still require their documented JSON inputs.
 // Native callback failures report the registration source location.
+
+// Synchronous generators are standard syntax: function* / yield / yield*.
+// Parameters initialize at call time; the body starts on first next().
+// Suspended frames and pending catch/finally completion survive Runtime snapshots.
+interface FlowGeneratorResult<T = unknown> { value: T | undefined; done: boolean; }
+interface FlowGenerator<Y = unknown, R = unknown, N = unknown> {
+  next(value?: N): FlowGeneratorResult<Y | R>;
+  return(value?: R): FlowGeneratorResult<Y | R>;
+  throw(error?: unknown): FlowGeneratorResult<Y | R>;
+  [Symbol.iterator](): FlowGenerator<Y, R, N>;
+}
+// No dynamic GeneratorFunction/AsyncGeneratorFunction or structuredClone(generator).
+
+
+// Async syntax: async function* / async generator methods / for await...of.
+// Queued requests and awaited values survive Runtime snapshots, including
+// host calls inside next/return, finally, Promise constructor/then getters.
+interface FlowAsyncGenerator<Y = unknown, R = unknown, N = unknown> {
+  next(value?: N): Promise<FlowGeneratorResult<Y | R>>;
+  return(value?: R | PromiseLike<R>): Promise<FlowGeneratorResult<Y | R>>;
+  throw(error?: unknown): Promise<FlowGeneratorResult<Y | R>>;
+  [Symbol.asyncIterator](): FlowAsyncGenerator<Y, R, N>;
+}
+// for-await adapts synchronous iterators and awaits their values. Actual
+// async iterator values are retained; break/return/throw await iterator cleanup.
+// Await assimilates thenables; general Promise.resolve/executor assimilation
+// is still incomplete. Dynamic AsyncGeneratorFunction remains unavailable.

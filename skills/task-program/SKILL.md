@@ -181,7 +181,7 @@ function inspectPackage(workdir) {
 - 路径与 URL 可直接计算：`path.join/resolve/relative/normalize/dirname/basename/extname` 和 `url.parse(value, base)`；结果用于普通流程，不调用 AI。resolve 至少一个绝对路径、relative 的两个参数必须绝对；url.parse 返回 href/origin/protocol/hostname/port/pathname/search/hash。它们由宿主 Rust 实现，处理路径不访问文件系统；文件访问仍使用 io。
 - 支持正则字面量及 `/pattern/i.test(text)`、`text.match(/pattern/g)`；只有 g/i/m/s/u 标志，Rust regex 语法不支持环视和回溯引用。test 无状态；match 未命中返回 null，非 g 返回完整匹配和捕获组数组，g 返回完整匹配数组。模式最多 8192 字节，输入最多 2 MiB，结果最多 10000 项、捕获文本最多 4 MiB；超出时报错。不是完整 JavaScript RegExp，支持 new RegExp 和 replace/replaceAll；不支持 lastIndex。
 - async 函数返回 Promise，await 挂起并在结果到达后恢复。`Promise.all`、`allSettled`、`race`、`any`、`then`、`catch`、`finally` 可组合结果；只读异步工具最多 32 项一批。async 的虚函数和模块可并发，模型请求共享并发槽位。Promise 按 JS 微任务顺序执行，用 Promise 结算另一个 Promise 时同样多等两轮。对顶层 async 函数或 /promises 工具的调用不 await 就直接取属性、参与运算、作为条件、传给 assert 或放进模板字符串，会在编译时报错；需要先保存 Promise 或 await。
-- 这是受限 JS 环境：普通 thenable 同化和提取 Promise 方法值尚不支持；function*/yield、call()/ai() 包装、除 host: 库之外的 import（第三方库用 require）、export、TypeScript 类型、class/this 和 BigInt 也还不支持。
+- 这是受限 JS 环境：await 支持 thenable 同化；Promise.resolve/构造器 resolve 的一般 thenable 同化仍不完整。call()/ai() 包装、除 host: 库之外的 import（第三方库用 require）、export、TypeScript 类型和 BigInt 也还不支持。同步 function*/yield/yield*、class/extends/super/new.target 和 this 已支持；生成器执行状态随 Runtime 存盘恢复，JSON 不保存执行状态。
 
 let/const 属于所在的块，内层块可以重复声明同名变量并遮蔽外层，声明前读取会抛出 ReferenceError；var 属于所在函数并提升，首次无初值为 undefined。函数只看自己的变量和顶层变量，调用方的局部变量作为参数传入。普通函数中的对象别名共享修改；AI 作用域和宿主工具以 JSON 交接。字符串 length、索引、slice 和 indexOf 使用 Unicode 标量。模板只插入原始值，对象和数组使用 JSON.stringify。完整规范在 docs/agent-program.md。
 
@@ -331,3 +331,6 @@ function transform(shared, part, content) {
 模块按调用方要拿到的结果定义，例如核实过的事实、统计或附文件行号的结论；复用时检查返回结果是否适合当前任务，不能只看它能否执行命令。已知步骤继续写成普通 JavaScript；模块内收集、处理材料，需要 AI 判断时才调用职责窄的虚函数，不强制增加 AI 层。代码分析交给 AI 的证据应包含相关完整单元、外层条件和提前返回。搜索命中只能证明命中的一行。一个适量的完整单元用一次打印，并保留文件和行范围；不要按任意字符位置截掉尾部。宿主实际交付不下时明确报错并保存原结果，AI 根据读取引用分段查看或调整编排，保留已完成操作；未读内容不能作为结论依据。行为结论要核对完整控制路径或实际执行顺序，区分读过测试与运行过测试。
 
 日志不再按单条 100,000 字符、200 条记录或最后 20 条静默裁剪。完整记录先保存在运行时；累计日志捕获超过堆预算时以 `OUTPUT_OVER_CAPACITY` 停止，拒收的完整记录也归档。主程序结局和模块探路结果在进入 AI 前按实际剩余上下文检查，放不下就明确失败，不交付成功前缀，原始输出、返回值和错误保存为 asset 并提供读取引用。资源错误由调用方调整编排，不作为普通实现错误自动修复重跑；已完成命令或写入不能盲目重放。只有 AI 下一次请求本身放不下时才是 `ContextOverflow`。显式按范围分页读取仍可使用，不把未请求的其余内容冒充已交付。
+
+
+异步迭代同样是普通流程代码：可写 async function* 和 for await...of。next/return/throw 返回 Promise，等待时后续请求排队；请求队列、finally 待完成值和宿主调用中的帧随 Runtime 保存。for-await 优先异步协议，否则回退同步协议并等待其 value；自定义异步协议的 value 原样保留。用它们逐批处理数据，仍按要交付的结果定义模块，在代码中收集和提炼材料后再交给 AI。

@@ -49,3 +49,9 @@ cargo test --bin vm-measurements --features vm-measurements model_source_corpus 
 cargo test --bin vm-measurements --features vm-measurements -- --test-threads=4
 cargo test --bin codex-workspace-mcp -- --test-threads=8
 ```
+
+
+阶段 6 增加 `test262-selection-stage6-generators.json`，覆盖同步生成器声明/表达式、yield 与 GeneratorFunction/GeneratorPrototype，共 703 项；动态 GeneratorFunction 仍按既定规则禁用，相关运行失败保留，不改为跳过。`test262-stage6-generators-before.json` 来自保留的阶段 5 补充修复二进制，使用同一 revision、选集及源码哈希；`test262-stage6-generators.json` 为改动后结果。原有七组基线分别继续与阶段 5 补充修复逐项比较。Node 对照的一个规范差异、十个存盘恢复用例和临时 CPU 亲和性条件见 [阶段 6 报告](REPORT-stage6.md)。
+
+
+阶段 7 增加 `test262-selection-stage7-async-iteration.json`，覆盖 for-await、async generator 声明/表达式、AsyncGeneratorFunction/Prototype 和 AsyncFromSyncIteratorPrototype。新范围固定 2267 项，`test262-stage7-async-iteration-before.json` 使用保留的阶段 6 二进制；改动后报告与其逐项比较，不改用例状态掩盖动态构造器限制。另复跑原有八组选集及同一份冻结模型语料。详细范围、Node 对照、存盘断言和完整失败名称对照见 [阶段 7 报告](REPORT-stage7.md) 与 [机器记录](stage7-validation.json)。
