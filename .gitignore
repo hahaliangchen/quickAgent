@@ -13,3 +13,6 @@
 
 # 隔离工作区、模型请求日志及临时测试产物
 /runs/
+
+# Local experiment workspaces, databases, dependencies and generated output.
+/scratch/

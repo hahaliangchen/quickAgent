@@ -4,6 +4,9 @@ mod builtins;
 mod compiler;
 mod heap;
 mod js_methods;
+mod js_functions;
+mod js_collections;
+mod js_date;
 mod js_value;
 mod vm_eval;
 pub(crate) mod declarations;
@@ -13,6 +16,8 @@ mod prelude;
 pub(crate) mod runtime;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod conformance;
 mod values;
 
 #[cfg(test)]
@@ -24,6 +29,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub const VERSION: u32 = 14;
+pub(super) fn js_prototype_global(name:&str)->bool {
+    matches!(name,"Symbol"|"Object"|"Function"|"Array"|"String"|"Number"|"Boolean"|"Date"|"RegExp"|"Promise"|"Map"|"Set"|"WeakMap"|"WeakSet") || vm_eval::ERROR_CLASSES.contains(&name)
+}
 /// Id of the function formed by a program's top-level statements. It is not
 /// a JavaScript identifier, so no declared function can take it.
 pub const ENTRY: &str = "<module>";
@@ -99,6 +107,14 @@ pub struct Function {
     pub module: bool,
     #[serde(default)]
     pub is_async: bool,
+    #[serde(default)]
+    pub is_generator: bool,
+    #[serde(default)]
+    pub lexical_this: bool,
+    #[serde(default)]
+    pub length: usize,
+    #[serde(default)]
+    pub constructable: bool,
     /// A named function expression sees its own name inside its body.
     #[serde(default)]
     pub self_name: Option<String>,
@@ -130,6 +146,9 @@ pub enum Op {
         destination: String,
     },
     Await { value: Expr, destination: String },
+    /// Parameter initializers run at call time; the body starts on first next().
+    GeneratorStart,
+    Yield { value: Expr, destination: String, return_target: usize, delegated: bool },
     Return(Expr),
     Branch(Expr, usize),
     Jump(usize),
@@ -150,6 +169,7 @@ pub enum Op {
 pub enum Expr {
     Undefined,
     Value(Value),
+    Utf16(Vec<u16>),
     Variable(String),
     Array(Vec<Expr>),
     Object(Vec<(String, Expr)>),
@@ -170,9 +190,21 @@ pub enum Expr {
     Function(String),
     /// A built-in function or tool as a value: "String", "Math.max", "tool:read_file".
     Native(String),
+    Intrinsic(String),
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Invocation {
+    pub callee: Expr,
+    pub receiver: Expr,
+    pub args: Expr,
+    #[serde(default)]
+    pub label: Option<Expr>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Effect {
+    /// A captured function reference plus its receiver, evaluated before args.
+    Invoke(Box<Invocation>),
+    Construct(Box<Invocation>),
     PromiseCreate { reject: bool, value: Expr },
     PromiseConstruct { executor: Expr },
     /// `require("ppt")`: the host links a third-party library when this runs.
@@ -213,4 +245,5 @@ pub enum Effect {
 pub const SKILL: &str = include_str!("../skills/task-program/SKILL.md");
 pub const ENVIRONMENT: &str = include_str!("../prompts/flow_environment.md");
 pub const CAPABILITIES: &str = include_str!("../prompts/flow_capabilities.md");
+pub const BUILTIN_CONTRACTS: &str = include_str!("../prompts/flow_builtin_contracts.d.ts");
 

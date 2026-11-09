@@ -1,11 +1,20 @@
 //! Serializable identity-bearing values and lexical environments for the
 //! JavaScript-subset interpreter. Closures are not yet connected to execution.
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+#[path="js_prototypes.rs"]
+mod prototypes;
+#[path="js_descriptors.rs"]
+mod descriptors;
+use descriptors::PropertyMeta;
+#[path="js_symbols.rs"]
+mod symbols;
+#[path="js_classes.rs"]
+mod class_support;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(super) struct HeapId(u64);
 
 /// IEEE-754 bits are stored directly so non-finite values and signed zero
@@ -25,10 +34,14 @@ impl JsNumber {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) enum VmValue {
     Undefined,
+    Symbol(u64),
     Null,
     Boolean(bool),
     Number(JsNumber),
     String(String),
+    /// Only ill-formed UTF-16 strings use this variant. Do not replace their
+    /// surrogate code units with U+FFFD while evaluating JavaScript.
+    Utf16(Vec<u16>),
     Reference(HeapId),
     Promise(super::promise::PromiseId),
 }
@@ -37,6 +50,8 @@ pub(super) enum VmValue {
 pub(super) enum HeapNode {
     Object(#[serde(deserialize_with = "deserialize_properties")] Vec<(String, VmValue)>),
     Array(Vec<VmValue>),
+    Collection(super::js_collections::Collection),
+    Iterator(super::js_collections::IteratorState),
     Environment {
         parent: Option<HeapId>,
         bindings: BTreeMap<String, VmValue>,
@@ -48,6 +63,7 @@ pub(super) enum HeapNode {
         function: String,
         environment: HeapId,
     },
+    BoundFunction { target: VmValue, receiver: VmValue, args: Vec<VmValue>, name: String, length: usize },
     /// Promise identity and reactions reside on the serialized heap.
     Promise {
         outcome: Option<super::promise::Outcome>,
@@ -81,6 +97,12 @@ where
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct Heap {
+    #[serde(default)]
+    class_constructors: BTreeMap<HeapId,bool>,
+    #[serde(default)]
+    readonly_bindings: BTreeMap<HeapId,BTreeSet<String>>,
+    #[serde(default)]
+    method_homes: BTreeMap<HeapId,HeapId>,
     next_id: u64,
     nodes: BTreeMap<HeapId, HeapNode>,
     #[serde(default)]
@@ -92,11 +114,93 @@ pub(super) struct Heap {
     /// One node per built-in function value, so `String === String`.
     #[serde(default)]
     natives: BTreeMap<String, HeapId>,
+    #[serde(default)]
+    // Also stores collection/iterator own properties; preserve the serialized
+    // field name for existing array snapshots.
+    array_properties: BTreeMap<HeapId, Vec<(String, VmValue)>>,
+    #[serde(default)]
+    frozen: BTreeSet<HeapId>,
+    /// Date's internal time value is not an enumerable JavaScript property.
+    #[serde(default)]
+    dates: BTreeMap<HeapId, JsNumber>,
+    #[serde(default)]
+    function_lengths: BTreeMap<String, usize>,
+    #[serde(default)]
+    generator_functions: BTreeSet<String>,
+    #[serde(default)]
+    async_generator_functions: BTreeSet<String>,
+    /// Internal slots, not enumerable properties or JSON tool data.
+    #[serde(default)]
+    pub(super) generators: BTreeMap<HeapId, super::runtime::Generator>,
+    #[serde(default)]
+    prototypes: BTreeMap<HeapId, Option<HeapId>>,
+    #[serde(default)]
+    intrinsics: BTreeMap<String, HeapId>,
+    #[serde(default)]
+    non_enumerable: BTreeMap<HeapId, BTreeSet<String>>,
+    #[serde(default)]
+    builtin_getters: BTreeMap<HeapId, BTreeMap<String,String>>,
+    #[serde(default)]
+    boxed: BTreeMap<HeapId, VmValue>,
+    #[serde(default)]
+    constructable: BTreeSet<String>,
+    #[serde(default)]
+    realm_ready: bool,
+    #[serde(default)]
+    descriptors: BTreeMap<HeapId,BTreeMap<String,PropertyMeta>>,
+    #[serde(default)]
+    deleted_properties: BTreeMap<HeapId,BTreeSet<String>>,
+    #[serde(default)]
+    non_extensible: BTreeSet<HeapId>,
+    #[serde(default)]
+    next_symbol:u64,
+    #[serde(default)]
+    symbols:BTreeMap<u64,Option<VmValue>>,
+    #[serde(default)]
+    symbol_registry:Vec<(Vec<u16>,u64)>,
+    #[serde(default)]
+    well_known_symbols:BTreeMap<String,u64>,
 }
 
 // The existing interpreter will be migrated to these values incrementally.
 #[allow(dead_code)]
 impl Heap {
+    /// The conformance helper is a test facility, not a new language type.
+    #[cfg(test)]
+    pub(crate) fn install_test_error(&mut self)->Result<()> {
+        let ctor=self.native("test262.error")?;
+        let proto=self.allocate(HeapNode::Object(vec![]))?;
+        self.define_builtin(ctor,"prototype",VmValue::Reference(proto))?;
+        self.define_builtin(proto,"constructor",VmValue::Reference(ctor))?;
+        self.intrinsics.insert("Test262Error.prototype".into(),proto);
+        Ok(())
+    }
+    pub(super) fn register_function_length(&mut self, id: &str, length: usize) {self.function_lengths.insert(id.into(),length);}
+    pub(super) fn function_length(&self, id: &str) -> usize {
+        self.function_lengths.get(id).copied().unwrap_or_else(||super::js_functions::native_length(id))
+    }
+    pub(super) fn native_reference(&self,name:&str)->Option<VmValue> {
+        self.natives.get(name).copied().map(VmValue::Reference)
+    }
+    pub(super) fn ensure_json_cloneable(&self,value:&VmValue,seen:&mut BTreeSet<HeapId>)->Result<()> {
+        let mut pending=if let VmValue::Reference(id)=value{vec![*id]}else{vec![]};
+        while let Some(id)=pending.pop() {
+            if !seen.insert(id){continue;}
+            ensure!(!self.generators.contains_key(&id), "TypeError: structuredClone cannot clone a generator; Runtime snapshots preserve its continuation");
+            let mut visit=|value:&VmValue|if let VmValue::Reference(id)=value{pending.push(*id);};
+            match self.get(id)? {
+                HeapNode::Collection(_) | HeapNode::Iterator(_)=>bail!("TypeError: structuredClone currently supports JSON values only; collection and iterator cloning is not implemented. Runtime snapshots preserve them in full."),
+                HeapNode::Array(values)=>for value in values {visit(value);},
+                HeapNode::Object(properties)=>for (_,value) in properties {visit(value);},
+                _=>{},
+            }
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(super) fn test_native(&self,name:&str)->Option<VmValue> {
+        self.natives.get(name).map(|id|VmValue::Reference(*id))
+    }
     /// Import a host JSON value into identity-bearing VM values. Each object
     /// or array becomes its own heap node; JSON itself cannot express aliases.
     pub(super) fn from_json(&mut self, input: &Value) -> Result<VmValue> {
@@ -130,7 +234,7 @@ impl Heap {
             Value::Object(values) => {
                 let mut properties = Vec::new();
                 for (key, value) in values {
-                    properties.push((key.clone(), self.import_json(value, depth + 1)?));
+                    properties.push((Self::string_key(key), self.import_json(value, depth + 1)?));
                 }
                 VmValue::Reference(self.allocate(HeapNode::Object(properties))?)
             }
@@ -149,10 +253,10 @@ impl Heap {
     /// arrays: undefined and functions.
     pub(super) fn json_absent(&self, value: &VmValue) -> bool {
         match value {
-            VmValue::Undefined => true,
+            VmValue::Undefined | VmValue::Symbol(_) => true,
             VmValue::Reference(id) => matches!(
                 self.nodes.get(id),
-                Some(HeapNode::Closure { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. })
+                Some(HeapNode::Closure { .. } | HeapNode::BoundFunction { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. })
             ),
             _ => false,
         }
@@ -186,6 +290,7 @@ impl Heap {
             bail!("value exceeds maximum JSON nesting depth");
         }
         Ok(match value {
+            VmValue::Symbol(_) => bail!("symbol cannot cross the JSON host boundary; use String or a data representation"),
             VmValue::Undefined => bail!("undefined cannot cross the JSON host boundary"),
             VmValue::Null => Value::Null,
             VmValue::Boolean(value) => Value::Bool(*value),
@@ -197,8 +302,17 @@ impl Heap {
                 super::number_value(number)
             }
             VmValue::String(value) => Value::String(value.clone()),
+            VmValue::Utf16(_) => bail!("unpaired UTF-16 surrogate cannot cross the Unicode JSON host boundary; use JSON.stringify to preserve escaped code units"),
             VmValue::Promise(_) => bail!("promise cannot cross the JSON host boundary"),
             VmValue::Reference(id) => {
+                if let Some(value)=self.boxed_value(*id).filter(|v|!matches!(v,VmValue::Symbol(_))){return self.export_json(value,active,depth+1);}
+                if let Some(ms) = self.date_value(*id) {
+                    return Ok(if ms.is_finite() { Value::String(super::js_date::iso(ms)?) } else { Value::Null });
+                }
+                for key in self.own_names(*id)?.into_iter().filter(|k|!Self::is_symbol_key(k)&&self.enumerable(*id,k)) {
+                    ensure!(self.own_descriptor(*id,&key)?.is_none_or(|d|d.accessor.is_none()),"TypeError: accessor cannot cross the JSON host boundary; read its value or use JSON.stringify first");
+                }
+                if let HeapNode::Array(items)=self.get(*id)?{for i in 0..items.len(){ensure!(self.descriptor_owner(*id,&i.to_string())?.is_none_or(|(_,d)|d.accessor.is_none()),"TypeError: accessor cannot cross the JSON host boundary; materialize with Array.from or JSON.stringify first");}}
                 if !active.insert(*id) {
                     bail!("cyclic value cannot cross the JSON host boundary");
                 }
@@ -206,9 +320,17 @@ impl Heap {
                     HeapNode::Object(properties) => {
                         let mut output = serde_json::Map::new();
                         for (key, item) in properties {
-                            if !self.json_absent(item) {
-                                output.insert(key.clone(), self.export_json(item, active, depth + 1)?);
+                            if !Self::is_symbol_key(key) && self.enumerable(*id,key) && !self.json_absent(item) {
+                                let VmValue::String(key)=self.key_value(key) else{unreachable!()};
+                                output.insert(key, self.export_json(item, active, depth + 1)?);
                             }
+                        }
+                        Value::Object(output)
+                    }
+                    HeapNode::Collection(_) | HeapNode::Iterator(_)=>{
+                        let mut output=serde_json::Map::new();
+                        for (key,item) in self.array_properties(*id) {
+                            if !Self::is_symbol_key(key) && self.enumerable(*id,key) && !self.json_absent(item){let VmValue::String(key)=self.key_value(key) else{unreachable!()};output.insert(key,self.export_json(item,active,depth+1)?);}
                         }
                         Value::Object(output)
                     }
@@ -217,11 +339,13 @@ impl Heap {
                             .iter()
                             .enumerate()
                             .map(|(index, item)| {
+                                let inherited=if self.array_holes.get(id).is_some_and(|holes|holes.contains(&index)){self.lookup_property(*id,&index.to_string())?}else{None};
+                                let item=inherited.as_ref().unwrap_or(item);
                                 if self.json_absent(item)
                                     || self
                                         .array_holes
                                         .get(id)
-                                        .is_some_and(|holes| holes.contains(&index))
+                                        .is_some_and(|holes| holes.contains(&index)) && inherited.is_none()
                                 {
                                     Ok(Value::Null)
                                 } else {
@@ -231,7 +355,7 @@ impl Heap {
                             .collect::<Result<Vec<_>>>()?,
                     ),
                     HeapNode::Promise { .. } => bail!("promise cannot cross the JSON host boundary"),
-                    HeapNode::Environment { .. } | HeapNode::Closure { .. } | HeapNode::Native(_) | HeapNode::PromiseCapability { .. } | HeapNode::PromiseResolver { .. } => {
+                    HeapNode::Environment { .. } | HeapNode::Closure { .. } | HeapNode::BoundFunction { .. } | HeapNode::Native(_) | HeapNode::PromiseCapability { .. } | HeapNode::PromiseResolver { .. } => {
                         bail!("function or environment cannot cross the JSON host boundary")
                     }
                 };
@@ -245,6 +369,7 @@ impl Heap {
         let id = HeapId(self.next_id);
         self.next_id = self.next_id.checked_add(1).context("heap id exhausted")?;
         self.nodes.insert(id, node);
+        self.initialize_node(id)?;
         Ok(id)
     }
 
@@ -266,10 +391,23 @@ impl Heap {
         }
         // Built-in function values stay interned for the life of the program.
         pending.extend(self.natives.values().copied());
+        pending.extend(self.intrinsics.values().copied());
         let mut live = BTreeSet::new();
         while let Some(id) = pending.pop() {
             if !live.insert(id) {
                 continue;
+            }
+            pending.extend(self.prototypes.get(&id).copied().flatten());
+            pending.extend(self.method_homes.get(&id).copied());
+            if let Some(generator) = self.generators.get(&id) {
+                pending.extend(generator.roots().iter().filter_map(|v| if let VmValue::Reference(id)=v {Some(*id)} else {None}));
+            }
+            if let Some(props)=self.descriptors.get(&id){for d in props.values(){if let Some((g,s))=&d.accessor{for v in [g,s]{if let VmValue::Reference(child)=v{pending.push(*child);}}}}}
+            if let Some(VmValue::Reference(value))=self.boxed.get(&id){pending.push(*value);}
+            if let Some(properties) = self.array_properties.get(&id) {
+                for (_, value) in properties {
+                    if let VmValue::Reference(child) = value { pending.push(*child); }
+                }
             }
             let mut visit = |value: &VmValue| {
                 if let VmValue::Reference(id) = value {
@@ -287,6 +425,8 @@ impl Heap {
                         visit(value);
                     }
                 }
+                HeapNode::Collection(c)=>for (key,value) in c.entries.iter().flatten(){visit(key);visit(value);},
+                HeapNode::Iterator(it)=>if let Some(source)=&it.source {visit(source);},
                 HeapNode::Environment {
                     parent, bindings, ..
                 } => {
@@ -300,6 +440,7 @@ impl Heap {
                     }
                 }
                 HeapNode::Closure { environment, .. } => pending.push(*environment),
+                HeapNode::BoundFunction {target,receiver,args,..} => {visit(target);visit(receiver);for arg in args {visit(arg);}},
                 HeapNode::Promise { outcome, .. } => {
                     if let Some(super::promise::Outcome::Fulfilled(value) | super::promise::Outcome::Rejected(value)) = outcome { visit(value); }
                 }
@@ -312,10 +453,25 @@ impl Heap {
         self.nodes.retain(|id, _| live.contains(id));
         self.array_holes.retain(|id, _| live.contains(id));
         self.classes.retain(|id, _| live.contains(id));
+        self.array_properties.retain(|id, _| live.contains(id));
+        self.frozen.retain(|id| live.contains(id));
+        self.dates.retain(|id, _| live.contains(id));
+        self.generators.retain(|id, _| live.contains(id));
+        self.prototypes.retain(|id,_|live.contains(id));
+        self.class_constructors.retain(|id,_|live.contains(id));
+        self.readonly_bindings.retain(|id,_|live.contains(id));
+        self.method_homes.retain(|id,_|live.contains(id));
+        self.non_enumerable.retain(|id,_|live.contains(id));
+        self.builtin_getters.retain(|id,_|live.contains(id));
+        self.boxed.retain(|id,_|live.contains(id));
+        self.descriptors.retain(|id,_|live.contains(id));
+        self.deleted_properties.retain(|id,_|live.contains(id));
+        self.non_extensible.retain(|id|live.contains(id));
         Ok(before - self.nodes.len())
     }
 
     pub(super) fn append(&mut self, id: HeapId, items: Vec<VmValue>) -> Result<usize> {
+        self.ensure_writable(id)?;
         match self.nodes.get_mut(&id).context("unknown heap reference")? {
             HeapNode::Array(values) => {
                 values.extend(items);
@@ -330,6 +486,27 @@ impl Heap {
             if let Some(descriptor) = self.regex_descriptor(id) {
                 return self.set_property(descriptor, key, value);
             }
+        }
+        let d=self.descriptor_owner(id,&key)?;
+        if let Some((_,d))=d {ensure!(d.accessor.is_none()&&d.writable,"TypeError: Cannot assign to read-only property {key}");}
+        let own=self.own_descriptor(id,&key)?.is_some();
+        ensure!(own||self.extensible(id),"TypeError: Cannot add property {key}, object is not extensible");
+        if matches!(self.get(id)?,HeapNode::Array(_))&&let Ok(index)=key.parse::<usize>() {
+            let len=match self.get(id)?{HeapNode::Array(a)=>a.len(),_=>0};
+            ensure!(index<len||self.own_descriptor(id,"length")?.unwrap().writable,"TypeError: Cannot extend a read-only array length");
+        }
+        if key=="length" && matches!(self.get(id)?,HeapNode::Array(_)) {
+            let patch=self.allocate(HeapNode::Object(vec![("value".into(),value)]))?;
+            ensure!(self.define_own(id,&key,patch)?,"TypeError: Cannot shrink array past a nonconfigurable property");return Ok(());
+        }
+        if let Some(keys)=self.deleted_properties.get_mut(&id){keys.remove(&key);}
+        self.raw_set_property(id,key,value)
+    }
+    pub(super) fn raw_set_property(&mut self,id:HeapId,key:String,value:VmValue)->Result<()> {
+        if matches!(self.get(id)?,HeapNode::Closure{..}|HeapNode::Native(_)|HeapNode::BoundFunction{..}|HeapNode::PromiseResolver{..}|HeapNode::Promise{..}) {
+            let properties=self.array_properties.entry(id).or_default();
+            if let Some((_,old))=properties.iter_mut().find(|(name,_)|*name==key){*old=value;}else{properties.push((key,value));}
+            return Ok(());
         }
         match self.nodes.get_mut(&id).context("unknown heap reference")? {
             HeapNode::Object(properties) => {
@@ -364,7 +541,12 @@ impl Heap {
                     }
                     return Ok(());
                 }
-                let index: usize = key.parse().context("array property must be an index")?;
+                let Some(index) = key.parse::<u32>().ok().filter(|n| *n != u32::MAX && n.to_string() == key).map(|n| n as usize) else {
+                    let properties = self.array_properties.entry(id).or_default();
+                    if let Some((_, existing)) = properties.iter_mut().find(|(name, _)| *name == key) { *existing = value; }
+                    else { properties.push((key, value)); }
+                    return Ok(());
+                };
                 if index > 1_000_000 {
                     bail!("array index exceeds runtime limit");
                 }
@@ -377,6 +559,14 @@ impl Heap {
                 items[index] = value;
                 Ok(())
             }
+            HeapNode::Collection(_) | HeapNode::Iterator(_)=>{
+                if !self.realm_ready && matches!(self.nodes.get(&id),Some(HeapNode::Collection(c)) if !c.kind.weak()) && key=="size" {
+                    bail!("TypeError: Cannot set read-only collection size");
+                }
+                let properties=self.array_properties.entry(id).or_default();
+                if let Some((_,old))=properties.iter_mut().find(|(name,_)|*name==key){*old=value;}else{properties.push((key,value));}
+                Ok(())
+            }
             _ => bail!("property assignment requires an object"),
         }
     }
@@ -385,7 +575,30 @@ impl Heap {
         self.classes.get(&id).map(String::as_str)
     }
 
+    pub(super) fn new_date(&mut self, ms: f64) -> Result<VmValue> {
+        let id = self.allocate(HeapNode::Object(Vec::new()))?;
+        self.set_class(id, "Date");
+        self.dates.insert(id, JsNumber::new(ms));
+        Ok(VmValue::Reference(id))
+    }
+
+    pub(super) fn date_value(&self, id: HeapId) -> Option<f64> {
+        self.dates.get(&id).map(|n| n.get())
+    }
+
+    pub(super) fn freeze(&mut self, id: HeapId) { self.integrity(id,true).expect("valid heap integrity"); }
+
+    pub(super) fn ensure_writable(&self, id: HeapId) -> Result<()> {
+        if self.frozen.contains(&id) { bail!("TypeError: Cannot modify a frozen object"); }
+        Ok(())
+    }
+
+    pub(super) fn array_properties(&self, id: HeapId) -> &[(String, VmValue)] {
+        self.array_properties.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
     pub(super) fn set_class(&mut self, id: HeapId, class: &str) {
+        if let Some(proto)=self.intrinsics.get(&format!("{class}.prototype")).copied(){self.prototypes.insert(id,Some(proto));}
         self.classes.insert(id, class.to_owned());
     }
 
@@ -394,12 +607,9 @@ impl Heap {
         let HeapNode::Object(properties) = self.get(id).ok()? else {
             return None;
         };
-        let [(key, VmValue::Reference(descriptor))] = properties.as_slice() else {
+        let Some((_, VmValue::Reference(descriptor))) = properties.iter().find(|(key, _)| key == "$flow_regex") else {
             return None;
         };
-        if key != "$flow_regex" {
-            return None;
-        }
         Some(*descriptor)
     }
 
@@ -427,6 +637,7 @@ impl Heap {
 
     /// Replace an array's elements and holes in one step.
     pub(super) fn replace_array(&mut self, id: HeapId, items: Vec<VmValue>, holes: BTreeSet<usize>) -> Result<()> {
+        self.ensure_writable(id)?;
         match self.nodes.get_mut(&id).context("unknown heap reference")? {
             HeapNode::Array(values) => {
                 *values = items;
@@ -448,9 +659,21 @@ impl Heap {
     /// The `delete` operator: an object loses the property, an array index
     /// becomes a hole. Other keys and values are left unchanged.
     pub(super) fn delete_property(&mut self, id: HeapId, key: &str) -> Result<()> {
+        ensure!(self.own_descriptor(id,key)?.is_none_or(|d|d.configurable),"TypeError: Cannot delete nonconfigurable property {key}");
+        self.raw_delete_property(id,key)?;
+        self.descriptors.entry(id).or_default().remove(key);
+        self.deleted_properties.entry(id).or_default().insert(key.into());
+        if let Some(props)=self.builtin_getters.get_mut(&id){props.remove(key);}
+        Ok(())
+    }
+    pub(super) fn raw_delete_property(&mut self,id:HeapId,key:&str)->Result<()> {
+        if let Some(keys)=self.non_enumerable.get_mut(&id){keys.remove(key);}
         match self.nodes.get_mut(&id).context("unknown heap reference")? {
             HeapNode::Object(properties) => properties.retain(|(name, _)| name != key),
+            HeapNode::Collection(_) | HeapNode::Iterator(_) | HeapNode::Closure {..} | HeapNode::Native(_) | HeapNode::BoundFunction {..} | HeapNode::PromiseResolver {..}=>if let Some(props)=self.array_properties.get_mut(&id){props.retain(|(name,_)|name!=key);},
             HeapNode::Array(items) => {
+                if key == "length" { bail!("TypeError: Cannot delete array length"); }
+                if let Some(properties) = self.array_properties.get_mut(&id) { properties.retain(|(name, _)| name != key); }
                 if let Ok(index) = key.parse::<usize>()
                     && index.to_string() == key
                     && index < items.len()
@@ -477,11 +700,40 @@ impl Heap {
 
     /// An object's own property, or None when it has no such property.
     pub(super) fn own_property(&self, id: HeapId, key: &str) -> Result<Option<VmValue>> {
+        if self.deleted_properties.get(&id).is_some_and(|keys|keys.contains(key)){return Ok(None);}
+        if self.descriptors.get(&id).and_then(|m|m.get(key)).is_some_and(|d|d.accessor.is_some()){return Ok(Some(VmValue::Undefined));}
+        if key=="lastIndex" && self.regex_parts(id).is_some(){return Ok(Some(VmValue::Number(JsNumber::new(0.0))));}
+        if self.builtin_getters.get(&id).is_some_and(|getters|getters.contains_key(key)){return Ok(Some(VmValue::Undefined));}
+        if let Some(value)=self.boxed.get(&id).filter(|v|matches!(v,VmValue::String(_)|VmValue::Utf16(_))) {
+            let text=super::js_value::string_units(self,value)?;
+            if key=="length"{return Ok(Some(VmValue::Number(JsNumber::new(text.len() as f64))));}
+            if let Ok(i)=key.parse::<usize>()&&i.to_string()==key&&let Some(c)=text.get(i){return Ok(Some(super::js_value::from_utf16(vec![*c])));}
+        }
+        if matches!(self.get(id)?,HeapNode::Closure{..}|HeapNode::Native(_)|HeapNode::BoundFunction{..}|HeapNode::PromiseResolver{..}) {
+            if let Some((_,value))=self.array_properties(id).iter().find(|(name,_)|name==key){return Ok(Some(value.clone()));}
+            return Ok(match (self.get(id)?,key) {
+                (HeapNode::BoundFunction{name,..},"name")=>Some(VmValue::String(name.clone())),
+                (HeapNode::BoundFunction{length,..},"length")=>Some(VmValue::Number(JsNumber::new(*length as f64))),
+                (HeapNode::Closure{function,..}|HeapNode::Native(function),"name")=>Some(VmValue::String(super::js_value::function_name(function).into())),
+                (HeapNode::Closure{function,..},"length")=>Some(VmValue::Number(JsNumber::new(self.function_length(function) as f64))),
+                (HeapNode::Native(function),"length")=>Some(VmValue::Number(JsNumber::new(super::js_functions::native_length(function) as f64))),
+                (HeapNode::PromiseResolver{..},"name")=>Some(VmValue::String(String::new())),
+                (HeapNode::PromiseResolver{..},"length")=>Some(VmValue::Number(JsNumber::new(1.0))),
+                _=>None,
+            });
+        }
         Ok(match self.get(id)? {
             HeapNode::Object(properties) => properties
                 .iter()
                 .find(|(name, _)| name == key)
                 .map(|(_, value)| value.clone()),
+            HeapNode::Collection(_) | HeapNode::Iterator(_)=>self.array_properties(id).iter().find(|(name,_)|name==key).map(|(_,value)|value.clone()),
+            HeapNode::Array(items) => {
+                if key == "length" { Some(VmValue::Number(JsNumber::new(items.len() as f64))) }
+                else if let Some(index) = key.parse::<usize>().ok().filter(|n| n.to_string() == key) {
+                    if self.has_array_index(id, index)? { Some(items[index].clone()) } else { None }
+                } else { self.array_properties(id).iter().find(|(name, _)| name == key).map(|(_, value)| value.clone()) }
+            },
             _ => None,
         })
     }
@@ -616,10 +868,12 @@ impl Heap {
         value: VmValue,
     ) -> Result<()> {
         let owner = self.binding_owner(environment, name)?;
-        let (bindings, uninitialized) = self.environment_mut(owner)?;
+        let (_, uninitialized) = self.environment_mut(owner)?;
         if uninitialized.contains(name) {
             bail!("ReferenceError: Cannot access '{name}' before initialization");
         }
+        if self.readonly_bindings.get(&owner).is_some_and(|names|names.contains(name)){bail!("TypeError: Assignment to constant class binding {name}");}
+        let (bindings,_)=self.environment_mut(owner)?;
         bindings.insert(name.to_owned(), value);
         Ok(())
     }

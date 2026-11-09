@@ -54,6 +54,7 @@ pub enum PermissionMode {
 impl PermissionMode {
     pub(crate) fn allows(self, name: &str) -> bool {
         match name {
+            "exec_command" | "write_stdin" | "kill_session" => true,
             "write_file" | "replace_range" | "edit_file" => !matches!(self, Self::ReadOnly),
             "run_program"
             | "install_dependencies"
@@ -891,7 +892,8 @@ pub async fn continue_task(
             }).collect::<anyhow::Result<Vec<_>>>()?;
         // The single-agent runtime restores its durable window itself, including
         // importing legacy records without requiring legacy native tool pairs.
-        let turn = events.iter().filter_map(|(_,data)|data["turn"].as_u64()).max().unwrap_or(0) as usize + 1;
+        let last_event_turn = events.iter().filter_map(|(_,data)|data["turn"].as_u64()).max().unwrap_or(0) as usize;
+        let turn = crate::attachments::next_turn(&tx, &read_id, last_event_turn)?;
         let permission_mode = req_permission.unwrap_or_else(|| events.iter().rev()
             .find(|(kind, _)| kind == "turn/start")
             .and_then(|(_, data)| data.get("permission_mode"))
@@ -1348,6 +1350,8 @@ pub(crate) async fn finish(
     task_id: &str,
     status: &str,
 ) -> anyhow::Result<()> {
+    crate::single_agent::cancel_saved_programs(state, task_id).await?;
+    crate::shell_process::cleanup_task(state.workspace.root(), task_id).await;
     // A single-agent conversation owns durable resources across user turns.
     // Closing its browser is an explicit tool action, not failure cleanup.
     let lookup_root = state.workspace.root().to_path_buf();
@@ -1557,6 +1561,7 @@ fn local_output_schema(name: &str) -> Option<Value> {
         json!({"type":"object","required":required,"properties":properties})
     };
     Some(match name {
+        "exec_command" | "write_stdin" | "kill_session" => crate::shell_process::output_schema(),
         "read_file" => json!({"type":"object","required":required,"properties":page}),
         "read_file_lines" => {
             let mut properties = page;
@@ -1589,6 +1594,9 @@ pub(crate) fn local_tools(
 ) -> Vec<Value> {
     let definitions = crate::mcp::tool_definitions();
     let allowed = [
+        "exec_command",
+        "write_stdin",
+        "kill_session",
         "workspace_info",
         "install_dependencies",
         "run_project_script",
@@ -1613,27 +1621,6 @@ pub(crate) fn local_tools(
         "write_file",
         "replace_range",
         "edit_file",
-        "search_code_map",
-        "index_go_workspace",
-        "go_index_status",
-        "list_go_symbols",
-        "search_go_symbols",
-        "read_go_symbol",
-        "index_rust_workspace",
-        "rust_index_status",
-        "list_rust_symbols",
-        "search_rust_symbols",
-        "read_rust_symbol",
-        "index_ts_workspace",
-        "ts_index_status",
-        "list_ts_symbols",
-        "search_ts_symbols",
-        "read_ts_symbol",
-        "index_python_workspace",
-        "python_index_status",
-        "list_python_symbols",
-        "search_python_symbols",
-        "read_python_symbol",
         "record_work_memory",
         "list_work_memory",
         "search_work_memory",
@@ -1644,7 +1631,7 @@ pub(crate) fn local_tools(
         "list_symbol_business_context",
         "search_symbol_business_context",
     ];
-    definitions.as_array().into_iter().flatten().filter(|tool| tool.get("name").and_then(Value::as_str).is_some_and(|n| (!ban_run_command || (n != "run_program" && !crate::project_process::is_execution(n))) && catalog.map_or(allowed.contains(&n), |catalog| catalog.contains(n) && !catalog.packages.declares_tool(n)))).map(|tool| {
+    definitions.as_array().into_iter().flatten().filter(|tool| tool.get("name").and_then(Value::as_str).is_some_and(|n| (!ban_run_command || crate::shell_process::is_tool(n) || (n != "run_program" && !crate::project_process::is_execution(n))) && catalog.map_or(allowed.contains(&n), |catalog| catalog.contains(n) && !catalog.packages.declares_tool(n)))).map(|tool| {
         let name=tool["name"].as_str().unwrap_or_default(); let mut description=tool["description"].as_str().unwrap_or_default().to_owned();
         let mut schema=tool.get("inputSchema").cloned().unwrap_or_else(||json!({"type":"object","properties":{}}));
         if let Some(props)=schema.get_mut("properties").and_then(Value::as_object_mut) {props.remove("workspace_root");}

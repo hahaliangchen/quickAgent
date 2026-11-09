@@ -247,6 +247,11 @@ pub async fn add_project(
             "INSERT OR IGNORE INTO agent_projects(path,title) VALUES (?1,?2)",
             params![path.to_string_lossy(), title],
         )?;
+        let title: String = conn.query_row(
+            "SELECT title FROM agent_projects WHERE path=?1",
+            [path.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )?;
         Ok(json!({"path":path,"title":title}))
     })())
 }

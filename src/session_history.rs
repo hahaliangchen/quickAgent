@@ -6,6 +6,7 @@ use std::path::Path;
 mod index;
 #[cfg(test)]
 mod regression_tests;
+mod flow_folder;
 mod store;
 pub use store::{EventQuery, load_events, tool_call_node};
 
@@ -162,6 +163,17 @@ fn read_programs(
     )
 }
 
+pub(crate) fn program_output_text(end: &Value) -> String {
+    let mut text = end["console"]
+        .as_array()
+        .map(|lines| lines.iter().map(|line| line.as_str().map(str::to_owned).unwrap_or_else(|| line.to_string())).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default();
+    if let Some(result) = end["detail"].get("result").filter(|value| !value.is_null()) {
+        text.push_str(&format!("\n返回：{}", result.as_str().map(str::to_owned).unwrap_or_else(|| result.to_string())));
+    }
+    text
+}
+
 #[cfg(test)]
 pub async fn read(root: &Path, task: &str, args: &Value) -> Result<Value> {
     read_for_call(root, task, args, None).await
@@ -290,6 +302,13 @@ fn read_saved(
         return index::read(conn, task, args, snapshot);
     }
     if args["programs"] == true {
+        if args["directory"].is_string()
+            || args["program"].as_str().is_some_and(flow_folder::is_module_path)
+            || args["start_line"].is_number() || args["end_line"].is_number()
+        {
+            let snapshot_tx = conn.unchecked_transaction()?;
+            return flow_folder::read(&snapshot_tx, task, args, boundary);
+        }
         return read_programs(conn, task, args, snapshot);
     }
     let store::SearchSelection {

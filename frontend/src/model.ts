@@ -258,6 +258,21 @@ function parsed(text: string): unknown {
   try { return JSON.parse(text) } catch { return undefined }
 }
 
+type ShellSessionId = string | number
+
+function shellSessionId(value: unknown): ShellSessionId | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : stringOf(value)
+}
+
+/** Only final metadata is shared between rows; each call keeps its own captured output. */
+function shellCompletion(value: Record<string, unknown>): Record<string, unknown> {
+  const completion: Record<string, unknown> = { running: false }
+  for (const field of ['exit_code', 'termination_reason', 'output_asset', 'errors']) {
+    if (value[field] !== undefined) completion[field] = value[field]
+  }
+  return completion
+}
+
 /** What each function frame last recorded about itself: its role, the call that opened it, its status and result. */
 function frameRecords(events: readonly AgentEvent[]): Map<string, { role: string | undefined; callId: string | undefined; status: string; result: unknown }> {
   const frames = new Map<string, { role: string | undefined; callId: string | undefined; status: string; result: unknown }>()
@@ -333,10 +348,43 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
   }
   const deliveredInterjections = new Set(events.filter(event => event.type === 'user/interjection_delivered').map(event => Number(event.data.interjection_seq)))
   const results = new Map<string, ToolResult>()
+  const shellCalls = new Map<string, { sessionId: ShellSessionId | undefined }>()
   for (const event of events) {
+    if (event.type !== 'tool/call' || !['exec_command', 'write_stdin', 'kill_session'].includes(String(event.data.name))) continue
+    const id = stringOf(event.data.callId)
+    if (id === undefined) continue
+    const args = recordOf(typeof event.data.arguments === 'string' ? parsed(event.data.arguments) : event.data.arguments)
+    shellCalls.set(id, { sessionId: shellSessionId(args.session_id) })
+  }
+  const completedShells = new Map<ShellSessionId, Record<string, unknown>>()
+  const shellResults = new Map<string, { sessionId: ShellSessionId; value: Record<string, unknown> }>()
+  for (const event of events) {
+    if (event.type === 'shell/end') {
+      const sessionId = shellSessionId(event.data.session_id)
+      if (sessionId !== undefined) completedShells.set(sessionId, { ...completedShells.get(sessionId), ...shellCompletion(event.data) })
+    }
     if (event.type !== 'tool/result') continue
     const id = callIdOfResult(event)
-    if (id !== undefined) results.set(id, resultOf(event))
+    if (id === undefined) continue
+    const result = resultOf(event)
+    results.set(id, result)
+    shellResults.delete(id)
+    const shell = shellCalls.get(id)
+    if (shell === undefined) continue
+    const decoded = parsed(result.text)
+    if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) continue
+    const value = decoded as Record<string, unknown>
+    const sessionId = shellSessionId(value.session_id) ?? shell.sessionId
+    if (sessionId === undefined) continue
+    shellResults.set(id, { sessionId, value })
+    if (value.running === false) completedShells.set(sessionId, { ...completedShells.get(sessionId), ...shellCompletion(value) })
+  }
+  for (const [id, { sessionId, value }] of shellResults) {
+    const completion = completedShells.get(sessionId)
+    const result = results.get(id)
+    if (completion !== undefined && result !== undefined) {
+      results.set(id, { ...result, text: JSON.stringify({ ...value, ...completion }) })
+    }
   }
   const frames = frameRecords(events)
   const childByCall = new Map<string, string>()

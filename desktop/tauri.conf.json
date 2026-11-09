@@ -12,11 +12,15 @@
     "active": true,
     "targets": "all",
     "icon": ["icons/icon.png", "icons/icon.ico"],
-    "externalBin": ["binaries/grow-agent"],
+    "externalBin": ["binaries/grow-agent", "binaries/rg"],
     "resources": {
       "../frontend/dist/": "frontend/dist/",
       "../src/builtin_plugins/code_flow/": "src/builtin_plugins/code_flow/",
-      "../src/builtin_plugins/git/": "src/builtin_plugins/git/"
+      "../src/builtin_plugins/git/": "src/builtin_plugins/git/",
+      "../third_party/DSH-LICENSE.txt": "DSH-LICENSE.txt",
+      "binaries/ripgrep-COPYING": "ripgrep-COPYING",
+      "binaries/ripgrep-LICENSE-MIT": "ripgrep-LICENSE-MIT",
+      "binaries/ripgrep-UNLICENSE": "ripgrep-UNLICENSE"
     }
   }
 }

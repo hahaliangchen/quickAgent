@@ -27,7 +27,8 @@ pub(super) fn truthy(value: &VmValue) -> bool {
         VmValue::Boolean(value) => *value,
         VmValue::Number(value) => value.get() != 0.0 && !value.get().is_nan(),
         VmValue::String(value) => !value.is_empty(),
-        VmValue::Reference(_) | VmValue::Promise(_) => true,
+        VmValue::Utf16(value) => !value.is_empty(),
+        VmValue::Reference(_) | VmValue::Promise(_) | VmValue::Symbol(_) => true,
     }
 }
 
@@ -53,7 +54,7 @@ fn canonical_index(key: &str) -> Option<usize> {
     (index != u32::MAX && index.to_string() == key).then_some(index as usize)
 }
 
-pub(super) const ERROR_CLASSES: [&str; 8] = [
+pub(super) const ERROR_CLASSES: &[&str] = &[
     "Error",
     "TypeError",
     "RangeError",
@@ -66,13 +67,27 @@ pub(super) const ERROR_CLASSES: [&str; 8] = [
 
 /// The [[Get]] of a property, for each value kind of this runtime.
 pub(super) fn member(heap: &Heap, object: &VmValue, key: &VmValue) -> Result<VmValue> {
-    let name = js::to_string(heap, key)?;
-    Ok(match object {
+    let name = heap.property_key(key)?;
+    #[cfg(test)]
+    if let VmValue::Reference(id)=object && matches!(heap.get(*id),Ok(HeapNode::Native(n)) if n=="test262.assert") {
+        if let Some(value)=heap.test_native(&format!("test262.assert.{name}")){return Ok(value);}
+    }
+    if heap.has_realm() && let VmValue::Reference(id)=object {
+        if let Some(value)=heap.lookup_property(*id,&name)?{return Ok(value);}
+        if matches!(heap.get(*id)?,HeapNode::Promise{..}) && !matches!(name.as_str(),"then"|"catch"|"finally") {bail!("TypeError: this is a Promise; the value may need await");}
+        return Ok(VmValue::Undefined);
+    }
+    if let VmValue::Reference(id)=object {
+        if let Some(value)=heap.own_property(*id,&name)? {return Ok(value);}
+    }
+    if !heap.has_realm() && let Some(value)=super::js_functions::method(heap,object,&name){return Ok(value);}
+    let value=match object {
         VmValue::Undefined | VmValue::Null => bail!(
             "TypeError: Cannot read properties of {} (reading '{name}')",
             if matches!(object, VmValue::Null) { "null" } else { "undefined" }
         ),
         VmValue::Reference(id) => match heap.get(*id)? {
+            HeapNode::Collection(_) | HeapNode::Iterator(_)=>super::js_collections::member(heap,*id,&name)?,
             HeapNode::Object(properties) => {
                 if let Some((pattern, flags)) = heap.regex_parts(*id) {
                     return Ok(match name.as_str() {
@@ -103,9 +118,11 @@ pub(super) fn member(heap: &Heap, object: &VmValue, key: &VmValue) -> Result<VmV
                         VmValue::Undefined
                     }
                 } else {
-                    VmValue::Undefined
+                    heap.own_property(*id, &name)?.unwrap_or(VmValue::Undefined)
                 }
             }
+            #[cfg(test)]
+            HeapNode::Native(id) if id=="test262.assert" => heap.test_native(&format!("test262.assert.{name}")).unwrap_or(VmValue::Undefined),
             HeapNode::Closure { function: id, .. } | HeapNode::Native(id) => match name.as_str() {
                 "name" => VmValue::String(js::function_name(id).to_owned()),
                 _ => VmValue::Undefined,
@@ -117,7 +134,7 @@ pub(super) fn member(heap: &Heap, object: &VmValue, key: &VmValue) -> Result<VmV
             },
             HeapNode::PromiseCapability { .. } => VmValue::Undefined,
             HeapNode::Promise { .. } => bail!("TypeError: this is a Promise; the value may need await"),
-            HeapNode::Environment { .. } => VmValue::Undefined,
+            HeapNode::Environment { .. } | HeapNode::BoundFunction {..} => VmValue::Undefined,
         },
         VmValue::String(text) => {
             if name == "length" {
@@ -131,16 +148,25 @@ pub(super) fn member(heap: &Heap, object: &VmValue, key: &VmValue) -> Result<VmV
                 VmValue::Undefined
             }
         }
-        VmValue::Boolean(_) | VmValue::Number(_) | VmValue::Promise(_) => VmValue::Undefined,
-    })
+        VmValue::Utf16(units) => {
+            if name == "length" { number(units.len() as f64) }
+            else if let Some(index) = canonical_index(&name) { units.get(index).map(|unit| js::from_utf16(vec![*unit])).unwrap_or(VmValue::Undefined) }
+            else { VmValue::Undefined }
+        }
+        VmValue::Symbol(_) | VmValue::Boolean(_) | VmValue::Number(_) | VmValue::Promise(_) => VmValue::Undefined,
+    };
+    if value==VmValue::Undefined && heap.has_realm() && let Some(proto)=heap.primitive_prototype(object){return Ok(heap.lookup_property(proto,&name)?.unwrap_or(VmValue::Undefined));}
+    Ok(value)
 }
 
 fn instance_of(heap: &Heap, value: &VmValue, class: &str) -> Result<bool> {
     Ok(match value {
         VmValue::Reference(id) => match (heap.get(*id)?, class) {
             (HeapNode::Array(_), "Array" | "Object") => true,
+            (HeapNode::Collection(c),class)=>class=="Object" || class==c.kind.name(),
+            (HeapNode::Iterator(_),"Object")=>true,
             (HeapNode::Promise { .. }, "Promise" | "Object") => true,
-            (HeapNode::Closure { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. }, "Function" | "Object") => true,
+            (HeapNode::Closure { .. } | HeapNode::BoundFunction { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. }, "Function" | "Object") => true,
             (HeapNode::Object(_), "Object") => true,
             (HeapNode::Object(_), "RegExp") => heap.regex_parts(*id).is_some(),
             (HeapNode::Object(_), "Error") => heap
@@ -163,7 +189,12 @@ fn binary(heap: &Heap, op: &str, left: &VmValue, right: &VmValue) -> Result<VmVa
         "+" => {
             let a = js::to_primitive(heap, left)?;
             let b = js::to_primitive(heap, right)?;
-            if matches!(a, VmValue::String(_)) || matches!(b, VmValue::String(_)) {
+            if matches!(a, VmValue::Utf16(_)) || matches!(b, VmValue::Utf16(_)) {
+                let mut units = js::string_units(heap, &a)?;
+                units.extend(js::string_units(heap, &b)?);
+                ensure!(units.len() <= 4 * 1024 * 1024, "RangeError: Invalid string length");
+                js::from_utf16(units)
+            } else if matches!(a, VmValue::String(_)) || matches!(b, VmValue::String(_)) {
                 let text = format!("{}{}", js::to_string(heap, &a)?, js::to_string(heap, &b)?);
                 ensure!(text.len() <= 4 * 1024 * 1024, "RangeError: Invalid string length");
                 VmValue::String(text)
@@ -172,11 +203,11 @@ fn binary(heap: &Heap, op: &str, left: &VmValue, right: &VmValue) -> Result<VmVa
             }
         }
         "<" | "<=" | ">" | ">=" => {
-            let a = js::to_primitive(heap, left)?;
-            let b = js::to_primitive(heap, right)?;
-            if let (VmValue::String(a), VmValue::String(b)) = (&a, &b) {
-                let a: Vec<u16> = a.encode_utf16().collect();
-                let b: Vec<u16> = b.encode_utf16().collect();
+            let a = js::to_numeric_primitive(heap, left)?;
+            let b = js::to_numeric_primitive(heap, right)?;
+            if matches!(a, VmValue::String(_) | VmValue::Utf16(_)) && matches!(b, VmValue::String(_) | VmValue::Utf16(_)) {
+                let a = js::string_units(heap, &a)?;
+                let b = js::string_units(heap, &b)?;
                 VmValue::Boolean(match op {
                     "<" => a < b,
                     "<=" => a <= b,
@@ -216,7 +247,8 @@ fn binary(heap: &Heap, op: &str, left: &VmValue, right: &VmValue) -> Result<VmVa
             })
         }
         "in" => {
-            let key = js::to_string(heap, left)?;
+            let key = heap.property_key(left)?;
+            if let VmValue::Reference(id)=right && heap.has_realm(){return Ok(VmValue::Boolean(heap.has_property(*id,&key)?));}
             match right {
                 VmValue::Reference(id) => VmValue::Boolean(match heap.get(*id)? {
                     HeapNode::Object(properties) => properties.iter().any(|(k, _)| *k == key),
@@ -224,6 +256,7 @@ fn binary(heap: &Heap, op: &str, left: &VmValue, right: &VmValue) -> Result<VmVa
                         key == "length"
                             || canonical_index(&key)
                                 .is_some_and(|i| i < items.len() && heap.has_array_index(*id, i).unwrap_or(false))
+                            || heap.own_property(*id, &key)?.is_some()
                     }
                     _ => false,
                 }),
@@ -231,6 +264,7 @@ fn binary(heap: &Heap, op: &str, left: &VmValue, right: &VmValue) -> Result<VmVa
             }
         }
         "instanceof" => {
+            if !matches!(right,VmValue::String(_)){return Ok(VmValue::Boolean(heap.instance_of(left,right)?));}
             let VmValue::String(class) = right else {
                 bail!("TypeError: Right-hand side of 'instanceof' is not callable")
             };
@@ -244,6 +278,7 @@ pub(super) fn eval(expr: &Expr, locals: Locals<'_>, heap: &mut Heap) -> Result<V
     Ok(match expr {
         Expr::Undefined => VmValue::Undefined,
         Expr::Value(value) => heap.from_json(value)?,
+        Expr::Utf16(units) => js::from_utf16(units.clone()),
         Expr::Variable(name) if is_temp(name) => locals
             .temps
             .get(name)
@@ -318,14 +353,16 @@ pub(super) fn eval(expr: &Expr, locals: Locals<'_>, heap: &mut Heap) -> Result<V
                 "void" => VmValue::Undefined,
                 "typeof" => VmValue::String(
                     match &value {
+                        VmValue::Symbol(_) => "symbol",
                         VmValue::Undefined => "undefined",
                         VmValue::Null => "object",
                         VmValue::Boolean(_) => "boolean",
                         VmValue::Number(_) => "number",
                         VmValue::String(_) => "string",
+                        VmValue::Utf16(_) => "string",
                         VmValue::Promise(_) => "object",
                         VmValue::Reference(id) => {
-                            if matches!(heap.get(*id)?, HeapNode::Closure { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. }) {
+                            if matches!(heap.get(*id)?, HeapNode::Closure { .. } | HeapNode::BoundFunction { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. }) {
                                 "function"
                             } else {
                                 "object"
@@ -364,13 +401,15 @@ pub(super) fn eval(expr: &Expr, locals: Locals<'_>, heap: &mut Heap) -> Result<V
             js_methods::builtin(heap, "JSON.parse", &[value])?
         }
         Expr::Template(parts) => {
-            let mut text = String::new();
+            let mut units = Vec::new();
             for part in parts {
                 let value = eval(part, locals, heap)?;
-                text.push_str(&js::to_string(heap, &value)?);
-                ensure!(text.len() <= 4 * 1024 * 1024, "RangeError: Invalid string length");
+                units.extend(js::string_units(heap, &value)?);
+                ensure!(units.len() <= 4 * 1024 * 1024, "RangeError: Invalid string length");
             }
-            VmValue::String(text)
+            let value = js::from_utf16(units);
+            if let VmValue::String(text) = &value { ensure!(text.len() <= 4 * 1024 * 1024, "RangeError: Invalid string length"); }
+            value
         }
         Expr::StringMethod(receiver, name, args) => {
             let value = eval(receiver, locals, heap)?;
@@ -388,13 +427,8 @@ pub(super) fn eval(expr: &Expr, locals: Locals<'_>, heap: &mut Heap) -> Result<V
             js_methods::builtin(heap, name, &values)?
         }
         Expr::RegExp(args) => {
-            let mut values = Vec::new();
-            for arg in args {
-                let value = eval(arg, locals, heap)?;
-                values.push(heap.to_json(&value)?);
-            }
-            let result = super::values::regexp(values)?;
-            heap.from_json(&result)?
+            let values=args.iter().map(|arg|eval(arg,locals,heap)).collect::<Result<Vec<_>>>()?;
+            js_methods::construct_regexp(heap,&values)?
         }
         // A closure captures the scope it is created in.
         Expr::Function(id) => {
@@ -405,13 +439,14 @@ pub(super) fn eval(expr: &Expr, locals: Locals<'_>, heap: &mut Heap) -> Result<V
             })?)
         }
         Expr::Native(name) => VmValue::Reference(heap.native(name)?),
+        Expr::Intrinsic(name)=>heap.intrinsic(name).with_context(||format!("ReferenceError: {name} is unavailable"))?,
     })
 }
 
 /// Whether a value can be called.
 pub(super) fn callable(heap: &Heap, value: &VmValue) -> bool {
     matches!(value, VmValue::Reference(id)
-        if matches!(heap.get(*id), Ok(HeapNode::Closure { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. })))
+        if matches!(heap.get(*id), Ok(HeapNode::Closure { .. } | HeapNode::BoundFunction { .. } | HeapNode::Native(_) | HeapNode::PromiseResolver { .. })))
 }
 
 #[cfg(test)]

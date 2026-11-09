@@ -110,6 +110,9 @@ pub fn builtin() -> Libraries {
         // Published only while a program the user's message paused can be resumed.
         ("previous".into(), named(&[("resume", "resume_previous_program")])),
         ("process".into(), same(&[
+            "exec_command",
+            "write_stdin",
+            "kill_session",
             "run_program",
             "run_project_script",
             "install_dependencies",
@@ -128,11 +131,6 @@ pub fn builtin() -> Libraries {
             ("screenshot", "browser_screenshot"),
             ("close", "browser_close"),
         ])),
-        ("code".into(), same(&["search_code_map"])),
-        ("code_go".into(), same(&["list_go_symbols", "search_go_symbols", "read_go_symbol"])),
-        ("code_rust".into(), same(&["list_rust_symbols", "search_rust_symbols", "read_rust_symbol"])),
-        ("code_ts".into(), same(&["list_ts_symbols", "search_ts_symbols", "read_ts_symbol"])),
-        ("code_python".into(), same(&["list_python_symbols", "search_python_symbols", "read_python_symbol"])),
         ("memory".into(), same(&[
             "record_work_memory",
             "list_work_memory",

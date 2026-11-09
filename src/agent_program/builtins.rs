@@ -162,7 +162,7 @@ fn url_parse(input: &str, base: Option<&str>) -> Result<Value> {
 }
 
 pub(super) fn call(name: &str, args: Vec<Value>) -> Result<Value> {
-    let (min, max) = arity(name).context("unsupported built-in")?;
+    let (min, max) = arity(name).with_context(||format!("{name} is unavailable in the flow runtime"))?;
     ensure!(
         (min..=max).contains(&args.len()),
         "invalid built-in argument count"
@@ -241,7 +241,7 @@ pub(super) fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         }
         "path.extname" => json!(extension(strings[0])),
         "url.parse" => url_parse(strings[0], strings.get(1).copied())?,
-        _ => bail!("unsupported built-in"),
+        _ => bail!("{name} is unavailable in the flow runtime"),
     };
     ensure!(
         serde_json::to_vec(&value)?.len() <= OUTPUT_LIMIT,

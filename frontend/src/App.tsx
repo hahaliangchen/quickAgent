@@ -7,6 +7,8 @@ import { CodexDock } from './components/CodexDock.tsx'
 import { CodexRightPanel } from './components/CodexRightPanel.tsx'
 import { SettingsModal } from './components/SettingsModal.tsx'
 import { WorkspaceModal } from './components/WorkspaceModal.tsx'
+import { ShellSetupDialog } from './components/ShellSetupDialog.tsx'
+import { isCodeShellContext } from './shellSetup.ts'
 import type { AgentSlotProps } from './cordis/slot-contract.ts'
 import { toggleTheme } from './theme.ts'
 import { useAgentWorkspace } from './useAgentWorkspace.ts'
@@ -197,6 +199,11 @@ export function App({ renderSlot }: AgentSlotProps) {
         />
       )}
 
+      <ShellSetupDialog
+        enabled={!git && !workbench && tab !== 'skill-pages' && !workspace.settingsOpen && isCodeShellContext(workspace.taskId, workspace.task, workspace.sidebarMode, workspace.activeWorkspace ?? '')}
+        scope={workspace.taskId ?? workspace.activeWorkspace ?? ''}
+        onReady={workspace.refreshInfoAndSettings}
+      />
       <SettingsModal
         open={workspace.settingsOpen}
         activeTab={workspace.settingsTab}
@@ -211,7 +218,6 @@ export function App({ renderSlot }: AgentSlotProps) {
         open={workspace.folderDialogOpen}
         onClose={workspace.closeFolderDialog}
         onAddWorkspace={workspace.addWorkspace}
-        existingWorkspaces={workspace.workspaces}
       />
     </div>
   )

@@ -6,6 +6,15 @@ use swc_ecma_ast as ast;
 use swc_ecma_parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer};
 use swc_ecma_visit::{Visit, VisitWith};
 
+#[path="compiler_properties.rs"]
+mod properties;
+#[path="compiler_iteration.rs"]
+mod iteration;
+#[path="compiler_classes.rs"]
+mod classes;
+#[path = "compiler_generators.rs"]
+mod generators;
+
 struct Compiler {
     map: Lrc<SourceMap>,
     names: BTreeSet<String>,
@@ -30,6 +39,7 @@ struct Compiler {
     virtuals: BTreeSet<String>,
     /// Top-level async functions, whose calls return a Promise.
     async_functions: BTreeSet<String>,
+    async_generator: bool,
     code: Vec<Instruction>,
     temp: usize,
     loops: Vec<LoopContext>,
@@ -120,8 +130,12 @@ pub fn required_libraries(source: &str) -> Vec<String> {
 /// Global built-in functions that can be used as values, as in `.filter(Boolean)`.
 /// `console` methods: output for the AI that wrote the program to read.
 const CONSOLE_METHODS: [&str; 5] = ["log", "info", "warn", "error", "debug"];
-const NATIVE_GLOBALS: [&str; 7] = [
+const NATIVE_GLOBALS: &[&str] = &[
     "String", "Number", "Boolean", "parseInt", "parseFloat", "isNaN", "isFinite",
+    "Symbol", "Array", "Date", "encodeURIComponent", "decodeURIComponent", "structuredClone",
+    "Map", "Set", "WeakMap", "WeakSet",
+    "Object", "Function", "RegExp", "Promise", "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval", "queueMicrotask",
 ];
 
 /// Array methods whose callback is compiled into the calling frame.
@@ -190,6 +204,7 @@ fn lexical_names(statements: &[ast::Stmt]) -> Vec<(String, bool)> {
                 }
             }
             ast::Stmt::Decl(ast::Decl::Fn(f)) => names.push((f.ident.sym.to_string(), true)),
+            ast::Stmt::Decl(ast::Decl::Class(c)) => names.push((c.ident.sym.to_string(), true)),
             _ => {}
         }
     }
@@ -206,6 +221,8 @@ struct FunctionSource<'a> {
     body: FunctionBody<'a>,
     is_async: bool,
     is_generator: bool,
+    lexical_this: bool,
+    constructable: bool,
     span: Span,
 }
 enum FunctionBody<'a> {
@@ -214,6 +231,7 @@ enum FunctionBody<'a> {
     Missing,
 }
 impl<'a> FunctionSource<'a> {
+    fn method(f:&'a ast::Function,name:Option<String>)->Self {let mut source=Self::function(f,name,None);source.constructable=false;source}
     fn function(f: &'a ast::Function, name: Option<String>, self_name: Option<String>) -> Self {
         Self {
             name,
@@ -225,6 +243,8 @@ impl<'a> FunctionSource<'a> {
             },
             is_async: f.is_async,
             is_generator: f.is_generator,
+            lexical_this: false,
+            constructable: !f.is_async && !f.is_generator,
             span: f.span,
         }
     }
@@ -239,6 +259,8 @@ impl<'a> FunctionSource<'a> {
             },
             is_async: a.is_async,
             is_generator: a.is_generator,
+            lexical_this: true,
+            constructable: false,
             span: a.span,
         }
     }
@@ -550,13 +572,8 @@ impl Compiler {
         let p = self.at(span);
         bail!("TS_PROGRAM {}:{}: {text}", p.line, p.column)
     }
-    fn emit(&mut self, span: Span, op: Op) -> usize {
-        let n = self.code.len();
-        self.code.push(Instruction {
-            at: self.at(span),
-            op,
-        });
-        n
+    fn emit(&mut self, span: Span, mut op: Op) -> usize {
+        self.property_op(span,&mut op);self.raw_emit(span,op)
     }
     fn temp(&mut self) -> String {
         self.temp += 1;
@@ -573,7 +590,7 @@ impl Compiler {
     fn declare(&mut self, name: &str, mutable: bool, span: Span) -> Result<()> {
         if matches!(
             name,
-            "tools" | "call" | "ai" | "assert" | "JSON" | "Promise"
+            "tools" | "assert" | "JSON" | "Promise"
         ) || name.starts_with("$temp")
             || self.libraries.contains_key(name)
             || self.imports.contains_key(name)
@@ -591,6 +608,7 @@ impl Compiler {
         match p {
             ast::PropName::Ident(i) => Ok(i.sym.to_string()),
             ast::PropName::Str(s) => Ok(s.value.to_string_lossy().into_owned()),
+            ast::PropName::Num(n)=>Ok(super::js_value::number_to_string(n.value)),
             _ => self.error(p.span(), "use a static object key"),
         }
     }
@@ -600,7 +618,10 @@ impl Compiler {
             return Ok(native);
         }
         Ok(match e {
-            E::Lit(ast::Lit::Str(s)) => Expr::Value(json!(s.value.to_string_lossy())),
+            E::Lit(ast::Lit::Str(s)) => match s.value.as_str() {
+                Some(text) => Expr::Value(json!(text)),
+                None => Expr::Utf16(s.value.as_wtf8().to_ill_formed_utf16().collect()),
+            },
             E::Lit(ast::Lit::Regex(r)) => {
                 let pattern = r.exp.to_string();
                 let flags = r.flags.to_string();
@@ -648,10 +669,13 @@ impl Compiler {
                 number_expr(if i.sym == *"NaN" { f64::NAN } else { f64::INFINITY })
             }
             E::Member(m) if self.constant_member(m).is_some() => self.constant_member(m).unwrap(),
-            E::Ident(_) => {
+            E::Ident(i) => {
+                if super::vm_eval::ERROR_CLASSES.contains(&i.sym.as_ref()) {
+                    return self.error(i.span,&format!("{} 作为函数值在当前流程运行时里不可用；构造调用 {}(...) / new {}(...) 可用",i.sym,i.sym,i.sym));
+                }
                 return self.error(
                     e.span(),
-                    "unknown variable; declare it in this function or at the top level, or pass it as a parameter",
+                    &format!("unknown variable {}: declare it in this function or at the top level, or pass it as a parameter",i.sym),
                 );
             }
             E::Paren(p) => return self.expr(&p.expr),
@@ -713,6 +737,21 @@ impl Compiler {
                     "calls must be lowered through the task/tool or semantic boundary",
                 );
             }
+            E::New(new) => {
+                let name=match &*new.callee {E::Ident(i)=>i.sym.to_string(),_=>"表达式构造器".into()};
+                let alternative=match name.as_str() {
+                    "Map" | "WeakMap"=>"；当前可用普通对象保存字符串键，但不能替代对象键和引用身份语义",
+                    "Set" | "WeakSet"=>"；当前可用数组配合 includes 处理小集合，但不能替代全部集合语义",
+                    _=>"",
+                };
+                return self.error(new.span,&format!("new {name}(...) 构造在流程运行时里尚不支持{alternative}"));
+            }
+            E::This(_)=>Expr::Variable("\0this".into()),
+            E::Class(node)=>return self.error(node.class.span,"class 表达式在流程运行时里尚不支持"),
+            E::Yield(node)=>return self.error(node.span,"yield must pass through the resumable expression boundary"),
+            E::TaggedTpl(node)=>return self.error(node.span,"通用标签模板在流程运行时里尚不支持；String.raw 标签模板可用"),
+            E::MetaProp(node) if node.kind==ast::MetaPropKind::NewTarget=>Expr::Variable("\0newTarget".into()),
+            E::MetaProp(node)=>return self.error(node.span,"import.meta 在流程运行时里尚不支持"),
             _ => {
                 return self.error(
                     e.span(),
@@ -733,8 +772,8 @@ impl Compiler {
             ast::Expr::Ident(i) => {
                 let name = i.sym.as_ref();
                 self.imports.contains_key(name)
-                    || (self.names.contains(name) && matches!(self.resolve_level(name), Some(0) | None))
-                    || self.resolve(name).is_none()
+                    || ((self.virtuals.contains(name) || self.async_entry.as_deref()==Some(name)) && matches!(self.resolve_level(name),Some(0)|None))
+                    || (self.resolve(name).is_none() && !self.names.contains(name) && !NATIVE_GLOBALS.contains(&name))
             }
             ast::Expr::Member(m) => matches!(&*m.obj, ast::Expr::Ident(i)
                 if self.libraries.contains_key(i.sym.as_ref()) && self.resolve(i.sym.as_ref()).is_none()),
@@ -743,6 +782,27 @@ impl Compiler {
     }
     /// Call a function value. The callee is evaluated before the arguments.
     fn dynamic_call(&mut self, call: &ast::CallExpr, callee: &ast::Expr) -> Result<Expr> {
+        let mut target=callee;
+        while let ast::Expr::Paren(p)=target {target=&p.expr;}
+        if let ast::Expr::Member(member)=target {
+            let receiver=self.lower_object(&member.obj)?;
+            let receiver=self.snapshot(member.obj.span(),receiver);
+            let key=self.member_key(&member.prop,member.span)?;
+            return self.call_reference(receiver,key,&call.args,call.span,false);
+        }
+        if let ast::Expr::OptChain(chain)=target && let ast::OptChainBase::Member(member)=&*chain.base {
+            let receiver=self.temp();
+            self.emit(call.span,Op::Set(receiver.clone(),Expr::Undefined));
+            let callee=self.with_chain(chain.span,|c| {
+                let value=c.lower_object(&member.obj)?;
+                let value=c.snapshot(member.obj.span(),value);
+                c.emit(member.span,Op::Set(receiver.clone(),value.clone()));
+                if chain.optional {c.chain_guard(chain.span,value.clone());}
+                let key=c.member_key(&member.prop,member.span)?;
+                Ok(Expr::Member(Box::new(value),Box::new(key)))
+            })?;
+            return self.invoke_reference(callee,Expr::Variable(receiver),&call.args,call.span,None);
+        }
         if call.args.iter().any(|a| a.spread.is_some()) {
             return self.error(call.span, "argument spread is unsupported");
         }
@@ -763,9 +823,6 @@ impl Compiler {
     /// Compile a nested function, arrow or method into its own code unit and
     /// return its id. Its body sees every scope visible at this point.
     fn compile_function(&mut self, source: FunctionSource<'_>) -> Result<String> {
-        if source.is_generator {
-            return self.error(source.span, "generator functions are unsupported");
-        }
         let at = self.at(source.span);
         let id = format!(
             "{}/{}@{}:{}",
@@ -791,6 +848,7 @@ impl Compiler {
             nested: Vec::new(),
             virtuals: self.virtuals.clone(),
             async_functions: self.async_functions.clone(),
+            async_generator: source.is_async && source.is_generator,
             code: Vec::new(),
             temp: 0,
             loops: Vec::new(),
@@ -830,6 +888,7 @@ impl Compiler {
         for (pattern, argument) in parameter_patterns {
             c.bind_value(pattern, Expr::Variable(argument), true)?;
         }
+        if source.is_generator { c.emit(source.span, Op::GeneratorStart); }
         let (vars, lexical) = match &source.body {
             FunctionBody::Block(body) => {
                 let vars: Vec<String> = var_names(&body.stmts).into_iter()
@@ -850,6 +909,7 @@ impl Compiler {
         // A nested declaration marked @virtual or @module is AI work, as at the top level.
         let contract = source.name.as_ref().and_then(|_| self.contracts.get(&source.span.lo.0)).filter(|(v, _, _)| *v).cloned();
         let module_task = contract.as_ref().is_some_and(|(_, module, _)| *module);
+        if source.is_generator && contract.is_some() { return c.error(source.span,"@module and @virtual must not be generators"); }
         match source.body {
             FunctionBody::Block(body) if contract.is_some() => {
                 let (_, _, description) = contract.clone().unwrap();
@@ -909,6 +969,10 @@ impl Compiler {
                 lexical: lexical.into_iter().map(|(name, _)| name).collect(),
                 module: false,
                 is_async: source.is_async,
+                is_generator: source.is_generator,
+                lexical_this: source.lexical_this,
+                constructable: source.constructable,
+                length: source.params.iter().take_while(|p|!matches!(p,ast::Pat::Assign(_) | ast::Pat::Rest(_))).count(),
                 self_name: source.self_name,
                 code: c.code,
             },
@@ -940,8 +1004,12 @@ impl Compiler {
                     None
                 } else if let Some(tool) = self.imports.get(name) {
                     Some(Expr::Native(format!("tool:{tool}")))
+                } else if self.global(name) && (matches!(name,"Math"|"JSON"|"Reflect") || super::js_prototype_global(name)) {
+                    Some(Expr::Intrinsic(name.into()))
                 } else if self.global(name) && NATIVE_GLOBALS.contains(&name) {
                     Some(Expr::Native(name.to_owned()))
+                } else if cfg!(test) && self.external.contains("__test262CheckThrown") && name=="Test262Error" && self.global(name) {
+                    Some(Expr::Native("test262.error".into()))
                 } else {
                     None
                 }
@@ -968,10 +1036,10 @@ impl Compiler {
                     Some(Expr::Native(format!("console.{property}")))
                 } else {
                     let name = format!("{namespace}.{property}");
-                    (matches!(namespace, "Math" | "Number" | "Object" | "Array" | "JSON")
+                    (matches!(namespace, "Math" | "Number" | "String" | "Date" | "Object" | "Array" | "JSON" | "Reflect" | "Symbol")
                         && self.global(namespace)
                         && super::js_methods::builtin_arity(&name).is_some())
-                    .then_some(Expr::Native(name))
+                    .then_some(Expr::Member(Box::new(Expr::Intrinsic(namespace.into())),Box::new(Expr::Value(json!(property)))))
                 }
             }
             _ => None,
@@ -1042,6 +1110,13 @@ impl Compiler {
                 }
             }
             _ => {
+                if let ast::Expr::Ident(name) = target {
+                    let alternative = match name.sym.as_ref() {
+                        "print" | "println" => "请改用 console.log(...) 输出；其他日志方法见 read_program_guide",
+                        _ => "请使用已声明的函数或程序指南中列出的内置函数",
+                    };
+                    return self.error(call.span, &format!("{} 在流程运行时里不可用；{alternative}", name.sym));
+                }
                 return self.error(
                     call.span,
                     "use helper(args) or library.method(args); call/ai wrappers are unsupported",
@@ -1104,7 +1179,7 @@ impl Compiler {
                 else {
                     return Ok(None);
                 };
-                if !matches!(namespace.sym.as_ref(), "Math" | "Number" | "Object" | "Array" | "JSON")
+                if !matches!(namespace.sym.as_ref(), "Math" | "Number" | "String" | "Date" | "Object" | "Array" | "JSON" | "Reflect" | "Symbol")
                     || !self.global(namespace.sym.as_ref())
                 {
                     return Ok(None);
@@ -1119,15 +1194,21 @@ impl Compiler {
                 _ => Ok(None),
             };
         };
+        if name=="Function" {return self.error(call.span,"Function constructor / dynamic code is unavailable in the flow runtime");}
+        if let Some((namespace,method))=name.split_once('.') {
+            if call.args.iter().any(|a|a.spread.is_some()) || (name=="Array.from" && (2..=3).contains(&call.args.len())) || (min..=max).contains(&call.args.len()) {
+                return self.call_reference(Expr::Intrinsic(namespace.into()),Expr::Value(json!(method)),&call.args,call.span,false).map(Some);
+            }
+        }
         if call.args.iter().any(|a| a.spread.is_some()) {
             return self.error(call.span, "built-in argument spreads are unsupported");
         }
-        if name == "Array.from" && call.args.len() == 2 {
-            // Array.from(items, mapFn) is Array.from(items).map(mapFn).
-            let source = self.lower(&call.args[0].expr)?;
-            let source = self.snapshot(call.args[0].span(), source);
-            let array = self.snapshot(call.span, Expr::NodeBuiltin(name, vec![source]));
-            return self.call_method_on(array, "map", &call.args[1..], call.span).map(Some);
+        if name == "Array.from" && (2..=3).contains(&call.args.len()) {
+            let mut args=vec![];
+            for arg in &call.args {let value=self.lower(&arg.expr)?;args.push(self.snapshot(arg.span(),value));}
+            let destination=self.temp();
+            self.emit(call.span,Op::Effect(Some(destination.clone()),Effect::Call("$$arrayFrom".into(),args)));
+            return Ok(Some(Expr::Variable(destination)));
         }
         if !(min..=max).contains(&call.args.len()) {
             return self.error(call.span, &format!("{name} takes {min} to {max} arguments"));
@@ -1151,6 +1232,14 @@ impl Compiler {
     /// Lower an expression. Arguments, keys and operands inside an optional
     /// chain are not part of it: their own chains short-circuit on their own.
     fn lower(&mut self, e: &ast::Expr) -> Result<Expr> {
+        if let ast::Expr::Yield(node) = e { return self.lower_yield(node); }
+        if let ast::Expr::Call(call) = e
+            && matches!(&call.callee, ast::Callee::Expr(c) if matches!(&**c, ast::Expr::Ident(i) if i.sym == *"$$generatorYieldResult"))
+        {
+            ensure!(call.args.len() == 1, "invalid internal generator yield");
+            let value = self.lower(&call.args[0].expr)?;
+            return self.generator_yield(value, call.span, true);
+        }
         let joins_chain = std::mem::take(&mut self.chain_object);
         if !joins_chain && self.chain_exits.is_some() {
             let saved = self.chain_exits.take();
@@ -1200,7 +1289,7 @@ impl Compiler {
             ast::MemberProp::Ident(i) => Expr::Value(json!(i.sym.to_string())),
             ast::MemberProp::Computed(c) => {
                 let key = self.lower(&c.expr)?;
-                self.snapshot(c.span, key)
+                self.snapshot(c.span, Expr::NodeBuiltin("$$propertyKey".into(),vec![key]))
             }
             _ => return self.error(span, "private members are unsupported"),
         })
@@ -1217,53 +1306,29 @@ impl Compiler {
                 Ok(Expr::Member(Box::new(object), Box::new(key)))
             }
             ast::OptChainBase::Call(call) => {
-                if chain.optional {
-                    let callee = self.lower_object(&call.callee)?;
-                    let callee = self.snapshot(call.callee.span(), callee);
-                    self.chain_guard(call.span, callee.clone());
-                    if call.args.iter().any(|arg| arg.spread.is_some()) {
-                        let array = ast::Expr::Array(ast::ArrayLit { span: call.span, elems: call.args.iter().cloned().map(Some).collect() });
-                        let args = self.lower(&array)?;
-                        let dest = self.temp();
-                        self.emit(call.span, Op::Effect(Some(dest.clone()), Effect::Apply { callee, args }));
-                        return Ok(Expr::Variable(dest));
-                    }
-                    let mut args = Vec::new();
-                    for arg in &call.args {
-                        let value = self.lower(&arg.expr)?;
-                        args.push(self.snapshot(arg.span(), value));
-                    }
-                    let dest = self.temp();
-                    self.emit(call.span, Op::Effect(Some(dest.clone()), Effect::Dynamic { callee, args }));
-                    return Ok(Expr::Variable(dest));
-                }
-                let (member, optional) = match &*call.callee {
-                    ast::Expr::OptChain(inner) => match &*inner.base {
-                        ast::OptChainBase::Member(m) => (m, inner.optional),
-                        _ => {
-                            return self.error(
-                                call.span,
-                                "calling a call result needs first-class functions, which are not available yet",
-                            );
-                        }
-                    },
-                    ast::Expr::Member(m) => (m, false),
-                    _ => {
-                        return self.error(
-                            call.span,
-                            "optional calls such as f?.() need first-class functions, which are not available yet",
-                        );
-                    }
+                let mut target=&*call.callee;
+                while let ast::Expr::Paren(p)=target {target=&p.expr;}
+                let member=match target {
+                    ast::Expr::Member(m)=>Some((m,false)),
+                    ast::Expr::OptChain(inner)=>match &*inner.base {ast::OptChainBase::Member(m)=>Some((m,inner.optional)),_=>None},
+                    _=>None,
                 };
-                let receiver = self.lower_object(&member.obj)?;
-                let receiver = self.snapshot(member.obj.span(), receiver);
-                if optional {
-                    self.chain_guard(call.span, receiver.clone());
+                if let Some((member,optional))=member {
+                    if let Some(callee)=self.native_value(target)? {
+                        if chain.optional {self.chain_guard(call.span,callee.clone());}
+                        return self.invoke_reference(callee,Expr::Undefined,&call.args,call.span,None);
+                    }
+                    let receiver=self.lower_object(&member.obj)?;
+                    let receiver=self.snapshot(member.obj.span(),receiver);
+                    if optional {self.chain_guard(call.span,receiver.clone());}
+                    let key=self.member_key(&member.prop,member.span)?;
+                    self.call_reference(receiver,key,&call.args,call.span,chain.optional)
+                } else {
+                    let value=self.lower_object(&call.callee)?;
+                    let callee=self.snapshot(call.callee.span(),value);
+                    if chain.optional {self.chain_guard(call.span,callee.clone());}
+                    self.invoke_reference(callee,Expr::Undefined,&call.args,call.span,None)
                 }
-                let ast::MemberProp::Ident(method) = &member.prop else {
-                    return self.error(call.span, "method names must be static identifiers");
-                };
-                self.call_method_on(receiver, method.sym.as_ref(), &call.args, call.span)
             }
         }
     }
@@ -1271,22 +1336,18 @@ impl Compiler {
     // --------------------------------------------------------------- methods
 
     fn call_method_spread(&mut self, receiver: Expr, key: Expr, args: &[ast::ExprOrSpread], span: Span) -> Result<Expr> {
-        let key = self.snapshot(span, Expr::NodeBuiltin("String".into(), vec![key]));
-        let is_object = Expr::Binary("===".into(), Box::new(Expr::Unary("typeof".into(), Box::new(receiver.clone()))), Box::new(Expr::Value(json!("object"))));
-        let not_null = Expr::Binary("!=".into(), Box::new(receiver.clone()), Box::new(Expr::Value(Value::Null)));
-        let check = Expr::Binary("&&".into(), Box::new(is_object), Box::new(not_null));
-        let has = Expr::Conditional(Box::new(check), Box::new(Expr::Binary("in".into(), Box::new(key.clone()), Box::new(receiver.clone()))), Box::new(Expr::Value(json!(false))));
-        let has = self.snapshot(span, has);
-        let callee = self.snapshot(span, Expr::Member(Box::new(receiver.clone()), Box::new(key.clone())));
+        self.call_reference(receiver,key,args,span,false)
+    }
+    fn call_reference(&mut self, receiver: Expr, key: Expr, args: &[ast::ExprOrSpread], span: Span, optional: bool) -> Result<Expr> {
+        let callee=self.snapshot(span,Expr::Member(Box::new(receiver.clone()),Box::new(key.clone())));
+        if optional {self.chain_guard(span,callee.clone());}
+        self.invoke_reference(callee,receiver,args,span,Some(key))
+    }
+    fn invoke_reference(&mut self, callee: Expr, receiver: Expr, args: &[ast::ExprOrSpread], span: Span, label: Option<Expr>) -> Result<Expr> {
         let array = ast::Expr::Array(ast::ArrayLit { span, elems: args.iter().cloned().map(Some).collect() });
         let args = self.lower(&array)?;
         let dest = self.temp();
-        let builtin = self.emit(span, Op::Branch(has, 0));
-        self.emit(span, Op::Effect(Some(dest.clone()), Effect::Apply { callee, args: args.clone() }));
-        let done = self.emit(span, Op::Jump(0));
-        self.land(builtin);
-        self.emit(span, Op::Effect(Some(dest.clone()), Effect::DynamicMethodApply { receiver, name: key, args }));
-        self.land(done);
+        self.emit(span,Op::Effect(Some(dest.clone()),Effect::Invoke(Box::new(Invocation{callee,receiver,args,label}))));
         Ok(Expr::Variable(dest))
     }
 
@@ -1301,7 +1362,7 @@ impl Compiler {
     ) -> Result<Expr> {
         if method != "map" && CALLBACK_METHODS.contains(&method) && args.first().is_some_and(|a| match &*a.expr {
             ast::Expr::Arrow(f) => f.is_async,
-            ast::Expr::Fn(f) => f.function.is_async,
+            ast::Expr::Fn(f) => f.function.is_async && !f.function.is_generator,
             _ => false,
         }) {
             return self.error(span, "async callbacks require Promise support");
@@ -1312,31 +1373,9 @@ impl Compiler {
         if let Some(reason) = super::js_methods::unavailable_method(method) {
             return self.error(span, reason);
         }
-        // Built-in methods keep their argument checks. Any other name may be a
-        // function-valued property, resolved when the call runs.
-        if let Some((min, max)) = super::js_methods::method_arity(method)
-            && !(min..=max).contains(&args.len())
-        {
-            return self.error(span, &format!("{method} takes {min} to {max} arguments"));
-        }
-        let mut lowered = Vec::with_capacity(args.len());
-        for arg in args {
-            let value = self.lower(&arg.expr)?;
-            lowered.push(self.snapshot(arg.span(), value));
-        }
-        let dest = self.temp();
-        self.emit(
-            span,
-            Op::Effect(
-                Some(dest.clone()),
-                Effect::Method {
-                    receiver,
-                    name: method.into(),
-                    args: lowered,
-                },
-            ),
-        );
-        Ok(Expr::Variable(dest))
+        // Resolve before evaluating arguments. An own function-valued property
+        // need not have the built-in method's parameter count.
+        self.call_reference(receiver,Expr::Value(json!(method)),args,span,false)
     }
 
     fn land(&mut self, at: usize) {
@@ -1350,7 +1389,37 @@ impl Compiler {
     fn lower_inner(&mut self, e: &ast::Expr) -> Result<Expr> {
         self.reject_unawaited_operands(e)?;
         match e {
+            ast::Expr::New(new) if matches!(&*new.callee, ast::Expr::Ident(i) if matches!(i.sym.as_ref(), "Array" | "Date" | "Map" | "Set" | "WeakMap" | "WeakSet") && self.global(i.sym.as_ref())) => {
+                let ast::Expr::Ident(name) = &*new.callee else { unreachable!() };
+                let args = new.args.as_deref().unwrap_or(&[]);
+                if args.iter().any(|arg| arg.spread.is_some()) { return self.error(new.span, "constructor argument spreads are unsupported; use Array.from for iterable values"); }
+                let mut values = Vec::new();
+                for arg in args {
+                    let value = self.lower(&arg.expr)?;
+                    values.push(self.snapshot(arg.span(), value));
+                }
+                Ok(self.snapshot(new.span, Expr::NodeBuiltin(format!("new {}", name.sym), values)))
+            }
+            ast::Expr::TaggedTpl(tagged) => {
+                if !matches!(&*tagged.tag, ast::Expr::Member(m) if matches!(&*m.obj, ast::Expr::Ident(i) if i.sym == *"String" && self.global("String")) && matches!(&m.prop, ast::MemberProp::Ident(p) if p.sym == *"raw")) {
+                    return self.error(tagged.span, "only the built-in String.raw tagged template is available");
+                }
+                let mut parts = Vec::new();
+                for (i, quasi) in tagged.tpl.quasis.iter().enumerate() {
+                    parts.push(Expr::Value(json!(quasi.raw.to_string())));
+                    if let Some(expr) = tagged.tpl.exprs.get(i) {
+                        let value = self.lower(expr)?;
+                        parts.push(self.snapshot(expr.span(), Expr::Template(vec![value])));
+                    }
+                }
+                Ok(Expr::Template(parts))
+            }
             ast::Expr::OptChain(chain) => self.with_chain(chain.span, |c| c.chain_link(chain)),
+            ast::Expr::New(new) if cfg!(test) && self.external.contains("__test262CheckThrown") && matches!(&*new.callee,ast::Expr::Ident(i) if i.sym==*"Test262Error") => {
+                let mut args=vec![];
+                for arg in new.args.as_deref().unwrap_or(&[]) {args.push(self.lower(&arg.expr)?);}
+                Ok(self.snapshot(new.span,Expr::NodeBuiltin("test262.error".into(),args)))
+            }
             ast::Expr::New(new)
                 if matches!(&*new.callee, ast::Expr::Ident(i)
                     if super::vm_eval::ERROR_CLASSES.contains(&i.sym.as_ref()) && self.global(i.sym.as_ref())) =>
@@ -1366,6 +1435,15 @@ impl Compiler {
                     lowered.push(self.snapshot(arg.span(), value));
                 }
                 Ok(self.snapshot(new.span, Expr::NodeBuiltin(format!("new {}", class.sym), lowered)))
+            }
+            ast::Expr::New(new) if !matches!(&*new.callee,ast::Expr::Ident(i) if self.resolve(i.sym.as_ref()).is_none() && !self.names.contains(i.sym.as_ref()) && !matches!(i.sym.as_ref(),"Object"|"Number"|"String"|"Boolean"|"Symbol")) => {
+                let callee=self.lower(&new.callee)?;
+                let callee=self.snapshot(new.callee.span(),callee);
+                let array=ast::Expr::Array(ast::ArrayLit{span:new.span,elems:new.args.as_deref().unwrap_or(&[]).iter().cloned().map(Some).collect()});
+                let args=self.lower(&array)?;
+                let dest=self.temp();
+                self.emit(new.span,Op::Effect(Some(dest.clone()),Effect::Construct(Box::new(Invocation{callee,receiver:Expr::Undefined,args,label:None}))));
+                Ok(Expr::Variable(dest))
             }
             ast::Expr::Unary(u) if u.op == ast::UnaryOp::Delete => {
                 let ast::Expr::Member(m) = &*u.arg else {
@@ -1384,7 +1462,9 @@ impl Compiler {
                 let ast::Expr::Ident(i) = &*u.arg else { unreachable!() };
                 let kind = if self.names.contains(i.sym.as_ref()) {
                     "function"
-                } else if matches!(i.sym.as_ref(), "Math" | "JSON" | "Number" | "Object" | "Array" | "path" | "url") {
+                } else if NATIVE_GLOBALS.contains(&i.sym.as_ref()) {
+                    "function"
+                } else if matches!(i.sym.as_ref(), "Math" | "JSON" | "Reflect" | "Object" | "path" | "url") {
                     "object"
                 } else if i.sym == *"undefined" {
                     "undefined"
@@ -1427,9 +1507,7 @@ impl Compiler {
             }
             ast::Expr::Await(awaited) => {
                 let value = self.lower(&awaited.arg)?;
-                let destination = self.temp();
-                self.emit(awaited.span, Op::Await { value, destination: destination.clone() });
-                Ok(Expr::Variable(destination))
+                Ok(self.await_value(value,awaited.span))
             }
             ast::Expr::Bin(b) => {
                 let op = match b.op {
@@ -1462,24 +1540,6 @@ impl Compiler {
                 let left = self.lower(&b.left)?;
                 if matches!(op, "&&" | "||" | "??") {
                     return self.logical(op, left, &b.right, b.span);
-                }
-                if op == "instanceof" {
-                    let known = matches!(&*b.right, ast::Expr::Ident(class)
-                        if (super::vm_eval::ERROR_CLASSES.contains(&class.sym.as_ref())
-                            || matches!(class.sym.as_ref(), "Array" | "Object" | "RegExp" | "Promise" | "Function"))
-                            && self.global(class.sym.as_ref()));
-                    let ast::Expr::Ident(class) = &*b.right else {
-                        return self.error(b.span, "instanceof needs a built-in constructor such as Error or Array");
-                    };
-                    if !known {
-                        return self.error(b.span, "instanceof needs a built-in constructor such as Error or Array");
-                    }
-                    let left = self.snapshot(b.left.span(), left);
-                    return Ok(Expr::Binary(
-                        "instanceof".into(),
-                        Box::new(left),
-                        Box::new(Expr::Value(json!(class.sym.to_string()))),
-                    ));
                 }
                 let left = self.snapshot(b.left.span(), left);
                 let right = self.lower(&b.right)?;
@@ -1517,13 +1577,14 @@ impl Compiler {
             ast::Expr::Tpl(t) => {
                 let mut parts = Vec::new();
                 for (i, quasi) in t.quasis.iter().enumerate() {
-                    let text = quasi
+                    let cooked = quasi
                         .cooked
                         .as_ref()
-                        .context("invalid template escape")?
-                        .to_string_lossy()
-                        .into_owned();
-                    parts.push(Expr::Value(json!(text)));
+                        .context("invalid template escape")?;
+                    parts.push(match cooked.as_str() {
+                        Some(text) => Expr::Value(json!(text)),
+                        None => Expr::Utf16(cooked.as_wtf8().to_ill_formed_utf16().collect()),
+                    });
                     if let Some(e) = t.exprs.get(i) {
                         let value = self.lower(e)?;
                         // Convert now, before any later interpolation has effects.
@@ -1534,12 +1595,13 @@ impl Compiler {
                 Ok(Expr::Template(parts))
             }
             ast::Expr::Assign(a) => {
+                if let ast::AssignTarget::Simple(ast::SimpleAssignTarget::SuperProp(p))=&a.left{return self.super_assignment(a,p);}
                 if let ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(member)) = &a.left {
                     let object = self.lower(&member.obj)?;
                     let object = self.snapshot(member.obj.span(), object);
                     let key = match &member.prop {
                         ast::MemberProp::Ident(name) => Expr::Value(json!(name.sym.to_string())),
-                        ast::MemberProp::Computed(key) => { let value = self.lower(&key.expr)?; self.snapshot(key.span, value) },
+                        ast::MemberProp::Computed(key) => { let value = self.lower(&key.expr)?; self.snapshot(key.span, Expr::NodeBuiltin("$$propertyKey".into(),vec![value])) },
                         _ => return self.error(member.span, "private members are unsupported"),
                     };
                     if matches!(a.op, ast::AssignOp::AndAssign | ast::AssignOp::OrAssign | ast::AssignOp::NullishAssign) {
@@ -1573,7 +1635,7 @@ impl Compiler {
                 if matches!(a.op, ast::AssignOp::AndAssign | ast::AssignOp::OrAssign | ast::AssignOp::NullishAssign) {
                     let old = self.snapshot(a.span, Expr::Variable(name.clone()));
                     let skip = self.emit(a.span, Op::Branch(Self::logical_assignment_test(a.op, old), 0));
-                    let value = self.lower(&a.right)?;
+                    let value = self.lower_named(&a.right,Some(&name))?;
                     self.emit(a.span, Op::Set(name.clone(), value));
                     self.land(skip);
                     return Ok(Expr::Variable(name));
@@ -1583,7 +1645,7 @@ impl Compiler {
                     return self.error(a.span, "unsupported compound assignment");
                 }
                 let old = op.map(|_| self.snapshot(a.span, Expr::Variable(name.clone())));
-                let value = self.lower(&a.right)?;
+                let value = if a.op==ast::AssignOp::Assign{self.lower_named(&a.right,Some(&name))?}else{self.lower(&a.right)?};
                 let value = if let (Some(op), Some(old)) = (op, old) {
                     Expr::Binary(op.into(), Box::new(old), Box::new(value))
                 } else {
@@ -1593,12 +1655,13 @@ impl Compiler {
                 Ok(Expr::Variable(name))
             }
             ast::Expr::Update(u) => {
+                if let ast::Expr::SuperProp(p)=&*u.arg{return self.super_update(u,p);}
                 if let ast::Expr::Member(member) = &*u.arg {
                     let object = self.lower(&member.obj)?;
                     let object = self.snapshot(member.obj.span(), object);
                     let key = match &member.prop {
                         ast::MemberProp::Ident(name) => Expr::Value(json!(name.sym.to_string())),
-                        ast::MemberProp::Computed(key) => { let value = self.lower(&key.expr)?; self.snapshot(key.span, value) },
+                        ast::MemberProp::Computed(key) => { let value = self.lower(&key.expr)?; self.snapshot(key.span, Expr::NodeBuiltin("$$propertyKey".into(),vec![value])) },
                         _ => return self.error(member.span, "private members are unsupported"),
                     };
                     let old = self.snapshot(u.span, Expr::Unary("+".into(), Box::new(Expr::Member(Box::new(object.clone()), Box::new(key.clone())))));
@@ -1635,11 +1698,13 @@ impl Compiler {
                 Ok(if u.prefix { Expr::Variable(name) } else { old })
             }
             ast::Expr::Call(call) => {
+                if matches!(call.callee,ast::Callee::Super(_)){return self.super_call(call);}
+                if let ast::Callee::Expr(e)=&call.callee && let ast::Expr::SuperProp(p)=&**e {let callee=self.super_get(p)?;return self.invoke_reference(callee,Expr::Variable("\0this".into()),&call.args,call.span,None);}
                 if matches!(&call.callee,ast::Callee::Expr(e) if matches!(&**e,ast::Expr::Member(m) if matches!(&*m.obj,ast::Expr::Ident(i) if i.sym==*"tools")))
                 {
                     return self.error(call.span,"tools.* is unsupported; use the fixed library.method(args) names in program_tool_headers");
                 }
-                if matches!(&call.callee,ast::Callee::Expr(e) if matches!(&**e,ast::Expr::Ident(i) if i.sym==*"assert"))
+                if matches!(&call.callee,ast::Callee::Expr(e) if matches!(&**e,ast::Expr::Ident(i) if i.sym==*"assert")) && self.global("assert")
                 {
                     if !(1..=2).contains(&call.args.len())
                         || call.args.iter().any(|a| a.spread.is_some())
@@ -1676,6 +1741,10 @@ impl Compiler {
                     let Some(library) = required_name(call) else {
                         return self.error(call.span, "require takes one library name string, such as require(\"ppt\")");
                     };
+                    if let Some(library) = library.strip_prefix("host:") {
+                        let example = if library.trim_end_matches("/promises") == "attachments" { "read_attachment" } else { "method" };
+                        return self.error(call.span, &format!("host 自带的库要用 import {{ {example} }} from \"host:{library}\" 引入，不要用 require；可用方法见 read_tool_contracts"));
+                    }
                     if !valid_library(&library) {
                         return self.error(
                             call.span,
@@ -1688,10 +1757,13 @@ impl Compiler {
                 }
                 if call.args.iter().any(|arg| arg.spread.is_some()) {
                     let ast::Callee::Expr(target) = &call.callee else { return self.error(call.span, "spread call needs a function value"); };
-                    if matches!(&**target, ast::Expr::Ident(i) if i.sym == *"assert") {
+                    let mut target=&**target;
+                    while let ast::Expr::Paren(p)=target {target=&p.expr;}
+                    if matches!(target,ast::Expr::OptChain(chain) if matches!(&*chain.base,ast::OptChainBase::Member(_))) {return self.dynamic_call(call,target);}
+                    if matches!(target, ast::Expr::Ident(i) if i.sym == *"assert") && self.global("assert") {
                         return self.error(call.span, "spread is unavailable for this special call");
                     }
-                    if let ast::Expr::Member(member) = &**target && self.native_value(target)?.is_none() {
+                    if let ast::Expr::Member(member) = target && self.native_value(target)?.is_none() {
                         let receiver = self.lower(&member.obj)?;
                         let receiver = self.snapshot(member.obj.span(), receiver);
                         let key = self.member_key(&member.prop, member.span)?;
@@ -1705,10 +1777,10 @@ impl Compiler {
                     self.emit(call.span, Op::Effect(Some(dest.clone()), Effect::Apply { callee, args }));
                     return Ok(Expr::Variable(dest));
                 }
-                // console output is a call into the runtime, which keeps it.
+                // Console and scheduling mutate durable Runtime state.
                 if let ast::Callee::Expr(target) = &call.callee
                     && let Some(callee) = self.native_value(target)?
-                    && matches!(&callee, Expr::Native(name) if name.starts_with("console."))
+                    && matches!(&callee, Expr::Native(name) if name.starts_with("console.") || matches!(name.as_str(), "setTimeout" | "setInterval" | "clearTimeout" | "clearInterval" | "queueMicrotask"))
                 {
                     let mut args = Vec::new();
                     for arg in &call.args {
@@ -1726,18 +1798,7 @@ impl Compiler {
                     && let ast::MemberProp::Ident(method) = &member.prop
                     && matches!(method.sym.as_ref(), "resolve" | "reject")
                 {
-                    if call.args.iter().any(|arg| arg.spread.is_some()) {
-                        return self.error(call.span, "Promise.resolve/reject spread arguments are not yet supported");
-                    }
-                    let mut args = Vec::new();
-                    for arg in &call.args {
-                        let value = self.lower(&arg.expr)?;
-                        args.push(self.snapshot(arg.span(), value));
-                    }
-                    let value = args.into_iter().next().unwrap_or(Expr::Undefined);
-                    let destination = self.temp();
-                    self.emit(call.span, Op::Effect(Some(destination.clone()), Effect::PromiseCreate { reject: method.sym == *"reject", value }));
-                    return Ok(Expr::Variable(destination));
+                    return self.call_reference(Expr::Intrinsic("Promise".into()),Expr::Value(json!(method.sym.to_string())),&call.args,call.span,false);
                 }
                 if let ast::Callee::Expr(target) = &call.callee
                     && let ast::Expr::Member(member) = &**target
@@ -1746,44 +1807,10 @@ impl Compiler {
                     && let ast::MemberProp::Ident(method) = &member.prop
                     && matches!(method.sym.as_ref(), "all" | "allSettled" | "race" | "any")
                 {
-                    if call.args.iter().any(|arg| arg.spread.is_some()) { return self.error(call.span, "Promise combinator spread arguments are not yet supported"); }
-                    let mut args = Vec::new();
-                    for arg in &call.args { let value = self.lower(&arg.expr)?; args.push(self.snapshot(arg.span(), value)); }
-                    let value = args.into_iter().next().unwrap_or(Expr::Undefined);
-                    let name = match method.sym.as_ref() { "all" => "$$promiseAll", "allSettled" => "$$promiseAllSettled", "race" => "$$promiseRace", _ => "$$promiseAny" };
-                    let destination = self.temp();
-                    self.emit(call.span, Op::Effect(Some(destination.clone()), Effect::Call(name.into(), vec![value])));
-                    return Ok(Expr::Variable(destination));
+                    return self.call_reference(Expr::Intrinsic("Promise".into()),Expr::Value(json!(method.sym.to_string())),&call.args,call.span,false);
                 }
                 if let Some(value) = self.builtin_call(call)? {
                     return Ok(value);
-                }
-                // Local result collection is deterministic, like for...of.
-                if let ast::Callee::Expr(target) = &call.callee
-                    && let ast::Expr::Member(m) = &**target
-                    && let ast::Expr::Ident(array) = &*m.obj
-                    && matches!(&m.prop,ast::MemberProp::Ident(p) if p.sym==*"push")
-                    && self.resolve(array.sym.as_ref()).is_some()
-                {
-                    if call.args.is_empty() || call.args.iter().any(|a| a.spread.is_some()) {
-                        return self
-                            .error(call.span, "array result collection needs explicit values");
-                    }
-                    let mut items = Vec::new();
-                    for arg in &call.args {
-                        let value = self.lower(&arg.expr)?;
-                        items.push(self.snapshot(arg.span(), value));
-                    }
-                    let destination = self.temp();
-                    self.emit(
-                        call.span,
-                        Op::Append {
-                            target: array.sym.to_string(),
-                            items,
-                            destination: destination.clone(),
-                        },
-                    );
-                    return Ok(Expr::Variable(destination));
                 }
                 if let ast::Callee::Expr(target) = &call.callee
                     && let ast::Expr::Member(member) = &**target
@@ -1871,64 +1898,36 @@ impl Compiler {
                 self.emit(call.span, Op::Effect(Some(dest.clone()), effect));
                 Ok(Expr::Variable(dest))
             }
+            ast::Expr::Class(c)=>self.lower_class(&c.class,c.ident.as_ref().map(|n|n.sym.to_string())),
+            ast::Expr::SuperProp(p)=>self.super_get(p),
             ast::Expr::Paren(p) => self.lower(&p.expr),
-            ast::Expr::Object(o) if o.props.iter().any(|p| matches!(p, ast::PropOrSpread::Spread(_))) => {
-                let target = self.temp();
-                self.emit(o.span, Op::Set(target.clone(), Expr::Object(Vec::new())));
+            ast::Expr::Object(o) => {
+                let target=self.temp();self.emit(o.span,Op::Set(target.clone(),Expr::Object(vec![])));
                 for prop in &o.props {
-                    match prop {
-                        ast::PropOrSpread::Spread(spread) => {
-                            let value = self.lower(&spread.expr)?;
-                            let merged = Expr::NodeBuiltin("Object.assign".into(), vec![Expr::Variable(target.clone()), value]);
-                            self.emit(spread.dot3_token, Op::Set(target.clone(), merged));
-                        }
-                        ast::PropOrSpread::Prop(prop) => {
-                            let (key, value) = match &**prop {
-                                ast::Prop::KeyValue(p) => (self.property(&p.key)?, self.lower(&p.value)?),
-                                ast::Prop::Shorthand(i) => (i.sym.to_string(), self.expr(&ast::Expr::Ident(i.clone()))?),
-                                ast::Prop::Method(method) => {
-                                    let key = self.property(&method.key)?;
-                                    let id = self.compile_function(FunctionSource::function(&method.function, Some(key.clone()), None))?;
-                                    (key, Expr::Function(id))
-                                }
-                                _ => return self.error(prop.span(), "object getters and setters are unsupported"),
-                            };
-                            self.emit(prop.span(), Op::SetMember { object: Expr::Variable(target.clone()), key: Expr::Value(json!(key)), value });
-                        }
+                    let ast::PropOrSpread::Prop(prop)=prop else {
+                        let ast::PropOrSpread::Spread(spread)=prop else{unreachable!()};
+                        let value=self.lower(&spread.expr)?;
+                        self.snapshot(spread.dot3_token,Expr::NodeBuiltin("$$spread".into(),vec![Expr::Variable(target.clone()),value]));continue;
+                    };
+                    if let ast::Prop::KeyValue(kv)=&**prop && (matches!(&kv.key,ast::PropName::Ident(i) if i.sym==*"__proto__") || matches!(&kv.key,ast::PropName::Str(s) if s.value.as_str()==Some("__proto__"))) {
+                        let value=self.lower(&kv.value)?;self.snapshot(prop.span(),Expr::NodeBuiltin("$$literalPrototype".into(),vec![Expr::Variable(target.clone()),value]));continue;
                     }
+                    let name=match &**prop{ast::Prop::KeyValue(p)=>Some(&p.key),ast::Prop::Method(p)=>Some(&p.key),ast::Prop::Getter(p)=>Some(&p.key),ast::Prop::Setter(p)=>Some(&p.key),_=>None};
+                    let key=if let Some(ast::PropName::Computed(c))=name{let v=self.lower(&c.expr)?;self.snapshot(c.span,Expr::NodeBuiltin("$$propertyKey".into(),vec![v]))}else if let Some(name)=name{Expr::Value(json!(self.property(name)?))}else if let ast::Prop::Shorthand(i)=&**prop{Expr::Value(json!(i.sym.to_string()))}else{return self.error(prop.span(),"unsupported object property")};
+                    let hint=if let Expr::Value(Value::String(s))=&key{s.clone()}else{String::new()};
+                    let (value,access)=match &**prop {
+                        ast::Prop::KeyValue(p)=>(self.lower_named_key(&p.value,Some(key.clone()))?,None),
+                        ast::Prop::Shorthand(i)=>(self.expr(&ast::Expr::Ident(i.clone()))?,None),
+                        ast::Prop::Method(m)=>(Expr::Function(self.compile_function(FunctionSource::method(&m.function,Some(hint)))?),None),
+                        ast::Prop::Getter(g)=>{let source=FunctionSource{name:Some(format!("get {hint}")),self_name:None,params:vec![],body:g.body.as_ref().map(FunctionBody::Block).unwrap_or(FunctionBody::Missing),is_async:false,is_generator:false,lexical_this:false,constructable:false,span:g.span};(Expr::Function(self.compile_function(source)?),Some("get"))},
+                        ast::Prop::Setter(g)=>{let source=FunctionSource{name:Some(format!("set {hint}")),self_name:None,params:vec![&g.param],body:g.body.as_ref().map(FunctionBody::Block).unwrap_or(FunctionBody::Missing),is_async:false,is_generator:false,lexical_this:false,constructable:false,span:g.span};(Expr::Function(self.compile_function(source)?),Some("set"))},
+                        _=>return self.error(prop.span(),"unsupported object property"),
+                    };
+                    let value=if matches!(&**prop,ast::Prop::Method(_)|ast::Prop::Getter(_)|ast::Prop::Setter(_)){let value=self.snapshot(prop.span(),Expr::NodeBuiltin("$$methodHome".into(),vec![value,Expr::Variable(target.clone())]));self.snapshot(prop.span(),Expr::NodeBuiltin("$$functionName".into(),vec![value,key.clone(),Expr::Value(json!(access.unwrap_or("")))]))}else{value};
+                    let mut args=vec![Expr::Variable(target.clone()),key,value];let name=if let Some(access)=access{args.push(Expr::Value(json!(access)));"$$literalAccessor"}else{"$$createData"};
+                    self.snapshot(prop.span(),Expr::NodeBuiltin(name.into(),args));
                 }
                 Ok(Expr::Variable(target))
-            }
-            ast::Expr::Object(o) => {
-                let mut fields = Vec::new();
-                for p in &o.props {
-                    match p {
-                        ast::PropOrSpread::Prop(p) => match &**p {
-                            ast::Prop::KeyValue(p) => {
-                                let key = self.property(&p.key)?;
-                                let value = self.lower(&p.value)?;
-                                fields.push((key, self.snapshot(p.value.span(), value)));
-                            }
-                            ast::Prop::Shorthand(i) => {
-                                let value = self.expr(&ast::Expr::Ident(i.clone()))?;
-                                fields.push((i.sym.to_string(), self.snapshot(i.span, value)));
-                            }
-                            // `{ run(x) { … } }` is a function-valued property.
-                            ast::Prop::Method(method) => {
-                                let key = self.property(&method.key)?;
-                                let id = self.compile_function(FunctionSource::function(
-                                    &method.function,
-                                    Some(key.clone()),
-                                    None,
-                                ))?;
-                                fields.push((key, Expr::Function(id)));
-                            }
-                            _ => return self.error(p.span(), "object getters and setters are unsupported"),
-                        },
-                        _ => return self.error(o.span, "object spread is unsupported"),
-                    }
-                }
-                Ok(Expr::Object(fields))
             }
             ast::Expr::Array(a) if a.elems.iter().any(|item| item.as_ref().is_some_and(|item| item.spread.is_some())) => {
                 let target = self.temp();
@@ -1938,14 +1937,7 @@ impl Compiler {
                     let value = self.lower(&item.expr)?;
                     if item.spread.is_some() {
                         let value = self.snapshot(item.span(), value);
-                        let array = Expr::Unary("isArray".into(), Box::new(value.clone()));
-                        let string = Expr::Binary("===".into(), Box::new(Expr::Unary("typeof".into(), Box::new(value.clone()))), Box::new(Expr::Value(json!("string"))));
-                        let invalid = self.emit(item.span(), Op::Branch(Expr::Binary("||".into(), Box::new(array), Box::new(string)), 0));
-                        let success = self.emit(item.span(), Op::Jump(0));
-                        self.land(invalid);
-                        self.emit(item.span(), Op::Throw(Expr::NodeBuiltin("new TypeError".into(), vec![Expr::Value(json!("spread value is not iterable"))])));
-                        self.land(success);
-                        let source = Expr::NodeBuiltin("Array.from".into(), vec![value]);
+                        let source = Expr::NodeBuiltin("$$iterableArray".into(), vec![value]);
                         let combined = Expr::StringMethod(Box::new(Expr::Variable(target.clone())), "concat".into(), vec![source]);
                         self.emit(item.span(), Op::Set(target.clone(), combined));
                     } else {
@@ -2009,16 +2001,16 @@ impl Compiler {
     }
     /// Evaluate the source once, then initialize the pattern left-to-right.
     fn binding(&mut self, p: &ast::Pat, e: &ast::Expr, declare: bool) -> Result<()> {
-        let value = self.lower(e)?;
+        let value = self.lower_named(e,if let ast::Pat::Ident(i)=p{Some(i.id.sym.as_ref())}else{None})?;
         let value = self.snapshot(e.span(), value);
         self.bind_value(p, value, declare)
     }
-    fn default_value(&mut self, span: Span, value: Expr, default: &ast::Expr) -> Result<Expr> {
+    fn default_value(&mut self, span: Span, value: Expr, default: &ast::Expr, hint:Option<&str>) -> Result<Expr> {
         let name = self.temp();
         self.emit(span, Op::Set(name.clone(), value));
         let test = Expr::Binary("===".into(), Box::new(Expr::Variable(name.clone())), Box::new(Expr::Undefined));
         let skip = self.emit(span, Op::Branch(test, 0));
-        let replacement = self.lower(default)?;
+        let replacement = self.lower_named(default,hint)?;
         self.emit(span, Op::Set(name.clone(), replacement));
         self.land(skip);
         Ok(Expr::Variable(name))
@@ -2030,36 +2022,29 @@ impl Compiler {
                 self.emit(p.span(), op);
             }
             ast::Pat::Assign(a) => {
-                let value = self.default_value(a.span, value, &a.right)?;
+                let value = self.default_value(a.span, value, &a.right, if let ast::Pat::Ident(i)=&*a.left{Some(i.id.sym.as_ref())}else{None})?;
                 self.bind_value(&a.left, value, declare)?;
             }
             ast::Pat::Array(a) => {
                 let value = self.snapshot(a.span, value);
-                let array = Expr::Unary("isArray".into(), Box::new(value.clone()));
-                let string = Expr::Binary("===".into(), Box::new(Expr::Unary("typeof".into(), Box::new(value.clone()))), Box::new(Expr::Value(json!("string"))));
-                let valid = Expr::Binary("||".into(), Box::new(array), Box::new(string));
-                let invalid = self.emit(a.span, Op::Branch(valid, 0));
-                let success = self.emit(a.span, Op::Jump(0));
-                self.land(invalid);
-                self.emit(a.span, Op::Throw(Expr::NodeBuiltin("new TypeError".into(), vec![Expr::Value(json!("destructuring value is not iterable"))])));
-                self.land(success);
-                for (index, item) in a.elems.iter().enumerate() {
-                    if let Some(item) = item {
-                        if let ast::Pat::Rest(rest) = item {
-                            let array = Expr::NodeBuiltin("Array.from".into(), vec![value.clone()]);
-                            let tail = Expr::StringMethod(Box::new(array), "slice".into(), vec![Expr::Value(json!(index))]);
-                            self.bind_value(&rest.arg, tail, declare)?;
-                        } else {
-                            let member = Expr::Member(Box::new(value.clone()), Box::new(Expr::Value(json!(index))));
-                            self.bind_value(item, member, declare)?;
-                        }
-                    }
+                let iterator=self.snapshot(a.span,Expr::NodeBuiltin("$$iterator".into(),vec![value]));
+                let thrown=self.temp();let caught=self.emit(a.span,Op::Catch{target:0,name:thrown.clone()});self.handlers+=1;
+                for index in 0..self.array_binding_len(a) {
+                    let item = a.elems.get(index).unwrap_or(&None);
+                    if let Some(item)=item {
+                        if let ast::Pat::Rest(rest)=item{let values=self.temp();self.emit(rest.span,Op::Effect(Some(values.clone()),Effect::Call("$$iteratorRest".into(),vec![iterator.clone()])));self.bind_value(&rest.arg,Expr::Variable(values),declare)?;}
+                        else{let member=self.snapshot(item.span(),Expr::NodeBuiltin("$$iteratorValue".into(),vec![iterator.clone()]));self.bind_value(item,member,declare)?;}
+                    }else{self.emit(a.span,Op::Effect(None,Effect::Call("$$iteratorElide".into(),vec![iterator.clone()])));}
                 }
+                self.handlers-=1;self.emit(a.span,Op::EndCatch);self.emit(a.span,Op::Effect(None,Effect::Call("$$iteratorCloseNormal".into(),vec![iterator.clone()])));
+                let jump=self.emit(a.span,Op::Jump(0));let handler=self.code.len();self.emit(a.span,Op::Effect(None,Effect::Call("$$iteratorCloseThrow".into(),vec![iterator,Expr::Variable(thrown)])));
+                let end=self.code.len();if let Op::Catch{target,..}=&mut self.code[caught].op{*target=handler;}self.code[jump].op=Op::Jump(end);
             }
+
             ast::Pat::Object(o) => {
                 let value = self.snapshot(o.span, value);
                 // Property access rejects null and undefined even for {}.
-                self.snapshot(o.span, Expr::Member(Box::new(value.clone()), Box::new(Expr::Value(json!("")))));
+                self.snapshot(o.span, Expr::NodeBuiltin("$$requireCoercible".into(),vec![value.clone()]));
                 let mut excluded = Vec::new();
                 for prop in &o.props {
                     match prop {
@@ -2071,7 +2056,7 @@ impl Compiler {
                                 ast::PropName::Computed(v) => { let key = self.lower(&v.expr)?; self.snapshot(v.span, key) },
                                 _ => return self.error(k.key.span(), "unsupported destructuring key"),
                             };
-                            let key = self.snapshot(k.key.span(), Expr::NodeBuiltin("String".into(), vec![key]));
+                            let key = self.snapshot(k.key.span(), Expr::NodeBuiltin("$$propertyKey".into(), vec![key]));
                             excluded.push(key.clone());
                             self.bind_value(&k.value, Expr::Member(Box::new(value.clone()), Box::new(key)), declare)?;
                         }
@@ -2079,16 +2064,13 @@ impl Compiler {
                             let key = Expr::Value(json!(a.key.id.sym.to_string()));
                             excluded.push(key.clone());
                             let member = Expr::Member(Box::new(value.clone()), Box::new(key));
-                            let member = if let Some(default) = &a.value { self.default_value(a.span, member, default)? } else { member };
+                            let member = if let Some(default) = &a.value { self.default_value(a.span, member, default,Some(a.key.id.sym.as_ref()))? } else { member };
                             let op = if declare { Op::Declare(a.key.id.sym.to_string(), member) } else { Op::Set(a.key.id.sym.to_string(), member) };
                             self.emit(a.span, op);
                         }
                         ast::ObjectPatProp::Rest(r) => {
-                            let copy = Expr::NodeBuiltin("Object.assign".into(), vec![Expr::Object(Vec::new()), value.clone()]);
-                            let copy = self.snapshot(r.span, copy);
-                            for key in &excluded {
-                                self.snapshot(r.span, Expr::NodeBuiltin("delete".into(), vec![copy.clone(), key.clone()]));
-                            }
+                            let copy = Expr::NodeBuiltin("$$objectRest".into(),vec![value.clone(),Expr::Array(excluded.clone())]);
+                            let copy=self.snapshot(r.span,copy);
                             self.bind_value(&r.arg, copy, declare)?;
                         }
                     }
@@ -2135,6 +2117,7 @@ impl Compiler {
             }
             S::Empty(_) => {}
             S::Decl(ast::Decl::Var(v)) => self.variable_declaration(v)?,
+            S::Decl(ast::Decl::Class(c)) => {let value=self.lower_class(&c.class,Some(c.ident.sym.to_string()))?;self.emit(c.class.span,Op::Declare(c.ident.sym.to_string(),value));},
             // Initialized when the enclosing scope was entered.
             S::Decl(ast::Decl::Fn(_)) => {}
             S::Expr(s) => {
@@ -2146,6 +2129,7 @@ impl Compiler {
                 } else {
                     Expr::Undefined
                 };
+                let value = if self.async_generator && r.arg.is_some() { self.await_value(value, r.span) } else { value };
                 let value = if self.finalizers.is_empty() { value } else { self.snapshot(r.span, value) };
                 self.emit_finalizers(None, r.span)?;
                 self.emit(r.span, Op::Return(value));
@@ -2331,7 +2315,7 @@ impl Compiler {
                 let source = self.lower(&f.right)?;
                 let source = self.snapshot(f.right.span(), source);
                 let is_null = Expr::Binary("==".into(), Box::new(source.clone()), Box::new(Expr::Value(Value::Null)));
-                let keys = Expr::Conditional(Box::new(is_null), Box::new(Expr::Array(Vec::new())), Box::new(Expr::NodeBuiltin("Object.keys".into(), vec![source.clone()])));
+                let keys = Expr::Conditional(Box::new(is_null), Box::new(Expr::Array(Vec::new())), Box::new(Expr::NodeBuiltin("$$forInKeys".into(), vec![source.clone()])));
                 self.emit(f.span, Op::Set(items.clone(), keys));
                 self.emit(f.span, Op::Set(index.clone(), Expr::Value(json!(0))));
                 let start = self.code.len();
@@ -2356,46 +2340,9 @@ impl Compiler {
                 self.leave_scope(f.span, head_scope);
             }
             S::ForOf(f) => {
-                if f.is_await {
-                    return self.error(f.span, "for await is unsupported");
-                }
-                let (pattern, kind) = self.loop_head(&f.left, f.span)?;
-                let head_scope = if matches!(kind, Some(ast::VarDeclKind::Let | ast::VarDeclKind::Const)) {
-                    let names = pattern_names(&pattern).into_iter().map(|name| (name, kind == Some(ast::VarDeclKind::Let))).collect();
-                    self.enter_scope(f.span, names)?
-                } else { false };
-                let items = self.temp();
-                let index = self.temp();
-                let item = self.temp();
-                let list = self.lower(&f.right)?;
-                self.emit(f.span, Op::Set(items.clone(), list));
-                self.emit(f.span, Op::Set(index.clone(), Expr::Value(json!(0))));
-                let start = self.code.len();
-                let next = self.emit(
-                    f.span,
-                    Op::ForNext {
-                        items,
-                        index,
-                        item: item.clone(),
-                        end: 0,
-                    },
-                );
-                // A let/const binding is fresh in every iteration; a var is hoisted.
-                self.begin_loop();
-                let entered = if matches!(kind, Some(ast::VarDeclKind::Let | ast::VarDeclKind::Const)) {
-                    let names = pattern_names(&pattern).into_iter().map(|name| (name, kind == Some(ast::VarDeclKind::Let))).collect();
-                    self.enter_scope(f.span, names)?
-                } else { false };
-                self.loop_bind(&pattern, Expr::Variable(item), entered)?;
-                self.stmt(&f.body)?;
-                self.leave_scope(f.span, entered);
-                self.emit(f.span, Op::Jump(start));
-                let end = self.code.len();
-                if let Op::ForNext { end: target, .. } = &mut self.code[next].op {
-                    *target = end;
-                }
-                self.end_loop(end, start);
-                self.leave_scope(f.span, head_scope);
+                let (pattern,kind)=self.loop_head(&f.left,f.span)?;
+                let head_scope=if matches!(kind,Some(ast::VarDeclKind::Let|ast::VarDeclKind::Const)){self.enter_scope(f.span,pattern_names(&pattern).into_iter().map(|name|(name,kind==Some(ast::VarDeclKind::Let))).collect())?}else{false};
+                let statement=self.iterable_for_of(f)?;self.stmt(&statement)?;self.leave_scope(f.span,head_scope);
             }
 
             S::Try(t) => {
@@ -2485,6 +2432,20 @@ impl Compiler {
 #[cfg(test)]
 pub fn compile(source: &str) -> Result<Program> {
     compile_with_libraries(source, super::libraries::builtin())
+}
+#[cfg(test)]
+pub(super) fn compile_conformance(source: &str) -> Result<Program> {
+    let names=["assert","__test262CheckThrown","$DONE","compareArray"]
+        .into_iter().map(str::to_owned).collect();
+    link_prelude(compile_inner(source,super::ENTRY,false,super::libraries::Libraries::new(),names,false)?)
+}
+
+#[cfg(test)]
+pub(super) fn script_parse_error(source: &str) -> bool {
+    let map:Lrc<SourceMap>=Default::default();
+    let file=map.new_source_file(FileName::Custom("test262.js".into()).into(),source.to_owned());
+    let mut parser=Parser::new_from(Lexer::new(Syntax::Es(EsSyntax::default()),Default::default(),StringInput::from(&*file),None));
+    parser.parse_script().is_err() || !parser.take_errors().is_empty()
 }
 #[cfg(test)]
 pub fn compile_body(source: &str, entry: &str) -> Result<Program> {
@@ -2684,7 +2645,7 @@ fn compile_inner(
         libraries.into_iter().filter(|(name, _)| !bound.0.contains(name)).collect()
     };
     ensure!(
-        declarations.len() <= 64,
+        internal || declarations.len() <= 64,
         "TS_PROGRAM supports at most 64 functions"
     );
     let mut names = BTreeSet::new();
@@ -2730,7 +2691,7 @@ fn compile_inner(
     }
     let async_entry = declarations
         .iter()
-        .find(|f| f.ident.sym.as_ref() == entry && f.function.is_async)
+        .find(|f| f.ident.sym.as_ref() == entry && f.function.is_async && !f.function.is_generator)
         .map(|f| f.ident.sym.to_string());
     // A leading JSDoc and comments inside the body form the task contract.
     // Walk only adjacent comments: a tag inside the previous function must
@@ -2808,7 +2769,7 @@ fn compile_inner(
         .collect::<BTreeSet<_>>();
     let async_functions = declarations
         .iter()
-        .filter(|f| f.function.is_async)
+        .filter(|f| f.function.is_async && !f.function.is_generator)
         .map(|f| f.ident.sym.to_string())
         .collect::<BTreeSet<_>>();
     // Top-level declarations form the module scope. The top-level flow runs
@@ -2837,6 +2798,7 @@ fn compile_inner(
             nested: Vec::new(),
             virtuals: virtuals.clone(),
             async_functions: async_functions.clone(),
+            async_generator: false,
             code: Vec::new(),
             temp: 0,
             loops: Vec::new(),
@@ -2885,6 +2847,10 @@ fn compile_inner(
                 lexical: module_lexical.into_iter().map(|(name, _)| name).collect(),
                 module: true,
                 is_async: true,
+                is_generator: false,
+                lexical_this: false,
+                constructable: false,
+                length: 0,
                 self_name: None,
                 code: c.code,
             },
@@ -2906,6 +2872,7 @@ fn compile_inner(
             nested: Vec::new(),
             virtuals: virtuals.clone(),
             async_functions: async_functions.clone(),
+            async_generator: f.function.is_async && f.function.is_generator,
             code: Vec::new(),
             temp: 0,
             loops: Vec::new(),
@@ -2917,9 +2884,6 @@ fn compile_inner(
             leaf_tools: leaf_tools.clone(),
             leaf_libraries: leaf_libraries.clone(),
         };
-        if f.function.is_generator {
-            return c.error(f.function.span, "generator functions are unsupported");
-        }
         let mut params = Vec::new();
         let mut parameter_names = Vec::new();
         let mut parameter_lexical = Vec::new();
@@ -2951,6 +2915,10 @@ fn compile_inner(
         }
         for (pattern, argument) in parameter_patterns {
             c.bind_value(pattern, Expr::Variable(argument), true)?;
+        }
+        if f.function.is_generator {
+            if virtual_task { return c.error(f.function.span,"@module and @virtual must not be generators"); }
+            c.emit(f.function.span, Op::GeneratorStart);
         }
         let vars: Vec<String> = var_names(&body.stmts).into_iter()
             .filter(|name| patterned || !parameter_names.contains(name)).collect();
@@ -3015,12 +2983,6 @@ fn compile_inner(
             );
             c.emit(body.span, Op::Return(Expr::Variable(dest)));
         } else {
-            if empty {
-                return c.error(
-                    body.span,
-                    "an empty helper must be explicitly marked @virtual with its task description and return contract",
-                );
-            }
             c.hoist_functions(&body.stmts)?;
             for s in &body.stmts {
                 c.stmt(s)?;
@@ -3047,6 +3009,10 @@ fn compile_inner(
                 lexical: lexical.into_iter().map(|(name, _)| name).collect(),
                 module: false,
                 is_async: f.function.is_async,
+                is_generator: f.function.is_generator,
+                lexical_this: false,
+                constructable: !f.function.is_async && !f.function.is_generator,
+                length: f.function.params.iter().take_while(|p|!matches!(&p.pat,ast::Pat::Assign(_) | ast::Pat::Rest(_))).count(),
                 self_name: None,
                 code: c.code,
             },

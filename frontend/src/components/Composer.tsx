@@ -1,4 +1,5 @@
 import { randomId } from '../randomId.ts'
+import { availableEfforts, resolveEffort } from '../reasoningEffort.ts'
 import {AttachmentRail,useAttachmentDraft,type AttachmentSubmission} from './Attachments.tsx'
 import { PREFILL_EVENT, recentPrefill } from './RewindControl.tsx'
 import { ContextRing, type ContextUsage } from './ContextRing.tsx'
@@ -412,7 +413,7 @@ export function Composer({
     ?? providers.find(p => p.id === settings?.orchestrator_provider)?.model_capabilities[settings?.orchestrator_model ?? '']
 
   const supportedEfforts = selectedCapability?.reasoning_efforts ?? []
-  const currentEffort = (reasoningEffort ?? (activeModelName ? selectedCapability?.default_effort : undefined) ?? settings?.reasoning_effort ?? '') || ''
+  const currentEffort = resolveEffort(reasoningEffort, supportedEfforts)
 
   const EFFORT_LABELS: Record<string, string> = {
     '': '默认',
@@ -420,6 +421,7 @@ export function Composer({
     low: '轻量',
     medium: '中等',
     high: '深度',
+    xhigh: '超深度',
     max: '最大',
   }
 
@@ -429,25 +431,11 @@ export function Composer({
     return name ? `${name} (${effort})` : effort
   }
 
-  const effortDisplay = formatEffort(currentEffort)
+  const effortDisplay = currentEffort ? formatEffort(currentEffort) : '不可调节'
   const triggerEffortLabel = currentEffort ? (EFFORT_LABELS[currentEffort] ?? currentEffort) : undefined
 
   const effortOptions = useMemo<{ key: string; label: string }[]>(() => {
-    if (supportedEfforts.length > 0) {
-      const opts = [{ key: '', label: '默认 (模型默认)' }]
-      for (const eff of supportedEfforts) {
-        opts.push({ key: eff, label: formatEffort(eff) })
-      }
-      return opts
-    }
-    return [
-      { key: '', label: '默认 (模型默认)' },
-      { key: 'none', label: '关闭 (none)' },
-      { key: 'low', label: '轻量 (low)' },
-      { key: 'medium', label: '中等 (medium)' },
-      { key: 'high', label: '深度 (high)' },
-      { key: 'max', label: '最大 (max)' },
-    ]
+    return availableEfforts(supportedEfforts).map(eff => ({ key: eff, label: formatEffort(eff) }))
   }, [supportedEfforts])
 
   return (
@@ -747,6 +735,7 @@ export function Composer({
                 type="button"
                 role="menuitem"
                 className={modelCss.cell}
+                disabled={effortOptions.length === 0}
                 onClick={() => { setPane('effort') }}
               >
                 <span className={modelCss.cellLabel}>思考等级</span>
@@ -759,9 +748,9 @@ export function Composer({
               >
                 <span className={modelCss.cellLabel}>⚡ 请求加速</span>
                 <Switch
-                  checked={Boolean(fastMode)}
+                  checked={Boolean(fastMode && selectedCapability?.fast_mode)}
                   label="请求加速"
-                  disabled={onSetGenerationOptions === undefined}
+                  disabled={onSetGenerationOptions === undefined || !selectedCapability?.fast_mode}
                   onChange={(checked) => {
                     void onSetGenerationOptions?.(currentEffort, checked)
                   }}

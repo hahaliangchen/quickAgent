@@ -1,6 +1,7 @@
 //! Durable flow execution with scoped functions, tools and bounded delegates.
 //! One Runtime owns control flow; working context is never folded.
 use crate::{
+    agent_program,
     agent_service::{self, AgentServiceState},
     context_window::estimate,
 };
@@ -51,6 +52,10 @@ struct Window {
     program: Option<crate::agent_program::Runtime>,
     #[serde(default)]
     program_value: Option<Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    module_probe: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    module_revisions: BTreeMap<String, modules::Revision>,
     #[serde(default)]
     program_task: Option<Value>,
     #[serde(default)]
@@ -116,6 +121,9 @@ enum LoopResult {
     Limit,
     // The user spoke: this frame stopped with its state kept, to be resumed.
     Paused,
+    // The program that made this call ended with an error: the call stopped
+    // before its next step and returns nothing (design guide §8).
+    Stopped,
 }
 
 async fn db<T: Send + 'static>(
@@ -221,7 +229,22 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     definitions
 }
 
+fn code_shell_context(s: &Session<'_>) -> bool {
+    if s.plugin.is_some() { return false; }
+    // Old sessions predate explicit kinds and are code sessions by default.
+    let kind = agent_service::open_db(s.state.workspace.root()).ok().and_then(|conn| {
+        conn.query_row("SELECT kind FROM agent_session_meta WHERE task_id=?1",[s.task],|r|r.get::<_,String>(0)).optional().ok().flatten()
+    });
+    kind.as_deref() != Some("chat")
+}
+
 fn available_tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
+    let code_context = code_shell_context(s);
+    // Detect on a code session's first request too: HTTP clients need not have
+    // opened the setup UI for the main AI to know modules can use the shell.
+    let environment_available = code_context && crate::shell_environment::resolve().is_ok();
+    let module_execution = code_context && program_flow::shell_code_allowed(s,w);
+    let shell_available = module_execution && environment_available;
     let mut tools: Vec<Value> = {
         agent_service::local_tools(
             &s.state.workspace,
@@ -232,7 +255,9 @@ fn available_tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
         .filter(|t| {
             t["function"]["name"]
                 .as_str()
-                .is_some_and(|name| s.state.permission_mode.allows(name))
+                .is_some_and(|name| s.state.permission_mode.allows(name)
+                    && (!crate::project_process::is_execution(name) || module_execution)
+                    && (!crate::shell_process::is_tool(name) || shell_available))
         })
         .collect()
     };
@@ -575,11 +600,24 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     // Code writers get the language environment and the library index; a
     // leaf only calls its tools.
     if role != "leaf" {
+        if code_shell_context(s) {
+        let shell = crate::shell_environment::description();
+        let project = crate::session_browser::task_workspace(s.state.workspace.root(), s.task)
+            .ok().and_then(|path| crate::tools::Workspace::new(path).ok());
+        let workspace = project.as_ref().unwrap_or(&s.state.workspace)
+            .workspace_info(crate::tools::WorkspaceInfoRequest { workspace_root:None }).ok();
+        wire.insert(1.min(wire.len()), json!({"role":"system","name":"shell_environment",
+            "content":json!({"shell":shell,"workspace":workspace,
+                "access":"module_deterministic_code_only",
+                "memory":{"ai_input_limit_tokens":s.input_budget,"program_shell_output_limit_bytes":crate::shell_process::PROGRAM_OUTPUT_LIMIT,
+                    "boundary":"Raw shell output stays in JS variables. Parse it in module code. Only print needed evidence or pass a small prepared input to a virtual hook; a module return first goes to its caller's JS, not automatically to AI context."},
+                "usage":if cfg!(windows) { "Windows uses PowerShell 7 syntax with D:/... or relative paths; Linux examples using Bash syntax do not apply. Main flows declare @module by the result needed, such as facts, counts or an evidence-based answer, rather than merely forwarding shell output. Only module deterministic code can call process.exec_command/write_stdin/kill_session. Each command starts a fresh shell, no profiles or PTY. Module code gets complete output in JS heap. Check running/exit_code and process stdout before printing complete evidence units with file/line ranges. SHELL_OUTPUT_OVER_CAPACITY or OUTPUT_OVER_CAPACITY explicitly fails delivery and preserves the original/read reference; revise from saved output instead of replaying commands or silently slicing evidence. Use rg --files and rg -n for repository discovery/search; they respect .gitignore by default. If available=false, inspect error; structured file tools remain usable." } else { "Linux uses Bash syntax. Main flows declare @module by the result needed; only module deterministic code can call process.exec_command/write_stdin/kill_session. Each command starts a fresh shell, no profiles or PTY. Module code gets complete output in JS heap. Check running/exit_code and process stdout before printing complete evidence units with file/line ranges. SHELL_OUTPUT_OVER_CAPACITY or OUTPUT_OVER_CAPACITY explicitly fails delivery and preserves the original/read reference; revise from saved output instead of replaying commands or silently slicing evidence. Use rg --files and rg -n for repository discovery/search; they respect .gitignore by default. If available=false, inspect error; structured file tools remain usable." }}).to_string()}));
+        }
         wire.insert(1.min(wire.len()),json!({"role":"system","name":"program_environment","content":crate::agent_program::ENVIRONMENT}));
-        // The host's own libraries with their methods, then the third-party
-        // ones a program can require, by name and purpose.
+        // Library categories are visible up front; method docs are read on demand.
         let libraries = program_flow::static_libraries(s, definitions);
-        let mut headers = crate::agent_program::declarations::index(&libraries, definitions);
+        let mut headers = crate::agent_program::declarations::directory(&libraries);
+        headers.push_str(&crate::agent_program::declarations::core_methods(&libraries, definitions));
         headers.push_str(&crate::agent_program::declarations::third_party_index(&program_flow::requirable(s, definitions)));
         for (skill, library) in program_flow::skill_library_names(s) {
             headers.push_str(&format!("// Skill ID {}: use read_skill with this ID for instructions; library {} is used with require.\n", serde_json::to_string(&skill).unwrap(), serde_json::to_string(&library).unwrap()));
@@ -1139,6 +1177,13 @@ async fn business_tool(
     args: Value,
     call_id: &str,
 ) -> Result<Value> {
+    business_tool_inner(s,node,name,args,call_id,false).await
+}
+async fn business_tool_inner(
+    s:&Session<'_>,node:&str,name:&str,args:Value,call_id:&str,module_code:bool,
+) -> Result<Value> {
+    ensure!(!crate::project_process::is_execution(name) || module_code,
+        "SHELL_MODULE_ONLY: OS execution is available only in a module's deterministic code. Declare @module for the result needed (verified facts, counts or an evidence-based answer), then implement commands and output processing inside it; virtual hooks receive only prepared arguments.");
     ensure!(page_allows(s, name), "PLUGIN_SCOPE_DENIED: {name}");
     if name == "read_session_history" {
         let mut args = args;
@@ -1181,7 +1226,8 @@ async fn business_tool(
     {
         anyhow::bail!("SANDBOX_UNSUPPORTED: package command tools cannot yet run under the workspace sandbox");
     }
-    if crate::tool_approvals::needs_approval(
+    if !(name == "write_stdin" && args["chars"].as_str().is_none_or(str::is_empty))
+        && crate::tool_approvals::needs_approval(
         s.state.permission_mode,
         name,
         s.state.tool_catalog.as_deref(),
@@ -1210,6 +1256,15 @@ async fn business_tool(
         };
         std::sync::Arc::new(crate::tools::Workspace::new(path)?)
     };
+    if crate::shell_process::is_tool(name) {
+        return crate::shell_process::execute_program(
+            s.state, &tool_workspace, s.task, s.turn, s.task_node_id.as_deref(),
+            name, &args, s.cancel, s.ban_execution,
+        ).await;
+    }
+    if crate::workspace_changes::is_mutation(name) {
+        crate::shell_process::ensure_idle(tool_workspace.root()).await?;
+    }
     if s.delegate_id().is_some()
         && tool_workspace.root() != s.state.workspace.root()
         && crate::workspace_changes::is_mutation(name)
@@ -1248,9 +1303,7 @@ async fn business_tool(
             let frame = crate::function_frames::get(&conn, s.task, owner)?;
             // Frames from before write versions existed have none; conservatively use zero.
             let started = frame.metadata["file_write_clock"].as_i64().unwrap_or(0);
-            if prepared.parallel_conflict(s.state.workspace.root(), s.task, owner, started)? {
-                let mut conflict = prepared.preserve_versions(s.state.workspace.root(), None, "parallel")?;
-                conflict["message"] = json!("Another function changed this file after this function started; the current file and proposed version were preserved.");
+            if let Some(conflict) = prepared.parallel_conflict_result(s.state.workspace.root(), s.task, owner, started)? {
                 return Ok(conflict);
             }
         }
@@ -1446,6 +1499,18 @@ fn material_over_capacity(
         "instruction":"The original body was saved but not delivered. Read only the pages you need with read_asset, session.read_asset in a program (char_offset, max_chars up to 24000); the host does not load it automatically."})
 }
 
+/// A result too large for what is left of a leaf's context. A leaf has no
+/// tools for saved material, so it narrows the call instead of paging.
+fn leaf_over_capacity(s: &Session<'_>, delivery: &Value, required_input_tokens: usize) -> Value {
+    let total_chars = delivery["total_chars"]
+        .as_u64()
+        .or_else(|| delivery.get("original_result").map(|v| v.to_string().chars().count() as u64))
+        .unwrap_or_else(|| delivery.to_string().chars().count() as u64);
+    json!({"error_code":"MATERIAL_OVER_CAPACITY","delivered":false,"total_chars":total_chars,
+        "required_input_tokens":required_input_tokens,"input_budget":s.input_budget,
+        "instruction":format!("This result has {total_chars} characters, more than the room left in this function's context, so it was not delivered. Make a narrower call, such as a smaller path, line range or limit. If the work truly needs all of it, reply with {{\"$task_error\":{{\"message\":\"concrete cause\"}}}}.")})
+}
+
 /// New jobs persist their step at submission. Only legacy jobs consult history.
 fn job_owner(s: &Session<'_>, call: &str, saved: Option<&str>) -> Result<Option<String>> {
     if let Some(owner) = saved {
@@ -1488,6 +1553,63 @@ fn has_visual_jobs(s: &Session<'_>, w: &Window) -> Result<bool> {
         }
     }
     Ok(false)
+}
+/// One event-loop wait. Polling also gives interjections/frame interruption a
+/// bounded wake time; an empty JoinSet must never win the select in a spin.
+async fn wait_for_program(program: &mut agent_program::Runtime, children: &mut tokio::task::JoinSet<Result<()>>, cancel: &CancellationToken) -> Result<bool> {
+    let timer=program.timer_wait();
+    let progress=tokio::select! {
+        biased;
+        _=cancel.cancelled()=> { program.cancel(); anyhow::bail!("cancelled"); },
+        _=tokio::time::sleep(program.remaining_time())=>{program.expire_time_budget();true},
+        result=children.join_next(), if !children.is_empty()=> {
+            if let Some(result)=result {result.context("async function task failed")??;}
+            true
+        },
+        _=tokio::time::sleep(timer.unwrap_or(Duration::from_millis(100))), if timer.is_some()=>true,
+        _=tokio::time::sleep(Duration::from_millis(100))=>false,
+    };
+    Ok(progress)
+}
+
+/// Terminal turn cleanup also updates saved windows: a host restart must not
+/// bring an old timeout back after the user stopped its turn.
+pub(crate) async fn cancel_saved_programs(state: &AgentServiceState, task: &str) -> Result<()> {
+    let task=task.to_owned();
+    db(state.workspace.root(),move |conn| {
+        let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let rows=tx.prepare("SELECT scope,state FROM agent_runtime_windows WHERE task_id=?1")?
+            .query_map([&task],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (scope,raw) in rows {
+            let mut window:Window=serde_json::from_str(&raw)?;
+            if let Some(program)=window.program.as_mut().filter(|program|!program.finished) {
+                program.cancel();
+                tx.execute("UPDATE agent_runtime_windows SET state=?3 WHERE task_id=?1 AND scope=?2",params![task,scope,serde_json::to_string(&window)?])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }).await
+}
+
+/// The frame was marked interrupted: the program that made this call ended.
+async fn frame_interrupted(s: &Session<'_>, w: &mut Window) -> Result<bool> {
+    let Some(id) = w.task_node_id.clone() else {
+        return Ok(false);
+    };
+    let task = s.task.to_owned();
+    let frame = id.clone();
+    let interrupted = db(s.state.workspace.root(), move |conn| {
+        Ok(crate::function_frames::get(conn, &task, &id).is_ok_and(|node| node.status == "interrupted"))
+    })
+    .await?;
+    if interrupted {
+        if let Some(program)=w.program.as_mut() { program.cancel(); }
+        save(s,w).await?;
+        crate::shell_process::cleanup_frame(s.state.workspace.root(), s.task, &frame).await;
+    }
+    Ok(interrupted)
 }
 async fn interjection_pending(s: &Session<'_>) -> Result<bool> {
     let task = s.task.to_owned();
@@ -1644,7 +1766,7 @@ fn spawn_call(children: &mut tokio::task::JoinSet<Result<()>>, s: &Session<'_>, 
             ban_execution, scope, parent: None, input_budget: budget };
         let mut child = child;
         match Box::pin(run_loop(&session, &mut child, 64, false)).await {
-            Ok(LoopResult::Answer | LoopResult::Paused) => Ok(()),
+            Ok(LoopResult::Answer | LoopResult::Paused | LoopResult::Stopped) => Ok(()),
             result => {
                 if child.program.as_ref().is_some_and(|program| !program.inflight_actions().is_empty()) {
                     let mut cleanup = session.clone();
@@ -1687,9 +1809,15 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
     let mut async_children: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
     // The context in view is the current task's; create_task and finish switch it.
     let mut current = s.clone();
-    while model_rounds < max_rounds {
+    'round: while model_rounds < max_rounds {
         current.task_node_id = w.task_node_id.clone();
         let s = &current;
+        // A call whose program ended with an error stops before its next
+        // step; its own calls stop the same way, so wait for them.
+        if !top && frame_interrupted(s, w).await? {
+            while async_children.join_next().await.is_some() {}
+            return Ok(LoopResult::Stopped);
+        }
         activate_page_plugin(s, w).await?;
         // The user spoke while a program ran: it pauses at this step, keeping
         // its state, and the main AI hears the message.
@@ -1746,17 +1874,22 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
                     continue;
                 }
                 program_flow::Round::Waiting => {
-                    if let Some(result) = async_children.join_next().await {
-                        result.context("async function task failed")??;
-                    } else {
+                    if async_children.is_empty() {
                         // Calls of a resumed program continue where they paused.
                         let paused = paused_programs::paused_calls(s, w)?;
-                        if paused.is_empty() {
+                        if paused.is_empty() && !w.program.as_ref().unwrap().inflight_actions().is_empty() {
                             program_flow::interrupt_unfinished(s, w).await?;
+                            continue 'round;
                         }
                         for (scope, child) in paused {
                             spawn_call(&mut async_children, s, scope, child);
                         }
+                    }
+                    loop {
+                        if wait_for_program(w.program.as_mut().unwrap(), &mut async_children, s.cancel).await? { break; }
+                        // Poll just the stop conditions, without serializing a
+                        // potentially large Runtime again every 100 ms.
+                        if (s.is_primary() && interjection_pending(s).await?) || (!top && frame_interrupted(s,w).await?) { break; }
                     }
                     continue;
                 }
@@ -1772,11 +1905,16 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
         let execution = s.clone();
         let s = &execution;
         let calls = crate::model_stream::tool_calls(&message);
-        // A reply that reached the output limit, or a call whose arguments are
-        // not complete JSON, was cut off: nothing in that reply runs, and the
-        // AI is told so and calls again.
+        // The program stopped while this reply was on its way: run none of it.
+        if !top && frame_interrupted(s, w).await? {
+            while async_children.join_next().await.is_some() {}
+            return Ok(LoopResult::Stopped);
+        }
+        // Nothing runs from a reply that reached the output limit or has a
+        // call whose arguments are not valid JSON; the AI is told whether it
+        // was cut off or what is wrong in the JSON, and calls again.
         if cut_off || calls.iter().any(|call| serde_json::from_str::<Value>(&call.arguments).is_err()) {
-            cut_off_reply(s, w, &calls, &node, step).await?;
+            cut_off_reply(s, w, &calls, &node, step, cut_off).await?;
             continue;
         }
         // A reply whose only call is write_program hands over the program.
@@ -1854,12 +1992,19 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
                         .as_str()
                         .context("current function returned no text")
                         .and_then(|text| {
-                            serde_json::from_str::<Value>(text)
-                                .context("current function must return one JSON value")
+                            let value = serde_json::from_str::<Value>(text)
+                                .context("current function must return one JSON value")?;
+                            ensure!(!modules::revision_pending(w) || value["$task_error"].is_object(),
+                                "this call requests a saved module revision; submit the complete implementation with write_program");
+                            Ok(value)
                         });
                     if let Err(error) = parsed {
                         let diagnostic = json!({"code":"FUNCTION_RESULT_INVALID","error":format!("{error:#}"),
-                            "instruction":"Continue in this same function and return one valid JSON value matching its original contract, without Markdown fences. The prior steps and tool results remain in this context; do not repeat completed or uncertain operations. If unable to finish, return a JSON object with $task_error and a concrete cause."});
+                            "instruction":if modules::revision_pending(w) {
+                                "Submit the complete revised implementation with write_program. If unable to finish, return a JSON object with $task_error and a concrete cause."
+                            } else {
+                                "Continue in this same function and return one valid JSON value matching its original contract, without Markdown fences. The prior steps and tool results remain in this context; do not repeat completed or uncertain operations. If unable to finish, return a JSON object with $task_error and a concrete cause."
+                            }});
                         let seq = append(
                             s,
                             "program/result_invalid",
@@ -1912,8 +2057,17 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
         let mut overflow = false;
         let mut asked = None;
         for call in calls {
-            let Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets: released } =
-                execute_call(s, w, &definitions, &node, step, &call, call_count, None).await?;
+            let remaining=w.program.as_ref().map(|p|p.remaining_time());
+            let executed=if let Some(remaining)=remaining {
+                match tokio::time::timeout(remaining,execute_call(s,w,&definitions,&node,step,&call,call_count,None)).await {
+                    Ok(result)=>result?,
+                    Err(_)=>{
+                        if let Some(runtime)=w.program.as_mut() {runtime.expire_time_budget();}
+                        continue 'round;
+                    }
+                }
+            } else {execute_call(s,w,&definitions,&node,step,&call,call_count,None).await?};
+            let Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets: released }=executed;
             if call.name == program_flow::ASK && !is_error {
                 asked = result["question"].as_str().map(str::to_owned);
             }
@@ -1975,8 +2129,20 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
                 }
             }
             if !fits {
-                delivery = material_over_capacity(s, &delivery, Some(seq), required_input_tokens);
-                overflow |= leaf;
+                delivery = if leaf {
+                    leaf_over_capacity(s, &delivery, required_input_tokens)
+                } else {
+                    material_over_capacity(s, &delivery, Some(seq), required_input_tokens)
+                };
+                // One result too large is not a function too large: a leaf
+                // goes on with the notice, and only a context that cannot take
+                // its next request ends it (design guide §8).
+                if leaf {
+                    let mut withheld = w.messages.clone();
+                    withheld.push(json!({"role":"tool","tool_call_id":call.call_id,"content":delivery.to_string()}));
+                    withheld.extend(image_messages.iter().cloned());
+                    overflow |= w.input_tokens(s, &request(s, &withheld, &definitions)).saturating_add(4096) >= s.input_budget;
+                }
             }
             let mut delivered_message = sourced(
                 json!({"role":"tool","tool_call_id":call.call_id,"content":delivery.to_string()}),
@@ -2063,18 +2229,27 @@ async fn cut_off_reply(
     calls: &[crate::model_stream::ToolCall],
     node: &str,
     step: usize,
+    cut_off: bool,
 ) -> Result<()> {
-    let cut = calls
+    // Arguments that stop before their JSON is complete are what a cut-off
+    // reply leaves, even when the service reports an ordinary finish (the
+    // 2026-11-02 Qwen run). Complete text that is not valid JSON, such as a
+    // string with a bad escape, is a different mistake and is named as one.
+    let failures = calls
         .iter()
-        .filter(|call| serde_json::from_str::<Value>(&call.arguments).is_err())
-        .map(|call| call.call_id.clone())
-        .collect::<BTreeSet<_>>();
+        .filter_map(|call| {
+            serde_json::from_str::<Value>(&call.arguments)
+                .err()
+                .map(|error| (call.call_id.clone(), error))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let stopped = cut_off || failures.values().any(|error| error.is_eof());
     if let Some(reply) = w.messages.iter_mut().rev().find(|m| {
         m["role"] == "assistant"
-            && m["tool_calls"].as_array().is_some_and(|calls| calls.iter().any(|c| c["id"].as_str().is_some_and(|id| cut.contains(id))))
+            && m["tool_calls"].as_array().is_some_and(|calls| calls.iter().any(|c| c["id"].as_str().is_some_and(|id| failures.contains_key(id))))
     }) {
         for call in reply["tool_calls"].as_array_mut().into_iter().flatten() {
-            if call["id"].as_str().is_some_and(|id| cut.contains(id)) {
+            if call["id"].as_str().is_some_and(|id| failures.contains_key(id)) {
                 call["function"]["arguments"] = json!("{}");
             }
         }
@@ -2082,14 +2257,24 @@ async fn cut_off_reply(
     for call in calls {
         append(s, "tool/call", json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
             "callId":call.call_id,"name":call.name,"arguments":call.arguments}), false).await?;
-        let result = if cut.contains(&call.call_id) {
-            let received = call.arguments.chars().count();
-            json!({"code":"TOOL_ARGUMENTS_TRUNCATED","executed":false,"received_chars":received,
-                "error":format!("the arguments of this {} call stop after {received} characters and are not complete JSON", call.name),
-                "instruction":"Your reply was most likely cut off at the model's output limit, which your reasoning counts toward as well. Nothing in that reply ran. Call again with shorter arguments: write the code once instead of drafting it in your reasoning first, generate repeated parts such as pages from one template in a loop, or have @virtual functions write the parts."})
-        } else {
-            json!({"code":"NOT_RUN","executed":false,
-                "error":"the reply this call came in was cut off at the model's output limit, so none of its calls ran; make this call again if it is still needed"})
+        let result = match failures.get(&call.call_id) {
+            Some(error) if error.is_eof() => {
+                let received = call.arguments.chars().count();
+                let cause = if cut_off { "Your reply was cut off" } else { "Your reply was most likely cut off" };
+                json!({"code":"TOOL_ARGUMENTS_TRUNCATED","executed":false,"received_chars":received,
+                    "error":format!("the arguments of this {} call stop after {received} characters and are not complete JSON", call.name),
+                    "instruction":format!("{cause} at the model's output limit, which your reasoning counts toward as well. Nothing in that reply ran. Call again with shorter arguments: write the code once instead of drafting it in your reasoning first, generate repeated parts such as pages from one template in a loop, or have @virtual functions write the parts.")})
+            }
+            // The arguments are not replayed, so the text near the fault is
+            // how the AI sees what to fix.
+            Some(error) => json!({"code":"TOOL_ARGUMENTS_INVALID","executed":false,
+                "error":format!("the arguments of this {} call are not valid JSON: {error}", call.name),
+                "near":parse_error_excerpt(&call.arguments, error),
+                "instruction":"Nothing in that reply ran. Call again with the arguments written as valid JSON."}),
+            None if stopped => json!({"code":"NOT_RUN","executed":false,
+                "error":"the reply this call came in was cut off at the model's output limit, so none of its calls ran; make this call again if it is still needed"}),
+            None => json!({"code":"NOT_RUN","executed":false,
+                "error":"another call in this reply had arguments that are not valid JSON, so none of its calls ran; make this call again if it is still needed"}),
         };
         let seq = append(s, "tool/result", json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
             "message":{"role":"tool","toolCallId":call.call_id,"isError":true,"content":[{"type":"text","text":result.to_string()}]},
@@ -2104,6 +2289,22 @@ async fn cut_off_reply(
         w.messages.push(sourced(json!({"role":"user","name":"output_limit","content":notice.to_string()}), s.task, seq));
     }
     save(s, w).await
+}
+
+/// The text around the point where parsing JSON arguments failed.
+fn parse_error_excerpt(text: &str, error: &serde_json::Error) -> String {
+    // serde_json counts the column in bytes from the start of its line.
+    let line_start: usize = text
+        .split_inclusive('\n')
+        .take(error.line().saturating_sub(1))
+        .map(str::len)
+        .sum();
+    let mut at = (line_start + error.column()).min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    let before = text[..at].chars().rev().take(40).collect::<Vec<_>>();
+    before.into_iter().rev().chain(text[at..].chars().take(20)).collect()
 }
 
 /// The AI handed over a program with write_program. The host writes it to the
@@ -2121,36 +2322,39 @@ async fn submit_program(
         "callId":call.call_id,"name":call.name,"arguments":call.arguments}), false).await?;
     let body = program_flow::role(w) == program_flow::Role::Implement;
     let root = s.state.workspace.root();
-    let written = program_flow::written_source(message)
-        .unwrap_or_else(|| Err("write_program needs a source".to_owned()))
-        .map_err(|error| anyhow::anyhow!(error))
-        .and_then(|source| {
-            if body {
-                return Ok((None, source));
-            }
-            let path = host_folder::write_program(root, s.task, s.turn, &source)?;
-            Ok((Some(path.clone()), std::fs::read_to_string(root.join(&path))?))
-        });
-    let path = written.as_ref().ok().and_then(|(path, _)| path.clone());
-    let args = json!({"source":written.as_ref().ok().map(|(_, source)| source)});
-    let installed = written.and_then(|_| program_flow::install_scoped(s, w, &args, body));
+    let mut args: Value = serde_json::from_str(&call.arguments)?;
+    let mut path = None;
+    let installed = (|| -> Result<Value> {
+        let source = args["source"].as_str().context("write_program needs a source")?;
+        if !body && args.get("probe").is_none() {
+            let saved = host_folder::write_program(root, s.task, s.turn, source)?;
+            args["source"] = json!(std::fs::read_to_string(root.join(&saved))?);
+            path = Some(saved);
+        }
+        program_flow::install_scoped(s, w, &args, body)
+    })();
     let source = args["source"].as_str().unwrap_or("");
     let (result, is_error) = match installed {
         Ok(receipt) => {
             let function = w.program_task.as_ref().map(|task| task["name"].clone()).unwrap_or(Value::Null);
             // Main flows are also kept in the project's saved flows.
             let saved_flow = if !body && s.plugin.is_none() { Some(project_flows::save(s, w, source)?) } else { None };
-            append(s, "program/start", json!({"turn":s.turn,"receipt":receipt,"function":function,"source":source,
+            let event = if w.module_probe { "program/probe_start" } else { "program/start" };
+            append(s, event, json!({"turn":s.turn,"receipt":receipt,"function":function,"source":source,
                 "path":path,"saved_flow":saved_flow}), false).await?;
-            if body {
-                // A module's first code is saved for every later call of its contract.
+            if body && !w.module_probe {
+                // New and revised module code is saved for later calls of its contract.
                 modules::authored(s, w, source).await?;
-            } else if s.plugin.is_none() {
+            } else if !body && s.plugin.is_none() {
                 // Getting to know the task ends when the main script starts.
                 program_flow::end_familiarization(w, message, source);
             }
-            (json!({"status":"running","path":path,
-                "note":"The program runs when this reply ends; its outcome comes back to you."}), false)
+            let note = if w.module_probe {
+                "This probe runs once. Its observations return to you in module_probe_result."
+            } else {
+                "The program runs when this reply ends; its outcome comes back to you."
+            };
+            (json!({"status":"running","path":path,"note":note}), false)
         }
         Err(error) => {
             let diagnostic = program_flow::source_error("program", &args, &error);
@@ -2171,7 +2375,8 @@ async fn stop_on_conflict(s: &Session<'_>, result: &Value) -> Result<()> {
     if result["error_code"] == "ASSET_CONFLICT" {
         let message = if let Some(copy) = result["candidate_path"].as_str() {
             let saved = if result["candidate"] == "request" { "这次的修改请求" } else { "待写副本" };
-            let reason = if result["reason"] == "parallel" { "另一个函数在该函数开始工作后修改了文件" } else { "文件与任务记录的版本不同" };
+            let reason = if result["reason"] == "shared_interval" { "文件在共享 shell 执行区间内发生变化，实际作者未知" }
+                else if result["reason"] == "parallel" { "另一个函数在该函数开始工作后修改了文件" } else { "文件与任务记录的版本不同" };
             let mut text = format!("文件 **{}** 存在写入冲突：{}。当前文件未覆盖。{}保存在 `{}`。", result["path"].as_str().unwrap_or(""), reason, saved, copy);
             // Only the task's record gives a common base; the host does not
             // keep what each function read.
@@ -2237,6 +2442,13 @@ async fn execute_call(
     let mut refreshed_from: Option<Value> = None;
     let output=async {
         let args:Value=serde_json::from_str(&call.arguments).context("invalid tool arguments JSON")?;
+        if crate::project_process::is_execution(&call.name) {
+            ensure!(at.is_some() && program_flow::shell_code_allowed(s,w),
+                "SHELL_MODULE_ONLY: declare @module for the needed result (facts, counts or an evidence-based answer), not merely a shell gateway. Run commands and process stdout in its deterministic code; do not expose shell to virtual hooks.");
+        }
+        if w.module_probe && call.name != "parallel_read_batch" {
+            ensure!(program_flow::probe_read(&call.name), "MODULE_PROBE_READ_ONLY: {} is unavailable in a probe", call.name);
+        }
         // Mode enforcement is independent of the model's advertised schema.
         if !program_flow::internal_call(w,call) {validate_tool(s,w,definitions,&call.name)?;}
         if crate::function_frames::is_tool(&call.name) || matches!(call.name.as_str(),"release_assets"|"read_skill"|"unload_skill") {
@@ -2301,11 +2513,16 @@ async fn execute_call(
                 let question = args["question"].as_str().map(str::trim).filter(|q| !q.is_empty()).context("question is required")?;
                 Ok(json!({"question":question,"status":"shown_to_user"}))
             },
-            "read_program_guide" => { Ok(json!({"guide":crate::agent_program::CAPABILITIES})) },
+            "read_program_guide" => { Ok(json!({"guide":crate::agent_program::CAPABILITIES,"builtin_contracts":crate::agent_program::BUILTIN_CONTRACTS})) },
             "read_tool_contracts" => {
+                use crate::agent_program::declarations;
                 let catalog = program_flow::library_catalog(s, definitions);
-                let selected = crate::agent_program::declarations::selected(&catalog, &args)?;
-                Ok(json!({"declarations":crate::agent_program::declarations::headers(&selected, definitions)}))
+                let selected = declarations::selected(&catalog, &args)?;
+                if args["overview"] == true {
+                    Ok(json!({"overview":declarations::overview(&selected, definitions)}))
+                } else {
+                    Ok(json!({"declarations":declarations::headers(&selected, definitions)}))
+                }
             },
             "propose_project_note" => {
                 ensure!(s.is_primary() && s.plugin.is_none(),"project notes are proposed by the main Agent of a code session");
@@ -2408,7 +2625,8 @@ async fn execute_call(
                 // A delegate's small write receipts are artifacts too: preserve
                 // their paths/versions even after its working window is gone.
                 if crate::context_assets::is_material_tool(name) || s.delegate_id().is_some() {material_source=Some((name.to_owned(),args.clone()));}
-                business_tool(s,&node,name,args,&call.call_id).await
+                business_tool_inner(s,&node,name,args,&call.call_id,
+                    at.is_some() && program_flow::shell_code_allowed(s,w)).await
             },
         }
     }.await;
@@ -2422,7 +2640,8 @@ async fn execute_call(
     }
     let is_error = output.is_err() || output.as_ref().is_ok_and(|value| value["error_code"] == "ASSET_CONFLICT" || value["host_denied"] == true);
     let result = output.unwrap_or_else(|error| {
-            json!({"error":format!("{error:#}")})
+            error.downcast_ref::<crate::shell_process::OutputCapacityError>()
+                .map(|error| error.0.clone()).unwrap_or_else(|| json!({"error":format!("{error:#}")}))
     });
     let seq=append(s,"tool/result",json!({
         "actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
@@ -2694,17 +2913,82 @@ mod tests {
     use axum::{Json, Router, extract::State, routing::post};
     use std::sync::{Arc, Mutex};
 
-    pub(super) fn declares(body: &Value, library: &str, method: &str) -> bool {
+    fn timer_program(source: &str) -> agent_program::Runtime {
+        let program=agent_program::compile(source).unwrap();
+        agent_program::Runtime::new(program, agent_program::ENTRY, vec![]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn vm_stage2_host_wait_drives_timer_only_program_without_any_model() {
+        let mut run=timer_program("setTimeout(()=>console.log('fired'),5);const result=7;");
+        let mut children=tokio::task::JoinSet::new();
+        let cancel=CancellationToken::new();
+        let finished=tokio::time::timeout(Duration::from_secs(2),async {
+            for _ in 0..30 {
+                match run.next() {
+                    agent_program::State::Waiting=>{wait_for_program(&mut run,&mut children,&cancel).await.unwrap();},
+                    agent_program::State::Returned(_)=>return,
+                    other=>panic!("unexpected state {other:?}"),
+                }
+            }
+            panic!("host is spinning")
+        }).await;
+        finished.unwrap();
+        assert_eq!(run.logs(),["fired"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn vm_stage2_host_wait_handles_child_completion_poll_and_cancellation() {
+        let mut run=timer_program("setInterval(()=>{},10000);");
+        assert!(matches!(run.next(),agent_program::State::Waiting));
+        let mut children=tokio::task::JoinSet::new();
+        children.spawn(async {tokio::time::sleep(Duration::from_millis(7)).await;Ok(())});
+        let cancel=CancellationToken::new();
+        let start=tokio::time::Instant::now();
+        assert!(wait_for_program(&mut run,&mut children,&cancel).await.unwrap());
+        assert!(start.elapsed()<Duration::from_millis(100));
+        let start=tokio::time::Instant::now();
+        assert!(!wait_for_program(&mut run,&mut children,&cancel).await.unwrap());
+        assert_eq!(start.elapsed(),Duration::from_millis(100));
+        cancel.cancel();
+        assert!(wait_for_program(&mut run,&mut children,&cancel).await.is_err());
+        assert_eq!(run.next_timer_at(),None);
+        assert!(matches!(run.next(),agent_program::State::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn vm_stage2_host_terminal_cleanup_cancels_all_saved_scopes() {
+        let root=TestRoot::new();
+        let state=agent_service::tests::test_state(root.path(),"127.0.0.1:9".parse().unwrap());
+        let conn=agent_service::open_db(root.path()).unwrap();
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_runtime_windows(task_id TEXT NOT NULL,scope TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(task_id,scope))").unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",[]).unwrap();
+        for scope in ["main","node:module"] {
+            let mut run=timer_program("setInterval(()=>console.log('must not run'),10000);");
+            assert!(matches!(run.next(),agent_program::State::Waiting));
+            let window=Window {program:Some(run),..Default::default()};
+            conn.execute("INSERT INTO agent_runtime_windows VALUES ('task',?1,?2)",params![scope,serde_json::to_string(&window).unwrap()]).unwrap();
+        }
+        cancel_saved_programs(&state,"task").await.unwrap();
+        let windows=conn.prepare("SELECT state FROM agent_runtime_windows WHERE task_id='task'").unwrap()
+            .query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(windows.len(),2);
+        for raw in windows {
+            let mut window:Window=serde_json::from_str(&raw).unwrap();
+            let run=window.program.as_mut().unwrap();
+            assert_eq!(run.next_timer_at(),None);
+            assert!(matches!(run.next(),agent_program::State::Failed(ref e) if e["code"]=="PROGRAM_CANCELLED"));
+        }
+    }
+
+    fn lists_builtin_library(body: &Value, library: &str) -> bool {
         body["messages"]
             .as_array()
             .unwrap()
             .iter()
             .find(|m| m["name"] == "program_tool_headers")
             .and_then(|m| m["content"].as_str())
-            .is_some_and(|text| {
-                text.contains(&format!("declare namespace {library}"))
-                    && text.contains(&format!("function {method}("))
-            })
+            .is_some_and(|text| text.lines().any(|line| line.starts_with(&format!("- {library} — "))))
     }
     /// The index names a third-party library a program can require.
     fn requirable(body: &Value, library: &str) -> bool {
@@ -3172,13 +3456,13 @@ mod tests {
         let received = requests.clone();
         let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
             received.lock().unwrap().push(body.clone());
-            let hook = body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_task_input");
-            let content = if hook {
-                json!({"ok": true}).to_string()
-            } else if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") {
-                "检查完成".to_owned()
-            } else {
-                "```js\nconst verdict = await judge(\"x\");\n\n/** @virtual */\nasync function judge(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".to_owned()
+            let role = body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "program_task_input")
+                .map(|m| serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap()["role"].as_str().unwrap_or("").to_owned());
+            let content = match role.as_deref() {
+                Some("leaf") => json!({"ok": true}).to_string(),
+                Some(_) => "```js\nasync function check(x) {\n  return await judge(x);\n}\n/** @virtual */\nasync function judge(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".to_owned(),
+                None if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => "检查完成".to_owned(),
+                None => "```js\nconst verdict = await check(\"x\");\n\n/** @module */\nasync function check(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".to_owned(),
             };
             async move { Json(program_flow::fixture_completion(&content)) }
         }));
@@ -3196,8 +3480,8 @@ mod tests {
         let (hooks, main): (Vec<&Value>, Vec<&Value>) = requests.iter().partition(|body| body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_task_input"));
         let plugin = |body: &Value| body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "plugin_instructions" || m["content"].as_str().is_some_and(|text| text.contains("plugin's dedicated conversation")));
         assert!(!main.is_empty() && main.iter().all(|body| plugin(body)), "the page's conversation references its plugin");
-        assert_eq!(hooks.len(), 1);
-        assert!(!plugin(hooks[0]), "a function the program calls brings only what it references");
+        assert_eq!(hooks.len(), 2, "the module's author and the hook its code declares");
+        assert!(hooks.iter().all(|body| !plugin(body)), "a function the program calls brings only what it references");
         runtime.shutdown().unwrap();
     }
 
@@ -3314,7 +3598,7 @@ mod tests {
                 // there to require before, during and after.
                 assert!((1..=8).contains(&n),"unexpected model request");
                 assert!(requirable(&body,"flow"),"a plugin library does not wait for its skill to load");
-                assert!(!declares(&body,"flow","read_code_flow"),"a third-party library is named, not listed method by method");
+                assert!(!lists_builtin_library(&body,"flow"),"a third-party library is listed separately");
                 if n==3 {
                     let tool=body["messages"].as_array().unwrap().iter().rev().find(|message|message["role"]=="tool").unwrap();
                     let packet:Value=serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
@@ -3807,7 +4091,7 @@ mod tests {
                     assert_eq!(messages[result_index-1]["tool_calls"][0]["id"],"analyze-call");
                     json!({"role":"assistant","content":"根据图像分析工具，第二页末行越界，原因待核对。"})
                 } else if body["messages"].as_array().unwrap().iter().any(|m|m["tool_call_id"]=="start") {
-                    assert!(declares(&body,"vision","analyze_images"));
+                    assert!(lists_builtin_library(&body,"vision"));
                     json!({"role":"assistant","content":null,"tool_calls":[{"id":"analyze-call","type":"function","function":{"name":"analyze_images","arguments":json!({"artifact_ids":[id],"question":"检查这张图"}).to_string()}}]})
                 } else {
                     json!({"role":"assistant","content":null,"tool_calls":[{"id":"start","type":"function","function":{"name":"create_task","arguments":json!({"goal":"Inspect the uploaded picture","briefing":"Analyze the picture"}).to_string()}}]})

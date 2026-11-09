@@ -32,6 +32,7 @@ import pluginsCss from '../dsh/settings/PluginInventorySettingsTab.module.css'
 import rootCss from '../dsh/settings/SettingsRoot.module.css'
 import { getThemeMode, setThemeMode, type ThemeMode } from '../theme.ts'
 import type { SettingsTab } from '../useAgentWorkspace.ts'
+import { shellSetupApi, type ShellStatus } from '../shellSetup.ts'
 
 interface DraftProvider {
   prefix_system_messages:boolean
@@ -50,6 +51,8 @@ interface DraftProvider {
 }
 
 interface DraftSettings {
+  bash_path: string
+  pwsh_path: string
   plugin_models: Record<string,readonly ModelRef[]>
   visual_tool: ModelUseSettings
   delegate_agent: ModelUseSettings
@@ -77,6 +80,8 @@ function parseModels(lines: string): string[] {
 
 function toDraft(data: SettingsData): DraftSettings {
   return {
+    bash_path: data.bash_path ?? '',
+    pwsh_path: data.pwsh_path ?? '',
     revision: data.revision,
     plugin_models: {...data.plugin_models},
     visual_tool: data.visual_tool ?? {},
@@ -142,11 +147,15 @@ export function SettingsModal({
   const [packages,setPackages]=useState<SkillPackage[]>([])
   const [pluginQuery, setPluginQuery] = useState('')
   const [expandedPlugins, setExpandedPlugins] = useState<Record<string, boolean>>({})
+  const [shellStatus, setShellStatus] = useState<ShellStatus | null>(null)
+  const [detectingShell, setDetectingShell] = useState(false)
+  const windowsShell = shellStatus?.platform.os === 'windows'
 
   const loadSettings = useCallback(() => {
     setStatusMsg(null)
     api.getSettings().then(
       (data) => {
+        setShellStatus(data.shell_environment ?? null)
         const next = toDraft(data)
         setDraft(next)
         setBaseline(JSON.stringify(next))
@@ -240,6 +249,7 @@ export function SettingsModal({
       const selectedCapability = draft.providers.find(p => p.id === draft.orchestrator_provider)
         ?.model_capabilities[draft.orchestrator_model]
       const saved = await api.saveSettings({
+        ...(windowsShell ? { pwsh_path: draft.pwsh_path.trim() } : { bash_path: draft.bash_path.trim() }),
         revision: draft.revision,
         plugin_models: draft.plugin_models,
         visual_tool: draft.visual_tool,
@@ -251,6 +261,7 @@ export function SettingsModal({
         fast_mode: Boolean(selectedCapability?.fast_mode && draft.fast_mode),
       })
       const savedDraft = toDraft(saved)
+      setShellStatus(saved.shell_environment ?? null)
       setDraft(savedDraft)
       setBaseline(JSON.stringify(savedDraft))
       setStatusMsg({ text: '设置已保存并立即对新任务生效。', error: false })
@@ -431,7 +442,7 @@ export function SettingsModal({
               <div className={modelsCss.section}>
                 <div className={modelsCss.pageHead}>
                   <h2 className={modelsCss.title}>通用设置</h2>
-                  <p className={modelsCss.intro}>自定义界面的外观主题，并查看当前工作区环境。</p>
+                  <p className={modelsCss.intro}>自定义界面外观、命令运行环境，并查看当前工作区。</p>
                 </div>
 
                 <div className={appearanceCss.block}>
@@ -466,6 +477,52 @@ export function SettingsModal({
                           </button>
                         ))}
                       </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className={appearanceCss.block}>
+                  <div className={appearanceCss.label}>命令运行环境</div>
+                  <div className={appearanceCss.group}>
+                    <div className={appearanceCss.row}>
+                      <label className={appearanceCss.rowText} htmlFor="settings-shell-path">
+                        <span className={appearanceCss.rowTitle}>{windowsShell ? 'PowerShell 7 可执行文件路径' : 'Bash 可执行文件路径'}</span>
+                        <span className={appearanceCss.rowHint}>留空自动查找；保存后对下一次命令立即生效。</span>
+                      </label>
+                      <div className={appearanceCss.control}>
+                        <input
+                          id="settings-shell-path"
+                          className={modelsCss.input}
+                          value={(windowsShell ? draft?.pwsh_path : draft?.bash_path) ?? ''}
+                          placeholder={windowsShell ? 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' : '/bin/bash'}
+                          disabled={draft === null || saving}
+                          spellCheck={false}
+                          onChange={event => { updateDraft(windowsShell ? { pwsh_path: event.target.value } : { bash_path: event.target.value }) }}
+                        />
+                      </div>
+                    </div>
+                    <div className={appearanceCss.row}>
+                      <span className={appearanceCss.rowHint}>{windowsShell
+                        ? '只使用 PowerShell 7 及以上版本。手动路径优先，其次是 GROW_PWSH_PATH 环境变量，再自动查找；不会回退到 Windows PowerShell 5.1。'
+                        : '手动路径优先，其次是 GROW_BASH_PATH 环境变量，再自动查找 /bin/bash 或 PATH。'}</span>
+                    </div>
+                    <div className={appearanceCss.row}>
+                      <div className={appearanceCss.rowText}>
+                        <span className={appearanceCss.rowTitle}>{shellStatus?.cache?.validated ? (shellStatus.available ? '运行环境可用' : '运行环境不可用') : '尚未检测'}</span>
+                        <span className={appearanceCss.rowHint} style={{ overflowWrap: 'anywhere' }}>{shellStatus?.executable ?? '进入代码会话时检测，也可手动重新检测。'}</span>
+                        {shellStatus?.version && <span className={appearanceCss.rowHint}>版本 {shellStatus.version}{shellStatus.cache?.cached ? ' · 已缓存' : ''}</span>}
+                        {shellStatus?.cache?.checked_at && <span className={appearanceCss.rowHint}>检测时间 {new Date(shellStatus.cache.checked_at).toLocaleString()}</span>}
+                        {shellStatus?.error && <span className={modelsCss.error}>{shellStatus.error}</span>}
+                      </div>
+                      <button type="button" className={modelsCss.primaryButton} disabled={detectingShell || saving || draft === null}
+                        onClick={() => {
+                          setDetectingShell(true)
+                          void shellSetupApi.detect().then(setShellStatus).catch((error: unknown) => {
+                            setStatusMsg({ text: error instanceof Error ? error.message : String(error), error: true })
+                          }).finally(() => { setDetectingShell(false) })
+                        }}>
+                        {detectingShell ? '检测中…' : '重新检测'}
+                      </button>
                     </div>
                   </div>
                 </div>

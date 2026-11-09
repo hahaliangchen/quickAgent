@@ -47,6 +47,8 @@ mod rewind;
 mod rust_index;
 mod session_browser;
 mod session_history;
+mod shell_environment;
+mod shell_process;
 mod single_agent;
 mod skill_packages;
 mod source_read;

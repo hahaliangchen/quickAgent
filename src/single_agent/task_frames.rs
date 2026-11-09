@@ -265,9 +265,10 @@ pub(super) async fn start_parallel_function(
 
 pub(super) async fn interrupt_parallel_function(s: &Session<'_>, call_id: &str) -> Result<()> {
     let task = s.task.to_owned(); let call_id = call_id.to_owned(); let turn = s.turn;
-    db(s.state.workspace.root(), move |conn| {
+    let interrupted = db(s.state.workspace.root(), move |conn| {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let nodes = tree::nodes(&tx, &task)?;
+        let mut interrupted = Vec::new();
         if let Some(root) = nodes.iter().find(|node| node.metadata["parallel_call_id"] == call_id) {
             let root_id = root.node_id.clone();
             for mut node in nodes {
@@ -275,14 +276,19 @@ pub(super) async fn interrupt_parallel_function(s: &Session<'_>, call_id: &str) 
                     && tree::path(&tx, &task, &node.node_id)?.iter().any(|ancestor| ancestor.node_id == root_id)
                 {
                     node.status = "interrupted".into();
+                    interrupted.push(node.node_id.clone());
                     node.result = Some(json!({"message":"execution interrupted; effects were not replayed"}));
                     tree::emit(&tx, &task, "task/node_returned", &mut node, turn)?;
                 }
             }
         }
         tx.commit()?;
-        Ok(())
-    }).await
+        Ok(interrupted)
+    }).await?;
+    for owner in interrupted {
+        crate::shell_process::cleanup_frame(s.state.workspace.root(), s.task, &owner).await;
+    }
+    Ok(())
 }
 
 /// Enter exactly one compiled function. The suspended Runtime is the only
@@ -382,7 +388,13 @@ fn temporary_frame(s: &Session<'_>, parent: &Window, node: &Node) -> Result<Wind
     let task = node.inputs["program_task"]
         .as_object()
         .context("compiled function descriptor required")?;
-    let task = Value::Object(task.clone());
+    let mut task = Value::Object(task.clone());
+    if task["module"] == true && !parent.module_revisions.is_empty() {
+        let contract = super::modules::contract(&task)?;
+        if let Some(revision) = parent.module_revisions.get(&contract.key) {
+            task["revision"] = json!(revision);
+        }
+    }
     let input = super::program_flow::call_view(&task)?;
     let virtual_function = task["role"] != "body";
     if virtual_function {
@@ -684,7 +696,7 @@ pub(super) fn memory_index(
         .collect::<Vec<_>>();
     Ok(Some(
         json!({"host_status":true,"not_a_user_request":true,"entries":entries,"entries_omitted":omitted,
-        "instruction":"Index of completed main tasks and task-free questions, oldest completion first. Each task has one entry with its goal, final summary and node_id even if it spanned multiple turns. Function calls are included in their main task, not separate entries. Working context and programs are not loaded here. Read details with read_session_history using the task node_id and include_descendants=true, or turn for a question/answer entry; add programs:true with the turn to read the code that turn ran."}),
+        "instruction":"Index of completed main tasks and task-free questions, oldest completion first. Each task has one entry with its goal, final summary and node_id even if it spanned multiple turns. Function calls are included in their main task, not separate entries. Working context and programs are not loaded here. Read details with read_session_history using the task node_id and include_descendants=true, or turn for a question/answer entry. Use programs:true,directory:'.' with the turn to browse flow files, or directory:'modules' to list reusable module versions available by that turn. Open a listed path with program; add output:true to read a main flow's recorded output."}),
     ))
 }
 

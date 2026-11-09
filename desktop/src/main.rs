@@ -67,6 +67,9 @@ fn desktop_port(data: &std::path::Path) -> Result<u16, Box<dyn std::error::Error
 
 fn main() {
     tauri::Builder::default()
+        // The agent page asks the OS for a project folder through this plugin;
+        // `capabilities/agent-page.json` limits it to that one command.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let resources = if cfg!(debug_assertions) {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -1,0 +1,86 @@
+/* "创建项目" dialog. Colours come from the theme tokens so light, dark and garden all read correctly. */
+.dialog {
+  width: min(650px, calc(100vw - 32px));
+  max-width: none;
+  padding: 0;
+  gap: 0;
+  border: 1px solid var(--codex-card-border);
+  border-radius: 24px;
+  background: var(--codex-panel-bg);
+  color: var(--codex-text-primary);
+}
+.form { padding: 28px 28px 24px; }
+
+.header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.header h2 { margin: 0; font-size: 24px; font-weight: 700; line-height: 1.25; }
+.close {
+  display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px;
+  background: transparent; color: var(--codex-text-muted); cursor: pointer;
+}
+.close:hover:not(:disabled) { background: var(--codex-hover-bg); color: var(--codex-text-primary); }
+
+/* Name field: folder glyph in its own cell, divided from the text. */
+.nameField {
+  display: flex; align-items: stretch; height: 50px; overflow: hidden; cursor: text;
+  border: 1px solid var(--codex-card-border); border-radius: 14px; background: var(--codex-card-bg);
+}
+.nameField:focus-within { border-color: var(--codex-blue-primary); box-shadow: 0 0 0 1px var(--codex-blue-primary); }
+.nameIcon {
+  display: grid; place-items: center; flex: none; width: 50px;
+  border-right: 1px solid var(--codex-card-border); color: var(--codex-text-secondary);
+}
+.nameField input, .pathArea input {
+  width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; font-size: 16px;
+}
+.nameField input { padding: 0 14px; }
+.nameField input::placeholder, .pathArea input::placeholder { color: var(--codex-text-muted); opacity: .65; }
+
+.sourceLabel { margin: 20px 0 10px; font-size: 16px; font-weight: 600; }
+.sourceBox {
+  display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 14px; min-height: 128px;
+  border: 1px solid var(--codex-card-border); border-radius: 14px; background: var(--codex-card-bg);
+}
+.sourceHint { color: var(--codex-text-muted); font-size: 16px; }
+.addButton {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border: 0; border-radius: 18px;
+  background: var(--codex-hover-bg); color: var(--codex-text-primary); font: inherit; font-size: 15px; cursor: pointer;
+}
+.addButton:hover:not(:disabled) { background: var(--codex-active-hover); }
+
+/* The chosen folder. */
+.picked { box-sizing: border-box; display: flex; align-items: center; gap: 12px; width: 100%; padding: 14px 14px 14px 18px; }
+.pickedIcon { display: grid; place-items: center; flex: none; width: 38px; height: 38px; border-radius: 10px; background: var(--codex-hover-bg); color: var(--codex-text-secondary); }
+.pickedText { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 2px; }
+.pickedText strong { overflow: hidden; font-size: 16px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.pickedText small { overflow: hidden; color: var(--codex-text-muted); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.change {
+  flex: none; padding: 5px 12px; border: 0; border-radius: 14px; background: var(--codex-hover-bg);
+  color: var(--codex-text-primary); font: inherit; font-size: 14px; cursor: pointer;
+}
+.change:hover:not(:disabled) { background: var(--codex-active-hover); }
+.remove {
+  display: grid; place-items: center; flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 8px;
+  background: transparent; color: var(--codex-text-muted); cursor: pointer;
+}
+.remove:hover:not(:disabled) { background: var(--codex-hover-bg); color: var(--codex-text-primary); }
+
+/* Typed path: only where there is no system chooser (a plain browser). */
+.pathArea { box-sizing: border-box; width: 100%; padding: 18px; }
+.pathArea label { display: block; margin-bottom: 8px; color: var(--codex-text-muted); font-size: 13px; }
+.pathArea input { box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--codex-card-border); border-radius: 9px; font-size: 14px; }
+.pathArea input:focus { border-color: var(--codex-blue-primary); }
+
+.error { margin: 12px 0 0; color: #d33b3b; font-size: 13px; }
+
+.footer { display: flex; justify-content: flex-end; align-items: center; gap: 24px; margin-top: 34px; }
+.cancel, .create { font: inherit; font-size: 16px; cursor: pointer; }
+.cancel { border: 0; background: transparent; color: var(--codex-text-muted); }
+.cancel:hover:not(:disabled) { color: var(--codex-text-primary); }
+.create {
+  min-width: 112px; min-height: 40px; padding: 0 20px; border: 0; border-radius: 12px;
+  background: var(--codex-text-primary); color: var(--codex-card-bg); font-weight: 600;
+}
+.create:hover:not(:disabled) { opacity: .88; }
+.close:disabled, .change:disabled, .remove:disabled, .addButton:disabled, .cancel:disabled, .create:disabled { opacity: .55; cursor: default; }
+
+@media (max-width: 520px) { .form { padding: 20px; } .footer { margin-top: 26px; } }

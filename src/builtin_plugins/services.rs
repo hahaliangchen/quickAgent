@@ -175,7 +175,6 @@ impl Plugin for ToolCatalogPlugin {
         context.provide("tools", Arc::new(ToolCatalog::default()))?;
         context.mount(FileToolsPlugin)?;
         context.mount(MemoryPlugin)?;
-        context.mount(CodeIndexPlugin)?;
         context.mount(crate::skill_packages::PackagesPlugin)?;
         context.mount(AgentTasksPlugin)?;
         Ok(())
@@ -183,6 +182,9 @@ impl Plugin for ToolCatalogPlugin {
 }
 
 const FILE_TOOLS: &[&str] = &[
+    "exec_command",
+    "write_stdin",
+    "kill_session",
     "workspace_info",
     "list_dir",
     "read_file",
@@ -203,30 +205,6 @@ const MEMORY_TOOLS: &[&str] = &[
     "list_symbol_business_context",
     "search_symbol_business_context",
 ];
-const INDEX_TOOLS: &[&str] = &[
-    "search_code_map",
-    "index_go_workspace",
-    "go_index_status",
-    "list_go_symbols",
-    "search_go_symbols",
-    "read_go_symbol",
-    "index_rust_workspace",
-    "rust_index_status",
-    "list_rust_symbols",
-    "search_rust_symbols",
-    "read_rust_symbol",
-    "index_ts_workspace",
-    "ts_index_status",
-    "list_ts_symbols",
-    "search_ts_symbols",
-    "read_ts_symbol",
-    "index_python_workspace",
-    "python_index_status",
-    "list_python_symbols",
-    "search_python_symbols",
-    "read_python_symbol",
-];
-
 fn register_tools(
     context: &PluginContext<'_>,
     names: &'static [&'static str],
@@ -276,23 +254,6 @@ impl Plugin for MemoryPlugin {
     }
 }
 
-pub struct CodeIndexPlugin;
-impl Plugin for CodeIndexPlugin {
-    fn id(&self) -> &'static str {
-        "code-index"
-    }
-    fn requires(&self) -> Vec<String> {
-        ["tools", "workspace"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    }
-    fn start(&self, context: &PluginContext<'_>) -> Result<()> {
-        register_tools(context, INDEX_TOOLS, mcp_handler())?;
-        context.provide("code-index", Arc::new(()))
-    }
-}
-
 pub struct AgentTasksPlugin;
 
 impl Plugin for AgentTasksPlugin {
@@ -306,7 +267,6 @@ impl Plugin for AgentTasksPlugin {
             "tools",
             "file-tools",
             "memory",
-            "code-index",
             "skill-packages",
         ]
         .into_iter()

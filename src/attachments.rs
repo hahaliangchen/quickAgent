@@ -379,6 +379,20 @@ pub fn already(
     }
     Ok(false)
 }
+
+/// Admission is committed before the task loop writes turn/start. A shutdown
+/// in that gap must not make the next message reuse an occupied turn number.
+/// Call inside the same immediate transaction as admit so concurrent senders
+/// cannot reserve the same number. Existing admissions are never overwritten.
+pub(crate) fn next_turn(c: &Connection, task: &str, last_event_turn: usize) -> Result<usize> {
+    schema(c)?;
+    let last_admitted: i64 = c.query_row(
+        "SELECT COALESCE(MAX(turn),0) FROM agent_attachment_messages WHERE task_id=?1",
+        [task], |row| row.get(0),
+    )?;
+    last_event_turn.max(usize::try_from(last_admitted).context("invalid admitted turn number")?)
+        .checked_add(1).context("conversation turn number exhausted")
+}
 pub fn admitted(root: &FsPath, task: &str, turn: usize) -> Result<Vec<Value>> {
     let c = agent_service::open_db(root)?;
     schema(&c)?;
@@ -851,6 +865,54 @@ mod tests {
         .unwrap();
         out.into_inner()
     }
+    #[test]
+    fn a_message_admitted_before_shutdown_does_not_block_the_next_turn() {
+        let f = Fixture::new();
+        {
+            let mut c = agent_service::open_db(&f.root).unwrap();
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+            admit(&tx, &f.root, "a", 1, "first", &[], Some("request-1"), None).unwrap();
+            // The second message was admitted but no turn/start was emitted.
+            admit(&tx, &f.root, "a", 2, "accepted before shutdown", &[], Some("request-2"), None).unwrap();
+            tx.commit().unwrap();
+        }
+        let mut c = agent_service::open_db(&f.root).unwrap();
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        assert!(already(&tx, "a", "request-2", "accepted before shutdown", &[]).unwrap());
+        let turn = next_turn(&tx, "a", 1).unwrap();
+        assert_eq!(turn, 3);
+        admit(&tx, &f.root, "a", turn, "continue after restart", &[], Some("request-3"), None).unwrap();
+        assert_eq!(next_turn(&tx, "b", 0).unwrap(), 1, "turns are conversation scoped");
+        assert_eq!(next_turn(&tx, "a", 8).unwrap(), 9, "event-only older sessions keep their numbering");
+        tx.commit().unwrap();
+        assert_eq!(admitted(&f.root, "a", 2).unwrap()[0]["text"], "accepted before shutdown");
+        assert_eq!(admitted(&f.root, "a", 3).unwrap()[0]["text"], "continue after restart");
+    }
+
+    #[test]
+    fn extracted_document_json_is_codepage_independent_and_emoji_pages_are_scalar_safe() {
+        let f = Fixture::new();
+        let input = f.root.join("encoding-regression.txt");
+        let text = format!("{}😀中文\\uDC00", "a".repeat(11_999));
+        std::fs::write(&input, text.as_bytes()).unwrap();
+        let output = std::process::Command::new("python3")
+            .arg("-c").arg(include_str!("attachments/read_document.py"))
+            .arg(&input).arg("encoding-regression.txt")
+            .env("PYTHONIOENCODING", "cp936").env("PYTHONUTF8", "0")
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stdout.is_ascii(), "extractor transport must not use the console code page");
+        let extracted: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(extracted["text"], text);
+        let text = extracted["text"].as_str().unwrap();
+        let first: String = text.chars().take(12_000).collect();
+        let rest: String = text.chars().skip(12_000).collect();
+        assert!(first.ends_with('😀'));
+        assert_eq!(format!("{first}{rest}"), text);
+        let encoded = serde_json::to_vec(&json!({"first": first, "rest": rest})).unwrap();
+        assert!(serde_json::from_slice::<Value>(&encoded).is_ok());
+    }
+
     #[tokio::test]
     async fn attachments_receipts_are_scoped_transactional_and_durable() {
         let f = Fixture::new();

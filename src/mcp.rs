@@ -51,7 +51,7 @@ pub async fn handle_mcp_get(headers: HeaderMap) -> Response {
     };
     let (receiver, cancel) = {
         let mut sessions = sessions().lock().unwrap();
-        sessions.retain(|_, session| session.last_used.elapsed().as_secs() < 7200);
+        sessions.retain(|_, session| session.last_used.elapsed() < SESSION_IDLE_TIMEOUT);
         let Some(session) = sessions.get_mut(id) else {
             return StatusCode::NOT_FOUND.into_response();
         };
@@ -122,16 +122,110 @@ pub struct JsonRpcError {
 struct SkillActivation {
     active: std::collections::BTreeSet<String>,
     scopes: std::collections::BTreeMap<String, crate::plugin_runtime::ScopeId>,
+    shell: McpShellScope,
+}
+
+struct McpShellScope {
+    task: String,
+    cancel: tokio_util::sync::CancellationToken,
+    state: Option<crate::agent_service::AgentServiceState>,
+}
+struct McpShellContext {
+    state: crate::agent_service::AgentServiceState,
+    task: String,
+    cancel: tokio_util::sync::CancellationToken,
+}
+impl Default for McpShellScope {
+    fn default() -> Self {
+        Self {
+            task: format!("mcp_shell_{}", crate::agent_service::uuid_like()),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            state: None,
+        }
+    }
+}
+impl Drop for McpShellScope {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+impl McpShellScope {
+    async fn context(
+        &mut self,
+        workspace: &Arc<Workspace>,
+    ) -> anyhow::Result<McpShellContext> {
+        anyhow::ensure!(!self.cancel.is_cancelled(), "MCP shell session is closed");
+        if self.state.is_none() {
+            let state = crate::agent_service::AgentServiceState {
+                workspace: workspace.clone(),
+                model_client: crate::model_transport::client()?,
+                model_request_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+                provider_url: String::new(),
+                api_key: String::new(),
+                provider_name: String::new(),
+                provider_routes: Default::default(),
+                default_model: String::new(),
+                model_map: Default::default(),
+                reasoning_effort: None,
+                fast_mode: false,
+                // External MCP keeps the same host access as run_program.
+                permission_mode: crate::agent_service::PermissionMode::FullAccess,
+                visual: Default::default(),
+                visual_tool_settings: Default::default(),
+                delegate_agent_settings: Default::default(),
+                config: None,
+                config_path: None,
+                tool_catalog: None,
+                plugin_cancel: self.cancel.clone(),
+                cancellations: Arc::default(),
+            };
+            let root = workspace.root().to_path_buf();
+            let task = self.task.clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let conn = crate::agent_service::open_db(&root)?;
+                // Blank prompt, terminal status and no user/message keep this
+                // event/asset owner out of the normal UI conversation list.
+                conn.execute(
+                    "INSERT OR IGNORE INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES (?1,'','','completed',?2,?2)",
+                    rusqlite::params![task, crate::agent_service::now()],
+                )?;
+                Ok(())
+            }).await??;
+            self.state = Some(state);
+        }
+        let state = self.state.as_ref().unwrap();
+        anyhow::ensure!(
+            state.workspace.root().canonicalize()? == workspace.root().canonicalize()?,
+            "MCP shell session belongs to another workspace"
+        );
+        anyhow::ensure!(!self.cancel.is_cancelled(), "MCP shell session is closed");
+        Ok(McpShellContext {
+            state: state.clone(),
+            task: self.task.clone(),
+            cancel: self.cancel.clone(),
+        })
+    }
+}
+impl McpShellContext {
+    async fn execute(&self, workspace: &Arc<Workspace>, name: &str, args: &Value) -> anyhow::Result<Value> {
+        // MCP has no automatic user-turn signal. Keep one execution turn per
+        // session so its background shells can coexist with later commands.
+        crate::shell_process::execute(
+            &self.state, workspace, &self.task, 1, None, name, args, &self.cancel, false,
+        ).await
+    }
 }
 struct McpSession {
     last_used: std::time::Instant,
     skills: Arc<tokio::sync::Mutex<SkillActivation>>,
     changed: tokio::sync::watch::Sender<u64>,
     stream: tokio_util::sync::CancellationToken,
+    cancel: tokio_util::sync::CancellationToken,
 }
 impl Drop for McpSession {
     fn drop(&mut self) {
         self.stream.cancel();
+        self.cancel.cancel();
     }
 }
 static MCP_SESSIONS: std::sync::OnceLock<
@@ -139,6 +233,30 @@ static MCP_SESSIONS: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 fn sessions() -> &'static std::sync::Mutex<std::collections::BTreeMap<String, McpSession>> {
     MCP_SESSIONS.get_or_init(Default::default)
+}
+const SESSION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(7200);
+
+// Expiration must also work when a disconnected client never sends another RPC.
+async fn expire_session(id: String, cancel: tokio_util::sync::CancellationToken) {
+    expire_session_with_timeout(id,cancel,SESSION_IDLE_TIMEOUT).await;
+}
+async fn expire_session_with_timeout(id: String, cancel: tokio_util::sync::CancellationToken, timeout: std::time::Duration) {
+    loop {
+        let remaining = {
+            let mut sessions = sessions().lock().unwrap();
+            let Some(session) = sessions.get(&id) else { return };
+            let remaining = timeout.saturating_sub(session.last_used.elapsed());
+            if remaining.is_zero() {
+                sessions.remove(&id);
+                return;
+            }
+            remaining
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(remaining) => {},
+        }
+    }
 }
 fn session(
     headers: &HeaderMap,
@@ -148,7 +266,7 @@ fn session(
     };
     let id = id.to_str()?;
     let mut sessions = sessions().lock().unwrap();
-    sessions.retain(|_, session| session.last_used.elapsed().as_secs() < 7200);
+    sessions.retain(|_, session| session.last_used.elapsed() < SESSION_IDLE_TIMEOUT);
     let session = sessions.get_mut(id).ok_or_else(|| {
         anyhow::anyhow!("MCP session expired or unknown; initialize a new session")
     })?;
@@ -209,7 +327,7 @@ pub async fn handle_mcp(
             return json_error(id, -32600, "initialize requires JSON-RPC 2.0 and an id");
         }
         let mut sessions = sessions().lock().unwrap();
-        sessions.retain(|_, session| session.last_used.elapsed().as_secs() < 7200);
+        sessions.retain(|_, session| session.last_used.elapsed() < SESSION_IDLE_TIMEOUT);
         if sessions.len() >= 1024 {
             return json_error(id, -32000, "MCP session capacity reached");
         }
@@ -221,7 +339,9 @@ pub async fn handle_mcp(
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let skills = Arc::new(tokio::sync::Mutex::new(SkillActivation::default()));
+        let activation = SkillActivation::default();
+        let cancel = activation.shell.cancel.clone();
+        let skills = Arc::new(tokio::sync::Mutex::new(activation));
         sessions.insert(
             token.clone(),
             McpSession {
@@ -229,8 +349,10 @@ pub async fn handle_mcp(
                 skills: skills.clone(),
                 changed: tokio::sync::watch::channel(0).0,
                 stream: tokio_util::sync::CancellationToken::new(),
+                cancel: cancel.clone(),
             },
         );
+        tokio::spawn(expire_session(token.clone(), cancel));
         new_session = Some(token);
         Some(skills)
     } else {
@@ -239,17 +361,12 @@ pub async fn handle_mcp(
             Err(error) => return (StatusCode::NOT_FOUND, error.to_string()).into_response(),
         }
     };
-    let mut activation = if let Some(activation) = &activation {
-        Some(activation.lock().await)
-    } else {
-        None
-    };
     let changed = request.method.as_deref() == Some("tools/call")
         && matches!(
             request.params["name"].as_str(),
             Some("read_skill" | "unload_skill" | "reset_skill_activation")
         );
-    let result = dispatch(&workspace, request, activation.as_deref_mut()).await;
+    let result = dispatch(&workspace, request, activation.as_ref()).await;
     if result.is_ok()
         && changed
         && let Some(id) = headers
@@ -312,7 +429,44 @@ fn mcp_value(value: Value) -> Value {
     json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value})
 }
 
+const RETIRED_CODE_INDEX_TOOLS: &[&str] = &[
+    "search_code_map",
+    "index_go_workspace", "go_index_status", "list_go_symbols", "search_go_symbols", "read_go_symbol",
+    "index_rust_workspace", "rust_index_status", "list_rust_symbols", "search_rust_symbols", "read_rust_symbol",
+    "index_ts_workspace", "ts_index_status", "list_ts_symbols", "search_ts_symbols", "read_ts_symbol",
+    "index_python_workspace", "python_index_status", "list_python_symbols", "search_python_symbols", "read_python_symbol",
+];
+
 async fn dispatch(
+    workspace: &Arc<Workspace>,
+    request: JsonRpcRequest,
+    activation: Option<&Arc<tokio::sync::Mutex<SkillActivation>>>,
+) -> anyhow::Result<Value> {
+    anyhow::ensure!(request.jsonrpc.as_deref() == Some("2.0"), "jsonrpc must be \"2.0\"");
+    if request.method.as_deref() == Some("tools/call")
+        && let Some(name) = request.params["name"].as_str().filter(|name| crate::shell_process::is_tool(name))
+    {
+        let args = request.params.get("arguments").cloned().unwrap_or(json!({}));
+        let context = {
+            let activation = activation.ok_or_else(|| {
+                anyhow::anyhow!("TOOL_UNAVAILABLE: initialize an MCP session before using shell tools")
+            })?;
+            let mut activation = activation.lock().await;
+            activation.shell.context(workspace).await?
+        };
+        return Ok(mcp_value(context.execute(workspace, name, &args).await?));
+    }
+    // Preserve skill activation and package scopes under the existing lock for
+    // every other RPC. Shell I/O alone runs outside it so kill can interrupt it.
+    let mut activation = if let Some(activation) = activation {
+        Some(activation.lock().await)
+    } else {
+        None
+    };
+    dispatch_activated(workspace, request, activation.as_deref_mut()).await
+}
+
+async fn dispatch_activated(
     workspace: &Arc<Workspace>,
     request: JsonRpcRequest,
     mut activation: Option<&mut SkillActivation>,
@@ -365,6 +519,13 @@ async fn dispatch(
                     .valid_active(&activation.active, &activation.scopes);
                 definitions.extend(catalog.packages.tools(&active).into_iter().map(|tool| json!({"name":tool["function"]["name"],"description":tool["function"]["description"],"inputSchema":tool["function"]["parameters"]})));
             }
+            // Only this code-facing, scoped catalog needs to resolve a shell.
+            // Registration and stateless listings must not probe the host.
+            let shell_available = activation.as_deref().is_some_and(|a| !a.shell.cancel.is_cancelled())
+                && crate::shell_environment::resolve().is_ok();
+            definitions.retain(|tool| {
+                !crate::shell_process::is_tool(tool["name"].as_str().unwrap_or("")) || shell_available
+            });
             Ok(json!({"tools":definitions}))
         }
         "tools/call" => {
@@ -431,82 +592,17 @@ async fn dispatch(
                     ));
                 }
             }
+            anyhow::ensure!(
+                !RETIRED_CODE_INDEX_TOOLS.contains(&name),
+                "TOOL_UNAVAILABLE: {name} has been retired; use search_text and read_file_lines"
+            );
             call_tool(workspace, request.params).await
         }
         "notifications/initialized" => Ok(json!({})),
         "ping" => Ok(json!({})),
         "resources/list" => {
             let w_root = workspace.root().display().to_string();
-            let mut resources = vec![
-                json!({
-                    "uri": "mcp://codex-workspace-mcp/notice",
-                    "name": "Notice: Workspace AST Code Index Info",
-                    "mimeType": "text/plain",
-                    "description": "Notice and instructions for AST code navigation. For code symbol lookups prefer AST index tools."
-                }),
-                json!({
-                    "uri": "mcp://codex-workspace-mcp/ast/status",
-                    "name": "AST Indexing Status Summary",
-                    "mimeType": "text/plain",
-                    "description": "Check the status of Rust, TS, Python, and Go AST code indexing files in the current project workspace."
-                }),
-            ];
-
-            // If Rust index exists, expose it as a resource
-            if let Ok(st) = workspace.rust_index_status(IndexRustWorkspaceRequest {
-                workspace_root: w_root.clone(),
-            }) {
-                if st.exists {
-                    resources.push(json!({
-                        "uri": "mcp://codex-workspace-mcp/ast/rust/symbols",
-                        "name": "Rust AST Symbols Index",
-                        "mimeType": "text/plain",
-                        "description": "Read all parsed Rust symbols, struct definitions, functions, and method signatures in this project."
-                    }));
-                }
-            }
-
-            // If TS index exists, expose it
-            if let Ok(st) = workspace.ts_index_status(IndexTsWorkspaceRequest {
-                workspace_root: w_root.clone(),
-            }) {
-                if st.exists {
-                    resources.push(json!({
-                        "uri": "mcp://codex-workspace-mcp/ast/ts/symbols",
-                        "name": "TS/JS AST Symbols Index",
-                        "mimeType": "text/plain",
-                        "description": "Read all parsed TS/JS symbols, class definitions, interfaces, functions, and signatures in this project."
-                    }));
-                }
-            }
-
-            // If Python index exists, expose it
-            if let Ok(st) = workspace.python_index_status(IndexPythonWorkspaceRequest {
-                workspace_root: w_root.clone(),
-            }) {
-                if st.exists {
-                    resources.push(json!({
-                        "uri": "mcp://codex-workspace-mcp/ast/python/symbols",
-                        "name": "Python AST Symbols Index",
-                        "mimeType": "text/plain",
-                        "description": "Read all parsed Python symbols, class definitions, function signatures, and docstrings in this project."
-                    }));
-                }
-            }
-
-            // If Go index exists, expose it
-            if let Ok(st) = workspace.go_index_status(IndexGoWorkspaceRequest {
-                workspace_root: w_root.clone(),
-            }) {
-                if st.exists {
-                    resources.push(json!({
-                        "uri": "mcp://codex-workspace-mcp/ast/go/symbols",
-                        "name": "Go AST Symbols Index",
-                        "mimeType": "text/plain",
-                        "description": "Read all parsed Go symbols, struct definitions, interface types, and functions in this project."
-                    }));
-                }
-            }
+            let mut resources = Vec::new();
 
             // If work memory has records, expose it as a timeline resource
             if let Ok(st) = workspace.list_work_memory(ListWorkMemoryRequest {
@@ -551,81 +647,6 @@ async fn dispatch(
             let w_root = workspace.root().display().to_string();
 
             let text_content = match uri {
-                "mcp://codex-workspace-mcp/notice" => {
-                    "NOTICE TO AI: This MCP server provides powerful AST-based semantic code indexing tools for Rust, TypeScript/JavaScript, Python, and Go.\n\
-                     You can query classes, functions, calls, definitions, and outlines across the workspace.\n\
-                     Read known files directly, use symbol tools for definitions, and text search for literals. No index-status check is required.\n\
-                     Symbol queries automatically build or incrementally refresh their language index."
-                        .to_string()
-                }
-                "mcp://codex-workspace-mcp/ast/status" => {
-                    let mut md = String::from("# AST Code Indexing Status Summary\n\n");
-                    md.push_str("| Language | Index Exists | Files Indexed | Symbols Indexed | Last Generated |\n");
-                    md.push_str("| --- | --- | --- | --- | --- |\n");
-
-                    // Rust
-                    if let Ok(st) = workspace.rust_index_status(IndexRustWorkspaceRequest { workspace_root: w_root.clone() }) {
-                        let gen_time = st.generated_at_unix.map(|u| format!("{}", u)).unwrap_or_else(|| "-".to_string());
-                        md.push_str(&format!("| Rust | {} | {} | {} | {} |\n", st.exists, st.files_indexed.unwrap_or(0), st.symbols_indexed.unwrap_or(0), gen_time));
-                    }
-                    // TS
-                    if let Ok(st) = workspace.ts_index_status(IndexTsWorkspaceRequest { workspace_root: w_root.clone() }) {
-                        let gen_time = st.generated_at_unix.map(|u| format!("{}", u)).unwrap_or_else(|| "-".to_string());
-                        md.push_str(&format!("| TypeScript/JavaScript | {} | {} | {} | {} |\n", st.exists, st.files_indexed.unwrap_or(0), st.symbols_indexed.unwrap_or(0), gen_time));
-                    }
-                    // Python
-                    if let Ok(st) = workspace.python_index_status(IndexPythonWorkspaceRequest { workspace_root: w_root.clone() }) {
-                        let gen_time = st.generated_at_unix.map(|u| format!("{}", u)).unwrap_or_else(|| "-".to_string());
-                        md.push_str(&format!("| Python | {} | {} | {} | {} |\n", st.exists, st.files_indexed.unwrap_or(0), st.symbols_indexed.unwrap_or(0), gen_time));
-                    }
-                    // Go
-                    if let Ok(st) = workspace.go_index_status(IndexGoWorkspaceRequest { workspace_root: w_root.clone() }) {
-                        let gen_time = st.generated_at_unix.map(|u| format!("{}", u)).unwrap_or_else(|| "-".to_string());
-                        md.push_str(&format!("| Go | {} | {} | {} | {} |\n", st.exists, st.files_indexed.unwrap_or(0), st.symbols_indexed.unwrap_or(0), gen_time));
-                    }
-                    md
-                }
-                "mcp://codex-workspace-mcp/ast/rust/symbols" => {
-                    let st = workspace.list_rust_symbols(ListRustSymbolsRequest { options: Default::default(), workspace_root: w_root.clone(), file_path: None, kind: None })?;
-                    let mut md = String::from("# Rust AST Symbols Index\n\n");
-                    md.push_str(&format!("Showing {} of {} symbols; next offset {:?}. Use list_*_symbols with file/directory filters or offset for further entries.\n\n",st.symbols.len(),st.page.total,st.page.next_offset));
-                    for sym in st.symbols {
-                        let impl_str = sym.impl_type.map(|t| format!(" (impl {})", t)).unwrap_or_default();
-                        md.push_str(&format!("- **{}** ({:?}): `{}` in `{}` (L{}-L{}){}\n  > {}\n", 
-                            sym.name, sym.kind, sym.signature, sym.file_path, sym.start_line, sym.end_line, impl_str, sym.docstring.trim().replace("\n", "\n  > ")));
-                    }
-                    md
-                }
-                "mcp://codex-workspace-mcp/ast/ts/symbols" => {
-                    let st = workspace.list_ts_symbols(ListTsSymbolsRequest { options: Default::default(), workspace_root: w_root.clone(), file_path: None, kind: None })?;
-                    let mut md = String::from("# TS/JS AST Symbols Index\n\n");
-                    md.push_str(&format!("Showing {} of {} symbols; next offset {:?}. Use list_*_symbols with file/directory filters or offset for further entries.\n\n",st.symbols.len(),st.page.total,st.page.next_offset));
-                    for sym in st.symbols {
-                        md.push_str(&format!("- **{}** ({:?}): `{}` in `{}` (L{}-L{})\n  > {}\n", 
-                            sym.name, sym.kind, sym.signature, sym.file_path, sym.start_line, sym.end_line, sym.docstring.trim().replace("\n", "\n  > ")));
-                    }
-                    md
-                }
-                "mcp://codex-workspace-mcp/ast/python/symbols" => {
-                    let st = workspace.list_python_symbols(ListPythonSymbolsRequest { options: Default::default(), workspace_root: w_root.clone(), file_path: None, kind: None })?;
-                    let mut md = String::from("# Python AST Symbols Index\n\n");
-                    md.push_str(&format!("Showing {} of {} symbols; next offset {:?}. Use list_*_symbols with file/directory filters or offset for further entries.\n\n",st.symbols.len(),st.page.total,st.page.next_offset));
-                    for sym in st.symbols {
-                        md.push_str(&format!("- **{}** ({:?}): `{}` in `{}` (L{}-L{})\n  > {}\n", 
-                            sym.name, sym.kind, sym.signature, sym.file_path, sym.start_line, sym.end_line, sym.docstring.trim().replace("\n", "\n  > ")));
-                    }
-                    md
-                }
-                "mcp://codex-workspace-mcp/ast/go/symbols" => {
-                    let st = workspace.list_go_symbols(ListGoSymbolsRequest { options: Default::default(), workspace_root: w_root.clone(), file_path: None, kind: None })?;
-                    let mut md = String::from("# Go AST Symbols Index\n\n");
-                    md.push_str(&format!("Showing {} of {} symbols; next offset {:?}. Use list_*_symbols with file/directory filters or offset for further entries.\n\n",st.symbols.len(),st.page.total,st.page.next_offset));
-                    for sym in st.symbols {
-                        md.push_str(&format!("- **{}** ({:?}): `{}` in `{}` (L{}-L{})\n  > {}\n", 
-                            sym.name, sym.kind, sym.signature, sym.file_path, sym.start_line, sym.end_line, sym.docstring.trim().replace("\n", "\n  > ")));
-                    }
-                    md
-                }
                 "mcp://codex-workspace-mcp/work-memory" => {
                     let st = workspace.list_work_memory(ListWorkMemoryRequest {
                         workspace_root: w_root.clone(),
@@ -749,6 +770,11 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("tools/call requires params.name"))?;
 
+    anyhow::ensure!(
+        !crate::shell_process::is_tool(name),
+        "TOOL_UNAVAILABLE: shell tools require a scoped MCP session"
+    );
+
     let arguments = params
         .get("arguments")
         .cloned()
@@ -838,11 +864,9 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
         );
     }
 
-    if name == "search_code_map"
-        || name.ends_with("_symbols")
-        || name.starts_with("index_")
-        || name.ends_with("_index_status")
-    {
+    // Retained for internal callers with legacy tool references. Public MCP
+    // dispatch and the current Agent tool catalog exclude these methods.
+    if RETIRED_CODE_INDEX_TOOLS.contains(&name) {
         let selected_root = arguments
             .get("workspace_root")
             .and_then(Value::as_str)
@@ -1045,6 +1069,7 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
     }))
 }
 
+/// Complete native schemas for registration; callers filter their visible catalog.
 pub fn tool_definitions() -> Value {
     let mut definitions = json!([
         {
@@ -1063,7 +1088,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "list_dir",
-            "description": "List a directory by relative workspace path or absolute filesystem path with optional recursion and filtering. By default this shows the real filesystem view, including gitignored files. Use only to understand project layout or locate files by path — for code symbol lookups prefer the index tools (search_go_symbols, search_ts_symbols, search_rust_symbols).",
+            "description": "List a directory by relative workspace path or absolute filesystem path with optional recursion and filtering. By default this shows the real filesystem view, including gitignored files. Use to understand project layout or locate files by path.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1084,7 +1109,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "read_file",
-            "description": "Read a UTF-8 file by path with a byte limit. Read known files directly. For one known definition, read_*_symbol with file_path + name avoids reading the whole file. No prior symbol search or index-status call is required.",
+            "description": "Read a UTF-8 file by path with a byte limit. For a known line range, use read_file_lines.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
@@ -1117,7 +1142,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "search_text",
-            "description": "Search workspace text. Literal matching is the default; set regex=true for patterns such as A|B, anchors, or character classes. Patterns match each line; invalid expressions return an error. Search directly for literals, UI strings, config keys, error messages, log lines, imports, and syntax patterns. Symbol tools are useful for definitions and relationships; text searches do not require trying a symbol tool first. By default this searches the real filesystem view, including gitignored files. Use `path` for one file/directory, or `paths` as an array for multiple files/directories; do not put multiple paths in one space-separated string.",
+            "description": "Search workspace text. Literal matching is the default; set regex=true for patterns such as A|B, anchors, or character classes. Patterns match each line; invalid expressions return an error. Search directly for literals, UI strings, config keys, error messages, log lines, imports, and syntax patterns. Symbol tools are useful for definitions and relationships; text searches do not require trying a symbol tool first. By default this searches the real filesystem view, including gitignored files. Use `path` for one file/directory, or `paths` as an array for multiple files/directories; do not put multiple paths in one space-separated string. Each match has path (with / separators), line, column and text; a line longer than 400 characters comes back as an excerpt around the match, with line_chars giving the whole line's length.",
             "inputSchema": {
                 "type": "object",
                 "required": ["query"],
@@ -1196,238 +1221,6 @@ pub fn tool_definitions() -> Value {
                     "path":{"type":"string"},
                     "expected_code_hash":{"type":"string","description":"Optional current file version. Recommended when the edits depend on code outside their anchors."},
                     "edits":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","required":["old_text","new_text"],"properties":{"old_text":{"type":"string","minLength":1},"new_text":{"type":"string"}}}}
-                }
-            }
-        },
-        {
-            "name":"search_code_map",
-            "description":"Locate functionality as a single definition, a source module, or a saved group of related files/definitions. Searches task wording and responsibility descriptions across supported languages and returns grouped responsibilities with direct code entry points. Does not infer functionality from call chains. No separate index or memory lookup is required. Missing or stale descriptions are explicit; confirm source details only when needed.",
-            "inputSchema":{"type":"object","required":["workspace_root","query"],"properties":{
-                "workspace_root":{"type":"string"},"query":{"type":"string","description":"Functionality or definition to locate, e.g. 节点拖拽 or 图片渲染."},
-                "language":{"type":"string","enum":["rust","ts","typescript","javascript","python","go"]},
-                "file_path":{"type":"string","description":"Optional exact workspace-relative source file."},
-                "directory":{"type":"string","description":"Optional workspace-relative subtree."},
-                "limit":{"type":"integer","minimum":1,"maximum":20,"default":8},
-                "entry_limit":{"type":"integer","minimum":1,"maximum":20,"default":6},
-                "offset":{"type":"integer","minimum":0,"default":0,"description":"Page each language's ranked symbol candidates; see language_pages."},
-                "group_offset":{"type":"integer","minimum":0,"default":0,"description":"Page groups within the current candidate window."}
-            }}
-        },
-        {
-            "name": "list_go_symbols",
-            "description": "Browse a compact, paginated symbol outline. Prefer a known file or directory filter. Default limit 40, max 100; local symbols hidden unless include_locals=true. Read page.next_offset to continue only if needed. Each result includes a concise responsibility and its current/stale/missing status. Index freshness and skipped/failed file coverage are included.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root"],
-                "properties": {
-                    "directory": { "type": "string", "description": "Workspace-relative directory prefix." },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 40 },
-                    "include_locals": { "type": "boolean", "default": false },
-                    "detailed": { "type": "boolean", "default": false, "description": "Include signature/doc previews (240/480 characters); normally read only the selected definition." },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "file_path": { "type": "string" },
-                    "kind": { "type": "string", "enum": ["function", "method", "struct", "interface", "type"] }
-                }
-            }
-        },
-        {
-            "name": "search_go_symbols",
-            "description": "Locate definitions by name, scope, signature, docstring, path, responsibility description or task keywords. Multi-keyword query defaults to any-term matching (up to 24 distinct terms), ranked by relevance before pagination. Use match_mode=all to require every term, or phrase for a literal substring. Use file/directory/kind filters to narrow results. Index updates automatically; unfiltered consecutive queries share a 2-second scan window, while known source reads verify their current hash. Chinese task terms include a bounded task-vocabulary expansion in any mode; all and phrase remain literal. Zero matches are not proof code is absent.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root", "query"],
-                "properties": {
-                    "file_path": { "type": "string", "description": "Exact workspace-relative file path." },
-                    "directory": { "type": "string", "description": "Workspace-relative directory prefix." },
-                    "kind": { "type": "string", "enum": ["function", "method", "struct", "interface", "type"] },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
-                    "match_mode": { "type": "string", "enum": ["any", "all", "phrase"], "default": "any" },
-                    "include_locals": { "type": "boolean", "default": false },
-                    "detailed": { "type": "boolean", "default": false },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "query": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
-                }
-            }
-        },
-        {
-            "name": "read_go_symbol",
-            "description": "Read a definition directly using file_path + name (qualified names accepted), or an existing symbol_id. Known file and name need no prior search/list call. Ambiguous names return candidate IDs. include_context=true adds heuristic caller/callee/import relationships, not compiler-verified dependencies. Includes a responsibility, qualified name and code_hash for optional version-checked annotation. The source index refreshes automatically.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root"],
-                "anyOf": [{ "required": ["symbol_id"] }, { "required": ["file_path", "name"] }],
-                "properties": {
-                    "file_path": { "type": "string", "description": "Workspace-relative file path; required with name when symbol_id is omitted." },
-                    "name": { "type": "string", "description": "Definition name, optionally qualified, e.g. PptxParser.parse or Renderer::render_slide." },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "symbol_id": { "type": "string" },
-                    "include_context": { "type": "boolean", "default": false }
-                }
-            }
-        },
-        {
-            "name": "list_rust_symbols",
-            "description": "Browse a compact, paginated symbol outline. Prefer a known file or directory filter. Default limit 40, max 100; local symbols hidden unless include_locals=true. Read page.next_offset to continue only if needed. Each result includes a concise responsibility and its current/stale/missing status. Index freshness and skipped/failed file coverage are included.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root"],
-                "properties": {
-                    "directory": { "type": "string", "description": "Workspace-relative directory prefix." },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 40 },
-                    "include_locals": { "type": "boolean", "default": false },
-                    "detailed": { "type": "boolean", "default": false, "description": "Include signature/doc previews (240/480 characters); normally read only the selected definition." },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "file_path": { "type": "string" },
-                    "kind": { "type": "string", "enum": ["function", "method", "struct", "enum", "trait", "type_alias", "const", "static", "module"] }
-                }
-            }
-        },
-        {
-            "name": "search_rust_symbols",
-            "description": "Locate definitions by name, scope, signature, docstring, path, responsibility description or task keywords. Multi-keyword query defaults to any-term matching (up to 24 distinct terms), ranked by relevance before pagination. Use match_mode=all to require every term, or phrase for a literal substring. Use file/directory/kind filters to narrow results. Index updates automatically; unfiltered consecutive queries share a 2-second scan window, while known source reads verify their current hash. Chinese task terms include a bounded task-vocabulary expansion in any mode; all and phrase remain literal. Zero matches are not proof code is absent.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root", "query"],
-                "properties": {
-                    "file_path": { "type": "string", "description": "Exact workspace-relative file path." },
-                    "directory": { "type": "string", "description": "Workspace-relative directory prefix." },
-                    "kind": { "type": "string", "enum": ["function", "method", "struct", "enum", "trait", "type_alias", "const", "static", "module"] },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
-                    "match_mode": { "type": "string", "enum": ["any", "all", "phrase"], "default": "any" },
-                    "include_locals": { "type": "boolean", "default": false },
-                    "detailed": { "type": "boolean", "default": false },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "query": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
-                }
-            }
-        },
-        {
-            "name": "read_rust_symbol",
-            "description": "Read a definition directly using file_path + name (qualified names accepted), or an existing symbol_id. Known file and name need no prior search/list call. Ambiguous names return candidate IDs. include_context=true adds heuristic caller/callee/import relationships, not compiler-verified dependencies. Includes a responsibility, qualified name and code_hash for optional version-checked annotation. The source index refreshes automatically.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root"],
-                "anyOf": [{ "required": ["symbol_id"] }, { "required": ["file_path", "name"] }],
-                "properties": {
-                    "file_path": { "type": "string", "description": "Workspace-relative file path; required with name when symbol_id is omitted." },
-                    "name": { "type": "string", "description": "Definition name, optionally qualified, e.g. PptxParser.parse or Renderer::render_slide." },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "symbol_id": { "type": "string" },
-                    "include_context": { "type": "boolean", "default": false }
-                }
-            }
-        },
-        {
-            "name": "list_ts_symbols",
-            "description": "Browse a compact, paginated symbol outline. Prefer a known file or directory filter. Default limit 40, max 100; local symbols hidden unless include_locals=true. Read page.next_offset to continue only if needed. Each result includes a concise responsibility and its current/stale/missing status. Index freshness and skipped/failed file coverage are included.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root"],
-                "properties": {
-                    "directory": { "type": "string", "description": "Workspace-relative directory prefix." },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 40 },
-                    "include_locals": { "type": "boolean", "default": false },
-                    "detailed": { "type": "boolean", "default": false, "description": "Include signature/doc previews (240/480 characters); normally read only the selected definition." },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "file_path": { "type": "string" },
-                    "kind": { "type": "string", "enum": ["function", "arrow_function", "class", "method", "interface", "type_alias", "enum", "const", "component"] }
-                }
-            }
-        },
-        {
-            "name": "search_ts_symbols",
-            "description": "Locate definitions by name, scope, signature, docstring, path, responsibility description or task keywords. Multi-keyword query defaults to any-term matching (up to 24 distinct terms), ranked by relevance before pagination. Use match_mode=all to require every term, or phrase for a literal substring. Use file/directory/kind filters to narrow results. Index updates automatically; unfiltered consecutive queries share a 2-second scan window, while known source reads verify their current hash. Chinese task terms include a bounded task-vocabulary expansion in any mode; all and phrase remain literal. Zero matches are not proof code is absent.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root", "query"],
-                "properties": {
-                    "file_path": { "type": "string", "description": "Exact workspace-relative file path." },
-                    "directory": { "type": "string", "description": "Workspace-relative directory prefix." },
-                    "kind": { "type": "string", "enum": ["function", "arrow_function", "class", "method", "interface", "type_alias", "enum", "const", "component"] },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
-                    "match_mode": { "type": "string", "enum": ["any", "all", "phrase"], "default": "any" },
-                    "include_locals": { "type": "boolean", "default": false },
-                    "detailed": { "type": "boolean", "default": false },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "query": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
-                }
-            }
-        },
-        {
-            "name": "read_ts_symbol",
-            "description": "Read a known TypeScript definition directly by file_path + name or symbol_id. For editing, include_related_types=true adds up to eight local type definitions (12000 source characters, two levels); include_outline=true adds parent and six nearest sibling positions/signatures. These are bounded navigation hints, not compiler-resolved types. include_context=true separately expands heuristic call relationships. Returns current source and version hash; no prerequisite list/search needed.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root"],
-                "anyOf": [{ "required": ["symbol_id"] }, { "required": ["file_path", "name"] }],
-                "properties": {
-                    "file_path": { "type": "string", "description": "Workspace-relative file path; required with name when symbol_id is omitted." },
-                    "name": { "type": "string", "description": "Definition name, optionally qualified, e.g. PptxParser.parse or Renderer::render_slide." },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "symbol_id": { "type": "string" },
-                    "include_context": { "type": "boolean", "default": false },
-                    "include_related_types": { "type": "boolean", "default": false, "description": "Include bounded referenced local interface/type/enum bodies for an edit; external packages, namespace imports and re-exports are not expanded." },
-                    "include_outline": { "type": "boolean", "default": false, "description": "Return parent and nearby definition positions/signatures for locating a change without listing the whole file." }
-                }
-            }
-        },
-        {
-            "name": "list_python_symbols",
-            "description": "Browse a compact, paginated symbol outline. Prefer a known file or directory filter. Default limit 40, max 100; local symbols hidden unless include_locals=true. Read page.next_offset to continue only if needed. Each result includes a concise responsibility and its current/stale/missing status. Index freshness and skipped/failed file coverage are included.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root"],
-                "properties": {
-                    "directory": { "type": "string", "description": "Workspace-relative directory prefix." },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 40 },
-                    "include_locals": { "type": "boolean", "default": false },
-                    "detailed": { "type": "boolean", "default": false, "description": "Include signature/doc previews (240/480 characters); normally read only the selected definition." },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "file_path": { "type": "string" },
-                    "kind": { "type": "string", "enum": ["function", "method", "class"] }
-                }
-            }
-        },
-        {
-            "name": "search_python_symbols",
-            "description": "Locate definitions by name, scope, signature, docstring, path, responsibility description or task keywords. Multi-keyword query defaults to any-term matching (up to 24 distinct terms), ranked by relevance before pagination. Use match_mode=all to require every term, or phrase for a literal substring. Use file/directory/kind filters to narrow results. Index updates automatically; unfiltered consecutive queries share a 2-second scan window, while known source reads verify their current hash. Chinese task terms include a bounded task-vocabulary expansion in any mode; all and phrase remain literal. Zero matches are not proof code is absent.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root", "query"],
-                "properties": {
-                    "file_path": { "type": "string", "description": "Exact workspace-relative file path." },
-                    "directory": { "type": "string", "description": "Workspace-relative directory prefix." },
-                    "kind": { "type": "string", "enum": ["function", "method", "class"] },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0 },
-                    "match_mode": { "type": "string", "enum": ["any", "all", "phrase"], "default": "any" },
-                    "include_locals": { "type": "boolean", "default": false },
-                    "detailed": { "type": "boolean", "default": false },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "query": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
-                }
-            }
-        },
-        {
-            "name": "read_python_symbol",
-            "description": "Read a definition directly using file_path + name (qualified names accepted), or an existing symbol_id. Known file and name need no prior search/list call. Ambiguous names return candidate IDs. include_context=true adds heuristic caller/callee/import relationships, not compiler-verified dependencies. Includes a responsibility, qualified name and code_hash for optional version-checked annotation. The source index refreshes automatically.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["workspace_root"],
-                "anyOf": [{ "required": ["symbol_id"] }, { "required": ["file_path", "name"] }],
-                "properties": {
-                    "file_path": { "type": "string", "description": "Workspace-relative file path; required with name when symbol_id is omitted." },
-                    "name": { "type": "string", "description": "Definition name, optionally qualified, e.g. PptxParser.parse or Renderer::render_slide." },
-                    "workspace_root": { "type": "string", "description": "Absolute workspace root." },
-                    "symbol_id": { "type": "string" },
-                    "include_context": { "type": "boolean", "default": false }
                 }
             }
         },
@@ -1557,7 +1350,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "search_symbol_business_context",
-            "description": "Inspect saved responsibility records, including keywords and stale flags. Ordinary search_*_symbols already searches these records and returns live definitions; no separate lookup is required for normal navigation.",
+            "description": "Inspect saved responsibility records, including keywords and stale flags. Use source reads to verify current code.",
             "inputSchema": {
                 "type": "object",
                 "required": ["workspace_root", "query"],
@@ -1614,6 +1407,10 @@ pub fn tool_definitions() -> Value {
     definitions
         .as_array_mut()
         .unwrap()
+        .extend(crate::shell_process::definitions());
+    definitions
+        .as_array_mut()
+        .unwrap()
         .extend(crate::browser_control::definitions());
     for tool in definitions.as_array_mut().into_iter().flatten() {
         let name = tool["name"].as_str().unwrap_or("");
@@ -1642,6 +1439,36 @@ pub fn tool_definitions() -> Value {
 mod native_tool_tests {
     use super::*;
 
+    struct TestMcpSession {
+        id: String,
+        skills: Arc<tokio::sync::Mutex<SkillActivation>>,
+    }
+    impl TestMcpSession {
+        async fn new(workspace: &Arc<Workspace>) -> Self {
+            let (headers, response) = rpc(workspace, None, "initialize", json!({})).await;
+            assert!(response["error"].is_null(), "{response}");
+            let id = headers["mcp-session-id"].to_str().unwrap().to_owned();
+            let skills = sessions().lock().unwrap().get(&id).unwrap().skills.clone();
+            Self { id, skills }
+        }
+        fn headers(&self) -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            headers.insert("mcp-session-id", self.id.parse().unwrap());
+            headers
+        }
+        async fn call(&self, workspace: &Arc<Workspace>, name: &str, args: Value) -> Value {
+            let (_, response) = rpc(workspace, Some(&self.id), "tools/call",
+                json!({"name":name,"arguments":args})).await;
+            assert!(response["error"].is_null(), "{response}");
+            response["result"]["structuredContent"].clone()
+        }
+    }
+    impl Drop for TestMcpSession {
+        fn drop(&mut self) {
+            sessions().lock().unwrap().remove(&self.id);
+        }
+    }
+
     async fn rpc(
         workspace: &Arc<Workspace>,
         token: Option<&str>,
@@ -1664,6 +1491,290 @@ mod native_tool_tests {
             .unwrap();
         (headers, serde_json::from_slice(&bytes).unwrap())
     }
+
+    #[tokio::test]
+    async fn shell_requires_scope_and_stateless_listing_hides_it() {
+        let workspace = Arc::new(Workspace::new(std::env::current_dir().unwrap()).unwrap());
+        let (_, listed) = rpc(&workspace, None, "tools/list", json!({})).await;
+        assert!(listed["result"]["tools"].as_array().unwrap().iter()
+            .all(|tool| !crate::shell_process::is_tool(tool["name"].as_str().unwrap())));
+        for name in crate::shell_process::TOOLS {
+            let params = json!({"name":name,"arguments":{"cmd":"echo must-not-run","session_id":"unowned"}});
+            let error = call_tool(&workspace, params.clone()).await.unwrap_err();
+            assert!(error.to_string().contains("scoped MCP session"), "{error:#}");
+            let (_, response) = rpc(&workspace, None, "tools/call", params).await;
+            assert!(response["error"]["message"].as_str().unwrap()
+                .contains("initialize an MCP session"), "{response}");
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_shell_definitions_follow_environment_availability() {
+        let workspace = Arc::new(Workspace::new(std::env::current_dir().unwrap()).unwrap());
+        let session = TestMcpSession::new(&workspace).await;
+        let available = crate::shell_environment::resolve().is_ok();
+        let (_, listed) = rpc(&workspace, Some(&session.id), "tools/list", json!({})).await;
+        for name in crate::shell_process::TOOLS {
+            assert_eq!(listed["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == *name), available);
+        }
+    }
+
+    #[test]
+    fn native_registry_always_contains_shell_schemas() {
+        let definitions = tool_definitions();
+        let definitions = definitions.as_array().unwrap();
+        for name in crate::shell_process::TOOLS {
+            let schemas = definitions.iter().filter(|tool| tool["name"] == *name).collect::<Vec<_>>();
+            assert_eq!(schemas.len(), 1, "{name} must be registered exactly once");
+            assert_eq!(schemas[0]["inputSchema"]["type"], "object");
+            assert!(!schemas[0]["inputSchema"]["required"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_scope_cancels_on_delete_expiration_and_activation_drop() {
+        let workspace = Arc::new(Workspace::new(std::env::current_dir().unwrap()).unwrap());
+        let first = TestMcpSession::new(&workspace).await;
+        let second = TestMcpSession::new(&workspace).await;
+        let first_cancel = first.skills.lock().await.shell.cancel.clone();
+        let second_cancel = second.skills.lock().await.shell.cancel.clone();
+        assert_ne!(first.skills.lock().await.shell.task, second.skills.lock().await.shell.task);
+        // Deleting must cancel even with an in-flight RPC holding activation.
+        let mut held = first.skills.lock().await;
+        assert_eq!(handle_mcp_delete(first.headers()).await.status(), StatusCode::NO_CONTENT);
+        assert!(first_cancel.is_cancelled());
+        assert!(!second_cancel.is_cancelled());
+        assert!(held.shell.context(&workspace)
+            .await.err().unwrap().to_string().contains("closed"));
+        drop(held);
+        // Windows Instant cannot predate boot. Inject expiration instead of
+        // subtracting two hours (which panics on a freshly restarted machine).
+        expire_session_with_timeout(second.id.clone(), second_cancel.clone(),std::time::Duration::ZERO).await;
+        assert!(second_cancel.is_cancelled());
+        assert!(!sessions().lock().unwrap().contains_key(&second.id));
+        let activation = SkillActivation::default();
+        let cancel = activation.shell.cancel.clone();
+        drop(activation);
+        assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn scoped_shell_exec_write_kill_and_assets_stay_out_of_ui_sessions() {
+        if let Err(error) = crate::shell_environment::resolve() {
+            eprintln!("skipped: shell environment unavailable: {error:#}");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("mcp-shell-{}", crate::agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = Arc::new(Workspace::new(&root).unwrap());
+        let first = TestMcpSession::new(&workspace).await;
+        let second = TestMcpSession::new(&workspace).await;
+        let (_, listed) = rpc(&workspace, Some(&first.id), "tools/list", json!({})).await;
+        for name in crate::shell_process::TOOLS {
+            assert!(listed["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == *name));
+        }
+        let read_command = if cfg!(windows) {
+            r#"$line = [Console]::ReadLine(); Write-Output "received:$line"; Start-Sleep -Seconds 120"#
+        } else {
+            "read -r line; printf 'received:%s\\n' \"$line\"; sleep 120 & wait"
+        };
+        let started = first.call(&workspace, "exec_command", json!({
+            "cmd":read_command,
+            "yield_time_ms":0
+        })).await;
+        let id = started["session_id"].as_str().unwrap();
+        assert_eq!(started["running"], true);
+        for name in ["write_stdin", "kill_session"] {
+            let (_, rejected) = rpc(&workspace, Some(&second.id), "tools/call",
+                json!({"name":name,"arguments":{"session_id":id,"chars":"must-not-send\n"}})).await;
+            assert!(rejected["error"]["message"].as_str().unwrap().contains("SHELL_SESSION_SCOPE_DENIED"), "{rejected}");
+        }
+        let (_, busy) = rpc(&workspace, Some(&second.id), "tools/call",
+            json!({"name":"exec_command","arguments":{"cmd":"echo must-not-run"}})).await;
+        assert!(busy["error"]["message"].as_str().unwrap().contains("SHELL_BUSY"), "{busy}");
+        let coexist_command = if cfg!(windows) { "Write-Output coexist" } else { "printf coexist" };
+        let alongside = first.call(&workspace, "exec_command",
+            json!({"cmd":coexist_command,"yield_time_ms":10000})).await;
+        assert_eq!(alongside["running"], false, "{alongside}");
+        assert_eq!(alongside["stdout"].as_str().unwrap().trim_end(), "coexist");
+        assert!(alongside["capture_error"].is_null(), "{alongside}");
+        let mut written = first.call(&workspace, "write_stdin",
+            json!({"session_id":id,"chars":"hello\n","yield_time_ms":1000})).await;
+        let mut stdout = written["stdout"].as_str().unwrap().to_owned();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !stdout.contains("received:hello") {
+                written = first.call(&workspace, "write_stdin",
+                    json!({"session_id":id,"yield_time_ms":100})).await;
+                stdout.push_str(written["stdout"].as_str().unwrap());
+            }
+        }).await.unwrap();
+        let killed = first.call(&workspace, "kill_session", json!({"session_id":id})).await;
+        assert_eq!(killed["running"], false, "{killed}");
+        assert_eq!(killed["termination_reason"], "requested_stop");
+        assert!(killed["capture_error"].is_null(), "{killed}");
+
+        let output_command = if cfg!(windows) {
+            "[Console]::Out.Write(('0' * 5000)); exit 7"
+        } else {
+            "printf '%05000d' 0; exit 7"
+        };
+        let mut output = first.call(&workspace, "exec_command",
+            json!({"cmd":output_command,"max_output_tokens":128})).await;
+        let mut saved = output["output_asset"].is_object();
+        let id = output["session_id"].as_str().unwrap().to_owned();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while output["running"] == true {
+                output = first.call(&workspace, "write_stdin",
+                    json!({"session_id":id,"yield_time_ms":100,"max_output_tokens":128})).await;
+                saved |= output["output_asset"].is_object();
+            }
+        }).await.unwrap();
+        assert_eq!(output["exit_code"], 7);
+        assert!(saved, "large output must have a durable asset");
+        let page = first.call(&workspace, "write_stdin",
+            json!({"session_id":id,"stream":"stdout","char_offset":0,"max_output_tokens":128})).await;
+        assert_eq!(page["total_chars"], 5000);
+
+        let state = first.skills.lock().await.shell.state.clone().unwrap();
+        assert!(matches!(state.permission_mode, crate::agent_service::PermissionMode::FullAccess));
+        let response = crate::agent_service::list_tasks(State(state),
+            axum::extract::Query(crate::agent_service::ListTasksQuery { limit: None })).await.into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let ui: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(ui["tasks"], json!([]), "{ui}");
+        let task = first.skills.lock().await.shell.task.clone();
+        let conn = crate::agent_service::open_db(&root).unwrap();
+        let events: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id=?1 AND kind IN ('workspace/changes','shell/output')",
+            [&task], |row| row.get(0)).unwrap();
+        assert!(events >= 3);
+        drop(conn);
+        drop(first);
+        drop(second);
+        // The shared DB writer can retain its SQLite handle until its idle timeout on Windows.
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn kill_rpc_interrupts_stdin_larger_than_pipe_without_deleting_session() {
+        if let Err(error) = crate::shell_environment::resolve() {
+            eprintln!("skipped: shell environment unavailable: {error:#}");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("mcp-shell-blocked-stdin-{}", crate::agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = Arc::new(Workspace::new(&root).unwrap());
+        let session = TestMcpSession::new(&workspace).await;
+        let cmd = if cfg!(windows) {
+            "Write-Output ready; Start-Sleep -Seconds 120"
+        } else {
+            "printf 'ready\\n'; sleep 120"
+        };
+        let mut started = session.call(&workspace, "exec_command", json!({"cmd":cmd,"yield_time_ms":100})).await;
+        let id = started["session_id"].as_str().unwrap().to_owned();
+        let mut stdout = started["stdout"].as_str().unwrap().to_owned();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !stdout.contains("ready") {
+                assert_eq!(started["running"], true, "{started}");
+                started = session.call(&workspace, "write_stdin",
+                    json!({"session_id":id,"yield_time_ms":100})).await;
+                stdout.push_str(started["stdout"].as_str().unwrap());
+            }
+        }).await.unwrap();
+        // Far beyond the pipe buffer. yield=0 means a pending RPC is blocked
+        // delivering stdin, rather than simply waiting for command completion.
+        let mut write = Box::pin(rpc(&workspace, Some(&session.id), "tools/call", json!({
+            "name":"write_stdin", "arguments":{
+                "session_id":id,"chars":"x".repeat(4 * 1024 * 1024),"yield_time_ms":0
+            }
+        })));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(300), write.as_mut()).await.is_err(),
+            "stdin must remain blocked until the separate kill RPC");
+        let (killed, (_, written)) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                session.call(&workspace, "kill_session", json!({"session_id":id})),
+                write.as_mut()
+            )
+        }).await.expect("kill RPC must interrupt blocked stdin without DELETE");
+        drop(write);
+        assert_eq!(killed["running"], false, "{killed}");
+        assert_eq!(killed["termination_reason"], "requested_stop", "{killed}");
+        assert!(written["error"]["message"].is_string(), "blocked write should fail after kill: {written}");
+        assert!(sessions().lock().unwrap().contains_key(&session.id));
+        assert!(!session.skills.lock().await.shell.cancel.is_cancelled());
+        let next = session.call(&workspace, "exec_command", json!({
+            "cmd":if cfg!(windows) { "Write-Output recovered" } else { "printf recovered" },
+            "yield_time_ms":10000
+        })).await;
+        assert_eq!(next["running"], false, "{next}");
+        assert_eq!(next["stdout"].as_str().unwrap().trim_end(), "recovered");
+        drop(session);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn deleting_shell_session_stops_live_process_tree_and_retained_scope() {
+        if let Err(error) = crate::shell_environment::resolve() {
+            eprintln!("skipped: shell environment unavailable: {error:#}");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("mcp-shell-cancel-{}", crate::agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = Arc::new(Workspace::new(&root).unwrap());
+        let session = TestMcpSession::new(&workspace).await;
+        let tree_command = if cfg!(windows) {
+            "$child = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120' -WindowStyle Hidden -PassThru; Write-Output 'child-started'; $child.WaitForExit()"
+        } else {
+            "sleep 120 & printf 'child-started\\n'; wait"
+        };
+        let mut started = session.call(&workspace, "exec_command",
+            json!({"cmd":tree_command,"yield_time_ms":1000})).await;
+        let id = started["session_id"].as_str().unwrap().to_owned();
+        let mut stdout = started["stdout"].as_str().unwrap().to_owned();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !stdout.contains("child-started") {
+                assert_eq!(started["running"], true, "{started}");
+                started = session.call(&workspace, "write_stdin",
+                    json!({"session_id":id,"yield_time_ms":100})).await;
+                stdout.push_str(started["stdout"].as_str().unwrap());
+            }
+        }).await.unwrap();
+        let task = session.skills.lock().await.shell.task.clone();
+        let state = session.skills.lock().await.shell.state.clone().unwrap();
+        assert_eq!(handle_mcp_delete(session.headers()).await.status(), StatusCode::NO_CONTENT);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let result = crate::shell_process::execute(&state, &workspace, &task, 1, None, "write_stdin",
+                    &json!({"session_id":started["session_id"],"yield_time_ms":100}),
+                    &tokio_util::sync::CancellationToken::new(), false).await.unwrap();
+                if result["running"] == false { break result; }
+            }
+        }).await.unwrap();
+        assert!(crate::shell_process::active(&root).await.is_none());
+        assert_eq!(result["running"], false, "{result}");
+        assert_eq!(result["termination_reason"], "task_cancelled", "{result}");
+        assert!(result["capture_error"].is_null(), "{result}");
+        let error = session.skills.lock().await.shell.context(&workspace).await.err().unwrap();
+        assert!(error.to_string().contains("closed"));
+        drop(session);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn mcp_retires_code_index_tools_and_resources() {
+        let workspace = Arc::new(Workspace::new(std::env::current_dir().unwrap()).unwrap());
+        let (_, listed) = rpc(&workspace, None, "tools/list", json!({})).await;
+        let names = listed["result"]["tools"].as_array().unwrap().iter()
+            .filter_map(|tool| tool["name"].as_str()).collect::<Vec<_>>();
+        assert!(names.contains(&"search_text") && names.contains(&"read_file_lines"));
+        assert!(RETIRED_CODE_INDEX_TOOLS.iter().all(|name| !names.contains(name)));
+        let (_, result) = rpc(&workspace, None, "tools/call",
+            json!({"name":"search_code_map","arguments":{"query":"main"}})).await;
+        assert!(result["error"]["message"].as_str().unwrap().contains("TOOL_UNAVAILABLE"), "{result}");
+        let (_, result) = rpc(&workspace, None, "resources/read",
+            json!({"uri":"mcp://codex-workspace-mcp/ast/status"})).await;
+        assert!(result["error"]["message"].is_string(), "{result}");
+    }
+
     #[tokio::test]
     async fn mcp_skill_sessions_isolate_activation_and_invalidate_reloaded_packages() {
         let root =

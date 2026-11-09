@@ -82,6 +82,32 @@
   transition: color 100ms ease;
 }
 
+.shellState {
+  flex: none;
+  margin-left: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.shellMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 4px 0 4px 4px;
+  overflow-wrap: anywhere;
+  font: var(--dsw-font-xs-13);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.shellMeta > span {
+  min-width: 0;
+}
+
+.shellTerminal {
+  --dsl-terminal-command-whitespace: pre-wrap;
+}
+
 .row:hover .title,
 .row:hover .summary:not(.errorSummary):not(.stoppedSummary),
 .row:hover .summarySuffix {

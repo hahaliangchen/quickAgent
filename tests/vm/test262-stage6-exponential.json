@@ -1,0 +1,176 @@
+{
+  "cases": [
+    {
+      "detail": "",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/infinity.js",
+      "includes": [],
+      "source_hash": "7aae86e77d076a9e44f3017606a762a13286f24d838291d84d14396df6b026ee",
+      "status": "pass"
+    },
+    {
+      "detail": "TS_PROGRAM 52:5: unknown variable arguments: declare it in this function or at the top level, or pass it as a parameter",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/length.js",
+      "includes": [
+        "propertyHelper.js"
+      ],
+      "source_hash": "af88b09fb9003c9d8acc5b048ab29741813a6ff16a42275ef9f8d59ea019fcba",
+      "status": "compile_rejected"
+    },
+    {
+      "detail": "TS_PROGRAM 52:5: unknown variable arguments: declare it in this function or at the top level, or pass it as a parameter",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/name.js",
+      "includes": [
+        "propertyHelper.js"
+      ],
+      "source_hash": "310fd5ea5bc4a081cbcf53c0b47c70fdd72e16a3a5076e1c8003de6cd0de2de7",
+      "status": "compile_rejected"
+    },
+    {
+      "detail": "",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/nan.js",
+      "includes": [],
+      "source_hash": "78cabb5ecd466fbcd921f12526486ec65cea5b50f5774e0747bad7e44c647292",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "features": [
+        "Reflect.construct",
+        "arrow-function"
+      ],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/not-a-constructor.js",
+      "includes": [
+        "isConstructor.js"
+      ],
+      "source_hash": "38d9b714b5f57586eebf55af02d9fc46a10ea68a40a659b9bf83798414b78f79",
+      "status": "pass"
+    },
+    {
+      "detail": "TS_PROGRAM 52:5: unknown variable arguments: declare it in this function or at the top level, or pass it as a parameter",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/prop-desc.js",
+      "includes": [
+        "propertyHelper.js"
+      ],
+      "source_hash": "ef6f7f267b4ea215b52b826631344191e1d56f891556b6c183b26f126c3ff0bd",
+      "status": "compile_rejected"
+    },
+    {
+      "detail": "",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/range.js",
+      "includes": [],
+      "source_hash": "e82a9078db98f6a604642a72b4bd0e1af2e8095a635ce2654d3229c8ab631b60",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "features": [
+        "Symbol"
+      ],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/return-abrupt-tointeger-fractiondigits-symbol.js",
+      "includes": [],
+      "source_hash": "7dbd8b0ca867f43114817871bf049b1fe87122f5b205b09b5a77e7ae79ee9b00",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/return-abrupt-tointeger-fractiondigits.js",
+      "includes": [],
+      "source_hash": "cc11b14e67bfd0d4b7b89459a6cb71100b75087ee02453af96f17e843025b9b1",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/return-values.js",
+      "includes": [],
+      "source_hash": "176e7e61081eed8dd725a37ccb84d24cab5db748b4e989d85ac022432fca28f4",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/this-is-0-fractiondigits-is-0.js",
+      "includes": [],
+      "source_hash": "c3a4d88cd41d3869c421e25735da9f091f8c6fbffb0acaaf2d77fba522252378",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/this-is-0-fractiondigits-is-not-0.js",
+      "includes": [],
+      "source_hash": "f38240822897cfe7e560debccbb30ead210831959dd0b89db20b58782ef04bd1",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "features": [
+        "Symbol"
+      ],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/this-type-not-number-or-number-object.js",
+      "includes": [],
+      "source_hash": "f846b4ec4908fceae1bb0d896ec80e2a38c7152f2675d077c432cccd66380bf2",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/tointeger-fractiondigits.js",
+      "includes": [],
+      "source_hash": "8284865721a7738a3a2842d21da2783f52db487204ff5ae49236feb499c918af",
+      "status": "pass"
+    },
+    {
+      "detail": "",
+      "features": [],
+      "flags": [],
+      "id": "test/built-ins/Number/prototype/toExponential/undefined-fractiondigits.js",
+      "includes": [],
+      "source_hash": "06c4fa779951b6f81feb82e63cd837c49420c4de0c76dea5e4ff5e3117ca9ddb",
+      "status": "pass"
+    }
+  ],
+  "counts": {
+    "compile_rejected": 3,
+    "pass": 12
+  },
+  "features": {
+    "Reflect.construct": {
+      "pass": 1
+    },
+    "Symbol": {
+      "pass": 2
+    },
+    "arrow-function": {
+      "pass": 1
+    },
+    "core": {
+      "compile_rejected": 3,
+      "pass": 9
+    }
+  },
+  "harness": "minimal host hooks v1; script compiled using VM strict module mode; not full test262 conformance",
+  "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+  "selection_hash": "845e6a442261985fe0f6402f50d569dc919e388223c14a3bf93361b11d10e9b3"
+}

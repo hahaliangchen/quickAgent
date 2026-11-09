@@ -97,7 +97,7 @@ async fn real_luna_typescript_minimal_prompt() -> Result<()> {
 
 请先根据设计资料理解项目目标，再检查五页作为一组是否完整、内容是否与设计一致、各页之间是否协调；同时检查页面本地链接与资源是否有效。根据实际检查结果写一份验收报告，包含整体和逐页结论、具体问题、依据以及没有检查或无法确认的事项。不要修改已有页面。
 
-用普通代码组织完整流程，并实现可以用代码和工具可靠完成的步骤。需要 AI 的能力用带 @virtual 注释的空函数声明，由宿主提供实现；写清职责、参数和返回类型。
+用普通代码组织完整流程，并实现可以用代码和工具可靠完成的步骤。主程序需要 AI 的能力用带 @module 注释的空函数声明，写清职责、参数和返回类型。模块的实现再用 @virtual 声明职责单一的 AI 钩子。
 
 按单一职责原则设计函数，保持高内聚、低耦合。每个虚函数尽量只做一件事，不要让一个虚函数承担过多不同职责；普通函数负责组合调用和具体执行。按实际需要划分，不为形式机械拆分。";
     std::fs::write(root.join("prompt.txt"),prompt)?;
@@ -241,7 +241,7 @@ fn last_answer(root: &Path) -> Result<String> {
 async fn real_model_leaf_asks_and_the_answer_continues() -> Result<()> {
     let (root,state,model)=real_low_effort("ask-real")?;
     eprintln!("REAL_ASK_START model={model} root={}",root.display());
-    let source="import * as io from \"host:io\";\nconst page = await writeIntro(\"an agent runtime that runs AI-written programs\");\nio.write({path: \"intro.html\", content: page.html});\n\n/** @virtual */\nasync function writeIntro(subject) {\n  // Write a short standalone HTML introduction to subject. Its audience, developers or managers, is not known and changes the whole page: ask the user which audience before writing anything. Returns {html:string}.\n}";
+    let source="import * as io from \"host:io\";\nconst page = await writeIntro(\"an agent runtime that runs AI-written programs\");\nio.write({path: \"intro.html\", content: page.html});\n\n/** @module */\nasync function writeIntro(subject) {\n  // Write a short standalone HTML introduction to subject. Its audience, developers or managers, is not known and changes the whole page: call a @virtual helper that asks the user which audience before writing anything. Returns {html:string}.\n}";
     let prompt=format!("Run exactly this program: call write_program with it unchanged as the source.\n```js\n{source}\n```");
     let started=std::time::Instant::now();
     tokio::time::timeout(Duration::from_secs(480),run_task(state.clone(),"example".into(),model.clone(),prompt,40,CancellationToken::new(),1,false)).await.context("first turn timed out")??;
@@ -260,7 +260,7 @@ async fn real_model_leaf_asks_and_the_answer_continues() -> Result<()> {
 async fn real_model_user_message_pauses_the_program() -> Result<()> {
     let (root,state,model)=real_low_effort("interject-real")?;
     eprintln!("REAL_INTERJECT_START model={model} root={}",root.display());
-    let source="import * as io from \"host:io\";\nconst topics = [\"agents\", \"programs\", \"tools\"];\nfor (const topic of topics) {\n  const page = await writePage(topic);\n  io.write({path: topic + \".html\", content: page.html});\n}\n\n/** @virtual */\nasync function writePage(topic) {\n  // Write a short standalone HTML page, under 40 lines, explaining topic in an agent runtime. Returns {html:string}.\n}";
+    let source="import * as io from \"host:io\";\nconst topics = [\"agents\", \"programs\", \"tools\"];\nfor (const topic of topics) {\n  const page = await writePage(topic);\n  io.write({path: topic + \".html\", content: page.html});\n}\n\n/** @module */\nasync function writePage(topic) {\n  // Use a focused @virtual helper to draft a short standalone HTML page, under 40 lines, explaining topic in an agent runtime. Returns {html:string}.\n}";
     let prompt=format!("Run exactly this program: call write_program with it unchanged as the source.\n```js\n{source}\n```");
     // The user speaks once the first page is written.
     let watched=root.clone();
@@ -754,7 +754,7 @@ async fn real_model_small_feature_probe() -> Result<()> {
     if mode=="skill" { install_skills(&root,&["spec-driven-testing"])?; }
     let mut prompt="请在现有 mini-webpack 上增加一个小功能：运行 node mini-webpack.js --version 时，只输出 package.json 中的 version 和一个换行，并以状态码 0 退出，不进行构建。原有打包命令的行为不变。请添加自动化测试，运行相关测试，并简要说明结果。".to_owned();
     if mode=="nudge" { prompt.push_str("\n如果技能列表为空，表示没有可用技能，请继续执行任务，不要重复查询相同的技能列表。"); }
-    if mode=="program" { prompt.push_str("\n请立即输出一段符合宿主要求的完整 JavaScript 程序，而不是先尝试用对话工具查看项目。你可以在程序中声明 @virtual 函数，让它读取代码、实现并测试该功能；由程序调用这个函数。不要只回复会去做。"); }
+    if mode=="program" { prompt.push_str("\n请立即输出一段符合宿主要求的完整 JavaScript 程序。你可以在主程序中声明 @module，让它用代码组织读取、实现和测试，模块内需要 AI 判断时再用 @virtual。不要只回复会去做。"); }
     let cancel=CancellationToken::new(); let monitor_cancel=cancel.clone(); let monitor_root=root.clone();
     let monitor=tokio::spawn(async move { loop { tokio::time::sleep(Duration::from_secs(2)).await;
         let Ok(conn)=agent_service::open_db(&monitor_root) else {continue};
