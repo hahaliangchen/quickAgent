@@ -1,16 +1,22 @@
-# Agent 流程伪代码与 Rust 执行器
+# Agent JavaScript 编排与持久化执行器
 
 > 本手册描述当前 Rust JS 子集，不代表最终目标必须使用自建 VM。设计理念与待验证的 Node 方向见 [设计与实现入口](agent-design-guide.md)。
 
 当前语言版本 **14**。使用常见 JS 基础语法表达流程，由 SWC 解析、Rust 执行持久化指令。内部值使用虚拟机堆以保留对象引用，变量按 JS 的块级作用域和词法作用域存放；宿主工具和 AI 仍通过 JSON 交接。**普通表达式由宿主确定性求值，智能判断必须写成显式任务函数。** 相同程序、相同输入和相同工具／任务返回值产生相同控制流；AI 任务及外部操作本身不因此变成确定性的。
 
-流程就是普通的 JavaScript。宿主实现其中的一个子集，本手册说明这个子集、尚未支持的功能和宿主提供的工具库。业务 skill 提供需求和流程，语言负责表达函数、数据依赖和控制流，宿主负责执行；学习语言不替代加载当前业务的 skill。
+编排以 Node.js JavaScript 为编写目标：主层描述流程，尚未实现的能力用 @virtual 空函数声明，宿主负责链接其实现。module 实现中的 AI 判断用 @virtual。入口提示词聚焦这些职责，API 来自当前工具契约；运行时兼容性、预算和恢复细节按需查询。本手册记录当前执行器的真实能力，不代表完整 Node 标准库都已提供。编排使用 Node.js 不意味着被处理的项目也是 JavaScript。
 
 ## 运行方式与工具导入
 
-主任务的 AI 把完整流程写成一段 JS，放在回复的一个 ```js 代码块里；宿主收到后直接编译运行，不需要另外调用提交工具。用户请求就是主任务，由宿主建立。程序像 JS 模块一样从顶层第一条语句开始顺序执行，没有入口函数，也不需要返回值；需要的数据写在代码里，或用导入的工具读取。宿主自带的工具通过 `import * as io from "host:io"` 或 `import {read as load} from "host:io"` 引入；支持命名导入和命名空间导入，别名仅为本地绑定，不扩大权限。也可以像 Node 里 `require("fs")` 那样写 `const io = require("io")`，执行到这一行时拿到同一组方法，方法是否存在在调用处才检查。没有 import 的程序里，宿主自带的库按名字就能用；程序自己声明了同名的变量时，这个名字归程序自己。插件和项目技能的库是第三方库，在用到的地方用 `const ppt = require("ppt")` 加载：执行到这一行，宿主才链接这个库，返回它的方法对象；同一次运行里再 require 拿到同一个对象；找不到就在这一行抛出可以捕获的 `MODULE_NOT_FOUND`。参数必须是库名字符串。`host:` 只用于宿主自带的库，用它引入插件库会收到改用 require 的诊断。工具仍以一个 JSON 对象传参并经过原权限检查。默认导入、export 和其他模块导入不支持。顶层运行完毕表示流程结束，不代表业务验收自动通过。
+主任务的 AI 用 `write_program({source})` 提交完整 JS，作为该条回复唯一的工具调用；宿主保存源码，编译通过后运行，结果回到主任务。回复正文中的代码只是展示，不会执行。程序像 JS 模块一样从顶层第一条语句开始顺序执行，没有入口函数，也不需要返回值；需要的数据写在代码里，或用导入的工具读取。
+
+宿主 SDK 使用普通 Node 风格的模块写法：`import io from "io"`、`import * as io from "io"`、`import {read as load} from "io"`，或在函数里 `const io = require("io")`。`host:` 是兼容别名，import 和 require 都接受，例如 `require("host:process")` 与 `require("process")` 加载同一个库对象。默认导入绑定库的方法集合。`<library>/promises` 提供异步方法。没有 import 的程序里，宿主自带的库按名字就能用；程序自己声明了同名变量时，这个名字归程序自己。这里的 `io`、`process` 是宿主 SDK，方法以已发布的工具契约为准，不能视为 Node 的 fs 或内置 process 对象。
+
+插件和项目技能的库在用到的函数里用 `const ppt = require("ppt")` 加载；执行到这一行才链接，返回方法对象。同一次运行再次 require 同一库拿到同一个对象；找不到时抛出可捕获的 `MODULE_NOT_FOUND`。参数必须是库名字符串。静态 import 仅绑定当前已发布的宿主 SDK；第三方库通过 require 在运行时加载。工具以一个 JSON 对象传参，仍经过原权限检查。export、本地文件模块和动态 import 尚不支持。顶层运行完毕表示流程结束，不代表业务验收自动通过。
 
 `program_tool_headers` 是按用途组织的库目录。读代码时，用 `io.search` 在相关目录找定义或文本，再用 `io.read_lines` 查原文。用 `read_tool_contracts({libraries:["io"],overview:true})` 看该库的当前方法和用途，再用 `read_tool_contracts({methods:["io.read_lines"]})` 读单个方法的参数和返回字段。宿主也在目录下列出常用源码方法的短签名，字段来自工具契约。主 AI 可直接使用文件搜索和读取工具，模块作者的探路使用 `io` 的只读方法。
+
+Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`：`status / index / list / search / read`，共同参数为 `language: "rust" | "typescript"` 和可选的 `workspace_root`。查询会自动建立、维护现有 syn/SWC 索引；无需每次先全仓重建。搜索返回 `matches`，列表返回 `symbols`，读取返回 `content`、符号位置和基于语法的调用关系。按需查方法契约，留意分页及 `index.coverage_issues`；索引不是完整类型分析或运行时覆盖。模块用它采集相关源码，再让 `@virtual` 判断职责、架构和正确性。索引操作只更新缓存，不改源码；它使用正常模块执行，不属于 `probe:true` 的核心文件探路方法。
 
 ## 阅读路线
 
@@ -37,7 +43,7 @@
   → 流程结束
 ```
 
-`compose` 和 `inspect` 带 `@module`：需要 AI 理解与处理，第一次调用时由 AI 各自写成代码，其中真正需要 AI 生成或判断的那一步，在模块代码里声明成虚函数；写文件、读文件及布尔判断有确定规则，直接由宿主执行。主程序里需要 AI 的地方都写成模块，主程序里声明虚函数，宿主在交出时就拒绝（[设计文档](agent-design-guide.md)第 3 节）。普通函数调用使用局部 Runtime 函数帧，不创建 AI 任务节点，也不启动另一个 Agent。此例用 HTML 说明串行数据流，只检查实际执行过的内容／结构，不声称已经完成浏览器视觉验收。
+`compose` 和 `inspect` 是第一层虚函数：主程序只编排它们的契约、参数、依赖和验收；宿主自动链接已有实现，缺少时由 AI 写成代码。实现中需要判断或生成的部分再声明第二层 `@virtual`。两层声明统一使用 JSDoc @virtual，实现在宿主链接，无须导入实现文件（[设计文档](agent-design-guide.md)第 3 节）。普通函数调用使用局部 Runtime 函数帧，不创建 AI 任务节点，也不启动另一个 Agent。此例用 HTML 说明串行数据流，只检查实际执行过的内容／结构，不声称已经完成浏览器视觉验收。
 
 已有的真实结果通过参数交给需要它的函数，不因为进入虚函数就重读原材料。虚函数可在同一上下文连续观察、调用工具和处理；它只做一件事时最稳：只检查，或只处理，检查之后要不要处理由代码决定。调用方对函数契约中可以确定的输入与输出关系做代码核对，不能把不匹配的返回结果当作有效验收。处理实际状态后需要复检时才重新读回；多步的复杂处理写成代码或模块，不交给一个虚函数。
 
@@ -49,7 +55,7 @@
 
 ## 异步函数、工具和并发
 
-宿主自带的工具从 `host:<library>` 导入，同步等待实际回执；需要异步工具时从 `host:<library>/promises` 导入。用 require 时，异步方法用 `require("<库名>/promises")` 加载。async 函数和 async 虚函数返回 Promise，调用方可在等待前继续执行。`Promise.all`、`allSettled`、`race`、`any`、`then`、`catch`、`finally` 提供组合与错误传播；all 和 allSettled 按输入顺序排列结果，race 和 any 按完成结果决定。
+宿主 SDK 从 `<library>` 导入，同步等待实际回执；需要异步工具时从 `<library>/promises` 导入；旧 `host:` 前缀仍可使用。用 require 时，异步方法用 `require("<库名>/promises")` 加载。async 函数和 async 虚函数返回 Promise，调用方可在等待前继续执行。`Promise.all`、`allSettled`、`race`、`any`、`then`、`catch`、`finally` 提供组合与错误传播；all 和 allSettled 按输入顺序排列结果，race 和 any 按完成结果决定。
 
 独立只读操作可由宿主合批，最多 32 项一批，逐项记录成功或失败。多个 async 虚函数运行在独立窗口，调用时固定参数和 `@uses` 点名的变量；模型请求共用并发队列，默认三个槽位。共享文件应由调用方统一写入；并发函数对同一文件的整文件写入会保留冲突候选并停止。
 
@@ -60,19 +66,27 @@
 | 写法 | 谁处理 | 何时完成 |
 | --- | --- | --- |
 | 普通 `helper(args)` | 宿主进入函数局部作用域并执行其代码 | 函数 `return` 后恢复调用方；注释不会自动执行 |
-| `@virtual` 的 `helper(args)`（写在模块代码里） | 一个 AI 读职责注释和实际参数，用工具循环完成这一件事 | 返回约定的 JSON 值 |
-| `@module` 的 `helper(args)` | 第一次调用时 AI 按契约写成代码，之后对同一契约的调用直接运行这份代码 | 代码 `return` 后恢复调用方 |
+| 第二层 `@virtual` 的 `helper(args)`（写在实现代码里） | 一个 AI 读职责注释和实际参数，用工具循环完成这一件事 | 返回约定的 JSON 值 |
+| 第一层 `@virtual` 的 `helper(args)` | 第一次调用时 AI 按契约写成代码，之后对同一契约的调用直接运行这份代码 | 代码 `return` 后恢复调用方 |
 | `library.method({...})` | 已发布的真实工具：import 的宿主库，或 require 得到的第三方库对象 | 得到工具原始 JSON；业务验收仍由流程定义 |
 
-普通函数按词法作用域执行。虚函数只看到自己的参数和契约里用 `@uses` 点名的变量，也就是它的闭包，值在调用时读取；async 虚函数发起之后，父流程变量的变化不会同步过去。模块只通过参数拿输入。
+普通函数按词法作用域执行。第一层 `@virtual` 通过参数获得输入；第二层虚函数看到参数和契约里用 `@uses` 点名的词法变量，值在调用时读取。async 虚函数发起后，父流程变量的变化不会同步过去。
 
 ## 模块：AI 写成的代码
 
-`@module` 函数是一块完整的工作。第一次调用时，宿主把它的签名、契约注释和这次调用的实参交给一个 AI，由它回复这个函数的完整代码；编译通过后存成这个聊天的模块文件再运行。之后对同一契约（函数名、签名和注释原文完全一样）的调用直接运行这份代码，不再请求 AI，所以模块要写成通用代码，实参只是一个例子。同一契约的几个调用同时第一次运行时，只写一次。示例见 [module-notes.js](../skills/task-program/examples/module-notes.js)。
+主编排里的第一层 `@virtual` 声明一项能力。第一次调用时，宿主把它的签名、契约注释和这次调用的实参交给一个 AI，由它回复这个函数的完整代码；编译通过后存成这个聊天的模块文件再运行。之后对同一契约（函数名、签名和注释原文完全一样）的调用直接运行这份代码，不再请求 AI，实现满足当前契约和实际输入即可，不提前设计通用框架；分析结论也不应硬编码。同一契约的几个调用同时第一次运行时，只写一次。示例见 [module-notes.js](../skills/task-program/examples/module-notes.js)。
 
-编排时可从 `chat_modules` 找已有模块的文件和版本，用历史工具打开源码。保持契约不变的实现改进可在提交主程序时加 `revise_modules: {模块名: {version, reason}}`。模块作者在实际调用时读取旧实现和修改目标，提交编译通过的新版本。签名、返回形状或承诺行为变化时使用独立契约。
+宿主按签名和契约链接实现，不要求编排代码指定实现文件或 import。`chat_modules` 展示可复用的契约；声明同一契约即可复用。需要改进实现时才读取其文件和版本。保持契约不变的实现改进可在提交主程序时加 `revise_modules: {模块名: {version, reason}}`。模块作者在实际调用时读取旧实现和修改目标，提交编译通过的新版本。签名、返回形状或承诺行为变化时使用独立契约。
 
-模块代码里除了 import 只有函数声明，第三方库在用它的函数里 require。需要 AI 的部分声明成虚函数，完整的子流程可以再声明成模块。模块不捕获调用方的变量，在模块上写 `@uses` 会编译报错；写模块的 AI 也看不到调用方读过的技能，要用哪个技能，自己用 `read_skill` 读。模块出错时交给修复者，见“失败与恢复”。
+实现可以包含 import、函数声明、顶层常量和 require；每次调用使用新的模块作用域，await 写在函数内部。实现入口已有真实函数体时，可以保留入口的 `/** @virtual */` 注释；宿主在实现和修复上下文中把它视为普通代码。其他 AI 声明仍须使用空函数体，避免把声明误当实现。
+
+模块作者可用 `write_program({probe:true,source})` 运行小型只读探测。探测与正式实现使用同一套 SDK 名称和加载语法，权限在实际调用时检查：仅允许 `read_file`、`read_file_lines`、`search_text`、`list_dir`、`workspace_info`。即使 process 库成功加载，shell 和写入仍返回 `MODULE_PROBE_READ_ONLY`，诊断明确指出 probe:true 的限制并要求去掉 probe 后提交正式实现；更换 import/require 不改变权限。探测结果只回到当前作者，不保存为复用模块，也不能调用 AI 函数。正式实现按当前任务权限执行。
+
+分析代码应采集和整理证据，需要判断时把相关源码交给聚焦的 `@virtual`；不要把本次仓库的报告和结论硬编码成所谓通用分析算法。每层不重复采集同一材料，按工具已发布的结果结构编写。引用校验要确认原文及完整控制路径支持对应结论，仅检查文件或行号存在并不构成验证。
+
+需要 AI 的部分声明成第二层虚函数；更大的实现继续拆普通代码步骤和聚焦的判断，不再创建另一层代码实现。模块不捕获调用方的变量，在模块上写 `@uses` 会编译报错；写模块的 AI 也看不到调用方读过的技能，要用哪个技能，自己用 `read_skill` 读。模块出错时交给修复者，见“失败与恢复”。
+
+宿主管理器在同步和并发调度前沿持久化调用链检查 AI 层级。主编排是入口，第一层 `@virtual` 获得代码实现，第二层 `@virtual` 是终端 AI 工具循环。普通 JS helper 不增加层数，缓存加载、修复和恢复也不重置层级。调用描述和模型输入包含 `ai_layer`。第二层没有提交程序或继续派生 AI 的权限；越层报 `VIRTUAL_LAYER_LIMIT`，旧模块标记不能用于第二层（`SECOND_LAYER_VIRTUAL_REQUIRED`）。第一层不捕获调用方变量，输入须作参数，错误使用 @uses 报 `FIRST_LAYER_ARGUMENTS_REQUIRED`。
 
 ## 失败与恢复
 
@@ -97,16 +111,16 @@
 | 局部值 | const/let/var、局部赋值、赋值表达式、局部 ++/-- 与 += -= *= /= %=。const 不重绑定。变量不共享可变别名 |
 | 调用 | helper(args)、已发布的 library.method(args)（如 io.read，或 require 得到的库对象的方法）、函数值调用；普通函数按 JS 处理实参数量（缺少为 undefined，多余忽略），@virtual 函数严格核对参数 |
 | 控制流 | if/else、for(init;test;update)、while、do/while、数组 for...of、简单绑定的 for...in、switch、带标签 break/continue、三元表达式、return、assert、try/catch/throw |
-| 表达式 | + - * / %、一元 + - ! typeof、== != === !== < <= > >=、&& || ??、模板字符串；宿主直接计算，不创建模型任务 |
+| 表达式 | + - * / %、一元 + - ! typeof、== != === !== < <= > >=、&& || ??、模板字符串、逗号运算符（从左到右执行并返回末项）；宿主直接计算，不创建模型任务 |
 | 收集及数据方法 | 本地数组 push；确定性的 includes/indexOf/slice/at/concat、字符串 lastIndexOf/startsWith/endsWith/trim/toLowerCase/toUpperCase/split/replace/replaceAll/match、正则 test、数组 join，以及 JSON.stringify/JSON.parse、Array.isArray、Object.keys/values |
 | 路径和 URL 计算 | `path.join/resolve/relative/normalize/dirname/basename/extname`、`url.parse`；由 Rust 直接计算，不访问文件系统 |
 | 异步并发 | async 虚函数和异步工具返回 Promise；可用 Promise.all 等待，失败可由 try/catch 处理 |
 
 常见语法归约为已有赋值、分支、跳转、调用和返回结构，不为每种写法新增调度协议。for 的 continue 进入 update 再检查条件；while 的 continue 进入条件；do/while 的 continue 进入末尾条件。break/continue 只退出其跨越的异常处理现场，保留外围 catch。
 
-顶层和 async 函数可以 await Promise；`Promise.all` 等组合子支持 async 虚函数与异步工具。Promise 回调和 await 恢复按 JS 微任务顺序执行：async 函数返回 Promise、`then` 回调返回 Promise 或 resolve 传入 Promise 时，与 JS 一样多等两轮。直接把顶层 async 函数（含 async 虚函数）或 `host:<库>/promises` 工具的调用结果当作值使用时编译失败，例如 `inspect(page).passed`、`if (inspect(page))`、`assert(inspect(page))`、`` `${work()}` `` 或参与运算；赋值保存、传给 `Promise.all`、调用 `then`/`catch`/`finally` 和 `void` 不受影响。局部函数值或变量保存的 Promise 在编译期无法识别，运行时读取 Promise 属性时报“this is a Promise; the value may need await”。运行时实现的是 JS 子集，不是完整 Node.js。支持对象和数组成员的赋值、复合赋值及自增自减；声明、普通函数参数和 catch 支持嵌套解构、默认值及解构剩余项，对象和数组字面量支持展开；支持可选函数调用、剩余参数及调用参数展开。非简单参数先在独立的参数作用域中初始化；默认值及其创建的闭包不会看到函数体内的同名绑定。其余仍禁止 call()/ai() 包装、除 host: 库之外的 import（第三方库用 require）和 export、TS 类型／断言、BigInt，以及 JS 全局环境。`new RegExp`、`new Promise`、`new Array`、`new Date`、`new Map/Set/WeakMap/WeakSet` 和内置 Error 类是构造例外。源码字符串里的这些词语只是数据，不按词语拦截。需要智能处理时声明注释任务；没有“计算失败后自动交给 AI”的路径。
+顶层和 async 函数可以 await Promise；`Promise.all` 等组合子支持 async 虚函数与异步工具。Promise 回调和 await 恢复按 JS 微任务顺序执行：async 函数返回 Promise、`then` 回调返回 Promise 或 resolve 传入 Promise 时，与 JS 一样多等两轮。直接把顶层 async 函数（含 async 虚函数）或 `host:<库>/promises` 工具的调用结果当作值使用时编译失败，例如 `inspect(page).passed`、`if (inspect(page))`、`assert(inspect(page))`、`` `${work()}` `` 或参与运算；赋值保存、传给 `Promise.all`、调用 `then`/`catch`/`finally` 和 `void` 不受影响。局部函数值或变量保存的 Promise 在编译期无法识别，运行时读取 Promise 属性时报“this is a Promise; the value may need await”。运行时实现的是 JS 子集，不是完整 Node.js。支持对象和数组成员的赋值、复合赋值及自增自减；声明、普通函数参数和 catch 支持嵌套解构、默认值及解构剩余项；数组/对象解构赋值返回原右值，成员和 super 属性也可作目标，目标 object/key 在读取对应迭代值或属性之前求值，const 目标拒绝赋值；对象和数组字面量支持展开；支持可选函数调用、剩余参数、调用参数展开和内置构造器实参展开。非简单参数先在独立的参数作用域中初始化；默认值及其创建的闭包不会看到函数体内的同名绑定。其余仍禁止 call()/ai() 包装、本地文件模块导入（第三方库用 require）和 export、TS 类型／断言、BigInt，以及 JS 全局环境。`new RegExp`、`new Promise`、`new Array`、`new Date`、`new Map/Set/WeakMap/WeakSet` 和内置 Error 类是构造例外。源码字符串里的这些词语只是数据，不按词语拦截。需要智能处理时声明注释任务；没有“计算失败后自动交给 AI”的路径。
 
-函数是值：嵌套函数声明、函数表达式、箭头函数和对象方法简写创建闭包，可保存、传递和调用。数组回调支持同步函数值、多语句和嵌套调用，包括在回调中调用工具并跨存盘恢复；字符串 replace/replaceAll 的替换函数也支持此方式。数组 map 支持 async 回调；其他数组回调当前仍要求同步。支持通过索引赋值和 length 产生稀疏数组；数组字面量空位尚不支持；数组可保存非索引属性（包括正则结果的 groups/index/input），这些属性不改变 length，也不作为数组元素参与 JSON.stringify。
+函数是值：嵌套函数声明、函数表达式、箭头函数和对象方法简写创建闭包，可保存、传递和调用。数组回调支持函数值、多语句和嵌套调用，包括在回调中调用工具并跨存盘恢复；字符串 replace/replaceAll 的替换函数也支持此方式。所有数组回调及 Map/Set.forEach 都接受 async 函数：只执行同步段并消费返回的 Promise 值，不自动等待；filter/some/every 将 Promise 视为真，reduce 可以自行构造 Promise 链，未处理的拒绝沿用现有错误规则。生成器回调返回迭代器。支持通过索引赋值、length 和数组字面量空位产生稀疏数组（例如 [1,,3] 的 length 为 3，但没有索引 1）；数组可保存非索引属性（包括正则结果的 groups/index/input），这些属性不改变 length，也不作为数组元素参与 JSON.stringify。
 
 ## 确定性的值规则
 
@@ -116,9 +130,11 @@
 
 `String.raw` 标签模板保留反斜杠并正常插值，例如 ``String.raw`x${1}\d` `` 为 `x1\d`。`String.fromCharCode(...units)` 按 UTF-16 码元构造，`String.fromCodePoint(...points)` 接受整数码点 0..0x10ffff，非法码点抛 `RangeError`。落单的代理码元在 VM 内保留，`JSON.stringify` 将其转义；直接通过要求 Unicode 标量字符串的宿主 JSON 边界会明确报错，不会静默替换。普通字符串仍按下文的 Unicode 标量索引规则处理。
 
-`Object.hasOwn(o,k)` 检查自己的属性，数组空位不算属性。`Object.freeze(o)` 浅冻结并返回原引用；属性写入、删除已有属性、数组变更等严格操作抛 `TypeError`，嵌套对象不自动冻结。`structuredClone(value)` 对 JSON 值深拷贝，嵌套引用与原值分离。
+`Object.is(a,b)` 使用 SameValue：NaN 与自身相等，+0 与 -0 不等。`Object.hasOwn(o,k)` 检查自己的属性，数组空位不算属性。`Object.freeze(o)` 浅冻结并返回原引用；属性写入、删除已有属性、数组变更等严格操作抛 `TypeError`，嵌套对象不自动冻结。`structuredClone(value)` 对 JSON 值深拷贝，嵌套引用与原值分离。
 
-`encodeURIComponent` / `decodeURIComponent` 按 URI 组件编码；非法百分号转义、非法 UTF-8 和编码时的落单代理码元抛 `URIError`。加号不会被解码为空格。
+`encodeURI` / `decodeURI` 用于完整 URI，额外保留 `;/?:@&=+$,#`；decodeURI 保留这些字符的原百分号转义（含原大小写）。`encodeURIComponent` / `decodeURIComponent` 用于 URI 组件。非法百分号转义、非法 UTF-8 和编码时的落单代理码元抛 `URIError`。加号不会被解码为空格；输入对象的转换可以经宿主调用挂起恢复。
+
+`String.prototype.localeCompare(other, locales, options)` 使用 ICU4X 2.2 的编译数据排序，支持中文拼音等 locale 数据和 `numeric`、`sensitivity`（base/accent/case/variant）、`caseFirst`（upper/lower/false），返回 -1/0/1。默认 locale 为 en-US；locales 可用字符串或数组（当前取首项，空数组用默认值）。不支持的选项或非法取值抛 RangeError，不以码点序代替区域排序。`Number.prototype.toLocaleString` 提供 en/zh 的三位分组、最多三位小数；目前不接受数字格式选项。两类方法的选项 getter 和字符串转换都走普通可挂起 VM 帧。
 
 正则 `exec`、非全局 `match` 和 `matchAll` 的每项结果带 `groups`、`index`、`input`；未匹配的命名组为 `undefined`，没有命名组时 `groups` 为 `undefined`。全局 `match` 与 JS 一样仅返回完整匹配的字符串列表。`replace` / `replaceAll` 的替换文本支持 `$<name>`。
 
@@ -128,7 +144,7 @@
 
 实例支持 `getTime`、`valueOf`、`toISOString`、`toJSON`、`toString`，以及 `getFullYear/Month/Date/Day/Hours/Minutes/Seconds/Milliseconds` 和对应的 `getUTC*`。两个 Date 相减得到毫秒数；`+date`、`< > <= >=` 按时间值计算，`instanceof Date` 成立。`JSON.stringify({t:new Date(0)})` 为 `{"t":"1970-01-01T00:00:00.000Z"}`。Date 内部毫秒值随堆序列化，挂起和恢复后不重新取当前时间。
 
-`new Date('x')` 是 Invalid Date，`getTime()` 为 NaN，`toISOString()` 抛 `RangeError`，`toJSON()` 及 JSON 序列化为 `null`。setter 暂不支持。`toLocaleString`、`toLocaleDateString`、`toLocaleTimeString` 因缺少区域数据而在编译期拒绝；改用 `toISOString()` 或手动拼接取值。`read_program_guide` 返回能力说明和 `builtin_contracts` 中的方法定义，声明中的 TS 类型只供阅读，不能复制进流程代码。
+`new Date('x')` 是 Invalid Date，`getTime()` 为 NaN，`toISOString()` 抛 `RangeError`，`toJSON()` 及 JSON 序列化为 `null`。setter 暂不支持。`toLocaleString`、`toLocaleDateString`、`toLocaleTimeString` 支持 en/zh（默认 en-US），按美式或中文年月日格式输出；省略 timeZone 时使用宿主本地时区，`timeZone:'UTC'` 使用 UTC，`'local'` 或与宿主 TZ 相同的名称使用本地时区。支持 hour12、year/month/day/hour/minute/second：数字字段支持 numeric/2-digit，month 额外支持 long/short/narrow。日期和时间字段按方法选择默认值；例如 `new Date(0).toLocaleString('en-US',{timeZone:'UTC'})` 为 `1/1/1970, 12:00:00 AM`，zh-CN 为 `1970/1/1 00:00:00`。不支持的 locale、Unicode locale 扩展、时区或选项明确抛 RangeError；这里不承诺完整 Intl.DateTimeFormat 或区域子标签的全部排版差异。`read_program_guide` 返回能力说明和 `builtin_contracts` 中的方法定义，声明中的 TS 类型只供阅读，不能复制进流程代码。
 
 日期字符串优先使用 ISO 格式；这里不承诺 Node 的全部宽松旧格式解析。`toString()` 显示本地时间和数值 GMT 偏移，不附带 Node/ICU 的本地化时区长名称。极端年份的本地规则依赖宿主时区实现，跨机器计算应使用 UTC 方法。
 
@@ -149,7 +165,11 @@
 
 `lastIndexOf` 接受一个字符串，返回 Unicode 标量下标或 -1。`replace` 和 `replaceAll` 分别替换首次或全部匹配；查找可以是字符串或正则（`replaceAll` 的正则必须带 `g`），替换文本按 JS 规则展开 `$$`、`$&`、`` $` ``、`$'`、`$1` 和 `$<name>`，也可以是替换函数（接收匹配、捕获组、位置和原文，有命名组时再接收 groups），结果最多 4 MiB。
 
-支持正则字面量，例如 `/a(\\d+)/i.test(text)` 和 `text.match(/a(\\d+)/g)`，也支持 `new RegExp(pattern, flags)` 和复制已有正则。可用标志为 `g`、`i`、`m`、`s`、`u`；底层采用 Rust regex 的 Unicode 语义及语法，不支持回溯引用、环视或 JS 特有语法。字面量的非法模式和标志在编译时拒绝，动态构造的在运行时拒绝。`test` 无状态，即使有 `g` 也不维护 JS 的 `lastIndex`；`match` 不匹配返回 null，非 `g` 返回完整匹配与捕获组组成的 JSON 数组（未匹配组为 null，不含 JS 的 index/groups 属性），`g` 返回全部完整匹配的数组。正则以内部 JSON 描述保存；除 `replace`/`replaceAll` 外，其他正则方法暂不支持。模式最多 8192 字节，输入最多 2 MiB，结果最多 10000 项及 4 MiB 捕获文本；超出时报错。正则不替代结构化 HTML 解析。
+支持正则字面量、`new RegExp(pattern,flags)` 和复制正则，标志为 g/i/m/s/u/y。test/exec 维护 g/y 的 lastIndex，sticky 要求从指定位置连续匹配；状态随 Runtime 保存。支持 match、matchAll、search、replace/replaceAll 和 split；matchAll 从原 lastIndex 的副本开始且不修改原值，当前结果仍是一次性物化的数组。全局 match 返回完整匹配列表，其他匹配结果保留捕获组、index/input/groups，未参与的组在 VM 内为 undefined。
+
+普通模式使用线性时间的 Rust regex；其不支持的环视或反向引用模式交给 fancy-regex 0.19，并限制回溯 100,000 次。支持正向/反向肯定及否定环视、数字和命名反向引用；u 标志下支持 `\p{L}`、`\p{Script=Han}`、`\P{...}`，无 u 时按字面量处理属性转义。ASCII 词边界在两种引擎中保持一致。回溯超限抛带 backtracking 信息的 RangeError，所有消费者传播该错误。模式最多 8192 字节，输入最多 2 MiB，匹配列表最多 10000 项和 4 MiB 捕获文本；不把引擎错误当成未匹配。字面量错误在编译期报告，动态模式错误在运行期报告。
+
+已知差异：引用未参与匹配的捕获组时，JS 视为空串，当前 fancy 后端会匹配失败（例如 `/(a|(b))\2c/.test('ac')`）；这项语义仍未实现。正则输入仍受 Unicode 标量字符串表示和索引的既有边界限制，未宣称覆盖全部 UTF-16/u 模式差异。正则不替代结构化 HTML 解析。
 
 ## 工具声明与固定名字
 
@@ -177,7 +197,7 @@ import 的库名是编译期绑定，不是可变 JS 对象；它的方法和 re
 
 ### Shell stage 1：process 库
 
-shell 只允许在 `@module` 的确定性实现代码中调用；主 AI、主程序和 `@virtual` 叶子均不能直接调用，也不能靠查找方法或 import 放宽。需要 shell 的主流程声明一个模块，由模块实现实际命令、轮询、解析和检查；虚函数仍是接收必要材料、只做一件事的 AI 判断钩子。三个方法属于 `host:process`：`process.exec_command({cmd,workdir,yield_time_ms})`、`process.write_stdin`、`process.kill_session`。旧工具保留，但不作为绕过 shell 边界的入口。shell 路径、能力和工作区由 system 动态注入；Windows 用 PowerShell 7（pwsh）语法与 `D:/project` 路径，Linux 用 Bash。每条 cmd 启动新进程、单独传 workdir，变量和 cd 不跨命令保留；长进程仍保留 session，标准输入输出用管道，无 PTY。
+shell 只允许在第一层 `@virtual` 的确定性实现代码中调用；主 AI、主程序和第二层 `@virtual` 叶子均不能直接调用，也不能靠查找方法或 import 放宽。需要 shell 的主流程声明第一层虚函数，由其实现执行实际命令、轮询、解析和检查；虚函数仍是接收必要材料、只做一件事的 AI 判断钩子。三个方法属于 `host:process`：`process.exec_command({cmd,workdir,yield_time_ms})`、`process.write_stdin`、`process.kill_session`。旧工具保留，但不作为绕过 shell 边界的入口。shell 路径、能力和工作区由 system 动态注入；Windows 用 PowerShell 7（pwsh）语法与 `D:/project` 路径，Linux 用 Bash。每条 cmd 启动新进程、单独传 workdir，变量和 cd 不跨命令保留；长进程仍保留 session，标准输入输出用管道，无 PTY。
 
 同一个 workspace 内，同 task、同 turn 的 shell 可以共存并共享 `change_interval`：例如先启动 `npm dev`、保留它的 session_id，再用后续 `exec_command` 执行 `curl` 探测。重叠期间的文件改动合并跟踪，直到区间里最后一个 shell 退出才结算；一个命令退出不代表整个区间完成。别的 task/turn，以及宿主文件写入、编辑和 undo，都必须等待该区间的所有 shell 停止。超过 `yield_time_ms` 等待仍未退出时，保留返回的 `session_id`，用 `process.write_stdin({session_id,chars:"",yield_time_ms})` 轮询增量输出；非空 `chars` 写 stdin，`process.kill_session({session_id})` 终止该会话的整个进程树。结果的 `running`、`exit_code`、`stdout`、`stderr`、`duration_ms`、`encoding`、`truncated` 是实际观测；空退出码不当作成功，业务验收仍需检查真实结果。
 
@@ -215,7 +235,7 @@ function process(notes) {
 
 业务 skill 和用户决定范围、依赖、确认点、验收与交付；通用 task-program skill 负责表达这些关系。宿主为每个用户请求建立主任务；AI 准备缺失的技能／工具契约后，用 `write_program` 交出一段覆盖完整工作、检查与交付的 JS 程序。
 
-普通 helper 在宿主的局部函数帧中执行，不创建 AI 任务节点；工具调用是实际操作步骤。显式的 @virtual 或 @module helper 创建独立的 AI 上下文，把职责注释与命名实参交给 AI。标记放在紧邻函数的前置 JSDoc 或函数体注释中，体内可为空，或仅写 throw new Error("固定说明") 作为占位；不允许占位 return 或其他可执行语句；未标记的空函数是普通 JS，返回 undefined，不声明 AI 工作。返回结构写入注释契约，实际返回来自 AI 或模块代码。普通代码中的注释没有执行效果。虚函数的 AI 用工具循环直接完成这件事；需要写成代码的工作声明为 @module。主程序里需要 AI 的地方一律是 @module，虚函数只写在模块代码里。注释应说明职责、输入与返回字段。所有调用一律按位置绑定实参，模块代码保持契约的参数个数；不按名字猜测，也不把多参自动打包成单对象。bindings 中的值就是局部参数值，没有额外 input 包装；closure 列出契约里 `@uses` 点名的变量。
+普通 helper 在宿主的局部函数帧中执行，不创建 AI 任务节点；工具调用是实际操作步骤。显式的 @virtual helper 创建独立的 AI 上下文，把职责注释与命名实参交给 AI。标记放在紧邻函数的前置 JSDoc 或函数体注释中，体内可为空，或仅写 throw new Error("固定说明") 作为占位；不允许占位 return 或其他可执行语句；未标记的空函数是普通 JS，返回 undefined，不声明 AI 工作。返回结构写入注释契约，实际返回来自 AI 或模块代码。普通代码中的注释没有执行效果。两层统一声明为 JSDoc @virtual：主编排的第一层由宿主生成或复用代码实现，实现里的第二层由 AI 工具循环返回判断。宿主按调用层级选择行为。注释应说明职责、输入与返回字段。所有调用一律按位置绑定实参，模块代码保持契约的参数个数；不按名字猜测，也不把多参自动打包成单对象。bindings 中的值就是局部参数值，没有额外 input 包装；closure 列出契约里 `@uses` 点名的变量。
 
 ```js
 const request = {output: "report.html", requirements: "按用户要求制作并验收报告"};
@@ -227,20 +247,20 @@ if (!check.passed) {
 }
 assert(check.passed, "修复后验收仍未通过，停止交付");
 deliver(artifact, request);
-/** @module */
+/** @virtual */
 function produce(request) {
   // 按 request 制作实际产物，返回路径和版本。
 }
-/** @module */
+/** @virtual */
 function inspect(artifact, request) {
   // 读取或检查实际产物，对照 request 判断。
   // 返回 {passed:boolean, evidence:[实际工具观察], issues:[...] }。
 }
-/** @module */
+/** @virtual */
 function repair(artifact, check, request) {
   // 使用 check 的证据完成授权范围内的修正，返回实际产物。
 }
-/** @module */
+/** @virtual */
 function deliver(artifact, request) {
   // 完成 request 要求的检查与交付，返回真实结果和限制。
 }
@@ -258,7 +278,7 @@ inspect 的判断由 AI 作出；!check.passed 由宿主消费布尔值。不再
 
 规划阶段将用户目标与业务 skill 编排成顶层流程和辅助函数；进入虚函数后，当前 AI 负责实现该函数的职责，可以直接理解、生成、转换、验收或使用工具并返回实际结果。当前调用已经满足“智能工作显式交给虚函数”的表达要求，执行者不必再次包装同一职责。
 
-需要具体编排的工作写成代码：能直接写的步骤写在主程序里，需要 AI 的每一块写成 @module，由写模块的 AI 继续拆分。进一步拆分应产生职责明确、实际推进处理的子步骤；仅换函数名、传递相同输入并转交同一未完成工作，属于重复规划。虚函数说做不到是正常的信号，调用它的代码接住后拆细或换一种做法。
+需要具体编排的工作写成代码：能直接写的步骤写在主程序里，需要 AI 的每一块写成 @virtual，由写模块的 AI 继续拆分。进一步拆分应产生职责明确、实际推进处理的子步骤；仅换函数名、传递相同输入并转交同一未完成工作，属于重复规划。虚函数说做不到是正常的信号，调用它的代码接住后拆细或换一种做法。
 
 该边界由规划与执行指令表达。宿主继续负责调用、返回和记录，不根据函数注释猜测业务进展，不新增完成确认、业务状态或语义判重／嵌套深度限制。
 
@@ -268,7 +288,7 @@ inspect 的判断由 AI 作出；!check.passed 由宿主消费布尔值。不再
 
 agent_runtime_windows.state.program 保存源码、指令、函数帧、PC、变量、catch 栈、指令预算和挂起 effect ID。每次效果先持久化位置，已有回执恢复时直接消费，不重复计算已完成的更新或重放操作。缺少外部回执时结果未知，不能承诺跨进程恰好一次。
 
-版本 13 及更早的现场、源码和回执保留，但拒绝按版本 14 续跑：作用域、对象引用、数值和条件语义已经变化，不能静默套用新规则。旧记录仍可作为历史查看，不自动重放已完成或状态未知的操作。源码上限 100,000 字节，最多 64 个顶层函数（连同嵌套函数和箭头函数最多 1024 个）、调用深度 64，每份运行中的代码（主程序，或一次模块调用）最多执行 1,000,000 条指令，普通函数调用算在调用方里；预算耗尽强制失败，不能被 catch 隐藏为成功。
+版本 13 及更早的现场、源码和回执保留，但拒绝按版本 14 续跑：作用域、对象引用、数值和条件语义已经变化，不能静默套用新规则。旧记录仍可作为历史查看，不自动重放已完成或状态未知的操作。源码上限 100,000 字节，最多 64 个顶层函数（连同嵌套函数和箭头函数最多 1024 个）、调用深度 64，每份运行中的代码（主程序，或一次模块调用）在两次已完成宿主交互之间最多执行 2,000,000 个工作量单位，普通函数调用算在调用方里；预算耗尽强制失败，不能被 catch 隐藏为成功。
 
 ## 统一的调用边界（版本 14）
 
@@ -325,7 +345,7 @@ cargo test single_agent::documented_examples::real_model_async_five_pages_publis
 
 绝对到期时间、回调、参数和闭包保存在 Runtime 快照中。暂停/恢复不延长到期时间；过期 timeout 立即执行，interval 只触发一次、从实际派发时间安排下一次，不补跑积压次数。等待定时器时宿主同时等待并发调用，并响应取消和用户插话；停止、错误或回合结束后清理，不用于跨回合/跨天任务。
 
-执行预算：两次已完成的宿主交互之间最多 1,000,000 条 VM 指令，整段程序另有 30 分钟墙钟期限（包含宿主等待和暂停时间）。快照保留计数与期限；真实宿主回复或宿主到期派发定时器回调刷新指令段，next()、存盘恢复和纯 Promise/queueMicrotask 微任务不刷新。耗尽以 INSTRUCTION_BUDGET_EXHAUSTED / PROGRAM_TIME_BUDGET_EXHAUSTED 停止，报告上限、已用量、累计量、位置和 hot_lines。中断交互的副作用可能未知，先核对再调整编排，不自动重放。
+执行预算：两次已完成的宿主交互之间最多 2,000,000 个工作量单位，整段程序另有 30 分钟墙钟期限（包含宿主等待和暂停时间）。快照保留计数与期限；真实宿主回复或宿主到期派发定时器回调刷新指令段，next()、存盘恢复和纯 Promise/queueMicrotask 微任务不刷新。用户字节码和用户回调正常计费，prelude 内部指令不逐条扣费，只在内建入口和循环回边计少量工作量；普通数据属性赋值与普通数组 push 走原生快路径，setter、只读属性等仍走完整语义。独立的 total_vm_steps 按物理执行步数累计，每 256 步检查墙钟与执行维护，不受计费折扣影响。热行和超限位置归到用户源码，内建在暂停、恢复和异步派发后保留调用来源。旧快照保留原有限额与剩余额度，不因升级或读取而补充。耗尽以 INSTRUCTION_BUDGET_EXHAUSTED / PROGRAM_TIME_BUDGET_EXHAUSTED 停止，报告上限、已用量、累计量、位置和 hot_lines。中断交互的副作用可能未知，先核对再调整编排，不自动重放。
 
 
 ### Map / Set / WeakMap / WeakSet（阶段 1）
@@ -346,7 +366,7 @@ Map/Set.forEach 现在支持 thisArg；原型链已支持，自定义 Symbol.ite
 
 调用先取得实际函数，再计算参数，因此参数中修改同名方法不会替换本次已取得的函数；非函数在参数求值后抛 TypeError，报错点名方法。f()()、(a || b)()、arr[i]() 等使用实际求值得到的函数；可选调用短路时不计算参数。自有函数属性优先，push、slice 等名称不再覆盖用户自己的方法。支持给函数增加普通属性；原型继承与普通函数构造已在下一节补齐，描述符仍待后续部分。
 
-Array 的 map/filter/forEach/some/every/find/findIndex/findLast/findLastIndex/flatMap、Map/Set.forEach、Array.from 的 mapper 支持 thisArg；箭头回调忽略 thisArg，reduce/sort/Promise 的普通回调使用 undefined。绑定函数和接收者进入 VM 堆快照与 GC 根，回调中的工具调用和 await 可挂起恢复，不重放已执行部分。宿主工具和 @module/@virtual 仍按原有参数/JSON 契约调用，不因 this 绑定额外向 AI 传入接收者。
+Array 的 map/filter/forEach/some/every/find/findIndex/findLast/findLastIndex/flatMap、Map/Set.forEach、Array.from 的 mapper 支持 thisArg；箭头回调忽略 thisArg，reduce/sort/Promise 的普通回调使用 undefined。绑定函数和接收者进入 VM 堆快照与 GC 根，回调中的工具调用和 await 可挂起恢复，不重放已执行部分。宿主工具和 @virtual/@virtual 仍按原有参数/JSON 契约调用，不因 this 绑定额外向 AI 传入接收者。
 
 已有 VM 方法已接入真实内置原型对象；属性描述符与访问器见下文，完整原型方法的泛型借用仍待补齐。禁止的旧全局 call()/ai() 包装与可用的 f.call/f.apply/f.bind 不同。定时器普通回调的 this 为 undefined，绑定函数和箭头捕获可保留接收者，但不提供 Node Timeout 的 this 对象。
 
@@ -416,7 +436,7 @@ console.log(result.summary());
 
 new.target 在普通调用和方法调用中是 undefined，在 new、绑定构造和 Reflect.construct 中指向有效构造目标；箭头函数从外围捕获。Error、Array、Map/Set/WeakMap/WeakSet、Date、RegExp、Promise、Object 和 Number/String/Boolean 子类保留内置槽位与相应原型关系。构造器、super 调用/访问器及 newTarget.prototype getter 可以在宿主调用处挂起；派生 this 的未初始化状态、home object、只读类名绑定和 new.target 都进入 GC 与 Runtime 快照，恢复后接着执行。JSON 只携带可枚举数据，不保留类身份或方法；变更 prelude 后沿用旧快照拒绝恢复的规则，历史源码与输出保留。
 
-类字段、私有字段、static 初始化块、动态 Function/eval 和异步迭代仍不提供；同步生成器见阶段 6。Promise/Array 等内置 species 算法、完整原型泛型借用、arguments、部分函数名推断及原生构造器的所有通用对象转换仍有缺口；支持继承不表示完整实现所有内置构造算法。对应限制与 test262 实际结果见 tests/vm/REPORT-stage5.md。
+类的公有/私有字段、私有方法和访问器、static 初始化块见后续补齐；同步生成器见阶段 6，异步迭代见阶段 7。普通严格函数提供未映射的 arguments，箭头函数捕获外围 arguments。动态 Function/eval、Promise/Array 等内置 species 算法、完整原型泛型借用及原生构造器的所有通用对象转换仍有缺口；支持继承不表示完整实现所有内置构造算法。阶段 5 的历史测量见 tests/vm/REPORT-stage5.md，本轮结果见阶段 8 记录。
 
 
 ### 异步调用、名称推断与诊断修复（阶段 5 补充）
@@ -464,3 +484,12 @@ for await (const result of summarize(batches)) summaries.push(result);
 ```
 
 等待值、请求队列、当前调用帧、缓存 next、闭包、this/super、异常处理器和 finally 中待完成的返回/异常全部参与 GC 和 Runtime 存盘；恢复继续同一次调用，不重放已完成的副作用。JSON.stringify/structuredClone 不保存这些执行状态。await 的 PromiseResolve 边界会读取 Promise.constructor 并同化普通 thenable；getter 和 thenable 回调可经过宿主调用挂起恢复。Promise.resolve 与构造器 resolve 的一般 thenable 同化仍是已有独立限制，本轮没有把整个 Promise 实现声明为完整兼容。
+
+
+### 类元素与私有状态补齐（阶段 8）
+
+每次类定义先按源码顺序计算一次计算键，再初始化内部类名绑定，最后按顺序执行 static 字段和 static 块；static 初始化中的 this/home object 都是类本身，每个 static 块有自己的 var 作用域。实例字段在独立的类作用域初始化帧中运行，不能看到构造参数：基类在参数默认值之前初始化，派生类在 super() 返回后立即初始化，包含条件语句、嵌套表达式、箭头函数内和默认派生构造器的 super()。公有字段定义自己的数据属性，不触发原型上的 setter；匿名函数/类字段推断属性名称。
+
+私有字段、实例/static 私有方法及 getter/setter（含 async、生成器）具有每次类求值独立的身份；#x in o 检查自有私有品牌，非对象右值抛 TypeError。私有访问可用于更新、复合赋值、可选链和解构目标，访问外来对象或原型继承来的实例抛 TypeError；未声明或重复私有声明在编译期拒绝。私有方法不可写，只有 getter 的访问器不可写，只有 setter 的访问器不可读；重复初始化报 TypeError。私有槽独立于普通属性，freeze/preventExtensions 不阻止添加或修改私有字段，Object.keys、Reflect.ownKeys、getOwnPropertyNames/Symbols、JSON、assign 和展开都不暴露私有成员。
+
+类初始化器、计算键、私有身份及槽值和方法都在 VM 堆中持久化，参与 GC；字段初始化、私有访问器和 static 块中的宿主调用可挂起恢复，不重做已完成的初始化。Proxy、BigInt、eval/动态 Function 仍在本轮范围之外；本轮验证和剩余差异见 [阶段 8 报告](../tests/vm/REPORT-stage8.md)。

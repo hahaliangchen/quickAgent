@@ -4,8 +4,8 @@ use super::heap::{Heap, HeapNode, VmValue};
 use anyhow::Result;
 
 pub(super) const ARRAY: &str = "at includes indexOf lastIndexOf slice concat push pop shift unshift splice reverse join flat fill sort toSorted toReversed keys values entries map filter forEach some every find findIndex findLast findLastIndex flatMap reduce reduceRight";
-pub(super) const STRING: &str = "at includes indexOf lastIndexOf slice concat startsWith endsWith trim trimStart trimEnd toLowerCase toUpperCase toLocaleLowerCase toLocaleUpperCase split replace replaceAll match matchAll search charAt charCodeAt codePointAt substring substr repeat padStart padEnd";
-pub(super) const DATE: &str = "getTime toISOString toJSON getFullYear getMonth getDate getDay getHours getMinutes getSeconds getMilliseconds getUTCFullYear getUTCMonth getUTCDate getUTCDay getUTCHours getUTCMinutes getUTCSeconds getUTCMilliseconds";
+pub(super) const STRING: &str = "localeCompare at includes indexOf lastIndexOf slice concat startsWith endsWith trim trimStart trimEnd toLowerCase toUpperCase toLocaleLowerCase toLocaleUpperCase split replace replaceAll match matchAll search charAt charCodeAt codePointAt substring substr repeat padStart padEnd";
+pub(super) const DATE: &str = "toLocaleString toLocaleDateString toLocaleTimeString getTime toISOString toJSON getFullYear getMonth getDate getDay getHours getMinutes getSeconds getMilliseconds getUTCFullYear getUTCMonth getUTCDate getUTCDay getUTCHours getUTCMinutes getUTCSeconds getUTCMilliseconds";
 fn contains(list: &str, name: &str) -> bool {
     list.split_whitespace().any(|item| item == name)
 }
@@ -19,7 +19,7 @@ pub(super) fn install(heap: &mut Heap) -> Result<()> {
         ("String", STRING),
         ("Date", DATE),
         ("RegExp", "test exec"),
-        ("Number", "toFixed toExponential"),
+        ("Number", "toFixed toExponential toLocaleString"),
         ("Promise", "then catch finally"),
         ("Object", "toString valueOf hasOwnProperty"),
     ] {
@@ -53,7 +53,7 @@ pub(super) fn method(heap: &Heap, receiver: &VmValue, name: &str) -> Option<VmVa
             _ => return None,
         },
         VmValue::String(_) | VmValue::Utf16(_) if contains(STRING, name) => "String",
-        VmValue::Number(_) if matches!(name,"toFixed"|"toExponential") => "Number",
+        VmValue::Number(_) if matches!(name,"toFixed"|"toExponential"|"toLocaleString") => "Number",
         VmValue::Undefined | VmValue::Null => return None,
         _ if matches!(name, "toString" | "valueOf" | "hasOwnProperty") => "Object",
         _ => return None,
@@ -101,7 +101,7 @@ pub(super) fn native_length(id: &str) -> usize {
         "Function.call" | "Function.bind" => 1,
         "Function.apply" => 2,
         "String" | "Number" | "Boolean" | "parseFloat" | "isNaN" | "isFinite"
-        | "encodeURIComponent" | "decodeURIComponent" | "structuredClone" | "queueMicrotask"
+        | "encodeURI" | "decodeURI" | "encodeURIComponent" | "decodeURIComponent" | "structuredClone" | "queueMicrotask"
         | "clearTimeout" | "clearInterval" => 1,
         "parseInt" | "setTimeout" | "setInterval" | "JSON.parse" | "Object.is"
         | "Object.hasOwn" | "Object.assign" => 2,
@@ -149,6 +149,8 @@ pub(super) fn native_length(id: &str) -> usize {
         | "Date.toJSON"
         | "Promise.catch"
         | "Promise.finally" => 1,
+        "String.localeCompare" => 1,
+        "Number.toLocaleString" | "Date.toLocaleString" | "Date.toLocaleDateString" | "Date.toLocaleTimeString" => 0,
         "Promise.then" => 2,
         _ => super::js_methods::builtin_arity(id)
             .map(|(min, _)| min)
@@ -186,6 +188,8 @@ pub(super) fn apply_args(heap: &Heap, value: VmValue) -> Result<Vec<VmValue>> {
 
 /// Builtins which may execute user accessors use ordinary durable VM frames.
 pub(super) fn resumable_builtin(name:&str)->Option<&'static str>{Some(match name {
+    "encodeURI"=>"$$encodeURI","decodeURI"=>"$$decodeURI","encodeURIComponent"=>"$$encodeURIComponent","decodeURIComponent"=>"$$decodeURIComponent",
+    "String.raw"=>"$$stringRaw",
     "Number"=>"$$numberBuiltin","new Date"=>"$$constructDate",
     "String"=>"$$stringBuiltin","Symbol"=>"$$symbolConvert","Symbol.for"=>"$$symbolForConvert",
     "Object.getOwnPropertyDescriptor"=>"$$objectDescriptor",

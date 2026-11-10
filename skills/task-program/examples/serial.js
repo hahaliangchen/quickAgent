@@ -1,4 +1,4 @@
-import * as io from "host:io";
+import * as io from "io";
 // 最小串行流程：设计 → 保存 → 读回 → 验收 → 交付。
 const request = {
   topic: "通用 Agent 的职责边界",
@@ -13,13 +13,13 @@ const review = inspect(request, actual.content);
 assert(review.passed, "验收未通过，不能交付");
 // 读写和验收完成后，流程自然结束。
 
-/** @module */
+/** @virtual */
 function compose(request) {
   // 按 request.topic 和 request.requirements 设计一个完整、独立的中文 HTML。
   // 返回设计好的 {content:string}，不只返回计划。
 }
 
-/** @module */
+/** @virtual */
 function inspect(request, content) {
   // content 是已保存文件的真实读回正文；对照 request 检查内容与 HTML 结构。
   // 返回 {passed:boolean, issues:[string], evidence:[string]}。

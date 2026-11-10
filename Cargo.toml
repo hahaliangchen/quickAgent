@@ -20,6 +20,9 @@ serde_json = "1.0.149"
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 ignore = "0.4.25"
 regex = "1.12.2"
+fancy-regex = "0.19"
+icu_collator = { version = "=2.2.0", features = ["compiled_data"] }
+icu_locale = "=2.2.0"
 swc_common = "21.0.2"
 swc_ecma_ast = "23.0.1"
 swc_ecma_parser = "39.1.0"

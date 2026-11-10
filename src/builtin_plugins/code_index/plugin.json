@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "code-index",
+  "library": "code_index",
+  "title": "代码索引",
+  "skill": "SKILL.md",
+  "tools": ["code_index__status", "code_index__index", "code_index__list", "code_index__search", "code_index__read"]
+}

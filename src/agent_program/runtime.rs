@@ -11,7 +11,9 @@ pub(super) use generators::Generator;
 
 /// Capture is program memory, independent of any AI's context budget.
 pub const CONSOLE_CAPTURE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
-pub const INSTRUCTION_LIMIT: usize = 1_000_000;
+// The recorded inventory/audit segments peak below 270k work units after
+// native mutation fast paths. Leave >7x headroom, retaining bounded loops.
+pub const INSTRUCTION_LIMIT: usize = 2_000_000;
 pub const PROGRAM_TIME_LIMIT_MS: i64 = 30 * 60 * 1000;
 fn instruction_limit() -> usize { INSTRUCTION_LIMIT }
 fn program_time_limit() -> i64 { PROGRAM_TIME_LIMIT_MS }
@@ -48,6 +50,10 @@ pub struct Frame {
     constructed: Option<VmValue>,
     #[serde(default)]
     diagnostic_at: Option<Location>,
+    /// User call site owning work done by a resumable built-in. Persist it
+    /// with the frame so suspension cannot lose attribution.
+    #[serde(default)]
+    work_origin: Option<(String, Location)>,
     #[serde(default)]
     derived_env: Option<HeapId>,
     #[serde(default)]
@@ -77,6 +83,8 @@ struct SuspendedCoroutine {
 struct PromiseReaction {
     #[serde(default)]
     at: Option<Location>,
+    #[serde(default)]
+    work_origin: Option<(String, Location)>,
     fulfilled: VmValue,
     rejected: VmValue,
     target: HeapId,
@@ -168,6 +176,12 @@ pub struct Runtime {
     segment_limit: usize,
     #[serde(default)]
     total_instructions: u64,
+    /// Physical interpreter steps drive maintenance independently of billing.
+    #[serde(default)]
+    total_vm_steps: u64,
+    #[cfg(test)]
+    #[serde(skip)]
+    test_deadline_after_steps: Option<u64>,
     #[serde(default)]
     line_instructions: BTreeMap<String, BTreeMap<usize,u64>>,
     #[serde(default)]
@@ -489,12 +503,28 @@ impl Runtime {
             }
             Some(heap.new_environment(None, bindings, BTreeSet::new())?)
         };
+        let inherited = if program.commonjs {
+            let exports = heap.allocate(HeapNode::Object(Vec::new()))?;
+            let module = heap.allocate(HeapNode::Object(vec![("exports".into(), VmValue::Reference(exports))]))?;
+            let bindings = [("module".to_owned(), VmValue::Reference(module)), ("exports".to_owned(), VmValue::Reference(exports))];
+            Some(heap.new_environment(inherited, bindings.into(), BTreeSet::new())?)
+        } else {
+            inherited
+        };
         let args = args
             .iter()
             .map(|value| heap.from_json(value))
             .collect::<Result<Vec<_>>>()?;
         let module_entry = program.functions.get(entry).is_some_and(|f| f.module);
-        let (mut frame, module_env) = if module_entry {
+        // An implementation with top-level statements runs them first, in the
+        // module scope its functions close over, then continues into the entry.
+        let mut init_frame = None;
+        let (mut frame, module_env) = if entry != super::ENTRY && program.functions.contains_key(super::MODULE_INIT) {
+            let init = Self::vm_frame(&program, &mut heap, inherited, super::MODULE_INIT, Vec::new(), None)?;
+            let env = init.env.context("module initialization has no scope")?;
+            init_frame = Some(init);
+            (Self::vm_frame(&program, &mut heap, Some(env), entry, args, None)?, env)
+        } else if module_entry {
             let frame = Self::vm_frame(&program, &mut heap, inherited, entry, args, None)?;
             let env = frame.env.context("entry frame has no scope")?;
             (frame, env)
@@ -520,7 +550,7 @@ impl Runtime {
         Ok(Self {
             program,
             scoped_calls: true,
-            frames: vec![frame],
+            frames: std::iter::once(frame).chain(init_frame).collect(),
             inherited_scope,
             promises: Default::default(),
             continuations: BTreeMap::new(),
@@ -554,6 +584,9 @@ impl Runtime {
             fuel: INSTRUCTION_LIMIT,
             segment_limit: INSTRUCTION_LIMIT,
             total_instructions: 0,
+            total_vm_steps: 0,
+            #[cfg(test)]
+            test_deadline_after_steps: None,
             line_instructions: BTreeMap::new(),
             started_at_ms: chrono::Utc::now().timestamp_millis(),
             time_limit_ms: PROGRAM_TIME_LIMIT_MS,
@@ -590,6 +623,7 @@ impl Runtime {
             .get(name)
             .with_context(|| format!("unknown function {name}"))?;
         // As in JavaScript: missing arguments are undefined, extra ones ignored.
+        let actual_args = args.clone();
         let mut args = args;
         if let Some(index) = function.rest_parameter {
             ensure!(index + 1 == function.params.len(), "invalid rest parameter index");
@@ -605,6 +639,10 @@ impl Runtime {
             function.vars.iter().map(|name| (name.clone(), VmValue::Undefined)).collect()
         };
         bindings.extend(function.params.iter().cloned().zip(args));
+        if function.arguments_object {
+            let arguments = heap.allocate(HeapNode::Array(actual_args))?;
+            bindings.insert("arguments".into(), VmValue::Reference(arguments));
+        }
         if !function.lexical_this {bindings.insert("\0this".into(),VmValue::Undefined);bindings.insert("\0newTarget".into(),VmValue::Undefined);bindings.insert("\0home".into(),VmValue::Undefined);bindings.insert("\0activeConstructor".into(),VmValue::Undefined);}
         let lexical = if function.parameter_scope { &function.parameter_lexical } else { &function.lexical };
         let env = heap.new_environment(parent, bindings, lexical.iter().cloned().collect())?;
@@ -623,6 +661,7 @@ impl Runtime {
             task_callback: false,
             constructed: None,
             diagnostic_at: None,
+            work_origin: None,
             derived_env: None,
             super_env: None,
             generator: None,
@@ -681,7 +720,7 @@ impl Runtime {
             ensure!(self.frames.len()<64,"program call depth limit");
             let this_arg=args.get(1).cloned().unwrap_or(VmValue::Undefined);
             let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$collectionForEach",vec![receiver,callback,this_arg],destination)?;
-            self.frames.push(frame);return Ok(None);
+            self.push_frame(frame);return Ok(None);
         }
         if let VmValue::Reference(source) = receiver
             && matches!(self.heap.get(source)?, HeapNode::Promise { .. })
@@ -696,7 +735,7 @@ impl Runtime {
             };
             let id = super::promise::ContinuationId(self.next_continuation);
             self.next_continuation = self.next_continuation.checked_add(1).context("continuation id exhausted")?;
-            self.reactions.insert(id, PromiseReaction { at:self.current_call_site(), fulfilled, rejected, target, origin: self.async_origin(), scope: self.named_bindings() });
+            self.reactions.insert(id, PromiseReaction { at:self.current_call_site(), work_origin:self.work_site(), fulfilled, rejected, target, origin: self.async_origin(), scope: self.named_bindings() });
             self.promises.subscribe_heap_promise(&mut self.heap, source, id)?;
             self.store(destination, VmValue::Reference(target))?;
             return Ok(None);
@@ -706,14 +745,13 @@ impl Runtime {
         {
             let callback = args.first().cloned().unwrap_or(VmValue::Undefined);
             let frame = Self::vm_frame(&self.program, &mut self.heap, self.module_env, "$$promiseFinally", vec![VmValue::Reference(source), callback], destination)?;
-            self.frames.push(frame);
+            self.push_frame(frame);
             return Ok(None);
         }
         let callback_method = matches!(name, "map" | "filter" | "forEach" | "some" | "every" | "find" | "findIndex" | "findLast" | "findLastIndex" | "flatMap" | "reduce" | "reduceRight") || matches!(name, "sort" | "toSorted") && !args.is_empty();
         let is_array = matches!(&receiver, VmValue::Reference(id) if matches!(self.heap.get(*id), Ok(HeapNode::Array(_))));
         if callback_method && is_array {
             ensure!(!args.is_empty() && super::vm_eval::callable(&self.heap, &args[0]), "TypeError: callback is not a function");
-            if name != "map" { self.ensure_sync_callback(&args[0])?; }
             let mut call_args = vec![receiver];
             call_args.extend(args.iter().cloned());
             if matches!(name, "reduce" | "reduceRight") {
@@ -723,33 +761,21 @@ impl Runtime {
             }
             ensure!(self.frames.len() < 64, "program call depth limit");
             let frame = Self::vm_frame(&self.program, &mut self.heap, self.module_env, &format!("$${name}"), call_args, destination)?;
-            self.frames.push(frame);
+            self.push_frame(frame);
             return Ok(None);
         }
         if matches!(&receiver, VmValue::String(_)) && matches!(name, "replace" | "replaceAll") && args.get(1).is_some_and(|v| super::vm_eval::callable(&self.heap, v)) {
-            self.ensure_sync_callback(&args[1])?;
             ensure!(self.frames.len() < 64, "program call depth limit");
             let mut call_args = vec![receiver];
             call_args.extend(args);
             call_args.push(VmValue::Boolean(name == "replaceAll"));
             let frame = Self::vm_frame(&self.program, &mut self.heap, self.module_env, "$$replace", call_args, destination)?;
-            self.frames.push(frame);
+            self.push_frame(frame);
             return Ok(None);
         }
         let value = super::js_methods::call_method(&mut self.heap, receiver, name, &args)?;
         self.store(destination, value)?;
         Ok(None)
-    }
-    fn ensure_sync_callback(&self, callback: &VmValue) -> Result<()> {
-        let mut callback=callback;
-        while let VmValue::Reference(id)=callback {
-            match self.heap.get(*id)? {
-                HeapNode::BoundFunction{target,..}=>callback=target,
-                HeapNode::Closure{function,..}=>{ensure!(!self.program.functions[function].is_async || self.program.functions[function].is_generator,"async callbacks require Promise support");break;},
-                _=>break,
-            }
-        }
-        Ok(())
     }
 
     /// Preserve complete records. Exhausting capture memory ends this program;
@@ -829,9 +855,19 @@ impl Runtime {
     }
     fn get_property(&mut self,target:VmValue,key:VmValue,receiver:VmValue,destination:Option<String>)->Result<Option<ActionKind>> {
         ensure!(!matches!(target,VmValue::Null|VmValue::Undefined),"TypeError: Cannot read properties of null or undefined");
-        if matches!(key,VmValue::Reference(_)){let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$keyedGet",vec![target,key,receiver],destination)?;self.frames.push(frame);return Ok(None);}
+        if matches!(key,VmValue::Reference(_)){let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$keyedGet",vec![target,key,receiver],destination)?;self.push_frame(frame);return Ok(None);}
         let original_key=key.clone();
         let key=self.heap.property_key(&key)?;
+        if super::heap::Heap::is_private_key(&key) {
+            let VmValue::Reference(id) = target else { bail!("TypeError: private element requires an object") };
+            return match self.heap.private_element(id,&key)? {
+                super::heap::PrivateElement::Field(value) | super::heap::PrivateElement::Method(value) => { self.store(destination,value)?; Ok(None) }
+                super::heap::PrivateElement::Accessor { get, .. } => {
+                    ensure!(get != VmValue::Undefined,"TypeError: private accessor has no getter");
+                    self.invoke_receiver(get,receiver,vec![],destination)
+                }
+            };
+        }
         let owner=match target{VmValue::Reference(id)=>Some(id),_=>self.heap.primitive_prototype(&target)};
         if let Some(id)=owner && let Some((_,d))=self.heap.descriptor_owner(id,&key)? && let Some((getter,_))=d.accessor {
             if getter==VmValue::Undefined{self.store(destination,VmValue::Undefined)?;return Ok(None);}
@@ -909,7 +945,7 @@ impl Runtime {
                     frame.completion = Some(promise);
                     frame.origin = self.async_origin();
                 }
-                self.frames.push(frame);
+                self.push_frame(frame);
                 Ok(None)
             }
             HeapNode::PromiseResolver { capability, reject } => {
@@ -929,19 +965,19 @@ impl Runtime {
                 }
                 if name=="GeneratorFunction" {bail!("EvalError: dynamic GeneratorFunction construction is disabled; declare function* in source");}
                 if name=="Function.restricted" {bail!("TypeError: caller and arguments are unavailable on strict functions");}
-                if name=="$$coercePrimitive" {let value=args[0].clone();if !matches!(value,VmValue::Reference(_)){self.store(destination,value)?;return Ok(None);}let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$toPrimitiveHint",args,destination)?;self.frames.push(frame);return Ok(None);}
-                if matches!(name.as_str(),"$$looseEqual"|"$$looseNotEqual") {let (a,b)=(&args[0],&args[1]);let object=|v:&VmValue|matches!(v,VmValue::Reference(_));let null=|v:&VmValue|matches!(v,VmValue::Undefined|VmValue::Null);if object(a)!=object(b)&&!null(a)&&!null(b){let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$coercedEqual",vec![a.clone(),b.clone(),VmValue::Boolean(name=="$$looseNotEqual")],destination)?;self.frames.push(frame);return Ok(None);}let value=super::js_value::loose_equal(&self.heap,a,b)?;self.store(destination,VmValue::Boolean(if name=="$$looseNotEqual"{!value}else{value}))?;return Ok(None);}
-                if matches!(name.as_str(),"String"|"Symbol"|"Symbol.for")&&matches!(args.first(),Some(VmValue::Reference(_))) {let helper=match name.as_str(){"String"=>"$$stringConvert","Symbol"=>"$$symbolConvert",_=>"$$symbolForConvert"};let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,args,destination)?;self.frames.push(frame);return Ok(None);}
+                if name=="$$coercePrimitive" {let value=args[0].clone();if !matches!(value,VmValue::Reference(_)){self.store(destination,value)?;return Ok(None);}let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$toPrimitiveHint",args,destination)?;self.push_frame(frame);return Ok(None);}
+                if matches!(name.as_str(),"$$looseEqual"|"$$looseNotEqual") {let (a,b)=(&args[0],&args[1]);let object=|v:&VmValue|matches!(v,VmValue::Reference(_));let null=|v:&VmValue|matches!(v,VmValue::Undefined|VmValue::Null);if object(a)!=object(b)&&!null(a)&&!null(b){let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$coercedEqual",vec![a.clone(),b.clone(),VmValue::Boolean(name=="$$looseNotEqual")],destination)?;self.push_frame(frame);return Ok(None);}let value=super::js_value::loose_equal(&self.heap,a,b)?;self.store(destination,VmValue::Boolean(if name=="$$looseNotEqual"{!value}else{value}))?;return Ok(None);}
+                if matches!(name.as_str(),"String"|"Symbol"|"Symbol.for")&&matches!(args.first(),Some(VmValue::Reference(_))) {let helper=match name.as_str(){"String"=>"$$stringConvert","Symbol"=>"$$symbolConvert",_=>"$$symbolForConvert"};let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,args,destination)?;self.push_frame(frame);return Ok(None);}
                 if matches!(name.as_str(),"Symbol.valueOf"|"Symbol.toPrimitive"|"Symbol.toString"|"getter:Symbol.description") {let id=self.heap.unbox_symbol(&receiver)?;let value=match name.as_str(){"Symbol.toString"=>self.heap.symbol_text(id)?,"getter:Symbol.description"=>self.heap.symbol_description(id),_=>VmValue::Symbol(id)};self.store(destination,value)?;return Ok(None);}
                 if name=="$$awaitSubscribe" {
                     return self.invoke_method(args[0].clone(),"then",args[1..].to_vec(),destination,true);
                 }
                 if name=="Iterator.identity" {self.store(destination,receiver)?;return Ok(None);}
-                if name=="String.iterator" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$stringIterator",vec![receiver],destination)?;self.frames.push(frame);return Ok(None);}
+                if name=="String.iterator" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$stringIterator",vec![receiver],destination)?;self.push_frame(frame);return Ok(None);}
 
-                if name=="Function.hasInstance" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$ordinaryHasInstance",vec![args.first().cloned().unwrap_or(VmValue::Undefined),receiver],destination)?;self.frames.push(frame);return Ok(None);}
+                if name=="Function.hasInstance" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$ordinaryHasInstance",vec![args.first().cloned().unwrap_or(VmValue::Undefined),receiver],destination)?;self.push_frame(frame);return Ok(None);}
                 if name=="$$invokeWithReceiver" {let list=super::js_functions::apply_args(&self.heap,args[2].clone())?;return self.invoke_receiver(args[0].clone(),args[1].clone(),list,destination);}
-                if name=="Function.bind" {let mut a=vec![receiver];a.extend(args);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$functionBind",a,destination)?;self.frames.push(frame);return Ok(None);}
+                if name=="Function.bind" {let mut a=vec![receiver];a.extend(args);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$functionBind",a,destination)?;self.push_frame(frame);return Ok(None);}
                 if name=="$$makeBound" {
                     let VmValue::Reference(target)=args[0] else{bail!("TypeError: bind target must be callable")};
                     let prefix=super::js_functions::apply_args(&self.heap,args[2].clone())?;
@@ -952,7 +988,7 @@ impl Runtime {
                     self.heap.set_prototype(bound,self.heap.prototype_of(target))?;
                     self.store(destination,VmValue::Reference(bound))?;return Ok(None);
                 }
-                if name=="Function.apply" {let mut a=vec![receiver];a.extend(args);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$functionApply",a,destination)?;self.frames.push(frame);return Ok(None);}
+                if name=="Function.apply" {let mut a=vec![receiver];a.extend(args);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$functionApply",a,destination)?;self.push_frame(frame);return Ok(None);}
                 if name=="$$getProperty" {let target=args.first().cloned().unwrap_or(VmValue::Undefined);let receiver=args.get(2).cloned().unwrap_or_else(||target.clone());return self.get_property(target,args.get(1).cloned().unwrap_or(VmValue::Undefined),receiver,destination);}
                 if name=="$$constructWithTarget" {let list=super::js_functions::apply_args(&self.heap,args[1].clone())?;self.construct_as(args[0].clone(),list,destination,&Location{line:0,column:0},Some(args[2].clone()))?;return Ok(None);}
                 if name=="$$constructReady" {let list=super::js_functions::apply_args(&self.heap,args[1].clone())?;self.construct_ready(args[0].clone(),list,destination,&Location{line:0,column:0},args[2].clone(),args[3].clone())?;return Ok(None);}
@@ -974,10 +1010,10 @@ impl Runtime {
                         let VmValue::Reference(id)=receiver else{bail!("TypeError: incompatible collection receiver")};
                         let HeapNode::Collection(c)=self.heap.get(id)? else{bail!("TypeError: incompatible collection receiver")};
                         ensure!(getter.starts_with(c.kind.name()),"TypeError: incompatible collection receiver");VmValue::Number(super::heap::JsNumber::new(c.size as f64))
-                    }else{let VmValue::Reference(id)=receiver else{bail!("TypeError: incompatible RegExp receiver")};let (pattern,flags)=self.heap.regex_parts(id).context("TypeError: incompatible RegExp receiver")?;match getter.rsplit('.').next().unwrap(){"source"=>VmValue::String(pattern),"flags"=>VmValue::String(flags.clone()),key=>VmValue::Boolean(flags.contains(match key{"global"=>'g',"ignoreCase"=>'i',"multiline"=>'m',"dotAll"=>'s',_=>'u'}))}};
+                    }else{let VmValue::Reference(id)=receiver else{bail!("TypeError: incompatible RegExp receiver")};let (pattern,flags)=self.heap.regex_parts(id).context("TypeError: incompatible RegExp receiver")?;match getter.rsplit('.').next().unwrap(){"source"=>VmValue::String(pattern),"flags"=>VmValue::String(flags.clone()),key=>VmValue::Boolean(flags.contains(match key{"global"=>'g',"ignoreCase"=>'i',"multiline"=>'m',"dotAll"=>'s',"unicode"=>'u',_=>'y'}))}};
                     self.store(destination,value)?;return Ok(None);
                 }
-                if let Some(helper)=super::js_functions::resumable_builtin(&name) {ensure!(self.frames.len()<64,"maximum helper call depth limit");let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,args,destination)?;self.frames.push(frame);return Ok(None);}
+                if let Some(helper)=super::js_functions::resumable_builtin(&name) {ensure!(self.frames.len()<64,"maximum helper call depth limit");let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,args,destination)?;self.push_frame(frame);return Ok(None);}
 
                 if let Some(method)=name.strip_prefix("Promise.") {
                     ensure!(Some(receiver.clone())==self.heap.intrinsic("Promise"),"TypeError: Promise static methods currently require the intrinsic Promise constructor");
@@ -985,11 +1021,12 @@ impl Runtime {
                         let value=args.into_iter().next().unwrap_or(VmValue::Undefined);
                         if method=="resolve" && matches!(&value,VmValue::Reference(id) if matches!(self.heap.get(*id),Ok(HeapNode::Promise{..}))) {self.store(destination,value)?;return Ok(None);}
                         let promise=self.promises.create_heap_promise(&mut self.heap)?;self.async_promises.push(promise);
+                        self.store(destination,VmValue::Reference(promise))?;
                         if method=="reject" {self.promises.settle_heap_promise(&mut self.heap,promise,super::promise::Outcome::Rejected(value))?;}else{self.resolve_async(Some(promise),value)?;}
-                        self.store(destination,VmValue::Reference(promise))?;return Ok(None);
+                        return Ok(None);
                     }
                     let helper=match method {"all"=>"$$promiseAll","allSettled"=>"$$promiseAllSettled","race"=>"$$promiseRace","any"=>"$$promiseAny",_=>bail!("TypeError: unsupported Promise static method")};
-                    let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,args,destination)?;self.frames.push(frame);return Ok(None);
+                    let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,args,destination)?;self.push_frame(frame);return Ok(None);
                 }
                 if matches!(name.as_str(),"Function.call"|"Function.apply"|"Function.bind") {
                     ensure!(super::vm_eval::callable(&self.heap,&receiver),"TypeError: Function.{} receiver must be callable",name.rsplit('.').next().unwrap());
@@ -1018,10 +1055,14 @@ impl Runtime {
                 if let Some(method)=name.strip_prefix("method:") {
                     let (kind,method)=method.split_once('.').context("invalid native method")?;
                     if kind=="Array" {
+                        if method == "push" && let Some(length) = self.heap.try_fast_push(&receiver, &args)? {
+                            self.store(destination, VmValue::Number(JsNumber::new(length as f64)))?;
+                            return Ok(None);
+                        }
                         let helper=match method {"sort"=>Some("$$sort"),"toSorted"=>Some("$$toSorted"),"push"=>Some("$$arrayPush"),"pop"=>Some("$$arrayPop"),"fill"=>Some("$$arrayFill"),"reverse"=>Some("$$arrayReverse"),"shift"=>Some("$$arrayShift"),"unshift"=>Some("$$arrayUnshift"),"splice"=>Some("$$arraySplice"),"copyWithin"=>Some("$$arrayCopyWithin"),_=>None};
-                        if let Some(helper)=helper{let mut a=vec![receiver];a.extend(args);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,a,destination)?;self.frames.push(frame);return Ok(None);}
+                        if let Some(helper)=helper{let mut a=vec![receiver];a.extend(args);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,a,destination)?;self.push_frame(frame);return Ok(None);}
                     }
-                    if kind=="Object" && method=="toString" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$objectToString",vec![receiver],destination)?;self.frames.push(frame);return Ok(None);}
+                    if kind=="Object" && method=="toString" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$objectToString",vec![receiver],destination)?;self.push_frame(frame);return Ok(None);}
                     if kind=="Object" {
                         let value=match method {
                             "toString"=>Some(VmValue::String(self.heap.object_tag(&receiver)?)),
@@ -1043,15 +1084,25 @@ impl Runtime {
                     if matches!(kind,"String"|"Number"|"Boolean") && matches!(method,"toString"|"valueOf") {
                         ensure!(matches!((&receiver,kind),(VmValue::String(_)|VmValue::Utf16(_),"String")|(VmValue::Number(_),"Number")|(VmValue::Boolean(_),"Boolean")),"TypeError: incompatible {kind} method receiver");
                     }
+                    if kind=="String" && method=="localeCompare" || kind=="Number" && method=="toLocaleString" || kind=="Date" && matches!(method,"toLocaleString"|"toLocaleDateString"|"toLocaleTimeString") {
+                        let mut values=vec![receiver];
+                        let helper=if kind=="String" { "$$localeCompare" } else if kind=="Number" {
+                            ensure!(matches!(values[0],VmValue::Number(_)),"TypeError: Number.toLocaleString requires a Number receiver");
+                            "$$numberLocale"
+                        } else { values.push(VmValue::String(method.into())); "$$dateLocale" };
+                        values.extend(args);
+                        let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,values,destination)?;
+                        self.push_frame(frame);return Ok(None);
+                    }
                     if kind=="Number" && method=="toExponential" {
                         ensure!(matches!(receiver,VmValue::Number(_)),"TypeError: Number.prototype.toExponential requires a Number receiver");
-                        let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$numberExponential",vec![receiver,args.first().cloned().unwrap_or(VmValue::Undefined)],destination)?;self.frames.push(frame);return Ok(None);
+                        let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$numberExponential",vec![receiver,args.first().cloned().unwrap_or(VmValue::Undefined)],destination)?;self.push_frame(frame);return Ok(None);
                     }
                     if kind=="String" {
                         ensure!(!matches!(receiver,VmValue::Null|VmValue::Undefined),"TypeError: incompatible String method receiver");
                         if !matches!(receiver,VmValue::String(_)|VmValue::Utf16(_)){receiver=VmValue::String(super::js_value::to_string(&self.heap,&receiver)?);}
                     }
-                    if kind=="String" && method=="concat" {let mut call=vec![receiver];call.extend(args);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$stringConcat",call,destination)?;self.frames.push(frame);return Ok(None);}
+                    if kind=="String" && method=="concat" {let mut call=vec![receiver];call.extend(args);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$stringConcat",call,destination)?;self.push_frame(frame);return Ok(None);}
                     let valid=match (&receiver,kind) {
                         (VmValue::Reference(id),"Array")=>matches!(self.heap.get(*id)?,HeapNode::Array(_)),
                         (VmValue::Reference(id),"Date")=>self.heap.date_value(*id).is_some(),
@@ -1063,7 +1114,7 @@ impl Runtime {
                     };
                     ensure!(valid,"TypeError: incompatible {kind} method receiver");
                     if kind=="Array" && method=="toString" {
-                        let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$arrayToString",vec![receiver],destination)?;self.frames.push(frame);return Ok(None);
+                        let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$arrayToString",vec![receiver],destination)?;self.push_frame(frame);return Ok(None);
                     }
                     if kind=="Error" {
                         let name=super::vm_eval::member(&self.heap,&receiver,&VmValue::String("name".into()))?;
@@ -1083,7 +1134,7 @@ impl Runtime {
                         };
                         ensure!(valid,"TypeError: incompatible {class} method receiver");
                     }else{bail!("TypeError: incompatible {class} method receiver");}
-                    if method=="next" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$iteratorNext",vec![receiver],destination)?;self.frames.push(frame);return Ok(None);}
+                    if method=="next" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$iteratorNext",vec![receiver],destination)?;self.push_frame(frame);return Ok(None);}
                     return self.invoke_method(receiver,method,args,destination,true);
                 }
                 if timers::is_global(&name) {
@@ -1095,7 +1146,7 @@ impl Runtime {
                 if name=="Array.from" && args.len()>=2 {
                     ensure!(self.frames.len()<64,"program call depth limit");
                     let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$arrayFrom",args,destination)?;
-                    self.frames.push(frame);return Ok(None);
+                    self.push_frame(frame);return Ok(None);
                 }
                 #[cfg(test)]
                 if name=="test262.assert.throws" {
@@ -1166,7 +1217,7 @@ impl Runtime {
         ensure!(self.heap.is_constructor_value(&callee)?,"TypeError: value is not a constructor");
         let list=VmValue::Reference(self.heap.allocate(HeapNode::Array(args))?);
         let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$constructUsingTarget",vec![callee,list,target],destination)?;
-        self.frames.push(frame);Ok(())
+        self.push_frame(frame);Ok(())
     }
     fn construct_ready(&mut self,callee:VmValue,args:Vec<VmValue>,destination:Option<String>,at:&Location,new_target:VmValue,prototype:VmValue)->Result<()> {
         let VmValue::Reference(id)=callee else{bail!("TypeError: value is not a constructor")};
@@ -1184,17 +1235,20 @@ impl Runtime {
                 self.heap.define_binding(env,"\0newTarget",new_target)?;
                 self.heap.define_binding(env,"\0activeConstructor",callee)?;
                 if derived{self.heap.uninitialize_this(env)?;self.frames.last_mut().unwrap().derived_env=Some(env);}
-                else{self.frames.last_mut().unwrap().constructed=Some(receiver);}
+                else {
+                    self.frames.last_mut().unwrap().constructed=Some(receiver.clone());
+                    if let Some(init) = self.heap.class_initializer(id) { self.invoke_receiver(init,receiver,vec![],None)?; }
+                }
             },
             HeapNode::Native(name)=>{
                 let prototype=if matches!(prototype,VmValue::Reference(_)){prototype}else{self.heap.intrinsic(&format!("{name}.prototype")).unwrap_or(VmValue::Undefined)};
                 if super::js_collections::NAMES.contains(&name.as_str()){
-                    let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$constructCollection",vec![VmValue::String(name),args.first().cloned().unwrap_or(VmValue::Undefined),prototype],destination)?;self.frames.push(frame);return Ok(());
+                    let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$constructCollection",vec![VmValue::String(name),args.first().cloned().unwrap_or(VmValue::Undefined),prototype],destination)?;self.push_frame(frame);return Ok(());
                 }
                 if name=="Promise"{return self.promise_constructor_with_proto(args.into_iter().next().unwrap_or(VmValue::Undefined),destination,at,Some(prototype));}
                 if matches!(name.as_str(),"Number"|"String"|"Boolean"){
                     let values=VmValue::Reference(self.heap.allocate(HeapNode::Array(args))?);
-                    let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$boxedSubclass",vec![VmValue::String(name),values,prototype],destination)?;self.frames.push(frame);return Ok(());
+                    let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$boxedSubclass",vec![VmValue::String(name),values,prototype],destination)?;self.push_frame(frame);return Ok(());
                 }
                 let value=match name.as_str(){
                     "Symbol"=>bail!("TypeError: Symbol cannot be constructed with new"),
@@ -1204,7 +1258,7 @@ impl Runtime {
                     "Date"=>{
                         // Conversion may call user code; the prelude makes it resumable.
                         let mut values=args;values.push(prototype);
-                        let values=VmValue::Reference(self.heap.allocate(HeapNode::Array(values))?);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$dateSubclass",vec![values],destination)?;self.frames.push(frame);return Ok(());
+                        let values=VmValue::Reference(self.heap.allocate(HeapNode::Array(values))?);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$dateSubclass",vec![values],destination)?;self.push_frame(frame);return Ok(());
                     },
                     "RegExp"=>super::js_methods::construct_regexp(&mut self.heap,&args)?,
                     _ if super::vm_eval::ERROR_CLASSES.contains(&name.as_str())=>super::js_methods::builtin(&mut self.heap,&name,&args)?,
@@ -1267,6 +1321,27 @@ impl Runtime {
                 self.adopting.insert(id, target);
                 self.promises.enqueue(id, super::promise::Outcome::Fulfilled(VmValue::Reference(source)));
                 return Ok(());
+            }
+            if let Some(target) = target {
+                let has_accessor = self.heap.descriptor_owner(source, "then")?
+                    .is_some_and(|(_, descriptor)| descriptor.accessor.is_some());
+                let has_then = self.heap.lookup_property(source, "then")?
+                    .is_some_and(|then| super::vm_eval::callable(&self.heap, &then));
+                if has_accessor || has_then {
+                    let capability = self.heap.allocate(HeapNode::PromiseCapability { promise: target, resolved: false })?;
+                    let resolve = self.heap.allocate(HeapNode::PromiseResolver { capability, reject: false })?;
+                    let reject = self.heap.allocate(HeapNode::PromiseResolver { capability, reject: true })?;
+                    let frame = Self::vm_frame(
+                        &self.program,
+                        &mut self.heap,
+                        self.module_env,
+                        "$$resolveAwaitValue",
+                        vec![VmValue::Reference(source), VmValue::Reference(resolve), VmValue::Reference(reject)],
+                        None,
+                    )?;
+                    self.push_frame(frame);
+                    return Ok(());
+                }
             }
         }
         if let Some(target) = target {
@@ -1482,23 +1557,94 @@ impl Runtime {
         self.fuel=self.segment_limit;
         self.line_instructions.clear();
     }
+    #[cfg(test)]
+    pub(super) fn gc_collections(&self) -> usize { self.heap.gc_collections }
+    /// Must run between instructions: temporaries live only in frames and roots.
+    fn collect_garbage(&mut self) -> Result<()> {
+        self.async_promises.retain(|id| match self.heap.get(*id) {
+            Ok(HeapNode::Promise { outcome: None, .. }) => true,
+            Ok(HeapNode::Promise { outcome: Some(super::promise::Outcome::Rejected(_)), handled: false, .. }) => true,
+            _ => false,
+        });
+        let mut roots = self.promises.roots();
+        self.callback_roots(&mut roots);
+        roots.extend(self.heap.generators.iter().filter(|(_,g)|g.pending()).map(|(id,_)|VmValue::Reference(*id)));
+        roots.extend(self.async_promises.iter().copied().map(VmValue::Reference));
+        roots.extend(self.root_result.iter().cloned());
+        roots.extend(self.async_actions.iter().map(|action| VmValue::Reference(action.promise)));
+        roots.extend(self.active_async_action.iter().map(|action| VmValue::Reference(action.promise)));
+        roots.extend(self.active_reaction.iter().map(|action| VmValue::Reference(action.promise)));
+        roots.extend(self.active_async_batch.iter().map(|action| VmValue::Reference(action.promise)));
+        roots.extend(self.inflight_async.values().map(|action| VmValue::Reference(action.promise)));
+        roots.extend(self.forwarding.values().chain(self.adopting.values()).flatten().copied().map(VmValue::Reference));
+        for reaction in self.reactions.values() {
+            roots.extend([reaction.fulfilled.clone(), reaction.rejected.clone(), VmValue::Reference(reaction.target)]);
+            roots.extend(reaction.origin.iter().copied().map(VmValue::Reference));
+        }
+        for frame in self.frames.iter().chain(self.continuations.values().flat_map(|c| c.frames.iter())) {
+            roots.extend(frame.generator.map(VmValue::Reference));
+            roots.extend(frame.generator_function.iter().cloned());
+            roots.extend(frame.constructed.iter().cloned());
+            roots.extend(frame.derived_env.map(VmValue::Reference));
+            roots.extend(frame.super_env.map(VmValue::Reference));
+            if let Some(locals) = &frame.vm_locals { roots.extend(locals.values().cloned()); }
+            roots.extend(frame.origin.iter().copied().map(VmValue::Reference));
+            roots.extend(frame.executor.map(VmValue::Reference));
+            roots.extend(
+                frame
+                    .env
+                    .iter()
+                    .chain(frame.handler_envs.iter().flatten())
+                    .map(|id| VmValue::Reference(*id)),
+            );
+        }
+        roots.extend(self.module_env.map(VmValue::Reference));
+        roots.extend(self.required.values().copied().map(VmValue::Reference));
+        self.heap.collect(&roots)?;
+        let heap = &self.heap;
+        self.throw_sites.retain(|id, _| heap.get(*id).is_ok());
+        Ok(())
+    }
+    fn work_site(&self) -> Option<(String, Location)> {
+        self.frames.iter().rev().find_map(|frame| {
+            if frame.function.starts_with("$$") { frame.work_origin.clone() }
+            else {
+                self.program.functions.get(&frame.function)?.code
+                    .get(frame.pc.saturating_sub(1)).map(|i|(frame.function.clone(), i.at.clone()))
+            }
+        })
+    }
+    fn push_frame(&mut self, mut frame: Frame) {
+        if frame.function.starts_with("$$") && frame.work_origin.is_none() {
+            frame.work_origin = self.work_site();
+        }
+        self.frames.push(frame);
+    }
     fn budget_error(&self, timed_out: bool) -> Value {
         let mut hot:Vec<_>=self.line_instructions.iter().flat_map(|(function,lines)|
             lines.iter().map(move |(line,count)|json!({"function":function,"line":line,"instructions":count}))).collect();
         hot.sort_by(|a,b|b["instructions"].as_u64().cmp(&a["instructions"].as_u64()));
         hot.truncate(8);
-        let location=self.frames.last().and_then(|frame|self.program.functions.get(&frame.function)
-            .and_then(|f|f.code.get(frame.pc))).map(|i|json!(i.at));
+        let location=self.work_site().map(|(_,at)|json!(at));
         let elapsed=chrono::Utc::now().timestamp_millis().saturating_sub(self.started_at_ms).max(0);
         json!({"name":"ResourceLimitError","code":if timed_out {"PROGRAM_TIME_BUDGET_EXHAUSTED"} else {"INSTRUCTION_BUDGET_EXHAUSTED"},
             "message":if timed_out {format!("Program time budget exhausted: elapsed {elapsed} ms, limit {} ms. State and completed effects are retained; revise the remaining work, do not replay completed operations.",self.time_limit_ms)}
                 else {format!("Instruction budget exhausted between host interactions: used {} of {} instructions (total {}). Read hot_lines and split or optimize the computation; completed effects must not be replayed.",self.segment_limit.saturating_sub(self.fuel),self.segment_limit,self.total_instructions)},
             "limit":self.segment_limit,"used":self.segment_limit.saturating_sub(self.fuel),"total_instructions":self.total_instructions,
+            "total_vm_steps":self.total_vm_steps,"meter":"user-work-v1",
             "elapsed_ms":elapsed,"limit_ms":self.time_limit_ms,"location":location,"hot_lines":hot})
     }
     pub fn remaining_time(&self) -> std::time::Duration {
+        #[cfg(test)]
+        if self.test_deadline_after_steps.is_some_and(|steps| self.total_vm_steps >= steps) {
+            return std::time::Duration::ZERO;
+        }
         let elapsed=chrono::Utc::now().timestamp_millis().saturating_sub(self.started_at_ms).max(0);
         std::time::Duration::from_millis(self.time_limit_ms.saturating_sub(elapsed).max(0) as u64)
+    }
+    #[cfg(test)]
+    pub(crate) fn set_test_deadline_after_steps(&mut self, steps: u64) {
+        self.test_deadline_after_steps = Some(steps);
     }
     pub fn expire_time_budget(&mut self) { self.fail_capacity(self.budget_error(true)); }
     pub fn resume_action(&mut self, id: &str, value: Value, failed: bool) -> Result<()> {
@@ -1592,6 +1738,22 @@ impl Runtime {
         Ok(())
     }
     pub fn next(&mut self) -> State {
+        let state = self.run_until_suspended();
+        // The host snapshots a suspended program, so leave no garbage in it.
+        // Actions hold JSON only; everything they resume into is rooted.
+        if matches!(state, State::Action(_) | State::Waiting) && self.heap.has_uncollected()
+            && let Err(error) = self.collect_garbage() {
+            return self.collection_failed(error);
+        }
+        state
+    }
+    fn collection_failed(&mut self, error: anyhow::Error) -> State {
+        self.finished = true;
+        let error = json!({"message":format!("VM heap collection failed: {error:#}")});
+        self.error = Some(error.clone());
+        State::Failed(error)
+    }
+    fn run_until_suspended(&mut self) -> State {
         // Old snapshots gain a start time once. Restores and host replies do
         // not refresh this deadline or the current instruction segment.
         if self.started_at_ms==0 {self.started_at_ms=chrono::Utc::now().timestamp_millis();}
@@ -1684,7 +1846,7 @@ impl Runtime {
                         // class guards, home objects, native coercion and async
                         // adoption must be identical to an ordinary invocation.
                         let result = match Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$promiseReaction",vec![callback,value],None) {
-                            Ok(mut frame)=>{frame.completion=Some(reaction.target);frame.origin=reaction.origin;frame.diagnostic_at=reaction.at;self.frames.push(frame);Ok(())},
+                            Ok(mut frame)=>{frame.completion=Some(reaction.target);frame.origin=reaction.origin;frame.diagnostic_at=reaction.at;frame.work_origin=reaction.work_origin;self.push_frame(frame);Ok(())},
                             Err(error)=>Err(error),
                         };
                         if let Err(error) = result {
@@ -1801,72 +1963,38 @@ impl Runtime {
                 self.fail_capacity(self.budget_error(false));
                 return State::Failed(self.error.clone().unwrap());
             }
-            self.fuel -= 1;
-            if self.fuel % 256 == 0 {
+            self.total_vm_steps = self.total_vm_steps.saturating_add(1);
+            if self.total_vm_steps % 256 == 0 {
                 if self.remaining_time().is_zero() {
                     self.expire_time_budget();
                     return State::Failed(self.error.clone().unwrap());
                 }
-                self.async_promises.retain(|id| match self.heap.get(*id) {
-                    Ok(HeapNode::Promise { outcome: None, .. }) => true,
-                    Ok(HeapNode::Promise { outcome: Some(super::promise::Outcome::Rejected(_)), handled: false, .. }) => true,
-                    _ => false,
-                });
-                let mut roots = self.promises.roots();
-                self.callback_roots(&mut roots);
-                roots.extend(self.heap.generators.iter().filter(|(_,g)|g.pending()).map(|(id,_)|VmValue::Reference(*id)));
-                roots.extend(self.async_promises.iter().copied().map(VmValue::Reference));
-                roots.extend(self.root_result.iter().cloned());
-                roots.extend(self.async_actions.iter().map(|action| VmValue::Reference(action.promise)));
-                roots.extend(self.active_async_action.iter().map(|action| VmValue::Reference(action.promise)));
-                roots.extend(self.active_reaction.iter().map(|action| VmValue::Reference(action.promise)));
-                roots.extend(self.active_async_batch.iter().map(|action| VmValue::Reference(action.promise)));
-                roots.extend(self.inflight_async.values().map(|action| VmValue::Reference(action.promise)));
-                roots.extend(self.forwarding.values().chain(self.adopting.values()).flatten().copied().map(VmValue::Reference));
-                for reaction in self.reactions.values() {
-                    roots.extend([reaction.fulfilled.clone(), reaction.rejected.clone(), VmValue::Reference(reaction.target)]);
-                    roots.extend(reaction.origin.iter().copied().map(VmValue::Reference));
+                if self.heap.collection_due() && let Err(error) = self.collect_garbage() {
+                    return self.collection_failed(error);
                 }
-                for frame in self.frames.iter().chain(self.continuations.values().flat_map(|c| c.frames.iter())) {
-                    roots.extend(frame.generator.map(VmValue::Reference));
-                    roots.extend(frame.generator_function.iter().cloned());
-                    roots.extend(frame.constructed.iter().cloned());
-                    roots.extend(frame.derived_env.map(VmValue::Reference));
-                    roots.extend(frame.super_env.map(VmValue::Reference));
-                    if let Some(locals) = &frame.vm_locals { roots.extend(locals.values().cloned()); }
-                    roots.extend(frame.origin.iter().copied().map(VmValue::Reference));
-                    roots.extend(frame.executor.map(VmValue::Reference));
-                    roots.extend(
-                        frame
-                            .env
-                            .iter()
-                            .chain(frame.handler_envs.iter().flatten())
-                            .map(|id| VmValue::Reference(*id)),
-                    );
-                }
-                roots.extend(self.module_env.map(VmValue::Reference));
-                roots.extend(self.required.values().copied().map(VmValue::Reference));
-                if let Err(error) = self.heap.collect(&roots) {
-                    self.finished = true;
-                    let error = json!({"message":format!("VM heap collection failed: {error:#}")});
-                    self.error = Some(error.clone());
-                    return State::Failed(error);
-                }
-                let heap = &self.heap;
-                self.throw_sites.retain(|id, _| heap.get(*id).is_ok());
             }
-            let instruction = {
+            let (instruction, charge) = {
                 let frame = self.frames.last_mut().unwrap();
                 let instruction = self.program.functions[&frame.function].code[frame.pc].clone();
+                // Prelude implementation steps are not user instructions.
+                // One unit per entry and backward edge prices iterations and
+                // still bounds a built-in loop independently of wall time.
+                let charge = !frame.function.starts_with("$$") || frame.pc == 0 || match &instruction.op {
+                    Op::Jump(target) | Op::Branch(_, target) => *target <= frame.pc,
+                    _ => false,
+                };
                 frame.pc += 1;
-                instruction
+                (instruction, charge)
             };
             let at = instruction.at.clone();
-            self.total_instructions=self.total_instructions.saturating_add(1);
-            let function=&self.frames.last().unwrap().function;
-            if let Some(lines)=self.line_instructions.get_mut(function) {
-                *lines.entry(at.line).or_default()+=1;
-            } else {self.line_instructions.insert(function.clone(),[(at.line,1)].into_iter().collect());}
+            let work_site = self.work_site();
+            if charge {
+                self.fuel -= 1;
+                self.total_instructions = self.total_instructions.saturating_add(1);
+                if let Some((function, location)) = &work_site {
+                    *self.line_instructions.entry(function.clone()).or_default().entry(location.line).or_default() += 1;
+                }
+            }
             let outcome = (|| -> Result<Option<Action>> {
                 match instruction.op {
                     Op::Set(name, e) => {
@@ -1923,7 +2051,8 @@ impl Runtime {
                         let object = eval(&object, locals, &mut self.heap)?;
                         let key = eval(&key, locals, &mut self.heap)?;
                         let value = eval(&value, locals, &mut self.heap)?;
-                        let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$strictSet",vec![object,key,value],None)?;self.frames.push(frame);
+                        if self.heap.try_fast_set(&object, &key, &value)? { return Ok(None); }
+                        let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$strictSet",vec![object,key,value],None)?;self.push_frame(frame);
                     }
                     Op::Branch(test, target) => {
                         let locals = self.frames.last().unwrap().locals()?;
@@ -2028,7 +2157,11 @@ impl Runtime {
                             value=self.heap.lookup_binding(env,"\0this")?;
                         }
                         if let Some(receiver)=frame.constructed && !matches!(value,VmValue::Reference(_)){value=receiver;}
-                        if let Some(env)=frame.super_env {self.heap.initialize_this(env,value.clone())?;}
+                        let initializer = if let Some(env)=frame.super_env {
+                            self.heap.initialize_this(env,value.clone())?;
+                            let active=self.heap.lookup_binding(env,"\0activeConstructor")?;
+                            if let VmValue::Reference(id)=active { self.heap.class_initializer(id).map(|init|(init,value.clone())) } else { None }
+                        } else { None };
                         if let Some(promise) = frame.completion {
                             self.resolve_async(Some(promise), value)?;
                         } else if frame.task_callback {
@@ -2040,12 +2173,10 @@ impl Runtime {
                         } else {
                             self.resolve_async(None, value)?;
                         }
+                        if let Some((init, receiver)) = initializer { self.invoke_receiver(init,receiver,vec![],None)?; }
                     }
                     Op::Effect(destination, effect) => {
-                        let frame = self.frames.last().unwrap();
-                        let temps = frame.vm_locals.clone().context("missing VM locals")?;
-                        let env = frame.env;
-                        let locals = Locals { temps: &temps, env };
+                        let locals = self.frames.last().unwrap().locals()?;
                         let kind = match effect {
                             Effect::PromiseConstruct { executor } => {
                                 let executor = eval(&executor, locals, &mut self.heap)?;
@@ -2104,7 +2235,7 @@ impl Runtime {
                                         frame.completion = Some(promise);
                                         frame.origin = self.async_origin();
                                     }
-                                    self.frames.push(frame);
+                                    self.push_frame(frame);
                                     return Ok(None);
                                 }
                             }
@@ -2228,11 +2359,11 @@ impl Runtime {
                                 for item in &items {
                                     // The map parameter is bound for this item only.
                                     let scope = self.heap.new_environment(
-                                        env,
+                                        locals.env,
                                         [(parameter.clone(), item.clone())].into(),
                                         BTreeSet::new(),
                                     )?;
-                                    let values = vm_args(&args, Locals { temps: &temps, env: Some(scope) }, &mut self.heap)?;
+                                    let values = vm_args(&args, Locals { temps: locals.temps, env: Some(scope) }, &mut self.heap)?;
                                     let mut values = json_args(values, &self.heap)?;
                                     let args = if values.is_empty() {
                                         json!({})
@@ -2291,7 +2422,7 @@ impl Runtime {
                 Ok(None) => {}
                 Err(e) => {
                     if self.error.as_ref().is_some_and(is_resource_error) {
-                        if let Some(error) = self.error.as_mut() { error["location"] = json!(at); }
+                        if let Some(error) = self.error.as_mut() { error["location"] = json!(work_site.as_ref().map(|(_,at)|at).unwrap_or(&at)); }
                         return State::Failed(self.error.clone().unwrap());
                     }
                     let error = self.runtime_error(format!("{e:#}"), &at);

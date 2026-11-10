@@ -66,7 +66,7 @@ pub(super) fn revisions(
     let mut revisions = BTreeMap::new();
     for (name, revision) in requests {
         let function = program.functions.get(&name).filter(|function| function.module_task)
-            .with_context(|| format!("revise_modules requires a top-level @module named {name}"))?;
+            .with_context(|| format!("revise_modules requires a top-level @virtual named {name}"))?;
         ensure!(!revision.reason.trim().is_empty() && revision.reason.chars().count() <= 2000,
             "give a concrete reason of up to 2000 characters to revise {name}");
         let args = vec![Value::Null; function.params.len()];
@@ -162,12 +162,12 @@ pub(super) fn system_message(root: &Path, task: &str) -> Option<Value> {
         .map(|(key, name, signature, description, version, _)| {
             let comment = description.lines().map(|line| format!("  // {line}")).collect::<Vec<_>>().join("\n");
             let path = file_name(name, key);
-            format!("modules/{path} (version {version})\n/** @module */\n{signature} {{\n{comment}\n}}")
+            format!("modules/{path} (version {version})\n/** @virtual */\n{signature} {{\n{comment}\n}}")
         })
         .collect::<Vec<_>>()
         .join("\n\n");
     Some(json!({"role":"system","name":"chat_modules","content":format!(
-        "Modules this chat already has. Use the exact declaration to reuse its implementation. Inspect source in the flow folder before proposing a revision.\n\n{declarations}"
+        "Modules this chat already has. Declare the same signature and contract to reuse one: the host links its saved implementation automatically, with no file import. Source paths are for inspection and revision.\n\n{declarations}"
     )}))
 }
 
@@ -270,7 +270,8 @@ fn libraries(s: &Session<'_>, w: &Window) -> crate::agent_program::libraries::Li
 }
 
 fn compile(s: &Session<'_>, w: &Window, name: &str, source: &str) -> Result<()> {
-    crate::agent_program::compile_body_with_scope(source, name, libraries(s, w), Default::default()).map(|_| ())
+    let program = crate::agent_program::compile_body_with_scope(source, name, libraries(s, w), Default::default())?;
+    program_flow::validate_implementation(&program)
 }
 
 /// Run this version of the module for the window's call, from its start.
@@ -443,6 +444,12 @@ pub(super) async fn failed(s: &Session<'_>, w: &mut Window, error: &Value, conso
 
 /// The fixer's edit_file: exact text edits to its module file only. The
 /// result says whether the module now compiles.
+pub(super) fn fix_edit_tool() -> Value {
+    function("edit_file", "Edit only the saved module file named in module_fix_input. This does not grant permission to edit project source. Every edit is compiled; inspect compiles and diagnostics before finishing.",
+        json!({"path":{"type":"string"},"edits":{"type":"array","minItems":1,"items":{"type":"object","properties":{"old_text":{"type":"string"},"new_text":{"type":"string"}},"required":["old_text","new_text"],"additionalProperties":false}}}),
+        json!(["path","edits"]))
+}
+
 pub(super) fn edit(s: &Session<'_>, w: &Window, args: &Value) -> Result<Value> {
     let task = w.program_task.as_ref().context("no module is being fixed")?;
     let path = task["fix"]["path"].as_str().context("no module is being fixed")?;

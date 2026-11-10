@@ -17,6 +17,9 @@ mod generators;
 
 struct Compiler {
     map: Lrc<SourceMap>,
+    /// Where the source binds each name, so a rejected declaration is
+    /// reported at the name itself rather than at its enclosing body.
+    binding_spans: Lrc<BTreeMap<String, Vec<Span>>>,
     names: BTreeSet<String>,
     arities: BTreeMap<String, usize>,
     async_entry: Option<String>,
@@ -57,6 +60,8 @@ struct Compiler {
     leaf_tools: Option<Vec<String>>,
     /// And the third-party libraries this source requires.
     leaf_libraries: Vec<String>,
+    /// Private class names are lowered to per-class collision-free keys.
+    private_names: BTreeMap<String, String>,
 }
 
 /// The library a `require("ppt")` call names: one string argument.
@@ -70,14 +75,20 @@ fn valid_library(spec: &str) -> bool {
     let name = spec.strip_suffix("/promises").unwrap_or(spec);
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
+/// `host:` is a compatibility alias, independent of import/require syntax.
+fn library_specifier(spec: &str) -> Option<&str> {
+    let spec = spec.strip_prefix("host:").unwrap_or(spec);
+    valid_library(spec).then_some(spec)
+}
 /// The library a `require("ppt")` call names, without /promises.
 fn required_library(call: &ast::CallExpr) -> Option<String> {
     let ast::Callee::Expr(callee) = &call.callee else { return None };
     if !matches!(&**callee, ast::Expr::Ident(i) if i.sym == *"require") {
         return None;
     }
-    let spec = required_name(call).filter(|spec| valid_library(spec))?;
-    Some(spec.strip_suffix("/promises").unwrap_or(&spec).to_owned())
+    let name = required_name(call)?;
+    let spec = library_specifier(&name)?;
+    Some(spec.strip_suffix("/promises").unwrap_or(spec).to_owned())
 }
 /// The libraries a source requires, wherever the calls are, and the
 /// variables `const md = require("markdown")` binds to them.
@@ -105,14 +116,24 @@ impl Visit for Requires {
 }
 /// Every name a source binds: declarations, parameters, catch bindings and
 /// function names.
-struct Bound(BTreeSet<String>);
+struct Bound(BTreeSet<String>, BTreeMap<String, Vec<Span>>);
+impl Bound {
+    fn bind(&mut self, name: &ast::Ident) {
+        self.0.insert(name.sym.to_string());
+        self.1.entry(name.sym.to_string()).or_default().push(name.span);
+    }
+}
 impl Visit for Bound {
     fn visit_binding_ident(&mut self, name: &ast::BindingIdent) {
-        self.0.insert(name.id.sym.to_string());
+        self.bind(&name.id);
     }
     fn visit_fn_decl(&mut self, f: &ast::FnDecl) {
-        self.0.insert(f.ident.sym.to_string());
+        self.bind(&f.ident);
         f.visit_children_with(self);
+    }
+    fn visit_class_decl(&mut self, class: &ast::ClassDecl) {
+        self.bind(&class.ident);
+        class.visit_children_with(self);
     }
 }
 /// The libraries a source requires, read without compiling it. A source that
@@ -132,16 +153,10 @@ pub fn required_libraries(source: &str) -> Vec<String> {
 const CONSOLE_METHODS: [&str; 5] = ["log", "info", "warn", "error", "debug"];
 const NATIVE_GLOBALS: &[&str] = &[
     "String", "Number", "Boolean", "parseInt", "parseFloat", "isNaN", "isFinite",
-    "Symbol", "Array", "Date", "encodeURIComponent", "decodeURIComponent", "structuredClone",
+    "Symbol", "Array", "Date", "encodeURI", "decodeURI", "encodeURIComponent", "decodeURIComponent", "structuredClone",
     "Map", "Set", "WeakMap", "WeakSet",
     "Object", "Function", "RegExp", "Promise", "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError",
     "setTimeout", "setInterval", "clearTimeout", "clearInterval", "queueMicrotask",
-];
-
-/// Array methods whose callback is compiled into the calling frame.
-const CALLBACK_METHODS: [&str; 14] = [
-    "map", "filter", "forEach", "find", "findIndex", "findLast", "findLastIndex", "some", "every",
-    "reduce", "reduceRight", "flatMap", "sort", "toSorted",
 ];
 
 /// A numeric constant, including NaN and the infinities that JSON cannot hold.
@@ -229,6 +244,12 @@ enum FunctionBody<'a> {
     Block(&'a ast::BlockStmt),
     Expr(&'a ast::Expr),
     Missing,
+    ClassElements(Vec<ClassElement<'a>>),
+}
+enum ClassElement<'a> {
+    Field { span: Span, key: Expr, hint: Expr, value: Option<&'a ast::Expr>, private: bool },
+    Private { span: Span, key: Expr, kind: &'static str, value: Expr, setter: Expr },
+    Block { span: Span, function: Expr },
 }
 impl<'a> FunctionSource<'a> {
     fn method(f:&'a ast::Function,name:Option<String>)->Self {let mut source=Self::function(f,name,None);source.constructable=false;source}
@@ -588,21 +609,32 @@ impl Compiler {
     }
     /// Bind `name` in the innermost scope.
     fn declare(&mut self, name: &str, mutable: bool, span: Span) -> Result<()> {
-        if matches!(
-            name,
-            "tools" | "assert" | "JSON" | "Promise"
-        ) || name.starts_with("$temp")
-            || self.libraries.contains_key(name)
-            || self.imports.contains_key(name)
-        {
-            return self.error(span, "duplicate or reserved local binding");
+        let reserved = if matches!(name, "assert" | "JSON" | "Promise") {
+            Some(format!("{name} is a host built-in and cannot be declared again; use another name"))
+        } else if name.starts_with("$temp") {
+            Some(format!("{name}: names beginning with $temp are reserved for the compiler"))
+        } else if self.libraries.contains_key(name) {
+            Some(format!("{name} is an imported library namespace here; give the local another name"))
+        } else if self.imports.contains_key(name) {
+            Some(format!("{name} is an imported tool here; give the local another name"))
+        } else {
+            None
+        };
+        if let Some(reason) = reserved {
+            return self.error(self.binding_span(name, span, 0), &reason);
         }
         let scope = self.scopes.last_mut().expect("a scope is open");
         if scope.contains_key(name) {
-            return self.error(span, &format!("{name} is already declared in this scope"));
+            return self.error(self.binding_span(name, span, 1), &format!("{name} is already declared in this scope"));
         }
         scope.insert(name.into(), mutable);
         Ok(())
+    }
+    /// The `nth` place inside `within` that binds `name`, else the first, else `within`.
+    fn binding_span(&self, name: &str, within: Span, nth: usize) -> Span {
+        let inside = self.binding_spans.get(name).into_iter().flatten()
+            .filter(|span| span.lo >= within.lo && span.hi <= within.hi).copied().collect::<Vec<_>>();
+        inside.get(nth).or(inside.first()).copied().unwrap_or(within)
     }
     fn property(&self, p: &ast::PropName) -> Result<String> {
         match p {
@@ -611,6 +643,13 @@ impl Compiler {
             ast::PropName::Num(n)=>Ok(super::js_value::number_to_string(n.value)),
             _ => self.error(p.span(), "use a static object key"),
         }
+    }
+    fn private_key(&self, name: &ast::PrivateName) -> Result<Expr> {
+        self.private_names
+            .get(name.name.as_ref())
+            .cloned()
+            .map(Expr::Variable)
+            .with_context(|| format!("unknown private name #{}", name.name))
     }
     fn expr(&self, e: &ast::Expr) -> Result<Expr> {
         use ast::Expr as E;
@@ -669,6 +708,10 @@ impl Compiler {
                 number_expr(if i.sym == *"NaN" { f64::NAN } else { f64::INFINITY })
             }
             E::Member(m) if self.constant_member(m).is_some() => self.constant_member(m).unwrap(),
+            // A host program is never Node's main module, so the usual
+            // `if (require.main === module) main()` guard stays closed.
+            E::Member(m) if matches!(&*m.obj, ast::Expr::Ident(i) if i.sym == *"require") && self.global("require")
+                && matches!(&m.prop, ast::MemberProp::Ident(p) if p.sym == *"main") => Expr::Undefined,
             E::Ident(i) => {
                 if super::vm_eval::ERROR_CLASSES.contains(&i.sym.as_ref()) {
                     return self.error(i.span,&format!("{} 作为函数值在当前流程运行时里不可用；构造调用 {}(...) / new {}(...) 可用",i.sym,i.sym,i.sym));
@@ -709,8 +752,8 @@ impl Compiler {
                 Box::new(self.expr(&m.obj)?),
                 Box::new(match &m.prop {
                     ast::MemberProp::Ident(i) => Expr::Value(json!(i.sym.to_string())),
+                    ast::MemberProp::PrivateName(i) => self.private_key(i)?,
                     ast::MemberProp::Computed(c) => self.expr(&c.expr)?,
-                    _ => return self.error(e.span(), "private members are unsupported"),
                 }),
             ),
             E::Assign(_) => {
@@ -749,13 +792,13 @@ impl Compiler {
             E::This(_)=>Expr::Variable("\0this".into()),
             E::Class(node)=>return self.error(node.class.span,"class 表达式在流程运行时里尚不支持"),
             E::Yield(node)=>return self.error(node.span,"yield must pass through the resumable expression boundary"),
-            E::TaggedTpl(node)=>return self.error(node.span,"通用标签模板在流程运行时里尚不支持；String.raw 标签模板可用"),
+            E::TaggedTpl(node) => return self.error(node.span, "tagged templates must be evaluated as expressions"),
             E::MetaProp(node) if node.kind==ast::MetaPropKind::NewTarget=>Expr::Variable("\0newTarget".into()),
             E::MetaProp(node)=>return self.error(node.span,"import.meta 在流程运行时里尚不支持"),
             _ => {
                 return self.error(
                     e.span(),
-                    "unsupported expression; use JSON values, ordinary helper/tool calls and if/else",
+                    "unsupported JavaScript expression in this VM",
                 );
             }
         })
@@ -835,6 +878,7 @@ impl Compiler {
         scopes.push(BTreeMap::new());
         let mut c = Compiler {
             map: self.map.clone(),
+            binding_spans: self.binding_spans.clone(),
             names: self.names.clone(),
             arities: self.arities.clone(),
             async_entry: None,
@@ -859,6 +903,7 @@ impl Compiler {
             contracts: self.contracts.clone(),
             leaf_tools: self.leaf_tools.clone(),
             leaf_libraries: self.leaf_libraries.clone(),
+            private_names: self.private_names.clone(),
         };
         let mut params = Vec::new();
         let mut parameter_lexical = Vec::new();
@@ -880,6 +925,10 @@ impl Compiler {
                 parameter_patterns.push((pattern, argument));
             }
         }
+        let arguments_object = !source.lexical_this && !parameter_names.iter().any(|name| name == "arguments");
+        if arguments_object {
+            c.declare("arguments", false, source.span)?;
+        }
         // The function name is available in parameter initializers.
         if let Some(name) = &source.self_name {
             let scope = c.scopes.last_mut().expect("function scope");
@@ -896,7 +945,7 @@ impl Compiler {
                 let lexical = lexical_names(&body.stmts);
                 let lexical_only = body.stmts.iter().filter(|stmt| matches!(stmt, ast::Stmt::Decl(ast::Decl::Var(v)) if v.kind != ast::VarDeclKind::Var)).cloned().collect::<Vec<_>>();
                 if let Some((name, _)) = lexical_names(&lexical_only).iter().find(|(name, _)| parameter_names.contains(name)) {
-                    return c.error(body.span, &format!("duplicate parameter and lexical binding {name}"));
+                    return c.error(c.binding_span(name, body.span, 0), &format!("duplicate parameter and lexical binding {name}"));
                 }
                 if patterned { c.scopes.push(BTreeMap::new()); }
                 for name in &vars { c.declare(name, true, body.span)?; }
@@ -945,6 +994,7 @@ impl Compiler {
                 let value = c.lower(body)?;
                 c.emit(body.span(), Op::Return(value));
             }
+            FunctionBody::ClassElements(elements) => { c.emit_class_elements(elements)?; c.emit(source.span, Op::Return(Expr::Undefined)); }
             FunctionBody::Missing => return c.error(source.span, "function body is required"),
         }
         self.nested.extend(c.nested);
@@ -962,6 +1012,7 @@ impl Compiler {
                 leaf_libraries: if virtual_task && !module_task { self.leaf_libraries.clone() } else { Vec::new() },
                 skills: Vec::new(),
                 params,
+                arguments_object,
                 rest_parameter,
                 parameter_scope: patterned,
                 parameter_lexical,
@@ -1284,14 +1335,14 @@ impl Compiler {
             .expect("a chain guard is emitted inside an optional chain")
             .push(at);
     }
-    fn member_key(&mut self, prop: &ast::MemberProp, span: Span) -> Result<Expr> {
+    fn member_key(&mut self, prop: &ast::MemberProp, _span: Span) -> Result<Expr> {
         Ok(match prop {
             ast::MemberProp::Ident(i) => Expr::Value(json!(i.sym.to_string())),
+            ast::MemberProp::PrivateName(i) => self.private_key(i)?,
             ast::MemberProp::Computed(c) => {
                 let key = self.lower(&c.expr)?;
                 self.snapshot(c.span, Expr::NodeBuiltin("$$propertyKey".into(),vec![key]))
             }
-            _ => return self.error(span, "private members are unsupported"),
         })
     }
     fn chain_link(&mut self, chain: &ast::OptChainExpr) -> Result<Expr> {
@@ -1351,6 +1402,74 @@ impl Compiler {
         Ok(Expr::Variable(dest))
     }
 
+    /// Lower a tagged template into the ordinary call protocol. The first
+    /// argument is the cooked string array with its raw view attached. A
+    /// member tag keeps its receiver exactly like `obj.tag(...)`.
+    fn lower_tagged_template(&mut self, tagged: &ast::TaggedTpl) -> Result<Expr> {
+        let cooked = tagged
+            .tpl
+            .quasis
+            .iter()
+            .map(|quasi| {
+                let value = quasi.cooked.as_ref().and_then(|value| value.as_str()).unwrap_or("");
+                Expr::Value(json!(value))
+            })
+            .collect::<Vec<_>>();
+        let raw = tagged
+            .tpl
+            .quasis
+            .iter()
+            .map(|quasi| Expr::Value(json!(quasi.raw.to_string())))
+            .collect::<Vec<_>>();
+        let strings = self.temp();
+        self.emit(tagged.span, Op::Set(strings.clone(), Expr::Array(cooked)));
+        self.emit(
+            tagged.span,
+            Op::SetMember {
+                object: Expr::Variable(strings.clone()),
+                key: Expr::Value(json!("raw")),
+                value: Expr::Array(raw),
+            },
+        );
+        let mut values = vec![Expr::Variable(strings)];
+        for expression in &tagged.tpl.exprs {
+            let value = self.lower(expression)?;
+            values.push(self.snapshot(expression.span(), value));
+        }
+        let args = Expr::Array(values);
+        let destination = self.temp();
+        let tag = &*tagged.tag;
+        if let ast::Expr::Member(member) = tag {
+            let receiver_value = self.lower_object(&member.obj)?;
+            let receiver = self.snapshot(member.obj.span(), receiver_value);
+            let key = self.member_key(&member.prop, member.span)?;
+            let callee = self.snapshot(tagged.span, Expr::Member(Box::new(receiver.clone()), Box::new(key.clone())));
+            self.emit(
+                tagged.span,
+                Op::Effect(
+                    Some(destination.clone()),
+                    Effect::Invoke(Box::new(Invocation {
+                        callee,
+                        receiver,
+                        args,
+                        label: Some(key),
+                    })),
+                ),
+            );
+        } else {
+            let callee_value = self.lower(tag)?;
+            let callee = self.snapshot(tagged.tag.span(), callee_value);
+            self.emit(
+                tagged.span,
+                Op::Effect(Some(destination.clone()), Effect::Dynamic { callee, args: match args {
+                    Expr::Array(values) => values,
+                    _ => unreachable!(),
+                }}),
+            );
+        }
+        Ok(Expr::Variable(destination))
+    }
+
     /// `receiver.method(args)` for a built-in receiver kind. Callback methods
     /// are compiled into this frame so that their callbacks can suspend.
     fn call_method_on(
@@ -1360,13 +1479,6 @@ impl Compiler {
         args: &[ast::ExprOrSpread],
         span: Span,
     ) -> Result<Expr> {
-        if method != "map" && CALLBACK_METHODS.contains(&method) && args.first().is_some_and(|a| match &*a.expr {
-            ast::Expr::Arrow(f) => f.is_async,
-            ast::Expr::Fn(f) => f.function.is_async && !f.function.is_generator,
-            _ => false,
-        }) {
-            return self.error(span, "async callbacks require Promise support");
-        }
         if args.iter().any(|a| a.spread.is_some()) {
             return self.call_method_spread(receiver, Expr::Value(json!(method)), args, span);
         }
@@ -1386,9 +1498,28 @@ impl Compiler {
         }
     }
 
+    fn lower_construct(&mut self, new: &ast::NewExpr) -> Result<Expr> {
+        let value = self.lower(&new.callee)?;
+        let callee = self.snapshot(new.callee.span(), value);
+        let array = ast::Expr::Array(ast::ArrayLit { span: new.span, elems: new.args.as_deref().unwrap_or(&[]).iter().cloned().map(Some).collect() });
+        let args = self.lower(&array)?;
+        let dest = self.temp();
+        self.emit(new.span, Op::Effect(Some(dest.clone()), Effect::Construct(Box::new(Invocation { callee, receiver: Expr::Undefined, args, label: None }))));
+        Ok(Expr::Variable(dest))
+    }
+
     fn lower_inner(&mut self, e: &ast::Expr) -> Result<Expr> {
         self.reject_unawaited_operands(e)?;
         match e {
+            ast::Expr::Seq(seq) => {
+                let Some((last, preceding)) = seq.exprs.split_last() else { return Ok(Expr::Undefined); };
+                for expr in preceding { self.discard(expr)?; }
+                self.lower(last)
+            }
+            // Spread constructors use the same durable invocation as aliases.
+            ast::Expr::New(new) if new.args.as_deref().unwrap_or(&[]).iter().any(|a| a.spread.is_some()) => {
+                self.lower_construct(new)
+            }
             ast::Expr::New(new) if matches!(&*new.callee, ast::Expr::Ident(i) if matches!(i.sym.as_ref(), "Array" | "Date" | "Map" | "Set" | "WeakMap" | "WeakSet") && self.global(i.sym.as_ref())) => {
                 let ast::Expr::Ident(name) = &*new.callee else { unreachable!() };
                 let args = new.args.as_deref().unwrap_or(&[]);
@@ -1400,20 +1531,7 @@ impl Compiler {
                 }
                 Ok(self.snapshot(new.span, Expr::NodeBuiltin(format!("new {}", name.sym), values)))
             }
-            ast::Expr::TaggedTpl(tagged) => {
-                if !matches!(&*tagged.tag, ast::Expr::Member(m) if matches!(&*m.obj, ast::Expr::Ident(i) if i.sym == *"String" && self.global("String")) && matches!(&m.prop, ast::MemberProp::Ident(p) if p.sym == *"raw")) {
-                    return self.error(tagged.span, "only the built-in String.raw tagged template is available");
-                }
-                let mut parts = Vec::new();
-                for (i, quasi) in tagged.tpl.quasis.iter().enumerate() {
-                    parts.push(Expr::Value(json!(quasi.raw.to_string())));
-                    if let Some(expr) = tagged.tpl.exprs.get(i) {
-                        let value = self.lower(expr)?;
-                        parts.push(self.snapshot(expr.span(), Expr::Template(vec![value])));
-                    }
-                }
-                Ok(Expr::Template(parts))
-            }
+            ast::Expr::TaggedTpl(tagged) => self.lower_tagged_template(tagged),
             ast::Expr::OptChain(chain) => self.with_chain(chain.span, |c| c.chain_link(chain)),
             ast::Expr::New(new) if cfg!(test) && self.external.contains("__test262CheckThrown") && matches!(&*new.callee,ast::Expr::Ident(i) if i.sym==*"Test262Error") => {
                 let mut args=vec![];
@@ -1437,13 +1555,7 @@ impl Compiler {
                 Ok(self.snapshot(new.span, Expr::NodeBuiltin(format!("new {}", class.sym), lowered)))
             }
             ast::Expr::New(new) if !matches!(&*new.callee,ast::Expr::Ident(i) if self.resolve(i.sym.as_ref()).is_none() && !self.names.contains(i.sym.as_ref()) && !matches!(i.sym.as_ref(),"Object"|"Number"|"String"|"Boolean"|"Symbol")) => {
-                let callee=self.lower(&new.callee)?;
-                let callee=self.snapshot(new.callee.span(),callee);
-                let array=ast::Expr::Array(ast::ArrayLit{span:new.span,elems:new.args.as_deref().unwrap_or(&[]).iter().cloned().map(Some).collect()});
-                let args=self.lower(&array)?;
-                let dest=self.temp();
-                self.emit(new.span,Op::Effect(Some(dest.clone()),Effect::Construct(Box::new(Invocation{callee,receiver:Expr::Undefined,args,label:None}))));
-                Ok(Expr::Variable(dest))
+                self.lower_construct(new)
             }
             ast::Expr::Unary(u) if u.op == ast::UnaryOp::Delete => {
                 let ast::Expr::Member(m) = &*u.arg else {
@@ -1508,6 +1620,12 @@ impl Compiler {
             ast::Expr::Await(awaited) => {
                 let value = self.lower(&awaited.arg)?;
                 Ok(self.await_value(value,awaited.span))
+            }
+            ast::Expr::Bin(b) if b.op == ast::BinaryOp::In && matches!(&*b.left, ast::Expr::PrivateName(_)) => {
+                let ast::Expr::PrivateName(name) = &*b.left else { unreachable!() };
+                let key = self.private_key(name)?;
+                let object = self.lower(&b.right)?;
+                Ok(self.snapshot(b.span, Expr::NodeBuiltin("$$privateHas".into(), vec![object,key])))
             }
             ast::Expr::Bin(b) => {
                 let op = match b.op {
@@ -1595,14 +1713,22 @@ impl Compiler {
                 Ok(Expr::Template(parts))
             }
             ast::Expr::Assign(a) => {
+                if let ast::AssignTarget::Pat(pat) = &a.left {
+                    let pat: ast::Pat = pat.clone().into();
+                    let value = self.lower(&a.right)?;
+                    let value = self.snapshot(a.right.span(), value);
+                    for name in pattern_names(&pat) { self.local_target(&name, a.span)?; }
+                    self.bind_value(&pat, value.clone(), false)?;
+                    return Ok(value);
+                }
                 if let ast::AssignTarget::Simple(ast::SimpleAssignTarget::SuperProp(p))=&a.left{return self.super_assignment(a,p);}
                 if let ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(member)) = &a.left {
                     let object = self.lower(&member.obj)?;
                     let object = self.snapshot(member.obj.span(), object);
                     let key = match &member.prop {
                         ast::MemberProp::Ident(name) => Expr::Value(json!(name.sym.to_string())),
+                        ast::MemberProp::PrivateName(name) => self.private_key(name)?,
                         ast::MemberProp::Computed(key) => { let value = self.lower(&key.expr)?; self.snapshot(key.span, Expr::NodeBuiltin("$$propertyKey".into(),vec![value])) },
-                        _ => return self.error(member.span, "private members are unsupported"),
                     };
                     if matches!(a.op, ast::AssignOp::AndAssign | ast::AssignOp::OrAssign | ast::AssignOp::NullishAssign) {
                         let old = self.snapshot(a.span, Expr::Member(Box::new(object.clone()), Box::new(key.clone())));
@@ -1628,7 +1754,7 @@ impl Compiler {
                     return Ok(value);
                 }
                 let ast::AssignTarget::Simple(ast::SimpleAssignTarget::Ident(i)) = &a.left else {
-                    return self.error(a.span, "only local variable assignment is supported");
+                    return self.error(a.span, "unsupported assignment target");
                 };
                 let name = i.id.sym.to_string();
                 self.local_target(&name, a.span)?;
@@ -1661,8 +1787,8 @@ impl Compiler {
                     let object = self.snapshot(member.obj.span(), object);
                     let key = match &member.prop {
                         ast::MemberProp::Ident(name) => Expr::Value(json!(name.sym.to_string())),
+                        ast::MemberProp::PrivateName(name) => self.private_key(name)?,
                         ast::MemberProp::Computed(key) => { let value = self.lower(&key.expr)?; self.snapshot(key.span, Expr::NodeBuiltin("$$propertyKey".into(),vec![value])) },
-                        _ => return self.error(member.span, "private members are unsupported"),
                     };
                     let old = self.snapshot(u.span, Expr::Unary("+".into(), Box::new(Expr::Member(Box::new(object.clone()), Box::new(key.clone())))));
                     let op = if u.op == ast::UpdateOp::PlusPlus { "+" } else { "-" };
@@ -1701,6 +1827,7 @@ impl Compiler {
                 if matches!(call.callee,ast::Callee::Super(_)){return self.super_call(call);}
                 if let ast::Callee::Expr(e)=&call.callee && let ast::Expr::SuperProp(p)=&**e {let callee=self.super_get(p)?;return self.invoke_reference(callee,Expr::Variable("\0this".into()),&call.args,call.span,None);}
                 if matches!(&call.callee,ast::Callee::Expr(e) if matches!(&**e,ast::Expr::Member(m) if matches!(&*m.obj,ast::Expr::Ident(i) if i.sym==*"tools")))
+                    && self.global("tools")
                 {
                     return self.error(call.span,"tools.* is unsupported; use the fixed library.method(args) names in program_tool_headers");
                 }
@@ -1732,8 +1859,7 @@ impl Compiler {
                     self.code[success].op = Op::Jump(end);
                     return Ok(Expr::Value(json!(true)));
                 }
-                // A third-party library loads when this line runs, as with
-                // require() in Node; the host's own libraries are imported.
+                // Both host SDK and third-party libraries load at this line.
                 if let ast::Callee::Expr(target) = &call.callee
                     && matches!(&**target, ast::Expr::Ident(i) if i.sym == *"require")
                     && self.global("require")
@@ -1741,18 +1867,14 @@ impl Compiler {
                     let Some(library) = required_name(call) else {
                         return self.error(call.span, "require takes one library name string, such as require(\"ppt\")");
                     };
-                    if let Some(library) = library.strip_prefix("host:") {
-                        let example = if library.trim_end_matches("/promises") == "attachments" { "read_attachment" } else { "method" };
-                        return self.error(call.span, &format!("host 自带的库要用 import {{ {example} }} from \"host:{library}\" 引入，不要用 require；可用方法见 read_tool_contracts"));
-                    }
-                    if !valid_library(&library) {
+                    let Some(specifier) = library_specifier(&library) else {
                         return self.error(
                             call.span,
-                            &format!("require(\"{library}\"): a library name has letters, digits, _ or -, optionally followed by /promises; the host's own libraries are imported from host:<library>"),
+                            &format!("require(\"{library}\"): a library name has letters, digits, _ or -, optionally followed by /promises; host: is an optional compatibility prefix"),
                         );
-                    }
+                    };
                     let destination = self.temp();
-                    self.emit(call.span, Op::Effect(Some(destination.clone()), Effect::Require(library)));
+                    self.emit(call.span, Op::Effect(Some(destination.clone()), Effect::Require(specifier.to_owned())));
                     return Ok(Expr::Variable(destination));
                 }
                 if call.args.iter().any(|arg| arg.spread.is_some()) {
@@ -1933,7 +2055,13 @@ impl Compiler {
                 let target = self.temp();
                 self.emit(a.span, Op::Set(target.clone(), Expr::Array(Vec::new())));
                 for item in &a.elems {
-                    let Some(item) = item else { return self.error(a.span, "array holes are unsupported"); };
+                    let Some(item) = item else {
+                        let destination = self.temp();
+                        self.emit(a.span, Op::Append { target: target.clone(), items: vec![Expr::Undefined], destination });
+                        let key = Expr::Binary("-".into(), Box::new(Expr::Member(Box::new(Expr::Variable(target.clone())), Box::new(Expr::Value(json!("length"))))), Box::new(Expr::Value(json!(1))));
+                        self.snapshot(a.span, Expr::NodeBuiltin("delete".into(), vec![Expr::Variable(target.clone()), key]));
+                        continue;
+                    };
                     let value = self.lower(&item.expr)?;
                     if item.spread.is_some() {
                         let value = self.snapshot(item.span(), value);
@@ -1955,12 +2083,20 @@ impl Compiler {
                             let value = self.lower(&e.expr)?;
                             values.push(self.snapshot(e.span(), value));
                         }
-                        _ => return self.error(a.span, "array holes/spread are unsupported"),
+                        None => values.push(Expr::Undefined),
+                        _ => unreachable!(),
                     }
                 }
-                Ok(Expr::Array(values))
+                if a.elems.iter().all(Option::is_some) { return Ok(Expr::Array(values)); }
+                let array = self.snapshot(a.span, Expr::Array(values));
+                for (i, item) in a.elems.iter().enumerate() {
+                    if item.is_none() { self.snapshot(a.span, Expr::NodeBuiltin("delete".into(), vec![array.clone(), Expr::Value(json!(i))])); }
+                }
+                Ok(array)
             }
             ast::Expr::Member(m) if self.constant_member(m).is_some() => Ok(self.constant_member(m).unwrap()),
+            ast::Expr::Member(m) if matches!(&*m.obj, ast::Expr::Ident(i) if i.sym == *"require") && self.global("require")
+                && matches!(&m.prop, ast::MemberProp::Ident(p) if p.sym == *"main") => Ok(Expr::Undefined),
             ast::Expr::Arrow(arrow) => Ok(Expr::Function(
                 self.compile_function(FunctionSource::arrow(arrow))?,
             )),
@@ -1980,8 +2116,8 @@ impl Compiler {
                 let object = self.snapshot(m.obj.span(), object);
                 let key = match &m.prop {
                     ast::MemberProp::Ident(i) => Expr::Value(json!(i.sym.to_string())),
+                    ast::MemberProp::PrivateName(i) => self.private_key(i)?,
                     ast::MemberProp::Computed(c) => self.lower(&c.expr)?,
-                    _ => return self.error(m.span, "private members are unsupported"),
                 };
                 Ok(Expr::Member(Box::new(object), Box::new(key)))
             }
@@ -2015,15 +2151,54 @@ impl Compiler {
         self.land(skip);
         Ok(Expr::Variable(name))
     }
+    fn binding_place(&mut self, p: &ast::Pat) -> Result<Option<(Expr, Expr, Option<Expr>)>> {
+        let expression = match p {
+            ast::Pat::Assign(a) => return self.binding_place(&a.left),
+            ast::Pat::Rest(r) => return self.binding_place(&r.arg),
+            ast::Pat::Expr(e) => &**e,
+            _ => return Ok(None),
+        };
+        let mut e = expression;
+        while let ast::Expr::Paren(p) = e { e = &p.expr; }
+        match e {
+            ast::Expr::Member(m) => {
+                let value = self.lower(&m.obj)?;
+                let object = self.snapshot(m.obj.span(), value);
+                let key = self.member_key(&m.prop, m.span)?;
+                let key = self.snapshot(m.span, Expr::NodeBuiltin("$$propertyKey".into(), vec![key]));
+                Ok(Some((object, key, None)))
+            }
+            ast::Expr::SuperProp(p) => { let (base, key, receiver) = self.super_reference(p)?; Ok(Some((base, key, Some(receiver)))) }
+            ast::Expr::Ident(i) => { self.local_target(i.sym.as_ref(), i.span)?; Ok(None) }
+            _ => self.error(e.span(), "unsupported destructuring assignment target"),
+        }
+    }
     fn bind_value(&mut self, p: &ast::Pat, value: Expr, declare: bool) -> Result<()> {
+        let place = self.binding_place(p)?;
+        self.bind_prepared(p, value, declare, place)
+    }
+    fn bind_prepared(&mut self, p: &ast::Pat, value: Expr, declare: bool, place: Option<(Expr, Expr, Option<Expr>)>) -> Result<()> {
         match p {
+            ast::Pat::Expr(e) => {
+                if let Some((object, key, receiver)) = place {
+                    if let Some(receiver) = receiver { self.class_helper(p.span(), "$$superSet", vec![object, key, value, receiver]); }
+                    else { self.emit(p.span(), Op::SetMember { object, key, value }); }
+                } else {
+                    let mut e = &**e;
+                    while let ast::Expr::Paren(p) = e { e = &p.expr; }
+                    let ast::Expr::Ident(i) = e else { return self.error(e.span(), "invalid assignment target"); };
+                    self.local_target(i.sym.as_ref(), i.span)?;
+                    self.emit(i.span, Op::Set(i.sym.to_string(), value));
+                }
+            }
             ast::Pat::Ident(i) => {
+                if !declare { self.local_target(i.id.sym.as_ref(), i.span())?; }
                 let op = if declare { Op::Declare(i.id.sym.to_string(), value) } else { Op::Set(i.id.sym.to_string(), value) };
                 self.emit(p.span(), op);
             }
             ast::Pat::Assign(a) => {
                 let value = self.default_value(a.span, value, &a.right, if let ast::Pat::Ident(i)=&*a.left{Some(i.id.sym.as_ref())}else{None})?;
-                self.bind_value(&a.left, value, declare)?;
+                self.bind_prepared(&a.left, value, declare, place)?;
             }
             ast::Pat::Array(a) => {
                 let value = self.snapshot(a.span, value);
@@ -2032,8 +2207,9 @@ impl Compiler {
                 for index in 0..self.array_binding_len(a) {
                     let item = a.elems.get(index).unwrap_or(&None);
                     if let Some(item)=item {
-                        if let ast::Pat::Rest(rest)=item{let values=self.temp();self.emit(rest.span,Op::Effect(Some(values.clone()),Effect::Call("$$iteratorRest".into(),vec![iterator.clone()])));self.bind_value(&rest.arg,Expr::Variable(values),declare)?;}
-                        else{let member=self.snapshot(item.span(),Expr::NodeBuiltin("$$iteratorValue".into(),vec![iterator.clone()]));self.bind_value(item,member,declare)?;}
+                        let place = self.binding_place(item)?;
+                        if let ast::Pat::Rest(rest)=item{let values=self.temp();self.emit(rest.span,Op::Effect(Some(values.clone()),Effect::Call("$$iteratorRest".into(),vec![iterator.clone()])));self.bind_prepared(&rest.arg,Expr::Variable(values),declare,place)?;}
+                        else{let member=self.snapshot(item.span(),Expr::NodeBuiltin("$$iteratorValue".into(),vec![iterator.clone()]));self.bind_prepared(item,member,declare,place)?;}
                     }else{self.emit(a.span,Op::Effect(None,Effect::Call("$$iteratorElide".into(),vec![iterator.clone()])));}
                 }
                 self.handlers-=1;self.emit(a.span,Op::EndCatch);self.emit(a.span,Op::Effect(None,Effect::Call("$$iteratorCloseNormal".into(),vec![iterator.clone()])));
@@ -2058,7 +2234,8 @@ impl Compiler {
                             };
                             let key = self.snapshot(k.key.span(), Expr::NodeBuiltin("$$propertyKey".into(), vec![key]));
                             excluded.push(key.clone());
-                            self.bind_value(&k.value, Expr::Member(Box::new(value.clone()), Box::new(key)), declare)?;
+                            let place = self.binding_place(&k.value)?;
+                            self.bind_prepared(&k.value, Expr::Member(Box::new(value.clone()), Box::new(key)), declare, place)?;
                         }
                         ast::ObjectPatProp::Assign(a) => {
                             let key = Expr::Value(json!(a.key.id.sym.to_string()));
@@ -2069,9 +2246,10 @@ impl Compiler {
                             self.emit(a.span, op);
                         }
                         ast::ObjectPatProp::Rest(r) => {
+                            let place = self.binding_place(&r.arg)?;
                             let copy = Expr::NodeBuiltin("$$objectRest".into(),vec![value.clone(),Expr::Array(excluded.clone())]);
                             let copy=self.snapshot(r.span,copy);
-                            self.bind_value(&r.arg, copy, declare)?;
+                            self.bind_prepared(&r.arg, copy, declare, place)?;
                         }
                     }
                 }
@@ -2091,16 +2269,6 @@ impl Compiler {
         }
     }
     fn loop_bind(&mut self, pattern: &ast::Pat, value: Expr, declare: bool) -> Result<()> {
-        if let ast::Pat::Expr(expression) = pattern {
-            if let ast::Expr::Member(member) = &**expression {
-                let object = self.lower(&member.obj)?;
-                let object = self.snapshot(member.obj.span(), object);
-                let key = self.member_key(&member.prop, member.span)?;
-                self.emit(member.span, Op::SetMember { object, key, value });
-                return Ok(());
-            }
-            return self.error(pattern.span(), "unsupported loop assignment target");
-        }
         self.bind_value(pattern, value, declare)
     }
 
@@ -2474,7 +2642,7 @@ pub fn compile_body_with_scope(
     let program = link_prelude(compile_inner(source, entry, true, libraries, external_names, false)?)?;
     ensure!(
         !program.functions[entry].virtual_task,
-        "the implementation of {entry} needs a real body; do not mark it @virtual or @module again"
+        "the implementation of {entry} needs a real body; its original contract annotation is optional, while empty helpers declare AI work"
     );
     Ok(program)
 }
@@ -2543,7 +2711,7 @@ fn compile_inner(
         .collect::<Vec<_>>();
     notes.sort_by_key(|c| c.span.lo);
     notes.dedup_by_key(|c| (c.span.lo, c.span.hi));
-    let external = external_names;
+    let mut external = external_names;
     let mut declarations = Vec::new();
     let mut top_level = Vec::new();
     let mut imports = BTreeMap::new();
@@ -2562,19 +2730,40 @@ fn compile_inner(
     module.visit_with(&mut all_declarations);
     let mut requires = Requires::default();
     module.visit_with(&mut requires);
-    let mut bound = Bound(BTreeSet::new());
+    let mut bound = Bound(BTreeSet::new(), BTreeMap::new());
     module.visit_with(&mut bound);
+    let binding_spans = Lrc::new(std::mem::take(&mut bound.1));
+    // Node gives every module `module` and `exports`; so does the runtime
+    // when the source uses them without declaring its own.
+    struct CommonJs(bool);
+    impl Visit for CommonJs {
+        fn visit_ident(&mut self, node: &ast::Ident) {
+            if matches!(node.sym.as_ref(), "module" | "exports") { self.0 = true; }
+        }
+    }
+    let commonjs = !internal && !bound.0.contains("module") && !bound.0.contains("exports") && {
+        let mut found = CommonJs(false);
+        module.visit_with(&mut found);
+        found.0
+    };
+    if commonjs {
+        external.insert("module".into());
+        external.insert("exports".into());
+    }
     for item in module.body {
         match item {
             ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
                 has_import = true;
                 let module_name = import.src.value.to_string_lossy();
-                let Some(namespace) = module_name.strip_prefix("host:") else {
-                    bail!("TS_PROGRAM 1:1: tool imports must use host:<library>");
+                let Some(namespace) = library_specifier(&module_name) else {
+                    bail!("TS_PROGRAM 1:1: invalid library specifier {module_name}");
                 };
                 let (library, asynchronous) = namespace.strip_suffix("/promises").map(|base| (base, true)).unwrap_or((namespace, false));
                 let Some(base_methods) = libraries.get(library) else {
-                    bail!("TS_PROGRAM 1:1: unknown or unavailable tool library {namespace}; host: imports only the host's own libraries, and a third-party library is loaded where it is needed with const {library} = require(\"{namespace}\")");
+                    if super::libraries::builtin().contains_key(library) {
+                        bail!("TS_PROGRAM 1:1: SDK_LIBRARY_UNAVAILABLE: {library} is not exposed in this execution scope or permission mode; check read_tool_contracts. Import and require use the same permissions; changing syntax cannot grant access. Shell methods are available only in deterministic module implementations.");
+                    }
+                    bail!("TS_PROGRAM 1:1: library {namespace} is unavailable for static import in this scope; check read_tool_contracts for available methods. Third-party libraries load at runtime with const {library} = require(\"{namespace}\")");
                 };
                 let methods: BTreeMap<String, String> = base_methods.iter().map(|(name, tool)| (name.clone(), if asynchronous { format!("async-tool:{tool}") } else { tool.clone() })).collect();
                 ensure!(
@@ -2598,9 +2787,7 @@ fn compile_inner(
                             (named.local.sym.to_string(), Some(method))
                         }
                         ast::ImportSpecifier::Namespace(ns) => (ns.local.sym.to_string(), None),
-                        ast::ImportSpecifier::Default(_) => {
-                            bail!("TS_PROGRAM 1:1: default tool imports are unsupported")
-                        }
+                        ast::ImportSpecifier::Default(default) => (default.local.sym.to_string(), None),
                     };
                     ensure!(
                         !super::libraries::reserved(&local) && imported_names.insert(local.clone()),
@@ -2617,7 +2804,7 @@ fn compile_inner(
                 }
             }
             ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(f))) => declarations.push(f),
-            ast::ModuleItem::Stmt(stmt) if !refinement && entry == super::ENTRY => top_level.push(stmt),
+            ast::ModuleItem::Stmt(stmt) if refinement || entry == super::ENTRY => top_level.push(stmt),
             other => {
                 let p = map.lookup_char_pos(other.span().lo);
                 bail!(
@@ -2637,6 +2824,51 @@ fn compile_inner(
         .collect::<Vec<_>>();
     // The top-level statements are the program, as in a JavaScript module.
     let implicit_entry = !refinement && entry == super::ENTRY;
+    // An implementation's own top-level statements initialize its module scope.
+    let module_init = refinement && !top_level.is_empty();
+    if module_init {
+        struct TopLevelAwait<'a>(Option<Span>, &'a str, Option<Span>);
+        impl Visit for TopLevelAwait<'_> {
+            fn visit_await_expr(&mut self, node: &ast::AwaitExpr) { self.0.get_or_insert(node.span); }
+            // `if (require.main === module) work()` never runs in the host.
+            fn visit_if_stmt(&mut self, node: &ast::IfStmt) {
+                let is = |e: &ast::Expr, main: bool| match e {
+                    ast::Expr::Member(m) if main => matches!(&*m.obj, ast::Expr::Ident(i) if i.sym == *"require")
+                        && matches!(&m.prop, ast::MemberProp::Ident(p) if p.sym == *"main"),
+                    ast::Expr::Ident(i) => !main && i.sym == *"module",
+                    _ => false,
+                };
+                let guard = matches!(&*node.test, ast::Expr::Bin(b) if matches!(b.op, ast::BinaryOp::EqEqEq | ast::BinaryOp::EqEq)
+                    && ((is(&b.left, true) && is(&b.right, false)) || (is(&b.left, false) && is(&b.right, true))));
+                node.test.visit_with(self);
+                if !guard { node.cons.visit_with(self); }
+                if let Some(alt) = &node.alt { alt.visit_with(self); }
+            }
+            fn visit_call_expr(&mut self, node: &ast::CallExpr) {
+                if matches!(&node.callee, ast::Callee::Expr(e) if matches!(&**e, ast::Expr::Ident(i) if i.sym == *self.1)) {
+                    self.2.get_or_insert(node.span);
+                }
+                node.visit_children_with(self);
+            }
+            fn visit_for_of_stmt(&mut self, node: &ast::ForOfStmt) {
+                if node.is_await { self.0.get_or_insert(node.span); }
+                node.visit_children_with(self);
+            }
+            fn visit_function(&mut self, _: &ast::Function) {}
+            fn visit_arrow_expr(&mut self, _: &ast::ArrowExpr) {}
+            fn visit_class(&mut self, _: &ast::Class) {}
+        }
+        let mut found = TopLevelAwait(None, entry, None);
+        for stmt in &top_level { stmt.visit_with(&mut found); }
+        if let Some(span) = found.2 {
+            let p = map.lookup_char_pos(span.lo);
+            bail!("TS_PROGRAM {}:{}: the host calls {entry} itself for each request; calling it at the top level would run it twice, so remove this call", p.line, p.col.0 + 1);
+        }
+        if let Some(span) = found.0 {
+            let p = map.lookup_char_pos(span.lo);
+            bail!("TS_PROGRAM {}:{}: await is not available at the top level of a module implementation; await inside its functions", p.line, p.col.0 + 1);
+        }
+    }
     // Without imports the host's libraries are in scope by name. A name the
     // source binds itself, as in `const io = require("io")`, is its own.
     let libraries = if has_import {
@@ -2666,7 +2898,7 @@ fn compile_inner(
         ensure!(
             !matches!(
                 f.ident.sym.as_ref(),
-                "tools" | "call" | "ai" | "assert" | "JSON" | "Promise"
+                "assert" | "JSON" | "Promise"
             ),
             "reserved function name {}",
             f.ident.sym
@@ -2693,6 +2925,9 @@ fn compile_inner(
         .iter()
         .find(|f| f.ident.sym.as_ref() == entry && f.function.is_async && !f.function.is_generator)
         .map(|f| f.ident.sym.to_string());
+    let implementation_entry = declarations.iter()
+        .find(|f| refinement && f.ident.sym.as_ref() == entry)
+        .map(|f| f.function.span.lo);
     // A leading JSDoc and comments inside the body form the task contract.
     // Walk only adjacent comments: a tag inside the previous function must
     // never attach to the next declaration. Every contract is read first, so
@@ -2734,6 +2969,12 @@ fn compile_inner(
             bail!("TS_PROGRAM {}:{}: {} is marked both @virtual and @module; a @virtual is AI work done in a loop, a @module is code AI writes once, so pick one", p.line, p.col.0 + 1, f.ident.sym);
         }
         let virtual_task = hook || module_task;
+        // An author/fixer is implementing this exact entry, not declaring it
+        // for another author. Retaining its contract JSDoc is harmless. Keep
+        // empty declarations and all nested AI contracts strict.
+        if implementation_entry == Some(f.function.span.lo) && virtual_task && !comment_only {
+            return Ok((false, false, String::new()));
+        }
         header.extend(inner);
         let contract = header.join("\n");
         let description = contract
@@ -2780,11 +3021,13 @@ fn compile_inner(
         .map(|f| (f.ident.sym.to_string(), false))
         .collect::<BTreeMap<_, _>>();
     let mut module_scope = function_bindings.clone();
-    if implicit_entry {
+    if implicit_entry || module_init {
+        let init_id = if implicit_entry { super::ENTRY } else { super::MODULE_INIT };
         let module_vars = var_names(&top_level);
         let module_lexical = lexical_names(&top_level);
         let mut c = Compiler {
             map: map.clone(),
+            binding_spans: binding_spans.clone(),
             names: names.clone(),
             arities: arities.clone(),
             async_entry: None,
@@ -2794,7 +3037,7 @@ fn compile_inner(
             external: external.clone(),
             temp_names: BTreeSet::new(),
             runtime_scopes: 0,
-            function_id: super::ENTRY.into(),
+            function_id: init_id.into(),
             nested: Vec::new(),
             virtuals: virtuals.clone(),
             async_functions: async_functions.clone(),
@@ -2809,6 +3052,7 @@ fn compile_inner(
             contracts: contracts_by_position.clone(),
             leaf_tools: leaf_tools.clone(),
             leaf_libraries: leaf_libraries.clone(),
+            private_names: BTreeMap::new(),
         };
         for name in &module_vars {
             c.declare(name, true, module.span)?;
@@ -2830,7 +3074,7 @@ fn compile_inner(
         c.emit(module.span, Op::Return(Expr::Undefined));
         functions.extend(std::mem::take(&mut c.nested));
         functions.insert(
-            super::ENTRY.into(),
+            init_id.into(),
             Function {
                 uses: Vec::new(),
                 description: String::new(),
@@ -2840,13 +3084,14 @@ fn compile_inner(
                 leaf_libraries: Vec::new(),
                 skills: Vec::new(),
                 params: Vec::new(),
+                arguments_object: false,
                 rest_parameter: None,
                 parameter_scope: false,
                 parameter_lexical: Vec::new(),
                 vars: module_vars,
                 lexical: module_lexical.into_iter().map(|(name, _)| name).collect(),
                 module: true,
-                is_async: true,
+                is_async: implicit_entry,
                 is_generator: false,
                 lexical_this: false,
                 constructable: false,
@@ -2859,6 +3104,7 @@ fn compile_inner(
     for f in declarations {
         let mut c = Compiler {
             map: map.clone(),
+            binding_spans: binding_spans.clone(),
             names: names.clone(),
             arities: arities.clone(),
             async_entry: async_entry.clone(),
@@ -2883,6 +3129,7 @@ fn compile_inner(
             contracts: contracts_by_position.clone(),
             leaf_tools: leaf_tools.clone(),
             leaf_libraries: leaf_libraries.clone(),
+            private_names: BTreeMap::new(),
         };
         let mut params = Vec::new();
         let mut parameter_names = Vec::new();
@@ -2903,6 +3150,10 @@ fn compile_inner(
                 let pattern = match &p.pat { ast::Pat::Rest(rest) => &*rest.arg, other => other };
                 parameter_patterns.push((pattern, argument));
             }
+        }
+        let arguments_object = !parameter_names.iter().any(|name| name == "arguments");
+        if arguments_object {
+            c.declare("arguments", false, f.function.span)?;
         }
         let body = f
             .function
@@ -2925,7 +3176,7 @@ fn compile_inner(
         let lexical = lexical_names(&body.stmts);
         let lexical_only = body.stmts.iter().filter(|stmt| matches!(stmt, ast::Stmt::Decl(ast::Decl::Var(v)) if v.kind != ast::VarDeclKind::Var)).cloned().collect::<Vec<_>>();
         if let Some((name, _)) = lexical_names(&lexical_only).iter().find(|(name, _)| parameter_names.contains(name)) {
-            return c.error(body.span, &format!("duplicate parameter and lexical binding {name}"));
+            return c.error(c.binding_span(name, body.span, 0), &format!("duplicate parameter and lexical binding {name}"));
         }
         if patterned { c.scopes.push(BTreeMap::new()); }
         for name in &vars { c.declare(name, true, body.span)?; }
@@ -3002,6 +3253,7 @@ fn compile_inner(
                 leaf_libraries: if virtual_task && !module_task { leaf_libraries.clone() } else { Vec::new() },
                 skills: Vec::new(),
                 params,
+                arguments_object,
                 rest_parameter,
                 parameter_scope: patterned,
                 parameter_lexical,
@@ -3034,6 +3286,7 @@ fn compile_inner(
         source: source.into(),
         prelude_hash: String::new(),
         functions,
+        commonjs,
     })
 }
 

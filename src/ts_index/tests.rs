@@ -9,6 +9,37 @@ fn temp_workspace(name: &str) -> PathBuf {
 }
 
 #[test]
+fn same_line_anonymous_functions_have_distinct_stable_ids_and_calls() {
+    let root = temp_workspace("same_line_functions");
+    fs::write(root.join("callbacks.ts"), "export const value = [1].map(function(x) { return inc(x); }).map(function(x) { return dbl(x); });\nfunction inc(x: number) { return x + 1; }\nfunction dbl(x: number) { return x * 2; }\n").unwrap();
+    index_workspace(&root).unwrap();
+    let request = || ListTsSymbolsRequest {
+        workspace_root:root.display().to_string(), file_path:Some("callbacks.ts".into()), kind:None,
+        options:crate::symbol_query::ListOptions { include_locals:true, ..Default::default() },
+    };
+    let listed = list_symbols(&root, request()).unwrap();
+    let callbacks = listed.symbols.iter().filter(|s| s.name == "<anonymous-fn>").collect::<Vec<_>>();
+    assert_eq!(callbacks.len(), 2);
+    assert_ne!(callbacks[0].id, callbacks[1].id);
+    let mut targets = Vec::new();
+    for symbol in callbacks {
+        let source = read_symbol(&root, ReadTsSymbolRequest {
+            workspace_root:root.display().to_string(), symbol_id:symbol.id.clone(), options:Default::default(),
+            include_context:false, include_related_types:false, include_outline:false,
+        }).unwrap();
+        targets.extend(source.symbol.calls.iter().map(|c| c.target_text.clone()));
+    }
+    targets.sort();
+    assert_eq!(targets, ["dbl", "inc"]);
+    let before = listed.symbols.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+    // Force a fresh parse rather than testing only the warm-cache path.
+    crate::database::init_db(&root).unwrap().execute("DELETE FROM symbol_index_tracking WHERE language='ts'", []).unwrap();
+    index_workspace(&root).unwrap();
+    assert_eq!(list_symbols(&root, request()).unwrap().symbols.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn indexes_ts_symbols_and_suggested_reads() {
     let root = temp_workspace("basic");
     fs::write(

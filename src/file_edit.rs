@@ -68,14 +68,17 @@ pub fn workspace_path(root: &Path, raw: &str) -> Result<PathBuf> {
         .map_err(|_| ToolError::OutsideWorkspace(raw.into()))?;
     // Joining an empty suffix adds a trailing separator to an existing file on
     // Windows, so it is then treated as a directory (ERROR_DIRECTORY / 267).
-    Ok(if suffix.as_os_str().is_empty() {
+    let path = if suffix.as_os_str().is_empty() {
         resolved
     } else {
         resolved.join(suffix)
-    })
+    };
+    crate::database::check_source_access(&path)?;
+    Ok(path)
 }
 
 pub fn snapshot(path: &Path) -> Result<Option<Vec<u8>>> {
+    crate::database::check_source_access(path)?;
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),

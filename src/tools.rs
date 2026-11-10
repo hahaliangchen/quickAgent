@@ -1300,6 +1300,9 @@ fn scan_text_root(
             continue;
         }
         let path = entry.path();
+        if crate::database::check_source_access(path).is_err() {
+            continue;
+        }
         let Ok(metadata) = fs::metadata(path) else {
             continue;
         };
@@ -1445,6 +1448,91 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    // A separate process observes the real OS lock, not SQLite's cached view
+    // of locks owned by this process. Normal test runs have nothing to probe.
+    #[test]
+    #[cfg(unix)]
+    fn wal_lock_probe_child() {
+        let Some(path) = std::env::var_os("CODEX_WAL_LOCK_PROBE_PATH") else { return };
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+        match conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;") {
+            Ok(()) => println!("WAL_LOCK_PROBE=unlocked"),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::DatabaseBusy => println!("WAL_LOCK_PROBE=locked"),
+            Err(error) => panic!("unexpected lock probe error: {error}"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn wal_lock_survives_workspace_text_search() {
+        let root = temp_workspace("wal_search_lock");
+        let state_dir = root.join(".codex-workspace-mcp");
+        fs::create_dir_all(&state_dir).unwrap();
+        let path = state_dir.join("codex_state.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE test(value); BEGIN IMMEDIATE;").unwrap();
+        let locked = || {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tools::tests::wal_lock_probe_child", "--nocapture"])
+                .env("CODEX_WAL_LOCK_PROBE_PATH", &path).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).contains("WAL_LOCK_PROBE=locked")
+        };
+        assert!(locked(), "fixture must hold an externally visible SQLite write lock");
+        fs::write(root.join("source.rs"), "fn expected_source() {}\n").unwrap();
+        let (matches, _) = scan_text_root(root.clone(), root.clone(), regex::Regex::new("expected_source").unwrap(), false, 100);
+        assert_eq!(matches.len(), 1);
+        let still_locked = locked();
+        if !still_locked {
+            // A failed guard has invalidated this connection's locks. Avoid
+            // SQLite cleanup against SHM that the probe may have reset.
+            std::mem::forget(conn);
+        } else {
+            conn.execute_batch("ROLLBACK").unwrap();
+        }
+        let _ = fs::remove_dir_all(root);
+        assert!(still_locked, "plain source search released the live SQLite WAL write lock");
+    }
+
+    #[test]
+    fn source_tools_reject_host_sqlite_files_but_allow_saved_programs() {
+        let root = temp_workspace("sqlite_source_guard");
+        let state = root.join(".codex-workspace-mcp");
+        fs::create_dir_all(&state).unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+        for name in ["codex_state.db", "codex_state.db-wal", "codex_state.db-shm", "codex_state.db-journal"] {
+            let path = state.join(name);
+            // Text content makes an accidental raw open observable, without
+            // relying on a binary decoding failure or a native crash.
+            fs::write(&path, "reserved SQLite state\n").unwrap();
+            let read = crate::source_read::read(&path, 1024);
+            assert!(matches!(read, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
+            assert!(crate::file_edit::workspace_path(&root, path.to_str().unwrap()).is_err());
+            assert!(crate::file_edit::snapshot(&path).is_err());
+            let (matches, _) = scan_text_root(root.clone(), path, regex::Regex::new("reserved").unwrap(), false, 100);
+            assert!(matches.is_empty(), "explicit file searches must not bypass the guard");
+        }
+        let programs = state.join("chats/example");
+        fs::create_dir_all(&programs).unwrap();
+        let program = programs.join("turn-1.js");
+        fs::write(&program, "console.log('saved program');\n").unwrap();
+        assert!(crate::source_read::read(&program, 1024).is_ok());
+        let (matches, _) = scan_text_root(root.clone(), root.clone(), regex::Regex::new("saved program").unwrap(), false, 100);
+        assert_eq!(matches.len(), 1);
+        #[cfg(unix)] {
+            let alias = root.join("state-alias.txt");
+            std::os::unix::fs::symlink(state.join("codex_state.db"), &alias).unwrap();
+            assert!(crate::source_read::read(&alias, 1024).is_err());
+            assert!(workspace.read_file(ReadFileRequest {
+                workspace_root: None, path: alias.to_string_lossy().into_owned(), max_bytes: 1024,
+            }).is_err());
+        }
+        let _ = workspace;
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

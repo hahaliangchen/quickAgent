@@ -372,7 +372,7 @@ impl Runtime {
                         None,
                     )?;
                     frame.generator = Some(id);
-                    self.frames.push(frame);
+                    self.push_frame(frame);
                     return Ok(());
                 }
                 let outcome = if request.kind == "throw" {

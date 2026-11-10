@@ -225,7 +225,7 @@ pub(super) async fn start_parallel_function(
     };
     let runtime = parent_frame.program.as_ref().context("parallel caller has no program")?;
     let snapshot = runtime.async_scope(&action.id).context("parallel call has no saved scope")?.clone();
-    let function = super::program_flow::function_task(&runtime.program, name, args, captured)?;
+    let function = super::program_flow::scheduled_function_task(s, parent_frame, &runtime.program, name, args, captured)?;
     let arguments = json!({"goal":name,"briefing":function["description"],"program_task":function,"call_site":action.at});
     let parent_id = frame_task(s, parent_frame);
     let conn = agent_service::open_db(s.state.workspace.root())?;

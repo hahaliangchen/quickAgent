@@ -49,6 +49,8 @@ fn same_value_zero(a: &VmValue, b: &VmValue) -> bool {
 /// The receiver kind is only known at run time, so this is the union.
 pub(super) fn method_arity(name: &str) -> Option<(usize, usize)> {
     Some(match name {
+        "localeCompare" => (1,3),
+        "toLocaleString" | "toLocaleDateString" | "toLocaleTimeString" => (0,2),
         "at" | "repeat" | "search" | "match" | "matchAll" | "test" | "exec" => (1, 1),
         "charAt" | "charCodeAt" | "codePointAt" | "toFixed" | "toExponential" | "join" | "flat" | "toString"
         | "toLowerCase" | "toUpperCase" | "toLocaleLowerCase" | "toLocaleUpperCase"
@@ -73,9 +75,7 @@ pub(super) fn method_arity(name: &str) -> Option<(usize, usize)> {
 /// Explain unavailable methods that a model is likely to reach for.
 pub(super) fn unavailable_method(name: &str) -> Option<&'static str> {
     Some(match name {
-        "localeCompare" => "localeCompare depends on locale collation data that the flow runtime does not have; compare strings with < and > (code point order)",
         "normalize" => "String.prototype.normalize is unavailable in the flow runtime",
-        "toLocaleString" | "toLocaleDateString" | "toLocaleTimeString" => "toLocale* depends on locale data that the flow runtime does not have; use toISOString() or manually format the date components",
         _ => return None,
     })
 }
@@ -171,14 +171,14 @@ fn substitution(
     out
 }
 
-fn captures_of(captures: &regex::Captures<'_>) -> Vec<Option<String>> {
+fn captures_of(captures: &super::values::JsCaptures<'_>) -> Vec<Option<String>> {
     captures
         .iter()
         .skip(1)
         .map(|m| m.map(|m| m.as_str().to_owned()))
         .collect()
 }
-fn names_of(re: &regex::Regex, captures: &regex::Captures<'_>) -> Vec<(String, Option<String>)> {
+fn names_of(re: &super::values::JsRegex, captures: &super::values::JsCaptures<'_>) -> Vec<(String, Option<String>)> {
     re.capture_names()
         .flatten()
         .map(|name| (name.to_owned(), captures.name(name).map(|m| m.as_str().to_owned())))
@@ -186,7 +186,7 @@ fn names_of(re: &regex::Regex, captures: &regex::Captures<'_>) -> Vec<(String, O
 }
 
 /// The match array of RegExpBuiltinExec, with undefined for unmatched groups.
-fn match_array(heap: &mut Heap, re: &regex::Regex, captures: &regex::Captures<'_>, input: &str) -> Result<VmValue> {
+fn match_array(heap: &mut Heap, re: &super::values::JsRegex, captures: &super::values::JsCaptures<'_>, input: &str) -> Result<VmValue> {
     ensure!(
         captures.len() <= REGEX_RESULT_LIMIT,
         "RangeError: regex capture result exceeds 10000 items"
@@ -212,12 +212,40 @@ fn match_array(heap: &mut Heap, re: &regex::Regex, captures: &regex::Captures<'_
 }
 
 /// A string pattern used where a RegExp is expected becomes `new RegExp(pattern)`.
-fn regex_argument(heap: &Heap, value: &VmValue) -> Result<(regex::Regex, String)> {
+fn regex_argument(heap: &Heap, value: &VmValue) -> Result<(super::values::JsRegex, String)> {
     let (pattern, flags) = match regex_parts(heap, value) {
         Some(parts) => parts,
         None => (to_string(heap, value)?, String::new()),
     };
     Ok((super::values::compile_regex(&pattern, &flags)?, flags))
+}
+
+/// BuiltinExec state is shared by test/exec and every string consumer.
+fn regex_exec<'t>(heap: &mut Heap, id: HeapId, re: &super::values::JsRegex, flags: &str, input: &'t str) -> Result<Option<super::values::JsCaptures<'t>>> {
+    let stateful=flags.contains('g')||flags.contains('y');
+    let start=if stateful { let n=to_number(heap,&heap.regex_last_index(id))?; if n.is_nan()||n<=0.0 {0} else {n.floor().min(usize::MAX as f64) as usize} } else {0};
+    let offset=if start==0 {Some(0)} else if start==input.chars().count() {Some(input.len())} else {input.char_indices().nth(start).map(|(i,_)|i)};
+    let captures=if let Some(offset)=offset { re.captures_at(input,offset)?.filter(|c|!flags.contains('y')||c.get(0).is_some_and(|m|m.start()==offset)) } else {None};
+    if stateful { let end=captures.as_ref().and_then(|c|c.get(0)).map(|m|char_index(input,m.end())).unwrap_or(0);heap.set_property(id,"lastIndex".into(),number(end as f64))?; }
+    Ok(captures)
+}
+fn regex_id(heap: &mut Heap, value: &VmValue) -> Result<HeapId> {
+    if let VmValue::Reference(id)=value && heap.regex_parts(*id).is_some() { return Ok(*id); }
+    let VmValue::Reference(id)=construct_regexp(heap,&[value.clone()])? else {unreachable!()};Ok(id)
+}
+fn regex_collect<'t>(heap: &mut Heap, id: HeapId, re: &super::values::JsRegex, flags: &str, text: &'t str, global: bool, reset: bool) -> Result<Vec<super::values::JsCaptures<'t>>> {
+    if reset {heap.set_property(id,"lastIndex".into(),number(0.0))?;}
+    let mut out=Vec::new();let mut captured_bytes=0usize;
+    while let Some(c)=regex_exec(heap,id,re,flags,text)? {
+        ensure!(out.len()<REGEX_RESULT_LIMIT,"RangeError: regex match result exceeds 10000 items");
+        captured_bytes+=c.iter().flatten().map(|m|m.as_str().len()).sum::<usize>();
+        ensure!(captured_bytes<=TEXT_RESULT_LIMIT,"RangeError: regex capture result exceeds 4 MiB");
+        let whole=c.get(0).unwrap();
+        if global && whole.start()==whole.end() { heap.set_property(id,"lastIndex".into(),number((char_index(text,whole.end())+1) as f64))?; }
+        out.push(c);
+        if !global {break;}
+    }
+    Ok(out)
 }
 
 fn replace(heap: &mut Heap, text: &str, name: &str, args: &[VmValue]) -> Result<VmValue> {
@@ -237,7 +265,8 @@ fn replace(heap: &mut Heap, text: &str, name: &str, args: &[VmValue]) -> Result<
         );
         let re = super::values::compile_regex(&source, &flags)?;
         let mut last = 0;
-        for captures in re.captures_iter(text) {
+        let id=regex_id(heap,&pattern)?;
+        for captures in regex_collect(heap,id,&re,&flags,text,global,global)? {
             let whole = captures.get(0).unwrap();
             out.push_str(&text[last..whole.start()]);
             out.push_str(&substitution(
@@ -301,11 +330,12 @@ fn split(heap: &mut Heap, text: &str, args: &[VmValue]) -> Result<VmValue> {
         if text.is_empty() {
             return new_array(
                 heap,
-                if re.is_match("") { vec![] } else { vec![VmValue::String(String::new())] },
+                if re.is_match("")? { vec![] } else { vec![VmValue::String(String::new())] },
             );
         }
         let mut last = 0;
         for captures in re.captures_iter(text) {
+            let captures = captures?;
             let whole = captures.get(0).unwrap();
             // An empty match at the previous split point or at the end does
             // not split, exactly as the specification's SplitMatcher loop.
@@ -467,39 +497,38 @@ fn string_method(heap: &mut Heap, text: &str, name: &str, args: &[VmValue]) -> R
         }
         "replace" | "replaceAll" => replace(heap, text, name, args)?,
         "search" => {
-            let (re, _) = regex_argument(heap, &arg(args, 0))?;
-            number(re.find(text).map(|m| char_index(text, m.start()) as f64).unwrap_or(-1.0))
+            let value=arg(args,0);
+            let (re,flags)=regex_argument(heap,&value)?;
+            let id=regex_id(heap,&value)?;
+            let saved=heap.regex_last_index(id);
+            // Search starts at zero and restores lastIndex, including on failure.
+            heap.set_property(id,"lastIndex".into(),number(0.0))?;
+            let found=regex_exec(heap,id,&re,&flags,text);
+            heap.set_property(id,"lastIndex".into(),saved)?;
+            number(found?.and_then(|c|c.get(0)).map(|m|char_index(text,m.start()) as f64).unwrap_or(-1.0))
         }
         "match" => {
-            let value = arg(args, 0);
-            let (re, flags) = regex_argument(heap, &value)?;
+            let value=arg(args,0);
+            let (re,flags)=regex_argument(heap,&value)?;
+            let id=regex_id(heap,&value)?;
             if flags.contains('g') {
-                let mut matches = Vec::new();
-                for m in re.find_iter(text) {
-                    ensure!(matches.len() < REGEX_RESULT_LIMIT, "RangeError: regex match result exceeds 10000 items");
-                    matches.push(VmValue::String(m.as_str().to_owned()));
-                }
-                if matches.is_empty() { VmValue::Null } else { new_array(heap, matches)? }
+                let matches=regex_collect(heap,id,&re,&flags,text,true,true)?.iter().map(|c|VmValue::String(c.get(0).unwrap().as_str().into())).collect::<Vec<_>>();
+                if matches.is_empty(){VmValue::Null}else{new_array(heap,matches)?}
             } else {
-                match re.captures(text) {
-                    Some(captures) => match_array(heap, &re, &captures, text)?,
-                    None => VmValue::Null,
-                }
+                match regex_exec(heap,id,&re,&flags,text)? {Some(c)=>match_array(heap,&re,&c,text)?,None=>VmValue::Null}
             }
         }
         "matchAll" => {
-            let value = arg(args, 0);
-            let (re, flags) = regex_argument(heap, &value)?;
-            ensure!(
-                regex_parts(heap, &value).is_none() || flags.contains('g'),
-                "TypeError: String.prototype.matchAll called with a non-global RegExp argument"
-            );
-            let mut all = Vec::new();
-            for captures in re.captures_iter(text) {
-                ensure!(all.len() < REGEX_RESULT_LIMIT, "RangeError: regex match result exceeds 10000 items");
-                all.push(match_array(heap, &re, &captures, text)?);
-            }
-            new_array(heap, all)?
+            let value=arg(args,0);
+            let original=regex_parts(heap,&value);
+            ensure!(original.as_ref().is_none_or(|(_,f)|f.contains('g')),"TypeError: String.prototype.matchAll called with a non-global RegExp argument");
+            let (source,flags)=if let Some(parts)=original {parts}else{(to_string(heap,&value)?,"g".into())};
+            let re=super::values::compile_regex(&source,&flags)?;
+            let VmValue::Reference(id)=construct_regexp(heap,&[VmValue::String(source),VmValue::String(flags.clone())])? else {unreachable!()};
+            if let VmValue::Reference(original)=value && heap.regex_parts(original).is_some() {heap.set_property(id,"lastIndex".into(),heap.regex_last_index(original))?;}
+            let mut all=Vec::new();
+            for captures in regex_collect(heap,id,&re,&flags,text,true,false)? {all.push(match_array(heap,&re,&captures,text)?);}
+            new_array(heap,all)?
         }
         "slice" => {
             let start = match arg(args, 0) {
@@ -581,8 +610,16 @@ fn array_method(heap: &mut Heap, id: HeapId, name: &str, args: &[VmValue]) -> Re
             let mut out = items.clone();
             let mut out_holes: BTreeSet<usize> = holes.clone();
             for value in args {
+                let spread = if let VmValue::Reference(other) = value {
+                    let key = heap.well_known_symbol("isConcatSpreadable");
+                    let explicit = key.as_ref().and_then(|key| super::vm_eval::member(heap, value, key).ok())
+                        .filter(|value| !matches!(value, VmValue::Undefined));
+                    explicit.map(|value| super::vm_eval::truthy(&value))
+                        .or_else(|| matches!(heap.get(*other), Ok(HeapNode::Array(_))).then_some(true))
+                        .unwrap_or(false)
+                } else { false };
                 match value {
-                    VmValue::Reference(other) if matches!(heap.get(*other)?, HeapNode::Array(_)) => {
+                    VmValue::Reference(other) if spread && matches!(heap.get(*other)?, HeapNode::Array(_)) => {
                         let offset = out.len();
                         let other_holes = heap.holes(*other);
                         out.extend(array_items(heap, *other)?);
@@ -952,12 +989,14 @@ fn number_method(heap: &mut Heap, value: f64, name: &str, args: &[VmValue]) -> R
             VmValue::String(radix_string(value, radix as u32))
         }
         "toLocaleString" => {
+            if let VmValue::Reference(id)=arg(args,1) { ensure!(heap.own_names(id)?.is_empty(),"RangeError: Number.toLocaleString options are unsupported"); }
             match arg(args, 0) {
                 VmValue::Undefined => {}
                 locale => {
                     let locale = to_string(heap, &locale)?;
+                    let parsed=locale.parse::<icu_locale::Locale>().map_err(|e|anyhow::anyhow!("RangeError: invalid number locale: {e}"))?;
                     ensure!(
-                        locale.starts_with("en") || locale.starts_with("zh"),
+                        matches!(parsed.id.language.as_str(),"en"|"zh") && parsed.extensions.is_empty(),
                         "RangeError: locale {locale} is not available in the flow runtime"
                     );
                 }
@@ -976,17 +1015,7 @@ fn regex_method(heap: &mut Heap, id: HeapId, pattern: &str, flags: &str, name: &
     }
     let input = to_string(heap, &arg(args, 0))?;
     ensure!(input.len() <= 2 * 1024 * 1024, "RangeError: regex input exceeds 2 MiB");
-    let global = flags.contains('g');
-    let start = if global {
-        let index = to_number(heap, &heap.regex_last_index(id))?;
-        if index.is_nan() || index <= 0.0 { 0 } else if !index.is_finite() { usize::MAX } else { index.floor().min(usize::MAX as f64) as usize }
-    } else { 0 };
-    let byte_start = if start == 0 { Some(0) } else if start == input.chars().count() { Some(input.len()) } else { input.char_indices().nth(start).map(|(i, _)| i) };
-    let captures = byte_start.and_then(|offset| re.captures_at(&input, offset));
-    if global {
-        let end = captures.as_ref().and_then(|c| c.get(0)).map(|m| input[..m.end()].chars().count()).unwrap_or(0);
-        heap.set_property(id, "lastIndex".into(), number(end as f64))?;
-    }
+    let captures=regex_exec(heap,id,&re,flags,&input)?;
     Ok(match name {
         "test" => VmValue::Boolean(captures.is_some()),
         "exec" => match captures {
@@ -1311,7 +1340,10 @@ pub(super) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
     if super::js_collections::NAMES.contains(&name) || name.strip_prefix("new ").is_some_and(|n|super::js_collections::NAMES.contains(&n)) {return Some((0,64));}
     if matches!(name,"$$iterator"|"$$arrayFromIterator"|"$$collectionEntries"|"$$iteratorValue"|"$$iterableArray") {return Some((1,1));}
     Some(match name {
+        "$$rawEncodeURI"|"$$rawDecodeURI"|"$$rawEncodeURIComponent"|"$$rawDecodeURIComponent"=>(1,1),"String.raw"=>(1,64),
         "$$functionName"=>(3,3),"$$rawExponential"=>(2,2),
+        "$$rawLocaleCompare"|"$$rawDateLocale"=>(4,4),"$$rawNumberLocale"=>(3,3),
+        "$$privateKey"=>(1,1),"$$privateAdd"|"$$privateMethod"=>(5,5),"$$privateHas"|"$$classInitializer"=>(2,2),
         "$$classSetup"|"$$classMethod"=>(5,5),"$$methodHome"|"$$classBinding"|"$$boxPrimitive"=>(2,2),"$$superBase"|"$$isDerived"=>(1,1),"$$superCallArray"=>(1,2),"$$superConstructor"=>(0,0),"$$constructReady"=>(4,4),
         "$$rawLooseEqual"|"$$objectRest"=>(2,2),
         "$$builtinStringIterator"|"$$rawDateConstruct"|"$$rawNumber"|"$$rawString"|"$$rawSymbol"|"$$rawSymbolFor"|"$$isDate"=>(1,1),
@@ -1345,9 +1377,9 @@ pub(super) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
         "Array" | "new Array" | "String.fromCharCode" | "String.fromCodePoint" => (0, 64),
         "Date" | "new Date" | "Date.UTC" => (0, 64),
         "Date.now" => (0, 0),
-        "Date.parse" | "encodeURIComponent" | "decodeURIComponent" | "structuredClone"
+        "Date.parse" | "encodeURI" | "decodeURI" | "encodeURIComponent" | "decodeURIComponent" | "structuredClone"
         | "Object.freeze" => (1, 1),
-        "Object.hasOwn" => (2, 2),
+        "Object.hasOwn" | "Object.is" => (2, 2),
         "JSON.stringify" => (1, 3),
         "JSON.parse" => (1, 1),
         "$$hasPrototype" | "delete" | "$$has" | "$$sortWriteBack" => (2, 2),
@@ -1432,6 +1464,10 @@ pub(super) fn js_pow(base: f64, exponent: f64) -> f64 {
 
 pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<VmValue> {
     if name=="$$rawExponential" {let VmValue::Number(value)=args[0] else{bail!("TypeError: Number.prototype.toExponential requires a Number receiver")};return number_method(heap,value.get(),"toExponential",&args[1..]);}
+    if let Some(name)=match name {"$$rawEncodeURI"=>Some("encodeURI"),"$$rawDecodeURI"=>Some("decodeURI"),"$$rawEncodeURIComponent"=>Some("encodeURIComponent"),"$$rawDecodeURIComponent"=>Some("decodeURIComponent"),_=>None} { return builtin(heap,name,args); }
+    if name=="$$rawLocaleCompare" { return super::js_locale::compare(heap,args); }
+    if name=="$$rawNumberLocale" { return number_method(heap,to_number(heap,&arg(args,0))?,"toLocaleString",&args[1..]); }
+    if name=="$$rawDateLocale" { return super::js_date::locale(heap,args); }
     if let Some(value)=heap.class_builtin(name,args)?{return Ok(value);}
     if let Some(value)=heap.symbol_builtin(name,args)?{return Ok(value);}
     if let Some(value)=heap.descriptor_builtin(name,args)?{return Ok(value);}
@@ -1474,7 +1510,9 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
                 ensure!(!all || flags.contains('g'), "TypeError: replaceAll must be called with a global RegExp");
                 ensure!(text.len() <= 2 * 1024 * 1024, "RangeError: regex input exceeds 2 MiB");
                 let re = super::values::compile_regex(&source, &flags)?;
-                for captures in re.captures_iter(&text) {
+                let id=regex_id(heap,&pattern)?;
+                let global=flags.contains('g');
+                for captures in regex_collect(heap,id,&re,&flags,&text,global,global)? {
                     ensure!(matches.len() < REGEX_RESULT_LIMIT, "RangeError: too many replacements");
                     captured_bytes += captures.iter().flatten().map(|m| m.as_str().len()).sum::<usize>();
                     ensure!(captured_bytes <= TEXT_RESULT_LIMIT, "RangeError: replacement matches exceed 4 MiB");
@@ -1568,18 +1606,18 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
             // Scalar strings never silently replace an unpaired surrogate.
             super::js_value::from_utf16(units)
         }
-        "encodeURIComponent" => {
+        "encodeURI" | "encodeURIComponent" => {
             if matches!(first, VmValue::Utf16(_)) { bail!("URIError: URI malformed (unpaired UTF-16 surrogate)"); }
             let text = to_string(heap, &first)?;
             let mut out = String::new();
             for byte in text.bytes() {
-                if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) { out.push(byte as char); }
+                if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) || name == "encodeURI" && b";/?:@&=+$,#".contains(&byte) { out.push(byte as char); }
                 else { out.push_str(&format!("%{byte:02X}")); }
                 ensure!(out.len() <= TEXT_RESULT_LIMIT, "RangeError: URI result exceeds 4 MiB");
             }
             VmValue::String(out)
         }
-        "decodeURIComponent" => {
+        "decodeURI" | "decodeURIComponent" => {
             let units: Vec<u16> = match &first {
                 VmValue::Utf16(units) => units.clone(),
                 value => to_string(heap, value)?.encode_utf16().collect(),
@@ -1596,7 +1634,12 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
                         encoded.push((hi*16+lo) as u8); i+=3;
                     }
                     let decoded=std::str::from_utf8(&encoded).map_err(|_| anyhow::anyhow!("URIError: URI malformed"))?;
-                    out.extend(decoded.encode_utf16());
+                    let mut offset = i - encoded.len() * 3;
+                    for ch in decoded.chars() {
+                        if name == "decodeURI" && ch.is_ascii() && b";/?:@&=+$,#".contains(&(ch as u8)) { out.extend_from_slice(&units[offset..offset+3]); }
+                        else { out.extend(ch.encode_utf16(&mut [0;2]).iter().copied()); }
+                        offset += ch.len_utf8() * 3;
+                    }
                 } else { out.push(units[i]); i += 1; }
                 ensure!(out.len() <= TEXT_RESULT_LIMIT, "RangeError: URI result exceeds runtime limit");
             }
@@ -1610,6 +1653,13 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
         "Object.freeze" => {
             if let VmValue::Reference(id) = first { heap.freeze(id); }
             first
+        }
+        "Object.is" => {
+            let other = arg(args, 1);
+            VmValue::Boolean(match (&first, &other) {
+                (VmValue::Number(a), VmValue::Number(b)) => (a.get().is_nan() && b.get().is_nan()) || a.get() == b.get() && a.get().is_sign_negative() == b.get().is_sign_negative(),
+                _ => strict_equal(&first, &other),
+            })
         }
         "Object.hasOwn" => {
             ensure!(!matches!(first, VmValue::Null | VmValue::Undefined), "TypeError: Cannot convert undefined or null to object");

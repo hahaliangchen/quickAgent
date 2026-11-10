@@ -1,5 +1,5 @@
 // 并发生成 20 页正文，主流程统一渲染、写入、读回和验收。
-import * as io from "host:io";
+import * as io from "io";
 
 function pageManifest() {
   return [
@@ -33,7 +33,7 @@ function readSource(path) {
   return {path: path, content: sourceRead.content};
 }
 
-/** @module */
+/** @virtual */
 function designStyles(markup) {
   // 为实际 markup 描述的 20 页中文 Agent 技术文档设计完整共享 CSS，
   // 返回 JSON 对象 {content:string}，content 仅包含 CSS，不能写文件。
@@ -170,7 +170,7 @@ function checkReadback(page, expectedContent, actual, manifest) {
   };
 }
 
-/** @module */
+/** @virtual */
 async function generatePageBody(shared, page) {
   // 根据 shared.sources 和 page.title 生成该页中文正文，不读写文件。
   // 返回 {path:string, sections:[{heading:string, blocks:[{kind:"paragraph",text:string}
@@ -178,7 +178,7 @@ async function generatePageBody(shared, page) {
   // 文字为非空纯文本，不含 HTML 元字符；依据材料，不编造事实。
 }
 
-/** @module */
+/** @virtual */
 function reviewDocumentation(shared, manifest, css, actualPages) {
   // 一次对照实际读回的 20 页、固定主题与五份实际材料，审查事实、
   // 覆盖、来源冲突、资料缺口标注、页面间矛盾和明显语义问题。

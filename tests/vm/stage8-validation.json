@@ -1,0 +1,4680 @@
+{
+  "stage": "8: JS syntax, class elements, regex and builtins",
+  "date": "2026-11-09",
+  "new_tests": {
+    "total": 59,
+    "snapshot_tests": 7,
+    "passed": [
+      "vm_stage8_array_holes",
+      "vm_stage8_async_array_callbacks",
+      "vm_stage8_async_callback_rejection",
+      "vm_stage8_async_reduce_collections",
+      "vm_stage8_conditional_super_fields",
+      "vm_stage8_constructor_spread",
+      "vm_stage8_default_derived_fields",
+      "vm_stage8_destructure_assignment",
+      "vm_stage8_destructure_const",
+      "vm_stage8_destructure_iterator_order",
+      "vm_stage8_destructure_loop_super",
+      "vm_stage8_destructure_order",
+      "vm_stage8_field_before_parameters",
+      "vm_stage8_field_computed_once",
+      "vm_stage8_field_define",
+      "vm_stage8_field_names",
+      "vm_stage8_field_scope",
+      "vm_stage8_generator_callbacks",
+      "vm_stage8_locale_compare",
+      "vm_stage8_locale_dates",
+      "vm_stage8_locale_errors",
+      "vm_stage8_locale_numbers",
+      "vm_stage8_object_is",
+      "vm_stage8_private_async_generators",
+      "vm_stage8_private_brand",
+      "vm_stage8_private_duplicate_declarations",
+      "vm_stage8_private_factory_identity",
+      "vm_stage8_private_frozen",
+      "vm_stage8_private_in",
+      "vm_stage8_private_method_before_fields",
+      "vm_stage8_private_methods",
+      "vm_stage8_private_nested_scope",
+      "vm_stage8_private_readonly",
+      "vm_stage8_private_reflection",
+      "vm_stage8_private_reinitialize",
+      "vm_stage8_private_undeclared",
+      "vm_stage8_private_updates_destructure_optional",
+      "vm_stage8_regex_backrefs",
+      "vm_stage8_regex_backtrack_consumers",
+      "vm_stage8_regex_backtrack_error",
+      "vm_stage8_regex_consumers",
+      "vm_stage8_regex_lookaround",
+      "vm_stage8_regex_matchall_lastindex",
+      "vm_stage8_regex_replace_callback_sticky",
+      "vm_stage8_regex_search_sticky",
+      "vm_stage8_regex_sticky_consumers",
+      "vm_stage8_regex_unicode_properties",
+      "vm_stage8_sequence",
+      "vm_stage8_snapshot_destructure",
+      "vm_stage8_snapshot_initializers",
+      "vm_stage8_snapshot_locale_getters",
+      "vm_stage8_snapshot_private_gc",
+      "vm_stage8_snapshot_raw_template",
+      "vm_stage8_snapshot_static_and_accessor",
+      "vm_stage8_snapshot_uri_coercion",
+      "vm_stage8_static_elements",
+      "vm_stage8_super_initializer_throw",
+      "vm_stage8_uri",
+      "vm_stage8_uri_errors"
+    ]
+  },
+  "test_first": {
+    "initial_tests": 46,
+    "initial_passed": 2,
+    "initial_failed": 44,
+    "logs": [
+      "runs/vm-stage8/test-first.log",
+      "runs/vm-stage8/test-first-regex-state.log",
+      "runs/vm-stage8/test-first-extra.log"
+    ]
+  },
+  "full_suite": {
+    "command": "cargo test --bin codex-workspace-mcp",
+    "before": {
+      "passed": 889,
+      "failed": 23,
+      "ignored": 23,
+      "seconds": 67.83,
+      "failure_names": [
+        "agent_program::tests::compatibility_raw_templates_and_character_constructors",
+        "agent_program::tests::jumps_and_throws_leave_exactly_the_scopes_they_cross",
+        "agent_program::tests::regular_expressions_validate_limits_and_resume_with_saved_state",
+        "agent_program::tests::version_eight_rejects_javascript_extensions_at_every_source_entry",
+        "agent_program::tests::vm_stage0_unsupported_syntax_diagnostics_name_the_feature",
+        "shell_process::tests::platform_shell_preserves_exit_status_encoding_and_environment",
+        "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+        "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+        "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+        "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+        "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+        "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+        "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+        "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+        "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+        "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+        "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+        "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+        "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+        "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+        "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+        "single_agent::program_flow::tests::source_adapters_reject_extensions_without_installing_a_program",
+        "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so"
+      ]
+    },
+    "after": {
+      "passed": 953,
+      "failed": 18,
+      "ignored": 23,
+      "seconds": 66.57,
+      "failure_names": [
+        "shell_process::tests::platform_shell_preserves_exit_status_encoding_and_environment",
+        "single_agent::documented_examples::skills_reach_only_the_code_that_references_them",
+        "single_agent::program_flow::tests::a_failed_main_program_heals_in_the_same_turn",
+        "single_agent::program_flow::tests::a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools",
+        "single_agent::program_flow::tests::a_module_is_written_once_and_later_calls_run_its_code",
+        "single_agent::program_flow::tests::a_module_that_cannot_be_fixed_gives_up_to_the_caller",
+        "single_agent::program_flow::tests::a_nested_virtual_helper_runs_as_a_leaf_under_its_own_name",
+        "single_agent::program_flow::tests::a_program_may_require_the_hosts_own_libraries_as_node_requires_fs",
+        "single_agent::program_flow::tests::a_program_outcome_is_the_turns_answer_and_what_the_next_turn_sees",
+        "single_agent::program_flow::tests::a_program_requires_a_plugin_library_where_it_needs_it_without_loading_its_skill",
+        "single_agent::program_flow::tests::a_responses_provider_gets_the_same_work_and_its_reasoning_back",
+        "single_agent::program_flow::tests::a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause",
+        "single_agent::program_flow::tests::a_resumed_program_pauses_again_and_resumes_inside_the_next_one",
+        "single_agent::program_flow::tests::a_user_message_pauses_the_program_and_the_new_one_resumes_it",
+        "single_agent::program_flow::tests::a_written_program_is_a_file_in_the_projects_host_folder_and_runs_from_it",
+        "single_agent::program_flow::tests::console_output_reaches_the_ai_that_wrote_the_program",
+        "single_agent::program_flow::tests::source_adapters_reject_extensions_without_installing_a_program",
+        "single_agent::program_flow::tests::write_program_with_other_calls_does_not_run_and_the_host_says_so"
+      ]
+    },
+    "new_failures": [],
+    "removed_failures": [
+      "agent_program::tests::compatibility_raw_templates_and_character_constructors",
+      "agent_program::tests::jumps_and_throws_leave_exactly_the_scopes_they_cross",
+      "agent_program::tests::regular_expressions_validate_limits_and_resume_with_saved_state",
+      "agent_program::tests::version_eight_rejects_javascript_extensions_at_every_source_entry",
+      "agent_program::tests::vm_stage0_unsupported_syntax_diagnostics_name_the_feature"
+    ],
+    "before_log": "runs/vm-stage8/main-before.log",
+    "after_log": "runs/vm-stage8/main-final.log"
+  },
+  "vm_suite": {
+    "command": "cargo test --bin vm-measurements --features vm-measurements -- --test-threads=4",
+    "passed": 600,
+    "failed": 0,
+    "ignored": 2,
+    "seconds": 15.0,
+    "failure_names": []
+  },
+  "test262": {
+    "async-iteration": {
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "6782c462ae347cbdf3e8bf14bdbc9bc03d804d5ed1c06687ee1fb017035e0a6a",
+      "case_count": 2267,
+      "source_hashes_unchanged": true,
+      "before": {
+        "compile_rejected": 600,
+        "pass": 1642,
+        "run_failed": 14,
+        "skipped": 11
+      },
+      "after": {
+        "compile_rejected": 322,
+        "pass": 1919,
+        "run_failed": 15,
+        "skipped": 11
+      },
+      "old_pass_regressions": [],
+      "new_pass_count": 277,
+      "status_changes": [
+        {
+          "id": "test/language/expressions/async-generator/dstr/ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/named-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/named-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/named-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/named-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/named-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/named-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/async-generator/dstr/obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/async-generator/dstr/ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/async-generator/dstr/ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/async-generator/dstr/dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/async-generator/dstr/dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/async-generator/dstr/dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/async-generator/dstr/obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-init-assignment.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-init-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-init-fn-name-arrow.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-init-fn-name-class.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-init-fn-name-fn.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-init-fn-name-gen.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-init-in.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-init-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-iter-nrml-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-nested-array-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-nested-array-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-nested-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-nested-obj-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-nested-obj-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-nested-obj-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-nested-obj-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-nested-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-put-prop-ref-no-get.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-put-prop-ref-user-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-put-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-target-identifier.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elem-trlg-iter-elision-iter-nrml-close-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elision-val-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-elision-val-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-empty-val-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-empty-val-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-after-element.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-after-elision.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-elision.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-iteration.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-array-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-array-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-array-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-array-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-obj-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-obj-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-obj-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-obj-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-nested-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-put-prop-ref-no-get.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-array-rest-put-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-empty-bool.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-empty-num.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-empty-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-empty-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-empty-symbol.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-first.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-last.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-lone.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-middle.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-identifier-resolution-trlng.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-assignment-missing.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-assignment-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-assignment-truthy.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-assignment-undef.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-fn-name-arrow.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-fn-name-class.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-fn-name-fn.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-fn-name-gen.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-in.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-id-init-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-assignment-missing.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-assignment-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-assignment-truthy.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-assignment-undef.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-fn-name-arrow.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-fn-name-class.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-fn-name-fn.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-fn-name-gen.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-elem-init-in.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-first.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-last.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-lone.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-middle.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-identifier-resolution-trlng.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-name-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-nested-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-nested-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-put-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-put-prop-ref-no-get.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-prop-put-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-descriptors.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-empty-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-getter.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-number.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-same-name.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-skip-non-enumerable.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-str-val.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-symbol-val.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-to-property-with-setter.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-to-property.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-decl-dstr-obj-rest-valid-object.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-const-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-const-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-const-async-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-const-async-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-const-async-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-const-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-let-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-let-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-let-async-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-let-async-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-let-async-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-let-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-var-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-var-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-var-async-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-var-async-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-var-async-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-func-dstr-var-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-assignment.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-fn-name-arrow.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-fn-name-class.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-fn-name-fn.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-fn-name-gen.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-in.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-init-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-get-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-nrml-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-nrml-close-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-nrml-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-iter-rtrn-close-null.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-array-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-nested-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-put-prop-ref-no-get.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-put-prop-ref-user-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-put-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-target-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-elision-iter-nrml-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-elision-iter-nrml-close-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-elision-iter-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-elision-iter-nrml-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-list-nrml-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-list-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-list-nrml-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-list-thrw-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elem-trlg-iter-rest-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elision-iter-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elision-iter-nrml-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elision-val-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-elision-val-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-empty-iter-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-empty-val-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-empty-val-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-after-element.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-after-elision.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-elision.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-iter-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-iteration.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-lref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-nested-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-put-prop-ref-no-get.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-put-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-array-rest-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-empty-bool.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-empty-num.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-empty-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-empty-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-empty-symbol.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-first.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-last.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-lone.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-middle.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-identifier-resolution-trlng.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-assignment-missing.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-assignment-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-assignment-truthy.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-assignment-undef.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-fn-name-arrow.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-fn-name-class.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-fn-name-fn.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-fn-name-gen.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-in.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-id-init-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-assignment-missing.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-assignment-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-assignment-truthy.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-assignment-undef.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-fn-name-arrow.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-fn-name-class.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-fn-name-fn.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-fn-name-gen.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-in.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-init-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-elem-target-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-first.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-last.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-lone.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-middle.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-identifier-resolution-trlng.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-name-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-nested-array-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-nested-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-nested-obj-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-nested-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-put-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-put-prop-ref-no-get.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-prop-put-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-descriptors.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-empty-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-getter.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-number.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-same-name.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-skip-non-enumerable.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-str-val.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-symbol-val.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-to-property-with-setter.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-to-property.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-decl-dstr-obj-rest-valid-object.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-const-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-const-async-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-const-async-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-const-async-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-const-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-let-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-let-async-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-let-async-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-let-async-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-let-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-var-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-var-async-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-var-async-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-var-async-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-await-of/async-gen-dstr-var-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        }
+      ],
+      "before_report": "runs/vm-stage8/test262/before-async-iteration.json",
+      "after_report": "runs/vm-stage8/test262/after-async-iteration.json",
+      "before_sha256": "1854266b0ad9df303f76a99d0dc2cee0faa47b47c3f6dbd4e672f740cde3895a",
+      "after_sha256": "75eeb759b8225408a14b3d348566310bdb3ced624e7ca296c9488183c28d5934"
+    },
+    "classes": {
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "1c395c1bc50fe3fb8baa5bd2bf5bfb9c0ef387487f8234b90683a89bd70842a4",
+      "case_count": 8636,
+      "source_hashes_unchanged": true,
+      "before": {
+        "compile_rejected": 477,
+        "pass": 2109,
+        "run_failed": 20,
+        "skipped": 6030
+      },
+      "after": {
+        "compile_rejected": 419,
+        "pass": 2167,
+        "run_failed": 20,
+        "skipped": 6030
+      },
+      "old_pass_regressions": [],
+      "new_pass_count": 58,
+      "status_changes": [
+        {
+          "id": "test/language/expressions/class/accessor-name-inst/computed-err-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/accessor-name-inst/computed-err-to-prop-key.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/accessor-name-static/computed-err-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/accessor-name-static/computed-err-to-prop-key.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-static-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/gen-meth-static-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-static-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-static-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-static-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-static-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-static-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/dstr/meth-static-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/class/scope-name-lex-open-heritage.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/super/call-spread-obj-with-overrides.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/definition/methods-gen-yield-as-expression-with-rhs.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/definition/methods-gen-yield-as-expression-without-rhs.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/definition/side-effects-in-extends.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-static-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-static-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-static-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-static-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/gen-meth-static-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-static-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-static-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-static-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-static-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-static-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/dstr/meth-static-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/class/scope-name-lex-open-heritage.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        }
+      ],
+      "before_report": "runs/vm-stage8/test262/before-classes.json",
+      "after_report": "runs/vm-stage8/test262/after-classes.json",
+      "before_sha256": "4e31a6290d6be24959c812aae70c679455683cc4e24c83173f96949fc3a60d2d",
+      "after_sha256": "6b1035453a5b6dc7ed3802706d341b0bd56a534ef41d4a1a3959c45cfcbfd35e"
+    },
+    "descriptors": {
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "a3067f84145e9cec23c04418b7157c2d60f5cc6c3c7396d4365e12dd712070c1",
+      "case_count": 3804,
+      "source_hashes_unchanged": true,
+      "before": {
+        "compile_rejected": 302,
+        "pass": 3004,
+        "run_failed": 127,
+        "skipped": 371
+      },
+      "after": {
+        "compile_rejected": 281,
+        "pass": 3030,
+        "run_failed": 122,
+        "skipped": 371
+      },
+      "old_pass_regressions": [],
+      "new_pass_count": 26,
+      "status_changes": [
+        {
+          "id": "test/built-ins/Object/defineProperties/15.2.3.7-6-a-155.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/defineProperties/15.2.3.7-6-a-156.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/defineProperty/15.2.3.6-4-159.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/defineProperty/15.2.3.6-4-160.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-152.js",
+          "from": "run_failed",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-158.js",
+          "from": "run_failed",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-159.js",
+          "from": "run_failed",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-81.js",
+          "from": "run_failed",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/getOwnPropertyDescriptor/15.2.3.3-4-90.js",
+          "from": "run_failed",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Reflect/apply/call-target.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Reflect/ownKeys/return-non-enumerable-keys.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/method-definition/yield-as-expression-with-rhs.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/method-definition/yield-as-expression-without-rhs.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        }
+      ],
+      "before_report": "runs/vm-stage8/test262/before-descriptors.json",
+      "after_report": "runs/vm-stage8/test262/after-descriptors.json",
+      "before_sha256": "f91b1004870f837ffd0e34613d23412d94024277e2ad2fde4a72c272bec743c8",
+      "after_sha256": "96d19d95f8bf12729f9badac5215c24eda709c62a3f1830e8f978950afccca78"
+    },
+    "exponential": {
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "845e6a442261985fe0f6402f50d569dc919e388223c14a3bf93361b11d10e9b3",
+      "case_count": 15,
+      "source_hashes_unchanged": true,
+      "before": {
+        "pass": 14,
+        "run_failed": 1
+      },
+      "after": {
+        "pass": 14,
+        "run_failed": 1
+      },
+      "old_pass_regressions": [],
+      "new_pass_count": 0,
+      "status_changes": [],
+      "before_report": "runs/vm-stage8/test262/before-exponential.json",
+      "after_report": "runs/vm-stage8/test262/after-exponential.json",
+      "before_sha256": "1f0131ecd40649bb7febb982b0ea9419d46a8c4324d74b7311f3571d8b993023",
+      "after_sha256": "1f0131ecd40649bb7febb982b0ea9419d46a8c4324d74b7311f3571d8b993023"
+    },
+    "fixed": {
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "17ef1cfab7e61db1b9c1a4a8c9fda1d4d4108b0b3fb116fc3046678adb0a3735",
+      "case_count": 1756,
+      "source_hashes_unchanged": true,
+      "before": {
+        "compile_rejected": 173,
+        "pass": 1124,
+        "run_failed": 143,
+        "skipped": 316
+      },
+      "after": {
+        "compile_rejected": 132,
+        "pass": 1162,
+        "run_failed": 146,
+        "skipped": 316
+      },
+      "old_pass_regressions": [],
+      "new_pass_count": 38,
+      "status_changes": [
+        {
+          "id": "test/built-ins/Array/from/from-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Array/from/source-object-length.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Array/from/source-object-missing.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Array/prototype/map/15.4.4.19-8-1.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Array/prototype/map/15.4.4.19-8-9.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Array/prototype/map/15.4.4.19-8-b-11.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Array/prototype/map/15.4.4.19-8-b-5.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Array/prototype/map/15.4.4.19-8-b-7.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/built-ins/Array/prototype/map/15.4.4.19-8-c-i-16.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/built-ins/Array/prototype/map/15.4.4.19-8-c-i-22.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/built-ins/Array/prototype/map/15.4.4.19-8-c-i-8.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/not-same-value-x-y-boolean.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/not-same-value-x-y-object.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/not-same-value-x-y-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/not-same-value-x-y-symbol.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/not-same-value-x-y-type.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/not-same-value-x-y-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/same-value-x-y-boolean.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/same-value-x-y-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/same-value-x-y-number.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/same-value-x-y-object.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/same-value-x-y-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/same-value-x-y-symbol.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/built-ins/Object/is/symbol-object-is-same-value.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/const/dstr/ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/const/dstr/ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/const/dstr/obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/const/fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/let/dstr/ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/let/dstr/ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/let/dstr/obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/let/fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/let/syntax/let-closure-inside-condition.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/let/syntax/let-closure-inside-next-expression.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/let/syntax/let-iteration-variable-is-freshly-allocated-for-each-iteration-multi-let-binding.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        }
+      ],
+      "before_report": "runs/vm-stage8/test262/before-fixed.json",
+      "after_report": "runs/vm-stage8/test262/after-fixed.json",
+      "before_sha256": "1512fab89746d7ac466ccee65e83b54362e8c675c6727b71da10afcb999f06ff",
+      "after_sha256": "a89c69e563c8756a21957ab82095ef6a9d84aadf974e32d2d7fa842ff95356f0"
+    },
+    "functions": {
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "7c564b84eb966c6a1ed5344ad4315b33b3fa94573e56a84609a4abe74d812883",
+      "case_count": 638,
+      "source_hashes_unchanged": true,
+      "before": {
+        "compile_rejected": 187,
+        "pass": 433,
+        "run_failed": 1,
+        "skipped": 17
+      },
+      "after": {
+        "compile_rejected": 180,
+        "pass": 440,
+        "run_failed": 1,
+        "skipped": 17
+      },
+      "old_pass_regressions": [],
+      "new_pass_count": 7,
+      "status_changes": [
+        {
+          "id": "test/language/expressions/arrow-function/dstr/ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/arrow-function/dstr/obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/call/spread-obj-with-overrides.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        }
+      ],
+      "before_report": "runs/vm-stage8/test262/before-functions.json",
+      "after_report": "runs/vm-stage8/test262/after-functions.json",
+      "before_sha256": "f0e9412cbe121edce37541716305f4a0af1695510d2f8b3ce15df616e51ee1de",
+      "after_sha256": "3f0974a13c7252f9a79b678f27009299d23c940ed7bd751a61861a2692d24489"
+    },
+    "generators": {
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "154c8bd308da69aa955e7e2d7e2ed759421266fd501bcfa6be56a9004637e52e",
+      "case_count": 703,
+      "source_hashes_unchanged": true,
+      "before": {
+        "compile_rejected": 120,
+        "pass": 562,
+        "run_failed": 12,
+        "skipped": 9
+      },
+      "after": {
+        "compile_rejected": 106,
+        "pass": 576,
+        "run_failed": 12,
+        "skipped": 9
+      },
+      "old_pass_regressions": [],
+      "new_pass_count": 14,
+      "status_changes": [
+        {
+          "id": "test/language/expressions/generators/dstr/ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/generators/dstr/ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/generators/dstr/dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/generators/dstr/dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/generators/dstr/dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/generators/dstr/obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/yield/rhs-omitted.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/yield/rhs-primitive.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/generators/dstr/ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/generators/dstr/ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/generators/dstr/dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/generators/dstr/dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/generators/dstr/dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/generators/dstr/obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        }
+      ],
+      "before_report": "runs/vm-stage8/test262/before-generators.json",
+      "after_report": "runs/vm-stage8/test262/after-generators.json",
+      "before_sha256": "b3cc1cbd18c04ab3b6a7928dba4256630efa4255d29f6959d7d3e8c7bbb93b28",
+      "after_sha256": "cb50e4b03fb9d2b87b032323c96ce94b3ac517cfc01483323cccdb5cfb52edbb"
+    },
+    "iteration": {
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "4510e253ce5df2b287db5c7fb6ddd23da242e8dd826b17168ba5ea5e6378ba91",
+      "case_count": 957,
+      "source_hashes_unchanged": true,
+      "before": {
+        "compile_rejected": 358,
+        "pass": 516,
+        "run_failed": 4,
+        "skipped": 79
+      },
+      "after": {
+        "compile_rejected": 123,
+        "pass": 739,
+        "run_failed": 16,
+        "skipped": 79
+      },
+      "old_pass_regressions": [],
+      "new_pass_count": 223,
+      "status_changes": [
+        {
+          "id": "test/language/expressions/array/11.1.4-0.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/array/S11.1.4_A1.2.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/array/S11.1.4_A1.4.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/array/S11.1.4_A1.5.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/array/S11.1.4_A1.6.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/array/S11.1.4_A1.7.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/array/spread-obj-with-overrides.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/Array.prototype.Symbol.iterator.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/Array.prototype.entries.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/Array.prototype.keys.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/body-dstr-assign-error.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/body-dstr-assign.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-assignment.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-fn-name-arrow.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-fn-name-class.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-fn-name-fn.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-fn-name-gen.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-in.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-let.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-init-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-get-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-nrml-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-nrml-close-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-nrml-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-rtrn-close-err.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-rtrn-close-null.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-rtrn-close.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-thrw-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-iter-thrw-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-array-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-array-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-array-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-obj-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-obj-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-obj-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-obj-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-obj-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-nested-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-put-let.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-put-obj-literal-prop-ref-init-active.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-put-obj-literal-prop-ref-init.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-put-obj-literal-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-put-prop-ref-no-get.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-put-prop-ref-user-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-put-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-target-identifier.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-target-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-abpt.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-elision-iter-nrml-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-get-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-rtrn-close-err.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-rtrn-close-null.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-rtrn-close.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-thrw-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-thrw-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-list-thrw-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-rest-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-rest-rtrn-close-err.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-rest-rtrn-close-null.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-rest-rtrn-close.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-rest-thrw-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-rest-thrw-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elem-trlg-iter-rest-thrw-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-iter-abpt.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-iter-get-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-iter-nrml-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-iter-nrml-close-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-iter-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-iter-nrml-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-val-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-val-bool.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-val-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-val-num.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-val-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-val-symbol.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-elision-val-undef.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-iter-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-iter-close-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-iter-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-iter-get-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-val-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-val-bool.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-val-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-val-num.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-val-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-val-symbol.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-empty-val-undef.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-iteration.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-after-element.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-after-elision.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-elision-iter-abpt.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-elision.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-iter-get-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-iter-nrml-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-iter-rtrn-close-err.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-iter-rtrn-close-null.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-iter-rtrn-close.js",
+          "from": "compile_rejected",
+          "to": "run_failed"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-iter-thrw-close-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-iter-thrw-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-iter-thrw-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-iteration.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-lref-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-lref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-array-iter-thrw-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-array-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-array-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-array-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-array-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-array-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-obj-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-obj-undefined-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-obj-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-obj-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-obj-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-nested-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-put-let.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-put-prop-ref-no-get.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-put-prop-ref-user-err-iter-close-skip.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-put-prop-ref-user-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-put-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/array-rest-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/const-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/const-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/const-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/let-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/let-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/let-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-empty-bool.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-empty-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-empty-num.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-empty-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-empty-string.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-empty-symbol.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-empty-undef.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-identifier-resolution-first.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-identifier-resolution-last.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-identifier-resolution-lone.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-identifier-resolution-middle.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-identifier-resolution-trlng.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-assignment-missing.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-assignment-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-assignment-truthy.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-assignment-undef.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-fn-name-arrow.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-fn-name-class.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-fn-name-fn.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-fn-name-gen.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-in.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-let.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-init-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-id-put-let.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-assignment-missing.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-assignment-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-assignment-truthy.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-assignment-undef.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-fn-name-arrow.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-fn-name-class.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-fn-name-fn.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-fn-name-gen.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-in.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-let.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-init-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-target-obj-literal-prop-ref-init-active.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-target-obj-literal-prop-ref-init.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-target-obj-literal-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-elem-target-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-identifier-resolution-first.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-identifier-resolution-last.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-identifier-resolution-lone.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-identifier-resolution-middle.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-identifier-resolution-trlng.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-name-evaluation-error.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-name-evaluation.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-array-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-array-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-array-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-array-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-array.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-obj-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-obj-undefined-own.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-obj-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-obj-yield-expr.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-nested-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-put-let.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-put-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-put-prop-ref-no-get.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-put-prop-ref-user-err.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-prop-put-prop-ref.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-computed-property.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-descriptors.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-empty-obj.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-getter-abrupt-get-error.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-getter.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-non-string-computed-property-1.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-non-string-computed-property-1dot.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-non-string-computed-property-1dot0.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-non-string-computed-property-1e0.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-non-string-computed-property-array-1.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-non-string-computed-property-array-1e0.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-non-string-computed-property-string-1.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-number.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-order.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-same-name.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-skip-non-enumerable.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-str-val.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-symbol-val.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-to-property-with-setter.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-to-property.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-val-null.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-val-undefined.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/obj-rest-valid-object.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/var-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/var-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/dstr/var-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/scope-head-lex-close.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/statements/for-of/scope-head-lex-open.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        }
+      ],
+      "before_report": "runs/vm-stage8/test262/before-iteration.json",
+      "after_report": "runs/vm-stage8/test262/after-iteration.json",
+      "before_sha256": "10f0c35d697137256e0da786caefc7ef7abd0cb5089a52cee09926d09d7655ea",
+      "after_sha256": "5f9ab6a378b8368f3fee08a520ad7fcee52f32064de2339e6882613ba4a1a855"
+    },
+    "prototypes": {
+      "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+      "selection_hash": "20986848b1d3cfaa5fd8fdbc989d3ac44b6fbddc0056883bc1faa565046b83b8",
+      "case_count": 1653,
+      "source_hashes_unchanged": true,
+      "before": {
+        "compile_rejected": 279,
+        "pass": 1027,
+        "run_failed": 13,
+        "skipped": 334
+      },
+      "after": {
+        "compile_rejected": 262,
+        "pass": 1044,
+        "run_failed": 13,
+        "skipped": 334
+      },
+      "old_pass_regressions": [],
+      "new_pass_count": 17,
+      "status_changes": [
+        {
+          "id": "test/language/expressions/instanceof/S11.8.6_A2.4_T1.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/new/spread-obj-with-overrides.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/gen-meth-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-dflt-ary-ptrn-elem-id-init-hole.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-dflt-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/dstr/meth-obj-ptrn-id-init-fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/fn-name-cover.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/method-definition/yield-as-expression-with-rhs.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        },
+        {
+          "id": "test/language/expressions/object/method-definition/yield-as-expression-without-rhs.js",
+          "from": "compile_rejected",
+          "to": "pass"
+        }
+      ],
+      "before_report": "runs/vm-stage8/test262/before-prototypes.json",
+      "after_report": "runs/vm-stage8/test262/after-prototypes.json",
+      "before_sha256": "fa1a7fb185bf980adf18e5ad1d989b50066eefae12c08a7f80100a3eff1c74b2",
+      "after_sha256": "e3ab6a966b7f160e5b6d6f2f95cf1084af54a320273655a306822a996dd354b6"
+    }
+  },
+  "node_oracle": {
+    "node": "v22.22.1",
+    "passed": 45,
+    "failed": 0,
+    "results": [
+      {
+        "name": "vm_stage8_sequence",
+        "pass": true,
+        "actual": [
+          2,
+          1,
+          2,
+          5
+        ],
+        "expected": [
+          2,
+          1,
+          2,
+          5
+        ]
+      },
+      {
+        "name": "vm_stage8_destructure_assignment",
+        "pass": true,
+        "actual": [
+          7,
+          5,
+          {
+            "x": 3,
+            "r": [
+              1,
+              2
+            ]
+          },
+          true
+        ],
+        "expected": [
+          7,
+          5,
+          {
+            "x": 3,
+            "r": [
+              1,
+              2
+            ]
+          },
+          true
+        ]
+      },
+      {
+        "name": "vm_stage8_destructure_order",
+        "pass": true,
+        "actual": [
+          [
+            "key",
+            "get",
+            "default"
+          ],
+          {
+            "x": 5
+          }
+        ],
+        "expected": [
+          [
+            "key",
+            "get",
+            "default"
+          ],
+          {
+            "x": 5
+          }
+        ]
+      },
+      {
+        "name": "vm_stage8_destructure_iterator_order",
+        "pass": true,
+        "actual": [
+          [
+            "key",
+            "next",
+            "key",
+            "next"
+          ],
+          {
+            "x": []
+          }
+        ],
+        "expected": [
+          [
+            "key",
+            "next",
+            "key",
+            "next"
+          ],
+          {
+            "x": []
+          }
+        ]
+      },
+      {
+        "name": "vm_stage8_destructure_loop_super",
+        "pass": true,
+        "actual": [
+          3,
+          4,
+          7
+        ],
+        "expected": [
+          3,
+          4,
+          7
+        ]
+      },
+      {
+        "name": "vm_stage8_array_holes",
+        "pass": true,
+        "actual": [
+          3,
+          false,
+          2,
+          false,
+          2,
+          false,
+          1,
+          2,
+          false,
+          3
+        ],
+        "expected": [
+          3,
+          false,
+          2,
+          false,
+          2,
+          false,
+          1,
+          2,
+          false,
+          3
+        ]
+      },
+      {
+        "name": "vm_stage8_constructor_spread",
+        "pass": true,
+        "actual": [
+          0,
+          2,
+          "x",
+          2,
+          true,
+          7
+        ],
+        "expected": [
+          0,
+          2,
+          "x",
+          2,
+          true,
+          7
+        ]
+      },
+      {
+        "name": "vm_stage8_default_derived_fields",
+        "pass": true,
+        "actual": [
+          [
+            "a",
+            "b"
+          ],
+          {
+            "a": 1,
+            "b": 2
+          }
+        ],
+        "expected": [
+          [
+            "a",
+            "b"
+          ],
+          {
+            "a": 1,
+            "b": 2
+          }
+        ]
+      },
+      {
+        "name": "vm_stage8_private_reflection",
+        "pass": true,
+        "actual": [
+          [
+            "a"
+          ],
+          [
+            "a"
+          ],
+          [
+            "a"
+          ],
+          "{\"a\":1}",
+          {
+            "a": 1
+          },
+          {
+            "a": 1
+          },
+          2
+        ],
+        "expected": [
+          [
+            "a"
+          ],
+          [
+            "a"
+          ],
+          [
+            "a"
+          ],
+          "{\"a\":1}",
+          {
+            "a": 1
+          },
+          {
+            "a": 1
+          },
+          2
+        ]
+      },
+      {
+        "name": "vm_stage8_private_brand",
+        "pass": true,
+        "actual": [
+          4,
+          1
+        ],
+        "expected": [
+          4,
+          1
+        ]
+      },
+      {
+        "name": "vm_stage8_field_scope",
+        "pass": true,
+        "actual": 3,
+        "expected": 3
+      },
+      {
+        "name": "vm_stage8_field_before_parameters",
+        "pass": true,
+        "actual": [
+          "field",
+          "param",
+          "body"
+        ],
+        "expected": [
+          "field",
+          "param",
+          "body"
+        ]
+      },
+      {
+        "name": "vm_stage8_field_define",
+        "pass": true,
+        "actual": [
+          0,
+          7,
+          {
+            "value": 7,
+            "writable": true,
+            "enumerable": true,
+            "configurable": true
+          }
+        ],
+        "expected": [
+          0,
+          7,
+          {
+            "value": 7,
+            "writable": true,
+            "enumerable": true,
+            "configurable": true
+          }
+        ]
+      },
+      {
+        "name": "vm_stage8_field_computed_once",
+        "pass": true,
+        "actual": [
+          2,
+          [
+            "a",
+            "b",
+            "static"
+          ],
+          [
+            "1"
+          ],
+          [
+            "1"
+          ],
+          2
+        ],
+        "expected": [
+          2,
+          [
+            "a",
+            "b",
+            "static"
+          ],
+          [
+            "1"
+          ],
+          [
+            "1"
+          ],
+          2
+        ]
+      },
+      {
+        "name": "vm_stage8_field_names",
+        "pass": true,
+        "actual": [
+          "x",
+          "y",
+          "#z"
+        ],
+        "expected": [
+          "x",
+          "y",
+          "#z"
+        ]
+      },
+      {
+        "name": "vm_stage8_conditional_super_fields",
+        "pass": true,
+        "actual": [
+          7,
+          7
+        ],
+        "expected": [
+          7,
+          7
+        ]
+      },
+      {
+        "name": "vm_stage8_static_elements",
+        "pass": true,
+        "actual": [
+          7,
+          3,
+          4,
+          "undefined",
+          [
+            true,
+            8
+          ]
+        ],
+        "expected": [
+          7,
+          3,
+          4,
+          "undefined",
+          [
+            true,
+            8
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage8_private_methods",
+        "pass": true,
+        "actual": [
+          7,
+          "#m",
+          9
+        ],
+        "expected": [
+          7,
+          "#m",
+          9
+        ]
+      },
+      {
+        "name": "vm_stage8_private_in",
+        "pass": true,
+        "actual": [
+          [
+            true,
+            true,
+            false
+          ],
+          [
+            false,
+            false,
+            true
+          ],
+          [
+            false,
+            false,
+            false
+          ],
+          true
+        ],
+        "expected": [
+          [
+            true,
+            true,
+            false
+          ],
+          [
+            false,
+            false,
+            true
+          ],
+          [
+            false,
+            false,
+            false
+          ],
+          true
+        ]
+      },
+      {
+        "name": "vm_stage8_private_factory_identity",
+        "pass": true,
+        "actual": [
+          1,
+          1,
+          true
+        ],
+        "expected": [
+          1,
+          1,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage8_private_frozen",
+        "pass": true,
+        "actual": [
+          2,
+          [],
+          true,
+          false
+        ],
+        "expected": [
+          2,
+          [],
+          true,
+          false
+        ]
+      },
+      {
+        "name": "vm_stage8_private_reinitialize",
+        "pass": true,
+        "actual": true,
+        "expected": true
+      },
+      {
+        "name": "vm_stage8_private_readonly",
+        "pass": true,
+        "actual": 3,
+        "expected": 3
+      },
+      {
+        "name": "vm_stage8_private_updates_destructure_optional",
+        "pass": true,
+        "actual": [
+          3,
+          7,
+          null
+        ],
+        "expected": [
+          3,
+          7,
+          null
+        ]
+      },
+      {
+        "name": "vm_stage8_private_async_generators",
+        "pass": true,
+        "actual": [
+          7,
+          8,
+          9
+        ],
+        "expected": [
+          7,
+          8,
+          9
+        ]
+      },
+      {
+        "name": "vm_stage8_regex_lookaround",
+        "pass": true,
+        "actual": [
+          true,
+          true,
+          "b",
+          true,
+          true
+        ],
+        "expected": [
+          true,
+          true,
+          "b",
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage8_regex_backrefs",
+        "pass": true,
+        "actual": [
+          true,
+          true,
+          "a"
+        ],
+        "expected": [
+          true,
+          true,
+          "a"
+        ]
+      },
+      {
+        "name": "vm_stage8_regex_unicode_properties",
+        "pass": true,
+        "actual": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "expected": [
+          true,
+          true,
+          true,
+          true
+        ]
+      },
+      {
+        "name": "vm_stage8_regex_consumers",
+        "pass": true,
+        "actual": [
+          "a",
+          1,
+          null,
+          0,
+          [
+            0,
+            2
+          ],
+          "xbxb",
+          [
+            "",
+            "bac"
+          ],
+          [
+            "aa"
+          ],
+          1
+        ],
+        "expected": [
+          "a",
+          1,
+          null,
+          0,
+          [
+            0,
+            2
+          ],
+          "xbxb",
+          [
+            "",
+            "bac"
+          ],
+          [
+            "aa"
+          ],
+          1
+        ]
+      },
+      {
+        "name": "vm_stage8_async_array_callbacks",
+        "pass": true,
+        "actual": [
+          null,
+          [
+            1,
+            2
+          ],
+          [
+            1,
+            2
+          ],
+          true,
+          true,
+          [
+            1
+          ],
+          [
+            1,
+            2,
+            11,
+            12
+          ]
+        ],
+        "expected": [
+          null,
+          [
+            1,
+            2
+          ],
+          [
+            1,
+            2
+          ],
+          true,
+          true,
+          [
+            1
+          ],
+          [
+            1,
+            2,
+            11,
+            12
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage8_async_reduce_collections",
+        "pass": true,
+        "actual": [
+          true,
+          6,
+          [
+            1,
+            5
+          ]
+        ],
+        "expected": [
+          true,
+          6,
+          [
+            1,
+            5
+          ]
+        ]
+      },
+      {
+        "name": "vm_stage8_generator_callbacks",
+        "pass": true,
+        "actual": [
+          [
+            1
+          ],
+          1
+        ],
+        "expected": [
+          [
+            1
+          ],
+          1
+        ]
+      },
+      {
+        "name": "vm_stage8_object_is",
+        "pass": true,
+        "actual": [
+          true,
+          false,
+          true,
+          true,
+          false,
+          2
+        ],
+        "expected": [
+          true,
+          false,
+          true,
+          true,
+          false,
+          2
+        ]
+      },
+      {
+        "name": "vm_stage8_uri",
+        "pass": true,
+        "actual": [
+          "https://%E4%BE%8B%E5%AD%90.cn/a%20b?x=1&y=#",
+          "https://例子.cn/a b?x=1&y=#",
+          "%2f%3F%23A",
+          "%3B%2F%3F%3A%40%26%3D%2B%24%2C%23"
+        ],
+        "expected": [
+          "https://%E4%BE%8B%E5%AD%90.cn/a%20b?x=1&y=#",
+          "https://例子.cn/a b?x=1&y=#",
+          "%2f%3F%23A",
+          "%3B%2F%3F%3A%40%26%3D%2B%24%2C%23"
+        ]
+      },
+      {
+        "name": "vm_stage8_uri_errors",
+        "pass": true,
+        "actual": 5,
+        "expected": 5
+      },
+      {
+        "name": "vm_stage8_locale_compare",
+        "pass": true,
+        "actual": [
+          -1,
+          0,
+          1,
+          -1,
+          1
+        ],
+        "expected": [
+          -1,
+          0,
+          1,
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "vm_stage8_locale_numbers",
+        "pass": true,
+        "actual": [
+          "1,234.5",
+          "1,234.5",
+          "12"
+        ],
+        "expected": [
+          "1,234.5",
+          "1,234.5",
+          "12"
+        ]
+      },
+      {
+        "name": "vm_stage8_locale_dates",
+        "pass": true,
+        "actual": [
+          "1/1/1970, 12:00:00 AM",
+          "1/1/1970",
+          "12:00:00 AM",
+          "1970/1/1 00:00:00",
+          "00:00"
+        ],
+        "expected": [
+          "1/1/1970, 12:00:00 AM",
+          "1/1/1970",
+          "12:00:00 AM",
+          "1970/1/1 00:00:00",
+          "00:00"
+        ]
+      },
+      {
+        "name": "vm_stage8_regex_matchall_lastindex",
+        "pass": true,
+        "actual": [
+          [
+            2
+          ],
+          2
+        ],
+        "expected": [
+          [
+            2
+          ],
+          2
+        ]
+      },
+      {
+        "name": "vm_stage8_regex_sticky_consumers",
+        "pass": true,
+        "actual": [
+          "abxb",
+          3,
+          2,
+          3,
+          [
+            "a"
+          ],
+          0,
+          [
+            0
+          ],
+          0
+        ],
+        "expected": [
+          "abxb",
+          3,
+          2,
+          3,
+          [
+            "a"
+          ],
+          0,
+          [
+            0
+          ],
+          0
+        ]
+      },
+      {
+        "name": "vm_stage8_regex_replace_callback_sticky",
+        "pass": true,
+        "actual": [
+          "ab3b",
+          3
+        ],
+        "expected": [
+          "ab3b",
+          3
+        ]
+      },
+      {
+        "name": "vm_stage8_regex_search_sticky",
+        "pass": true,
+        "actual": [
+          -1,
+          1
+        ],
+        "expected": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "vm_stage8_private_nested_scope",
+        "pass": true,
+        "actual": [
+          8,
+          7
+        ],
+        "expected": [
+          8,
+          7
+        ]
+      },
+      {
+        "name": "vm_stage8_private_method_before_fields",
+        "pass": true,
+        "actual": [
+          7,
+          8
+        ],
+        "expected": [
+          7,
+          8
+        ]
+      },
+      {
+        "name": "vm_stage8_super_initializer_throw",
+        "pass": true,
+        "actual": [
+          "field",
+          7,
+          true
+        ],
+        "expected": [
+          "field",
+          7,
+          true
+        ]
+      }
+    ]
+  },
+  "constraints": {
+    "no_real_model_calls": true,
+    "no_branch_or_commit": true,
+    "initial_worktree_changes_preserved": true,
+    "prompts_and_skill_files_not_edited_by_this_task": true
+  },
+  "remaining_limits": [
+    "Backreferences to nonparticipating captures still fail instead of matching the empty string in the fancy backend.",
+    "Regex/string positions retain the existing Unicode-scalar representation boundary; matchAll is eagerly materialized.",
+    "Date and Number locale formatting is the documented en/zh subset; unsupported locales/options/timezones throw RangeError. localeCompare uses ICU4X 2.2 compiled data.",
+    "The nine frozen test262 selections are unchanged; this does not certify all private-field or locale test262 features.",
+    "Proxy, BigInt, eval and dynamic Function remain outside scope; preexisting VM limitations remain visible in test262 results."
+  ],
+  "source_hashes": {
+    "Cargo.toml": "0788189c34c7f450244c2b222663a8be0cd4955f2f18fe5b1f86f10ee815f1f2",
+    "Cargo.lock": "4814528b4c509ab85c9d81dbfab1366c4458333de73e843345880fb63044d038",
+    "src/agent_program.rs": "019e55403697b768d2370621dc006c88a68cd5fab7d82534079655e840c7cf60",
+    "src/agent_program/compiler.rs": "086f2f15e113a20a3e6cd417909095e5da7eac697270134260442e04c3e557e5",
+    "src/agent_program/compiler_classes.rs": "df8c2c0ab05f2360402af1f4076cc198828226e204037895b9a38f23ae1b9171",
+    "src/agent_program/heap.rs": "0a1b9af9b8a50782ea82a68b20162ccf6887419b63a6fa98228aeffe091d6aa5",
+    "src/agent_program/js_classes.rs": "c4a21925d72500f7c954746465844fd17291bbc7d282467e3408a98255d4dec8",
+    "src/agent_program/js_descriptors.rs": "0ab1468b70612b3393f60bad63b4f0eb26c09c6bee88b1c822b9ee2b80777351",
+    "src/agent_program/js_date.rs": "a1d42f7e0d8ba481e587cf424a2df440e41a2a902c1c3ec26f58621281d192bb",
+    "src/agent_program/js_locale.rs": "c140fb4c1db4a6e5bb58d6d8a356c5a5835e526bd813ad4d7d06beae760ef0b9",
+    "src/agent_program/js_functions.rs": "b137a925905a44ba27248a00ae83ee8847de7c50eea38562cb4482e827733466",
+    "src/agent_program/js_methods.rs": "a068c4dab0ff28ab928da48ddbac408e641d6e2c8bb7b4216f3bf66a0e6faa9e",
+    "src/agent_program/js_symbols.rs": "3a722ef7095146c46d25a31f1ed49d5003b7f3b8d2ade643da47026fa6b66628",
+    "src/agent_program/js_prototypes.rs": "e5298213794add192155327096ba9f453ba3dbdba2b478910424f2f8ecad7762",
+    "src/agent_program/prelude.js": "4cb3db42dc640cd16d3bd83a4379f93b6fe2262f3f52e95830e34cc4ddcd7e36",
+    "src/agent_program/runtime.rs": "3043449187d9de58f34841621f40570a772ecf8ff443f9a88ced256b309e2e93",
+    "src/agent_program/tests.rs": "f39fd5ddc57eb4161e826a27680558ca4795e6a2993d1f8766e3ae8c1868e135",
+    "src/agent_program/tests_stage8.rs": "10bfc80eb30c3dac284dcef0972536e9ea4229d15dfadb2ae1b74ebb46c51639",
+    "src/agent_program/values.rs": "1f9005d554efebb8b78ce35d6787e3e521643757a89132458dcefd20131fc889",
+    "docs/agent-program.md": "25bfa208b8f409878a491693b4ba4186eb7183ba8192f806a90750e2313ab5c3",
+    "tests/vm/stage8-oracle.cjs": "f9cf87360463669eef87b277365bbbcd5929f02f728fa306090aeb890102188a"
+  },
+  "documentation_check": {
+    "command": "cargo test --bin vm-measurements --features vm-measurements published_flow_examples_compile_with_the_fixed_whitelist",
+    "passed": 1,
+    "failed": 0,
+    "log": "runs/vm-stage8/documentation-check.log"
+  },
+  "baseline_vm_binary_sha256": "35eafad1cc0027a4a4b0b5130278c4d0ca2235c2c1df97f3c3bc26100a2a5ebb"
+}

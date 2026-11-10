@@ -11,6 +11,51 @@ pub(crate) struct PropertyMeta {
 }
 
 impl Heap {
+    /// Ordinary data writes need no JS frame or descriptor-plan allocation.
+    /// Anything capable of calling user code stays on the resumable path.
+    pub(crate) fn try_fast_set(&mut self, target: &VmValue, key: &VmValue, value: &VmValue) -> Result<bool> {
+        let VmValue::Reference(id) = target else { return Ok(false) };
+        if matches!(key, VmValue::Reference(_)) || !matches!(self.get(*id)?, HeapNode::Object(_) | HeapNode::Array(_))
+            || self.classes.contains_key(id) || self.boxed.contains_key(id) || self.frozen.contains(id) {
+            return Ok(false);
+        }
+        let key = self.property_key(key)?;
+        if Self::is_private_key(&key) { return Ok(false); }
+        let array = matches!(self.get(*id)?, HeapNode::Array(_));
+        if array && key == "length" { return Ok(false); }
+        let descriptor = self.descriptor_owner(*id, &key)?;
+        if descriptor.is_some_and(|(_, d)| d.accessor.is_some() || !d.writable) { return Ok(false); }
+        if self.own_descriptor(*id, &key)?.is_none() && !self.extensible(*id) { return Ok(false); }
+        if array && let Some(index) = array_index(&key) {
+            let HeapNode::Array(items) = self.get(*id)? else { unreachable!() };
+            if index >= 1_000_000 || index >= items.len() && !self.own_descriptor(*id, "length")?.unwrap().writable {
+                return Ok(false);
+            }
+        }
+        self.set_property(*id, key, value.clone())?;
+        Ok(true)
+    }
+
+    /// Check every append target before touching the array. If a setter or
+    /// read-only inherited index exists, the slow path must preserve partial
+    /// writes and observable setter ordering.
+    pub(crate) fn try_fast_push(&mut self, receiver: &VmValue, args: &[VmValue]) -> Result<Option<usize>> {
+        let VmValue::Reference(id) = receiver else { return Ok(None) };
+        let HeapNode::Array(items) = self.get(*id)? else { return Ok(None) };
+        let len = items.len();
+        if !self.extensible(*id) || !self.own_descriptor(*id, "length")?.unwrap().writable {
+            return Ok(None);
+        }
+        if len.saturating_add(args.len()) > 1_000_000 { return Ok(None); }
+        if let Some(proto) = self.prototype_of(*id) {
+            for index in len..len + args.len() {
+                if self.descriptor_owner(proto, &index.to_string())?
+                    .is_some_and(|(_, d)| d.accessor.is_some() || !d.writable) { return Ok(None); }
+            }
+        }
+        self.append(*id, args.to_vec()).map(Some)
+    }
+
     pub(crate) fn own_descriptor(&self, id: HeapId, key: &str) -> Result<Option<PropertyMeta>> {
         if self
             .deleted_properties
@@ -561,6 +606,17 @@ impl Heap {
             }
             "$$prepareSet" => {
                 let key = self.property_key(&args[1])?;
+                if Self::is_private_key(&key) {
+                    let VmValue::Reference(id) = first else { bail!("TypeError: private element requires an object") };
+                    let setter = self.private_set(id,&key,args[2].clone())?;
+                    return Ok(Some(VmValue::Reference(self.allocate(HeapNode::Array(vec![VmValue::Boolean(true),setter]))?)));
+                }
+                let regex_id = target.or_else(|| match &first { VmValue::Reference(id) => Some(*id), _ => None });
+                if key == "lastIndex" && regex_id.is_some_and(|id| self.regex_parts(id).is_some()) {
+                    let id = regex_id.unwrap();
+                    self.set_property(id, key, args[2].clone())?;
+                    return Ok(Some(VmValue::Reference(self.allocate(HeapNode::Array(vec![VmValue::Boolean(true), VmValue::Undefined]))?)));
+                }
                 let receiver = &args[3];
                 let owner = target.or_else(|| self.primitive_prototype(&first));
                 let descriptor = match owner {

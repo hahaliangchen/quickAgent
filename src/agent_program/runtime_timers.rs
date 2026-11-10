@@ -5,6 +5,8 @@ use super::*;
 pub(super) struct Callback {
     function: VmValue,
     args: Vec<VmValue>,
+    #[serde(default)]
+    work_origin: Option<(String, Location)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +88,7 @@ impl Runtime {
                 Callback {
                     function,
                     args: vec![],
+                    work_origin: self.work_site(),
                 },
             );
             self.promises.enqueue(
@@ -115,6 +118,7 @@ impl Runtime {
                 callback: Callback {
                     function,
                     args: args.into_iter().skip(2).collect(),
+                    work_origin: self.work_site(),
                 },
                 due_at_ms: self.timer_now().saturating_add(delay),
                 period_ms: (name == "setInterval").then_some(delay),
@@ -136,7 +140,8 @@ impl Runtime {
             None,
         )?;
         frame.task_callback = true;
-        self.frames.push(frame);
+        frame.work_origin = callback.work_origin;
+        self.push_frame(frame);
         Ok(())
     }
 

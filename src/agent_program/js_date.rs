@@ -2,7 +2,7 @@
 //! chrono supplies the clock and the host's local timezone, without JS callbacks.
 use super::heap::{Heap, HeapId, JsNumber, VmValue};
 use super::js_value;
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Duration, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 const LIMIT: f64 = 8_640_000_000_000_000.0;
@@ -259,6 +259,199 @@ pub(super) fn method(heap: &Heap, id: HeapId, name: &str, _args: &[VmValue]) -> 
         "Seconds" => p.seconds as f64,
         "Milliseconds" => p.millis as f64,
         _ => unreachable!(),
+    }))
+}
+
+/// Date locale formatting deliberately supports en/zh and UTC/the host zone.
+/// Unsupported options fail explicitly instead of pretending to use ICU data.
+pub(super) fn locale(heap: &Heap, args: &[VmValue]) -> Result<VmValue> {
+    let VmValue::Reference(id) = args[0] else {
+        bail!("TypeError: Date locale method requires a Date receiver")
+    };
+    let ms = heap
+        .date_value(id)
+        .context("TypeError: Date locale method requires a Date receiver")?;
+    let method = js_value::to_string(heap, &args[1])?;
+    let locale = js_value::to_string(heap, &args[2])?;
+    let parsed = locale
+        .parse::<icu_locale::Locale>()
+        .map_err(|e| anyhow::anyhow!("RangeError: invalid date locale: {e}"))?;
+    let language = parsed.id.language.as_str();
+    ensure!(
+        matches!(language, "en" | "zh") && parsed.extensions.is_empty(),
+        "RangeError: unsupported date locale {locale}"
+    );
+    let zh = language == "zh";
+    let opt = |key| super::js_locale::option(heap, &args[3], key);
+    let text_opt = |key| -> Result<Option<String>> {
+        match opt(key)? {
+            VmValue::Undefined => Ok(None),
+            v => Ok(Some(js_value::to_string(heap, &v)?)),
+        }
+    };
+    let utc = match text_opt("timeZone")?.as_deref() {
+        None | Some("local") => false,
+        Some("UTC") => true,
+        Some(zone) if std::env::var("TZ").ok().as_deref() == Some(zone) => false,
+        _ => bail!("RangeError: only UTC and the local time zone are supported"),
+    };
+    let hour12 = match opt("hour12")? {
+        VmValue::Undefined => !zh,
+        VmValue::Boolean(v) => v,
+        _ => unreachable!(),
+    };
+    let mut formats = Vec::new();
+    for key in ["year", "month", "day", "hour", "minute", "second"] {
+        let format = text_opt(key)?;
+        if let Some(ref f) = format {
+            ensure!(
+                matches!(f.as_str(), "numeric" | "2-digit")
+                    || key == "month" && matches!(f.as_str(), "long" | "short" | "narrow"),
+                "RangeError: invalid Date locale option {key}: {f}"
+            );
+        }
+        formats.push(format);
+    }
+    let want_date = method != "toLocaleTimeString";
+    let want_time = method != "toLocaleDateString";
+    let has_date = formats[..3].iter().any(Option::is_some);
+    let has_time = formats[3..].iter().any(Option::is_some);
+    if want_date && !has_date && (!want_time || !has_time) {
+        for f in &mut formats[..3] {
+            *f = Some("numeric".into());
+        }
+    }
+    if want_time && !has_time && (!want_date || !has_date) {
+        formats[3] = Some(if zh { "2-digit" } else { "numeric" }.into());
+        formats[4] = Some("2-digit".into());
+        formats[5] = Some("2-digit".into());
+    }
+    if !ms.is_finite() {
+        return Ok(VmValue::String("Invalid Date".into()));
+    }
+    let p = parts(
+        ms + if utc {
+            0.0
+        } else {
+            offset_at(ms) as f64 * 1000.0
+        },
+    )
+    .unwrap();
+    let num = |n: i64, f: &str| {
+        if f == "2-digit" {
+            format!("{:02}", n.rem_euclid(100))
+        } else {
+            n.to_string()
+        }
+    };
+    let year = formats[0].as_ref().map(|f| num(p.year, f));
+    let month = formats[1].as_ref().map(|f| match f.as_str() {
+        "long" | "short" | "narrow" if zh => format!("{}月", p.month),
+        "long" => [
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ][p.month as usize - 1]
+            .into(),
+        "short" => [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ][p.month as usize - 1]
+            .into(),
+        "narrow" => ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"]
+            [p.month as usize - 1]
+            .into(),
+        _ => num(p.month as i64, f),
+    });
+    let day = formats[2].as_ref().map(|f| num(p.date as i64, f));
+    let date = if !want_date {
+        String::new()
+    } else if zh
+        && formats[1]
+            .as_deref()
+            .is_some_and(|f| matches!(f, "long" | "short" | "narrow"))
+    {
+        format!(
+            "{}{}{}",
+            year.map(|v| v + "年").unwrap_or_default(),
+            month.unwrap_or_default(),
+            day.map(|v| v + "日").unwrap_or_default()
+        )
+    } else if !zh
+        && formats[1]
+            .as_deref()
+            .is_some_and(|f| matches!(f, "long" | "short" | "narrow"))
+    {
+        let mut out = month.unwrap_or_default();
+        if let Some(day) = day {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&day);
+        }
+        if let Some(year) = year {
+            if !out.is_empty() {
+                out.push_str(", ");
+            }
+            out.push_str(&year);
+        }
+        out
+    } else {
+        let order = if zh {
+            vec![year, month, day]
+        } else {
+            vec![month, day, year]
+        };
+        order.into_iter().flatten().collect::<Vec<_>>().join("/")
+    };
+    let mut time = Vec::new();
+    if want_time {
+        for (index, n) in [
+            (
+                3,
+                if hour12 {
+                    if p.hours % 12 == 0 { 12 } else { p.hours % 12 }
+                } else {
+                    p.hours
+                },
+            ),
+            (4, p.minutes),
+            (5, p.seconds),
+        ] {
+            if let Some(f) = &formats[index] {
+                // A 24-hour clock uses two hour digits, even when the caller
+                // requests numeric hours or leaves the time fields implicit.
+                let padded = if index == 3 && !hour12 || index > 3 && !time.is_empty() {
+                    "2-digit"
+                } else {
+                    f
+                };
+                time.push(num(n as i64, padded));
+            }
+        }
+    }
+    let mut time = time.join(":");
+    if hour12 && formats[3].is_some() && !time.is_empty() {
+        if zh {
+            time = format!("{}{time}", if p.hours < 12 { "上午" } else { "下午" });
+        } else {
+            time.push_str(if p.hours < 12 { " AM" } else { " PM" });
+        }
+    }
+    Ok(VmValue::String(if date.is_empty() {
+        time
+    } else if time.is_empty() {
+        date
+    } else {
+        format!("{date}{}{time}", if zh { " " } else { ", " })
     }))
 }
 

@@ -805,3 +805,141 @@ async fn real_model_continues_mini_webpack_high_turn_five() -> Result<()> {
     if !matches!(result,Ok(Ok(()))) || status!="completed" { anyhow::bail!("follow-up did not complete"); }
     Ok(())
 }
+
+/// Opt-in end-to-end analysis of a caller-prepared snapshot of this repository.
+/// Uses the real provider, normal prompts, tool dispatcher and Agent Program VM.
+/// The optional naive comparison changes only test-built main requests; it
+/// uses the same production tool loop, provider, catalog and read permissions.
+pub(super) fn repository_review_naive(s: &Session<'_>) -> bool {
+    s.task == "example" && std::env::var("SELF_REVIEW_MODE").as_deref() == Ok("naive")
+}
+
+const NAIVE_REVIEW_PROMPT: &str = "Complete the user's authorized task using actual evidence and applicable skills. Use the advertised tools directly in a normal observe/reason/tool-call loop, then answer the user. Read library instructions and exact tool contracts when needed. For project analysis, discover the actual stack and entry points, follow source references, and read relevant implementations with code_index.read where supported. Base conclusions on complete relevant code, including conditions and earlier returns. Keep confirmed facts, inferences and missing evidence distinct. Work within the user's scope and read-only restrictions. Give a clear Chinese answer supported by file paths and line numbers. Respect pauses and required user decisions; report errors and incomplete work honestly. This test uses direct tool calls: do not submit or execute an orchestration program or delegate AI subfunctions.";
+
+pub(super) fn repository_review_main_prompt(s: &Session<'_>) -> &'static str {
+    if repository_review_naive(s) { NAIVE_REVIEW_PROMPT } else { MAIN_PROMPT }
+}
+
+#[tokio::test]
+#[ignore = "real configured model, repository snapshot, consumes provider tokens"]
+async fn real_model_analyzes_repository_snapshot() -> Result<()> {
+    let root=std::path::PathBuf::from(std::env::var("SELF_REVIEW_ROOT").context("SELF_REVIEW_ROOT is required")?);
+    ensure!(root.join("src/agent_program/runtime.rs").is_file(),"repository snapshot is missing");
+    let evidence=root.parent().context("snapshot must have an evidence directory")?;
+    let provider=std::env::var("REAL_PROVIDER").unwrap_or_else(|_|"deepseek".into());
+    let model=std::env::var("REAL_MODEL").unwrap_or_else(|_|"deepseek-flash".into());
+    let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    crate::ai_proxy::apply_agent_config(&mut state,&config);
+    ensure!(state.use_provider(&provider),"provider {provider} is not configured");
+    ensure!(state.model_map.contains_key(&model),"model {model} is not configured for {provider}");
+    state.reasoning_effort=Some(real_effort("high"));
+    state.permission_mode=agent_service::PermissionMode::ReadOnly;
+    real_wire(&mut state);
+    // Opt into the production native packages for library-integration trials.
+    // Older isolated replays deliberately have no package catalog.
+    let package_runtime = if std::env::var("SELF_REVIEW_WITH_PACKAGES").as_deref() == Ok("1") {
+        use crate::plugin_runtime::{Plugin, PluginContext, PluginRuntime, ROOT};
+        use std::sync::Arc;
+        struct Services(Arc<crate::builtin_plugins::ToolCatalog>, Arc<crate::tools::Workspace>);
+        impl Plugin for Services {
+            fn id(&self) -> &str { "repository-test-services" }
+            fn start(&self, ctx: &PluginContext<'_>) -> Result<()> {
+                ctx.provide("tools", self.0.clone())?;
+                ctx.provide("skill-packages", self.0.packages.clone())?;
+                ctx.provide("workspace", self.1.clone())
+            }
+        }
+        let runtime = PluginRuntime::new();
+        let catalog = Arc::new(crate::builtin_plugins::ToolCatalog::default());
+        let parent = runtime.mount(ROOT, Services(catalog.clone(), state.workspace.clone()))?;
+        runtime.mount(parent, crate::builtin_plugins::FileToolsPlugin)?;
+        runtime.mount(parent, crate::builtin_plugins::MemoryPlugin)?;
+        for package in crate::builtin_plugins::packages()? {
+            runtime.mount(parent, crate::skill_packages::PackagePlugin(package))?;
+        }
+        state.tool_catalog = Some(catalog);
+        Some(runtime)
+    } else { None };
+    let effort=state.reasoning_effort.clone();
+    let prompt=match std::env::var("SELF_REVIEW_PROMPT_FILE") {
+        Ok(path)=>std::fs::read_to_string(path)?,
+        Err(_)=>"分析一下这个项目的代码：梳理核心架构、从用户请求到模型和工具执行再到结果返回的主要链路，以及值得关注的问题。请依据实际读到的代码给出文件路径和行号，区分已经证实的问题、推测与没有验证的部分。只读分析，不要修改任何项目文件。".to_owned(),
+    };
+    let prompt=match std::env::var("SELF_REVIEW_PROMPT_SUFFIX_FILE") {
+        Ok(path)=>format!("{prompt}\n\n{}",std::fs::read_to_string(path)?),
+        Err(_)=>prompt,
+    };
+    std::fs::write(evidence.join("prompt.txt"),&prompt)?;
+    agent_service::open_db(&root)?.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at,provider_name,reasoning_effort) VALUES ('example',?1,?2,'running',0,0,?3,?4)",rusqlite::params![prompt,model,provider,effort])?;
+    eprintln!("SELF_REVIEW_START provider={provider} model={model} effort={effort:?} root={}",root.display());
+    let cancel=CancellationToken::new();let started=std::time::Instant::now();
+    let result=tokio::time::timeout(Duration::from_secs(900),run_task(state,"example".into(),model.clone(),prompt,100,cancel.clone(),1,false)).await;
+    if result.is_err(){cancel.cancel();}
+    let conn=agent_service::open_db(&root)?;
+    let status:String=conn.query_row("SELECT status FROM agent_tasks WHERE id='example'",[],|r|r.get(0))?;
+    let count=|kind:&str|conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id='example' AND kind=?1",[kind],|r|r.get::<_,i64>(0)).unwrap_or(-1);
+    let requests:i64=conn.query_row("SELECT count(*) FROM agent_request_contexts WHERE task_id='example'",[],|r|r.get(0))?;
+    let error=match &result {Ok(Ok(()))=>None,Ok(Err(e))=>Some(format!("{e:#}")),Err(e)=>Some(e.to_string())};
+    let answer=last_answer(&root).unwrap_or_default();
+    std::fs::write(evidence.join("analysis.md"),&answer)?;
+    let summary=json!({"provider":provider,"model":model,"reasoning_effort":effort,"mode":std::env::var("SELF_REVIEW_MODE").unwrap_or_else(|_|"orchestration".into()),"native_packages":package_runtime.is_some(),"status":status,"seconds":started.elapsed().as_secs_f64(),"run_ok":matches!(result,Ok(Ok(()))),"error":error,"model_requests":requests,"tool_calls":count("tool/call"),"programs":count("program/start"),"runtime_errors":count("program/runtime_error"),"module_loads":count("module/loaded"),"module_fixes":count("module/fix_started"),"answer_bytes":answer.len(),"workspace":root});
+    std::fs::write(evidence.join("summary.json"),serde_json::to_vec_pretty(&summary)?)?;
+    eprintln!("SELF_REVIEW_RESULT {summary}");
+    if let Some(runtime) = package_runtime { runtime.shutdown()?; }
+    ensure!(matches!(result,Ok(Ok(()))) && status=="completed","repository analysis did not complete");
+    ensure!(!answer.trim().is_empty(),"repository analysis returned no answer");
+    Ok(())
+}
+
+/// A single request with only the user's minimal Node.js planning instruction.
+/// No production agent prompts, tool loop, implementation author or VM execution.
+#[tokio::test]
+#[ignore = "real configured model, minimal Node.js plan only, consumes provider tokens"]
+async fn real_model_node_analysis_plan_minimal_prompt() -> Result<()> {
+    let evidence=std::path::PathBuf::from(std::env::var("NODE_PLAN_OUTPUT").context("NODE_PLAN_OUTPUT is required")?);
+    std::fs::create_dir_all(&evidence)?;
+    let mut state=agent_service::tests::test_state(&evidence,"127.0.0.1:1".parse()?);
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    crate::ai_proxy::apply_agent_config(&mut state,&config);
+    ensure!(state.use_provider("deepseek"),"deepseek is not configured");
+    let model="deepseek-flash";
+    ensure!(state.model_map.contains_key(model),"deepseek-flash is not configured");
+    real_wire(&mut state);
+    let prompt=match std::env::var("NODE_PLAN_PROMPT_FILE") {
+        Ok(path)=>std::fs::read_to_string(path)?,
+        Err(_)=>"请用 Node.js 代码编排如何分析 codex-workspace-mcp 项目的代码，项目路径是 /home/goodtime/Documents/project/codex-workspace-mcp。用代码描述流程如何做，需要的方法用 JSDoc @virtual 标记并说明其功能、参数和返回值，不必实现。只返回代码。".to_owned(),
+    };
+    let agent_core=std::env::var("NODE_PLAN_AGENT_CORE").as_deref()==Ok("1");
+    let messages=if agent_core {
+        json!([{"role":"system","content":MAIN_PROMPT},
+            {"role":"system","name":"program_environment","content":crate::agent_program::ENVIRONMENT},
+            {"role":"user","content":prompt}])
+    } else {json!([{"role":"user","content":prompt}])};
+    let roles=messages.as_array().unwrap().iter().map(|m|m["role"].clone()).collect::<Vec<_>>();
+    let effort=real_effort("low");
+    let body=json!({"model":model,"messages":messages,"stream":false,"reasoning_effort":effort});
+    std::fs::write(evidence.join("request.json"),serde_json::to_vec_pretty(&body)?)?;
+    eprintln!("NODE_PLAN_START model={model} evidence={}",evidence.display());
+    let started=std::time::Instant::now();
+    let response=state.model_client.post(format!("{}/chat/completions",state.provider_url.trim_end_matches('/')))
+        .bearer_auth(&state.api_key).json(&body).timeout(Duration::from_secs(300)).send().await?.error_for_status()?;
+    let result:Value=response.json().await?;
+    let raw=result["choices"][0]["message"]["content"].as_str().context("model returned no source")?;
+    std::fs::write(evidence.join("response.txt"),raw)?;
+    let source=raw.trim();
+    let source=if source.starts_with("```") {
+        source.split_once('\n').map(|(_,s)|s).unwrap_or(source).trim_end_matches('`').trim()
+    } else {source};
+    let source_file=if source.lines().any(|line| line.starts_with("import ") || line.starts_with("export ")) {
+        "analysis-plan.mjs"
+    } else { "analysis-plan.cjs" };
+    std::fs::write(evidence.join(source_file),source)?;
+    let report=json!({"provider":"deepseek","model":model,"seconds":started.elapsed().as_secs_f64(),
+        "requests":1,"message_roles":roles,"prompt_mode":if agent_core {"agent-core"} else {"user-only"},
+        "usage":result["usage"],"finish_reason":result["choices"][0]["finish_reason"],
+        "lines":source.lines().count(),"chars":source.chars().count(),"source_file":source_file,"executed":false});
+    std::fs::write(evidence.join("summary.json"),serde_json::to_vec_pretty(&report)?)?;
+    eprintln!("NODE_PLAN_RESULT {report}");
+    Ok(())
+}

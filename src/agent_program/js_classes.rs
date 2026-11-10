@@ -2,6 +2,18 @@
 use super::*;
 
 impl Heap {
+    pub(crate) fn is_private_key(key: &str) -> bool { key.starts_with("\0private:") }
+    pub(crate) fn class_initializer(&self, ctor: HeapId) -> Option<VmValue> { self.class_initializers.get(&ctor).cloned() }
+    pub(crate) fn private_element(&self, id: HeapId, key: &str) -> Result<PrivateElement> {
+        self.private_elements.get(&id).and_then(|p|p.get(key)).cloned().context("TypeError: object does not have the required private brand")
+    }
+    pub(crate) fn private_set(&mut self, id: HeapId, key: &str, value: VmValue) -> Result<VmValue> {
+        match self.private_element(id,key)? {
+            PrivateElement::Field(_) => { self.private_elements.get_mut(&id).unwrap().insert(key.into(),PrivateElement::Field(value)); Ok(VmValue::Undefined) }
+            PrivateElement::Method(_) => bail!("TypeError: private method is read-only"),
+            PrivateElement::Accessor { set, .. } => { ensure!(set != VmValue::Undefined,"TypeError: private accessor has no setter"); Ok(set) }
+        }
+    }
     pub(crate) fn function_name_key(&self, key: &VmValue, prefix: &str) -> Result<VmValue> {
         use super::super::js_value::{from_utf16, string_units};
         let name = if let VmValue::Symbol(id) = key {
@@ -58,6 +70,48 @@ impl Heap {
             return Ok(None);
         };
         let value = match name {
+            "$$privateKey" => {
+                let symbol = self.symbol(Some(first.clone()));
+                let VmValue::Symbol(id) = symbol else { unreachable!() };
+                self.private_symbols.insert(id);
+                symbol
+            }
+            "$$privateHas" => {
+                let VmValue::Reference(id) = first else { bail!("TypeError: right operand of private in must be an object") };
+                let key = self.property_key(&args[1])?;
+                VmValue::Boolean(self.private_elements.get(id).is_some_and(|p| p.contains_key(&key)))
+            }
+            "$$privateAdd" => {
+                let VmValue::Reference(id) = first else { bail!("TypeError: private element requires an object") };
+                let key = self.property_key(&args[1])?;
+                ensure!(Self::is_private_key(&key), "invalid private key");
+                ensure!(!self.private_elements.get(id).is_some_and(|p|p.contains_key(&key)), "TypeError: private element initialized twice");
+                let kind = super::super::js_value::to_string(self,&args[3])?;
+                let element = match kind.as_str() {
+                    "field" => PrivateElement::Field(args[2].clone()),
+                    "method" => PrivateElement::Method(args[2].clone()),
+                    "accessor" => PrivateElement::Accessor { get: args[2].clone(), set: args[4].clone() },
+                    _ => bail!("invalid private element kind"),
+                };
+                self.private_elements.entry(*id).or_default().insert(key, element);
+                first.clone()
+            }
+            "$$classInitializer" => {
+                let VmValue::Reference(ctor) = first else { bail!("invalid class constructor") };
+                self.class_initializers.insert(*ctor,args[1].clone());
+                first.clone()
+            }
+            "$$privateMethod" => {
+                let (VmValue::Reference(ctor),VmValue::Reference(function)) = (first,&args[1]) else { bail!("invalid private method") };
+                let home = if args[3] == VmValue::Boolean(true) { *ctor } else {
+                    let Some(VmValue::Reference(home)) = self.own_property(*ctor,"prototype")? else { bail!("class prototype missing") }; home
+                };
+                self.method_homes.insert(*function,home);
+                let prefix = super::super::js_value::to_string(self,&args[4])?;
+                let name = self.function_name_key(&args[2],&prefix)?;
+                self.raw_set_property(*function,"name".into(),name)?;
+                args[1].clone()
+            }
             "$$functionName" => {
                 let VmValue::Reference(id) = *first else {
                     bail!("TypeError: function name target must be callable")

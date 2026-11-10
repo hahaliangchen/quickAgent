@@ -2,7 +2,7 @@
 const summary = inspectPackage(".");
 console.log(JSON.stringify(summary));
 
-/** @module */
+/** @virtual */
 function inspectPackage(workdir) {
   // 用 Node 读取 workdir/package.json 的实际 JSON；检查进程结束、退出码和输出完整性。
   // 返回 {name:string, scriptCount:number, scriptNames:[string]}，列出实际脚本名称。

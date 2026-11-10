@@ -219,12 +219,22 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     match program_flow::role(w) {
         program_flow::Role::Main => definitions.push(program_flow::write_program_tool(false)),
         program_flow::Role::Implement => definitions.push(program_flow::write_program_tool(true)),
+        program_flow::Role::Fix => {
+            // This edits only the fix input's saved module, even when project
+            // writes are forbidden. modules::edit enforces that exact path.
+            definitions.retain(|d| d["function"]["name"] != "edit_file");
+            definitions.push(modules::fix_edit_tool());
+        }
         _ => {}
     }
     // The main AI finds methods to read and run with while it gets to know the task.
     if program_flow::role(w) == program_flow::Role::Main && s.plugin.is_none() {
         definitions.push(program_flow::find_main_tool());
         definitions.extend(project_flows::tools());
+    }
+    #[cfg(test)]
+    if documented_examples::repository_review_naive(s) {
+        definitions.retain(|tool| tool["function"]["name"] != "write_program");
     }
     definitions
 }
@@ -273,7 +283,7 @@ fn available_tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     tools.push(function("list_context_assets", "Inspect the asset references and loaded/reference-only states in your current context. Does not read asset files or alter context.",json!({}),json!([])));
     {
         tools.push(crate::agent_program::declarations::contract_tool());
-        tools.push(function("read_program_guide", "Read supported flow language capabilities and differences from JavaScript on demand.", json!({}), json!([])));
+        tools.push(function("read_program_guide", "Read available orchestration APIs, execution compatibility and limits when needed.", json!({}), json!([])));
     }
     {
         tools.push(function("list_skills", "List installed skill packages and their short applicability descriptions. Load only a skill useful for the current task; the host does not classify the request.",json!({}),json!([])));
@@ -596,6 +606,10 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
         && first.get("name").is_none()
     {
         first["content"] = json!(program_flow::prompt(role));
+        #[cfg(test)]
+        if role == "main" {
+            first["content"] = json!(documented_examples::repository_review_main_prompt(s));
+        }
     }
     // Code writers get the language environment and the library index; a
     // leaf only calls its tools.
@@ -610,10 +624,15 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
             "content":json!({"shell":shell,"workspace":workspace,
                 "access":"module_deterministic_code_only",
                 "memory":{"ai_input_limit_tokens":s.input_budget,"program_shell_output_limit_bytes":crate::shell_process::PROGRAM_OUTPUT_LIMIT,
-                    "boundary":"Raw shell output stays in JS variables. Parse it in module code. Only print needed evidence or pass a small prepared input to a virtual hook; a module return first goes to its caller's JS, not automatically to AI context."},
-                "usage":if cfg!(windows) { "Windows uses PowerShell 7 syntax with D:/... or relative paths; Linux examples using Bash syntax do not apply. Main flows declare @module by the result needed, such as facts, counts or an evidence-based answer, rather than merely forwarding shell output. Only module deterministic code can call process.exec_command/write_stdin/kill_session. Each command starts a fresh shell, no profiles or PTY. Module code gets complete output in JS heap. Check running/exit_code and process stdout before printing complete evidence units with file/line ranges. SHELL_OUTPUT_OVER_CAPACITY or OUTPUT_OVER_CAPACITY explicitly fails delivery and preserves the original/read reference; revise from saved output instead of replaying commands or silently slicing evidence. Use rg --files and rg -n for repository discovery/search; they respect .gitignore by default. If available=false, inspect error; structured file tools remain usable." } else { "Linux uses Bash syntax. Main flows declare @module by the result needed; only module deterministic code can call process.exec_command/write_stdin/kill_session. Each command starts a fresh shell, no profiles or PTY. Module code gets complete output in JS heap. Check running/exit_code and process stdout before printing complete evidence units with file/line ranges. SHELL_OUTPUT_OVER_CAPACITY or OUTPUT_OVER_CAPACITY explicitly fails delivery and preserves the original/read reference; revise from saved output instead of replaying commands or silently slicing evidence. Use rg --files and rg -n for repository discovery/search; they respect .gitignore by default. If available=false, inspect error; structured file tools remain usable." }}).to_string()}));
+                    "boundary":"Command output stays in code until printed or passed to a virtual helper."},
+                "usage":if cfg!(windows) { "Use PowerShell 7 with Windows paths. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." } else { "Use Bash. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." }}).to_string()}));
         }
-        wire.insert(1.min(wire.len()),json!({"role":"system","name":"program_environment","content":crate::agent_program::ENVIRONMENT}));
+        let environment = crate::agent_program::ENVIRONMENT;
+        #[cfg(test)]
+        let environment = if documented_examples::repository_review_naive(s) {
+            "Use advertised tools directly. program_tool_headers describes available libraries; read_tool_contracts and find_library_methods provide exact methods and callable tool names. Use tool results as evidence and deliver the final analysis directly."
+        } else { environment };
+        wire.insert(1.min(wire.len()),json!({"role":"system","name":"program_environment","content":environment}));
         // Library categories are visible up front; method docs are read on demand.
         let libraries = program_flow::static_libraries(s, definitions);
         let mut headers = crate::agent_program::declarations::directory(&libraries);
@@ -1183,7 +1202,7 @@ async fn business_tool_inner(
     s:&Session<'_>,node:&str,name:&str,args:Value,call_id:&str,module_code:bool,
 ) -> Result<Value> {
     ensure!(!crate::project_process::is_execution(name) || module_code,
-        "SHELL_MODULE_ONLY: OS execution is available only in a module's deterministic code. Declare @module for the result needed (verified facts, counts or an evidence-based answer), then implement commands and output processing inside it; virtual hooks receive only prepared arguments.");
+        "SHELL_MODULE_ONLY: OS execution is available only in first-layer implementation code. Declare a JSDoc @virtual function for the result needed (verified facts, counts or an evidence-based answer), then implement commands and output processing inside it; second-layer virtual helpers receive only prepared arguments.");
     ensure!(page_allows(s, name), "PLUGIN_SCOPE_DENIED: {name}");
     if name == "read_session_history" {
         let mut args = args;
@@ -2447,7 +2466,8 @@ async fn execute_call(
                 "SHELL_MODULE_ONLY: declare @module for the needed result (facts, counts or an evidence-based answer), not merely a shell gateway. Run commands and process stdout in its deterministic code; do not expose shell to virtual hooks.");
         }
         if w.module_probe && call.name != "parallel_read_batch" {
-            ensure!(program_flow::probe_read(&call.name), "MODULE_PROBE_READ_ONLY: {} is unavailable in a probe", call.name);
+            ensure!(program_flow::probe_read(&call.name),
+                "MODULE_PROBE_READ_ONLY: probe:true forbids shell and writes; {} cannot execute. Only read_file, read_file_lines, search_text, list_dir and workspace_info may run. To use shell or other module capabilities, omit probe and submit the implementation with write_program({{source}}); normal permissions still apply. Changing import/require syntax will not change this permission.", call.name);
         }
         // Mode enforcement is independent of the model's advertised schema.
         if !program_flow::internal_call(w,call) {validate_tool(s,w,definitions,&call.name)?;}
@@ -3031,6 +3051,33 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn read_only_module_fixer_can_edit_only_its_saved_module() {
+        let root = TestRoot::new();
+        let mut state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        state.permission_mode = agent_service::PermissionMode::ReadOnly;
+        let cancel = CancellationToken::new();
+        let session = Session { agent_id:None, task_node_id:None, plugin:None, state:&state,
+            task:"task", model:"fake", turn:1, cancel:&cancel, ban_execution:false,
+            scope:"main".into(), parent:None, input_budget:INPUT_BUDGET };
+        let module_path = ".codex-workspace-mcp/module-to-fix.js";
+        let window = Window { program_task:Some(json!({"name":"read","module":true,"role":"implement",
+            "fix":{"path":module_path,"version":1}})), ..Default::default() };
+        let definitions = tools(&session, &window);
+        let edits = definitions.iter().filter(|d| d["function"]["name"] == "edit_file").collect::<Vec<_>>();
+        assert_eq!(edits.len(), 1, "a read-only fixer needs its own scoped editor");
+        let messages = vec![json!({"role":"system","content":program_flow::prompt("fix")}),
+            json!({"role":"user","name":"module_fix_input","content":"{}"})];
+        let body = request(&session, &messages, &definitions);
+        assert!(body["tools"].as_array().unwrap().iter().any(|d| d["function"]["name"] == "edit_file"));
+        assert!(!tools(&session, &Window::default()).iter().any(|d| d["function"]["name"] == "edit_file"));
+        std::fs::write(root.path().join("project.rs"), "keep me").unwrap();
+        let error = modules::edit(&session, &window, &json!({"path":"project.rs",
+            "edits":[{"old_text":"keep me","new_text":"changed"}]})).unwrap_err();
+        assert!(error.to_string().contains("only the module file"));
+        assert_eq!(std::fs::read_to_string(root.path().join("project.rs")).unwrap(), "keep me");
     }
 
     #[tokio::test]

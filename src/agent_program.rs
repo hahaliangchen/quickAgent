@@ -1,4 +1,4 @@
-//! A fixed JavaScript-shaped subset is the flow language, not a JS/TS runtime.
+//! A resumable JavaScript runtime for executable orchestration.
 //! SWC compiles it to serializable control flow; effects use the normal host tools.
 mod builtins;
 mod compiler;
@@ -7,6 +7,7 @@ mod js_methods;
 mod js_functions;
 mod js_collections;
 mod js_date;
+mod js_locale;
 mod js_value;
 mod vm_eval;
 pub(crate) mod declarations;
@@ -35,6 +36,9 @@ pub(super) fn js_prototype_global(name:&str)->bool {
 /// Id of the function formed by a program's top-level statements. It is not
 /// a JavaScript identifier, so no declared function can take it.
 pub const ENTRY: &str = "<module>";
+/// A module implementation's top-level statements. Each call of the
+/// implementation runs them first, in its module scope, then its entry.
+pub const MODULE_INIT: &str = "<module-init>";
 // JavaScript has one number type; JSON tool schemas often require integer
 // representations. Preserve integral values at the deterministic boundary.
 fn number_value(value: f64) -> Value {
@@ -59,6 +63,10 @@ pub struct Program {
     #[serde(default)]
     pub prelude_hash: String,
     pub functions: BTreeMap<String, Function>,
+    /// The source uses CommonJS `module` or `exports` without declaring them:
+    /// the runtime provides both, as Node does for every module.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub commonjs: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Function {
@@ -66,17 +74,17 @@ pub struct Function {
     pub description: String,
     #[serde(default)]
     pub virtual_task: bool,
-    /// Declared `@module`: AI writes its code once per contract and later
-    /// calls reuse it. Without it, an AI function is a `@virtual` hook.
+    /// Host-resolved first virtual layer: author/reuse its code per contract.
+    /// The @module source marker also sets this bit. The second layer
+    /// runs a focused AI tool loop instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub module_task: bool,
     /// Outer variables a virtual function's contract names with `@uses`: its
     /// closure, read in the scope where it is declared when it is called.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<String>,
-    /// A `@virtual` hook is a plain tool loop limited to the tools the source
-    /// declaring it imports. Programs saved before `@module` existed have None
-    /// for a virtual declared in a main program, which was implemented as code.
+    /// Authorized tools for a second-layer virtual. First-layer declarations
+    /// are resolved to code by the host rather than using this tool scope.
     #[serde(default)]
     pub leaf_tools: Option<Vec<String>>,
     /// The third-party libraries the source declaring a `@virtual` requires:
@@ -88,6 +96,10 @@ pub struct Function {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
     pub params: Vec<String>,
+    /// Ordinary functions expose their actual call arguments through the
+    /// array-like `arguments` binding. Arrows inherit the outer binding.
+    #[serde(default)]
+    pub arguments_object: bool,
     /// Index of the final rest parameter, if present.
     #[serde(default)]
     pub rest_parameter: Option<usize>,

@@ -282,3 +282,16 @@ function $$resolveAwaitValue(value,resolve,reject){
   });
 }
 async function $$asyncGeneratorAwaitReturn(value){return await value;}
+
+// Locale input and option getters execute in ordinary, serializable VM frames.
+function $$localeChoice(locales){if(locales===undefined)return 'en-US';if(typeof locales==='string')return locales;if(Array.isArray(locales)){for(const locale of locales)return $$stringConvert(locale);return 'en-US';}throw new TypeError('locales must be a string or an array');}
+function $$localeOptions(options,allowed){if(options===undefined)return {};if(options===null)throw new TypeError('locale options must be an object');const obj=Object(options),keys=Object.keys(obj),out={};for(const key of keys){if(!allowed.includes(key))throw new RangeError('unsupported locale option: '+key);}for(const key of allowed){const value=obj[key];if(value!==undefined)out[key]=key==='numeric'||key==='hour12'?Boolean(value):$$stringConvert(value);}return out;}
+function $$localeCompare(value,other,locales,options){$$requireCoercible(value);const a=$$stringConvert(value),b=$$stringConvert(other);return $$rawLocaleCompare(a,b,$$localeChoice(locales),$$localeOptions(options,['numeric','sensitivity','caseFirst']));}
+function $$numberLocale(value,locales,options){return $$rawNumberLocale(value,$$localeChoice(locales),$$localeOptions(options,[]));}
+function $$dateLocale(value,method,locales,options){return $$rawDateLocale(value,method,$$localeChoice(locales),$$localeOptions(options,['timeZone','hour12','year','month','day','hour','minute','second']));}
+
+function $$encodeURI(value){return $$rawEncodeURI($$toPrimitiveHint(value,'string'));}
+function $$decodeURI(value){return $$rawDecodeURI($$toPrimitiveHint(value,'string'));}
+function $$encodeURIComponent(value){return $$rawEncodeURIComponent($$toPrimitiveHint(value,'string'));}
+function $$decodeURIComponent(value){return $$rawDecodeURIComponent($$toPrimitiveHint(value,'string'));}
+function $$stringRaw(template,...substitutions){$$requireCoercible(template);const raw=Object(template).raw;$$requireCoercible(raw);const obj=Object(raw);let n=Number(obj.length);if(Number.isNaN(n)||n<0)n=0;else n=Math.floor(n);if(n>1000000)throw new RangeError('String.raw segments exceed runtime limit');let out='';for(let i=0;i<n;i++){out=$$textLimit(out+$$stringConvert(obj[i]));if(i+1<n&&i<substitutions.length)out=$$textLimit(out+$$stringConvert(substitutions[i]));}return out;}

@@ -16,6 +16,7 @@
     "resources": {
       "../frontend/dist/": "frontend/dist/",
       "../src/builtin_plugins/code_flow/": "src/builtin_plugins/code_flow/",
+      "../src/builtin_plugins/code_index/": "src/builtin_plugins/code_index/",
       "../src/builtin_plugins/git/": "src/builtin_plugins/git/",
       "../third_party/DSH-LICENSE.txt": "DSH-LICENSE.txt",
       "binaries/ripgrep-COPYING": "ripgrep-COPYING",

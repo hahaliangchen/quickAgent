@@ -46,6 +46,43 @@ pub(super) enum VmValue {
     Promise(super::promise::PromiseId),
 }
 
+/// Node growth that always fits before a collection, so a small live heap
+/// is not re-marked every few allocations.
+const GC_MIN_NODE_GROWTH: usize = 4096;
+/// Payload allocated between collections when node growth alone would miss it.
+const GC_MIN_PRESSURE: usize = 32 * 1024 * 1024;
+const GC_PRESSURE_PER_LIVE_NODE: usize = 64;
+/// Shorter strings are covered by the node-growth trigger.
+const GC_LARGE_VALUE_BYTES: usize = 1024;
+
+/// `VM_GC_STRESS=1 cargo test agent_program` collects on every heartbeat, so
+/// a heap side table or runtime field missing from the roots fails quickly.
+#[cfg(test)]
+pub(super) fn gc_stress() -> bool {
+    static STRESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STRESS.get_or_init(|| std::env::var_os("VM_GC_STRESS").is_some())
+}
+
+fn value_bytes(value: &VmValue) -> usize {
+    let bytes = match value {
+        VmValue::String(text) => text.len(),
+        VmValue::Utf16(units) => units.len() * 2,
+        _ => 0,
+    };
+    if bytes >= GC_LARGE_VALUE_BYTES { bytes } else { 0 }
+}
+fn items_bytes(items: &[VmValue]) -> usize {
+    items.len() * std::mem::size_of::<VmValue>() + items.iter().map(value_bytes).sum::<usize>()
+}
+fn node_bytes(node: &HeapNode) -> usize {
+    match node {
+        HeapNode::Array(values) => items_bytes(values),
+        HeapNode::Object(properties) => properties.iter().map(|(_, value)| value_bytes(value)).sum(),
+        HeapNode::Environment { bindings, .. } => bindings.values().map(value_bytes).sum(),
+        _ => 0,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) enum HeapNode {
     Object(#[serde(deserialize_with = "deserialize_properties")] Vec<(String, VmValue)>),
@@ -95,8 +132,20 @@ where
     })
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) enum PrivateElement {
+    Field(VmValue),
+    Method(VmValue),
+    Accessor { get: VmValue, set: VmValue },
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct Heap {
+    #[serde(default)]
+    private_symbols: BTreeSet<u64>,
+    #[serde(default)]
+    private_elements: BTreeMap<HeapId, BTreeMap<String, PrivateElement>>,
+    #[serde(default)]
+    class_initializers: BTreeMap<HeapId, VmValue>,
     #[serde(default)]
     class_constructors: BTreeMap<HeapId,bool>,
     #[serde(default)]
@@ -105,6 +154,19 @@ pub(super) struct Heap {
     method_homes: BTreeMap<HeapId,HeapId>,
     next_id: u64,
     nodes: BTreeMap<HeapId, HeapNode>,
+    /// Collection schedule. Derived after the first collection, so it is
+    /// never persisted and a restored heap simply collects once.
+    #[serde(skip)]
+    gc_live_nodes: usize,
+    #[serde(skip)]
+    gc_next_nodes: usize,
+    #[serde(skip)]
+    gc_pressure: usize,
+    #[serde(skip)]
+    gc_pressure_limit: usize,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(super) gc_collections: usize,
     #[serde(default)]
     array_holes: BTreeMap<HeapId, BTreeSet<usize>>,
     /// Objects created by a built-in constructor such as Error keep their
@@ -274,6 +336,7 @@ impl Heap {
 
     /// Add an initialized binding to one environment, such as a hoisted function.
     pub(super) fn define_binding(&mut self, environment: HeapId, name: &str, value: VmValue) -> Result<()> {
+        self.add_pressure(value_bytes(&value));
         let (bindings, uninitialized) = self.environment_mut(environment)?;
         uninitialized.remove(name);
         bindings.insert(name.to_owned(), value);
@@ -320,7 +383,7 @@ impl Heap {
                     HeapNode::Object(properties) => {
                         let mut output = serde_json::Map::new();
                         for (key, item) in properties {
-                            if !Self::is_symbol_key(key) && self.enumerable(*id,key) && !self.json_absent(item) {
+                            if !Self::is_symbol_key(key) && !Self::is_private_key(key) && self.enumerable(*id,key) && !self.json_absent(item) {
                                 let VmValue::String(key)=self.key_value(key) else{unreachable!()};
                                 output.insert(key, self.export_json(item, active, depth + 1)?);
                             }
@@ -330,7 +393,7 @@ impl Heap {
                     HeapNode::Collection(_) | HeapNode::Iterator(_)=>{
                         let mut output=serde_json::Map::new();
                         for (key,item) in self.array_properties(*id) {
-                            if !Self::is_symbol_key(key) && self.enumerable(*id,key) && !self.json_absent(item){let VmValue::String(key)=self.key_value(key) else{unreachable!()};output.insert(key,self.export_json(item,active,depth+1)?);}
+                            if !Self::is_symbol_key(key) && !Self::is_private_key(key) && self.enumerable(*id,key) && !self.json_absent(item){let VmValue::String(key)=self.key_value(key) else{unreachable!()};output.insert(key,self.export_json(item,active,depth+1)?);}
                         }
                         Value::Object(output)
                     }
@@ -368,6 +431,7 @@ impl Heap {
     pub(super) fn allocate(&mut self, node: HeapNode) -> Result<HeapId> {
         let id = HeapId(self.next_id);
         self.next_id = self.next_id.checked_add(1).context("heap id exhausted")?;
+        self.add_pressure(node_bytes(&node));
         self.nodes.insert(id, node);
         self.initialize_node(id)?;
         Ok(id)
@@ -378,6 +442,22 @@ impl Heap {
     }
     pub(super) fn get_mut(&mut self, id: HeapId) -> Result<&mut HeapNode> {
         self.nodes.get_mut(&id).context("unknown heap reference")
+    }
+
+    /// A full mark costs time proportional to the live heap, so collect only
+    /// after the heap has grown by about its own size or a lot of payload
+    /// bytes were allocated. A few nodes can hold very large arrays or strings.
+    pub(super) fn collection_due(&self) -> bool {
+        #[cfg(test)]
+        if gc_stress() { return true; }
+        self.nodes.len() >= self.gc_next_nodes || self.gc_pressure >= self.gc_pressure_limit
+    }
+    /// Anything allocated since the last collection, for compaction before a snapshot.
+    pub(super) fn has_uncollected(&self) -> bool {
+        self.nodes.len() > self.gc_live_nodes || self.gc_pressure > 0
+    }
+    fn add_pressure(&mut self, bytes: usize) {
+        self.gc_pressure = self.gc_pressure.saturating_add(bytes);
     }
 
     /// Reclaim unreachable nodes between instructions, when the interpreter
@@ -399,6 +479,16 @@ impl Heap {
             }
             pending.extend(self.prototypes.get(&id).copied().flatten());
             pending.extend(self.method_homes.get(&id).copied());
+            if let Some(VmValue::Reference(init)) = self.class_initializers.get(&id) { pending.push(*init); }
+            if let Some(elements) = self.private_elements.get(&id) {
+                for element in elements.values() {
+                    let values = match element {
+                        PrivateElement::Field(v) | PrivateElement::Method(v) => vec![v],
+                        PrivateElement::Accessor { get, set } => vec![get,set],
+                    };
+                    pending.extend(values.into_iter().filter_map(|v| if let VmValue::Reference(id)=v {Some(*id)} else {None}));
+                }
+            }
             if let Some(generator) = self.generators.get(&id) {
                 pending.extend(generator.roots().iter().filter_map(|v| if let VmValue::Reference(id)=v {Some(*id)} else {None}));
             }
@@ -461,17 +551,27 @@ impl Heap {
         self.class_constructors.retain(|id,_|live.contains(id));
         self.readonly_bindings.retain(|id,_|live.contains(id));
         self.method_homes.retain(|id,_|live.contains(id));
+        self.class_initializers.retain(|id,_|live.contains(id));
+        self.private_elements.retain(|id,_|live.contains(id));
         self.non_enumerable.retain(|id,_|live.contains(id));
         self.builtin_getters.retain(|id,_|live.contains(id));
         self.boxed.retain(|id,_|live.contains(id));
         self.descriptors.retain(|id,_|live.contains(id));
         self.deleted_properties.retain(|id,_|live.contains(id));
         self.non_extensible.retain(|id|live.contains(id));
-        Ok(before - self.nodes.len())
+        let live_nodes = self.nodes.len();
+        self.gc_live_nodes = live_nodes;
+        self.gc_next_nodes = live_nodes + live_nodes.max(GC_MIN_NODE_GROWTH);
+        self.gc_pressure = 0;
+        self.gc_pressure_limit = GC_MIN_PRESSURE.max(live_nodes.saturating_mul(GC_PRESSURE_PER_LIVE_NODE));
+        #[cfg(test)]
+        { self.gc_collections += 1; }
+        Ok(before - live_nodes)
     }
 
     pub(super) fn append(&mut self, id: HeapId, items: Vec<VmValue>) -> Result<usize> {
         self.ensure_writable(id)?;
+        self.add_pressure(items_bytes(&items));
         match self.nodes.get_mut(&id).context("unknown heap reference")? {
             HeapNode::Array(values) => {
                 values.extend(items);
@@ -482,6 +582,7 @@ impl Heap {
     }
 
     pub(super) fn set_property(&mut self, id: HeapId, key: String, value: VmValue) -> Result<()> {
+        self.add_pressure(value_bytes(&value));
         if key == "lastIndex" {
             if let Some(descriptor) = self.regex_descriptor(id) {
                 return self.set_property(descriptor, key, value);
@@ -630,6 +731,10 @@ impl Heap {
         }
     }
 
+    pub(crate) fn well_known_symbol(&self, name: &str) -> Option<VmValue> {
+        self.well_known_symbols.get(name).copied().map(VmValue::Symbol)
+    }
+
     /// Mark an index as a hole after removing or never assigning it.
     pub(super) fn set_hole(&mut self, id: HeapId, index: usize) {
         self.array_holes.entry(id).or_default().insert(index);
@@ -638,6 +743,7 @@ impl Heap {
     /// Replace an array's elements and holes in one step.
     pub(super) fn replace_array(&mut self, id: HeapId, items: Vec<VmValue>, holes: BTreeSet<usize>) -> Result<()> {
         self.ensure_writable(id)?;
+        self.add_pressure(items_bytes(&items));
         match self.nodes.get_mut(&id).context("unknown heap reference")? {
             HeapNode::Array(values) => {
                 *values = items;
@@ -702,7 +808,7 @@ impl Heap {
     pub(super) fn own_property(&self, id: HeapId, key: &str) -> Result<Option<VmValue>> {
         if self.deleted_properties.get(&id).is_some_and(|keys|keys.contains(key)){return Ok(None);}
         if self.descriptors.get(&id).and_then(|m|m.get(key)).is_some_and(|d|d.accessor.is_some()){return Ok(Some(VmValue::Undefined));}
-        if key=="lastIndex" && self.regex_parts(id).is_some(){return Ok(Some(VmValue::Number(JsNumber::new(0.0))));}
+        if key=="lastIndex" && self.regex_parts(id).is_some(){return Ok(Some(self.regex_last_index(id)));}
         if self.builtin_getters.get(&id).is_some_and(|getters|getters.contains_key(key)){return Ok(Some(VmValue::Undefined));}
         if let Some(value)=self.boxed.get(&id).filter(|v|matches!(v,VmValue::String(_)|VmValue::Utf16(_))) {
             let text=super::js_value::string_units(self,value)?;
@@ -873,6 +979,7 @@ impl Heap {
             bail!("ReferenceError: Cannot access '{name}' before initialization");
         }
         if self.readonly_bindings.get(&owner).is_some_and(|names|names.contains(name)){bail!("TypeError: Assignment to constant class binding {name}");}
+        self.add_pressure(value_bytes(&value));
         let (bindings,_)=self.environment_mut(owner)?;
         bindings.insert(name.to_owned(), value);
         Ok(())
@@ -885,6 +992,7 @@ impl Heap {
         name: &str,
         value: VmValue,
     ) -> Result<()> {
+        self.add_pressure(value_bytes(&value));
         let owner = self.binding_owner(environment, name)?;
         let (bindings, uninitialized) = self.environment_mut(owner)?;
         uninitialized.remove(name);

@@ -370,7 +370,20 @@ impl TsCollector {
         let end_line = line_of(&self.cm, span.hi);
         let signature = self.signature_snippet(signature_span);
         let docstring = self.docstring_before(span);
-        let id = ts_symbol_id(&self.file_path, &scope_path, name, start_line);
+        let base_id = ts_symbol_id(&self.file_path, &scope_path, name, start_line);
+        let mut id = base_id.clone();
+        // Distinct anonymous callbacks (and block-local names) can share a
+        // scope, name and line. Keep legacy IDs where unique, but preserve
+        // every definition and its own parent/call relationships on collision.
+        if self.id_to_index.contains_key(&id) {
+            let column = self.cm.lookup_char_pos(span.lo).col.0 + 1;
+            id = format!("{base_id}:column{column}");
+            let mut occurrence = 2;
+            while self.id_to_index.contains_key(&id) {
+                id = format!("{base_id}:column{column}:{occurrence}");
+                occurrence += 1;
+            }
+        }
         let export = explicit_export || default_export;
         let export_names_val = if default_export {
             default_export_names()

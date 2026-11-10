@@ -88,6 +88,7 @@ pub fn clear() {
 }
 pub fn read(path: &Path, limit: usize) -> io::Result<Arc<Snapshot>> {
     let path = path.canonicalize()?;
+    crate::database::check_source_access(&path)?;
     let limit = limit.min(FILE_LIMIT);
     let before = fs::metadata(&path)?;
     if !before.is_file() {

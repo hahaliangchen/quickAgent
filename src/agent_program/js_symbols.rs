@@ -20,6 +20,7 @@ impl Heap {
     }
     pub(crate) fn property_key(&self, value: &VmValue) -> Result<String> {
         Ok(match value {
+            VmValue::Symbol(id) if self.private_symbols.contains(id) => format!("\0private:{id}"),
             VmValue::Symbol(id) => Self::symbol_storage_key(*id),
             _ => Self::string_key(&super::super::js_value::to_string(self, value)?),
         })
@@ -70,6 +71,8 @@ impl Heap {
             "hasInstance",
             "toPrimitive",
             "toStringTag",
+            "species",
+            "isConcatSpreadable",
         ] {
             let VmValue::Symbol(id) = self.symbol(Some(VmValue::String(format!("Symbol.{name}"))))
             else {

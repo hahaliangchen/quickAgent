@@ -282,7 +282,7 @@ impl Heap {
             ("Array", super::super::js_functions::ARRAY),
             ("String", super::super::js_functions::STRING),
             ("Date", super::super::js_functions::DATE),
-            ("Number", "toFixed toExponential toString valueOf"),
+            ("Number", "toFixed toExponential toLocaleString toString valueOf"),
             ("Boolean", "toString valueOf"),
             ("RegExp", "test exec toString"),
             ("Promise", "then catch finally"),
@@ -355,6 +355,7 @@ impl Heap {
             "multiline",
             "dotAll",
             "unicode",
+            "sticky",
         ] {
             self.builtin_getter("RegExp.prototype", name, "RegExp");
         }
@@ -604,6 +605,7 @@ impl Heap {
             for i in 0..super::super::js_value::string_units(self,value)?.len(){let key=i.to_string();if !names.contains(&key){names.push(key);}}
             if !names.iter().any(|k|k=="length"){names.push("length".into());}
         }
+        names.retain(|key|!Self::is_private_key(key));
         names.retain(|key|!self.deleted_properties.get(&id).is_some_and(|keys|keys.contains(key)));
         names.sort_by_key(|key| {
             let i = key

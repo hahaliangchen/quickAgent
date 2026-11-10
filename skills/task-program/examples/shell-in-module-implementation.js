@@ -1,4 +1,4 @@
-import * as process from "host:process";
+import * as process from "process";
 
 function inspectPackage(workdir) {
   // 相同的单引号参数写法可用于 Windows PowerShell 7 和 Linux Bash；需要已安装 Node。

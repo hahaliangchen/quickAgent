@@ -1,6 +1,25 @@
 use rusqlite::{Connection, OptionalExtension, Result, params};
 use std::path::Path;
 
+/// Ordinary file I/O must never open SQLite's own state files. On Unix,
+/// closing any descriptor for the DB/SHM inode releases this process's POSIX
+/// locks, including locks held by SQLite on other threads. A subsequent
+/// connection can then reset SHM while the writer still has it mapped.
+pub(crate) fn check_source_access(path: &Path) -> std::io::Result<()> {
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let state_dir = resolved.parent().and_then(Path::file_name).and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(".codex-workspace-mcp"));
+    let state_file = resolved.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        ["codex_state.db", "codex_state.db-wal", "codex_state.db-shm", "codex_state.db-journal"]
+            .iter().any(|reserved| name.eq_ignore_ascii_case(reserved))
+    });
+    if state_dir && state_file {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+            "SQLITE_STATE_FILE: host database files are accessed through SQLite, not source-file tools"));
+    }
+    Ok(())
+}
+
 pub fn init_db(workspace_root: &Path) -> Result<Connection> {
     let index_dir = workspace_root.join(".codex-workspace-mcp");
     if !index_dir.exists() {

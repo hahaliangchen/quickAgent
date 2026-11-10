@@ -12,6 +12,12 @@ mod stage5_fixes;
 mod stage6;
 #[path="tests_stage7.rs"]
 mod stage7;
+#[path="tests_stage8.rs"]
+mod stage8;
+#[path = "tests_work_budget.rs"]
+mod work_budget;
+#[path = "tests_bindings.rs"]
+mod bindings;
 
 #[test]
 fn vm_stage3b_array_json_reads_inherited_indices() {
@@ -609,7 +615,7 @@ fn vm_stage0_saved_budget_and_whole_program_deadline_survive_restore() {
 
 #[test]
 fn vm_stage0_unsupported_syntax_diagnostics_name_the_feature() {
-    for (source,name) in [("new WeakRef({})","WeakRef"),("new Proxy({}, {})","Proxy"),("new URL('https://example.com')","URL"),("class Box { #x; }","class")] {
+    for (source,name) in [("new WeakRef({})","WeakRef"),("new Proxy({}, {})","Proxy"),("new URL('https://example.com')","URL")] {
         let error=compile(source).unwrap_err().to_string();
         assert!(error.contains(name),"{source}: {error}");
     }
@@ -685,6 +691,36 @@ fn compatibility_raw_templates_and_character_constructors() {
 }
 
 #[test]
+fn compatibility_arguments_thenables_sticky_regex_and_tagged_templates() {
+    assert_eq!(
+        returned(runtime(r#"function main(){function f(a){return [arguments.length,arguments[0],arguments[1]];}return f(3,4);}"#)),
+        json!([2,3,4])
+    );
+    assert_eq!(
+        returned(runtime(r#"async function main(){const thenable={then(resolve){resolve(9);}};const a=await Promise.resolve(thenable);const b=await new Promise(resolve=>resolve(thenable));return [a,b];}"#)),
+        json!([9,9])
+    );
+    let sticky = returned(runtime(r#"function main(){const r=/a/y;r.lastIndex=1;const first=r.exec('ba');const second=r.exec('ba');return [first[0],r.lastIndex,second,r.sticky,r.unicode];}"#));
+    assert_eq!(sticky, json!( ["a",0,null,true,false] ));
+    assert_eq!(
+        returned(runtime(r#"function main(){function tag(strings,...values){return [strings[0],strings.raw[0],values[0]];}return tag`a${3}b`; }"#)),
+        json!(["a","a",3])
+    );
+}
+
+#[test]
+fn compatibility_class_fields_and_static_fields() {
+    assert_eq!(
+        returned(runtime(r#"function main(){class A{x=1;y;static z=3;m(){return this.x;}}const a=new A();return [a.x,a.y,A.z,a.m()];}"#)),
+        json!([1,null,3,1])
+    );
+    assert_eq!(
+        returned(runtime(r#"function main(){class A{#x=4;get(){return this.#x;}}return new A().get();}"#)),
+        json!(4)
+    );
+}
+
+#[test]
 fn compatibility_regexp_named_groups_and_replacement() {
     assert_eq!(returned(runtime(r#"function main(){
       const r=/(?<y>\d+)(?<optional>x)?/;
@@ -743,14 +779,43 @@ fn compatibility_uri_encoding_and_malformed_inputs() {
 }
 
 #[test]
-fn compatibility_diagnostics_name_missing_global_and_host_import_syntax() {
+fn compatibility_diagnostics_name_missing_global() {
     let error=compile("function main(){return absentGlobal(3);}").unwrap_err().to_string();
     assert!(error.contains("absentGlobal 在流程运行时里不可用"),"{error}");
     assert!(!error.contains("call/ai wrappers"),"{error}");
     let error=compile("function main(){print('result');}").unwrap_err().to_string();
     assert!(error.contains("print 在流程运行时里不可用") && error.contains("console.log(...)"),"{error}");
-    let error=compile("function main(){const a=require('host:attachments');}").unwrap_err().to_string();
-    assert!(error.contains("import { read_attachment } from \"host:attachments\"") && error.contains("不要用 require"),"{error}");
+}
+
+#[test]
+fn module_loading_accepts_node_style_syntax_and_legacy_host_aliases() {
+    for spec in ["io", "host:io"] {
+        for binding in ["* as files", "files", "{read as load}"] {
+            let call = if binding.starts_with('{') { "load" } else { "files.read" };
+            let source = format!("import {binding} from '{spec}'; function main(){{return {call}({{path:'a.txt'}});}}");
+            let mut run = runtime(&source);
+            assert!(matches!(run.next(), State::Action(Action { kind:ActionKind::Tool { name, .. }, .. }) if name == "read_file"), "{source}");
+            run.resume(json!({"content":"actual"}), false).unwrap();
+            assert_eq!(returned(run), json!({"content":"actual"}));
+        }
+    }
+    let mut run = runtime("function main(){const a=require('host:io');return a===require('io');}");
+    assert!(matches!(run.next(), State::Action(Action { kind:ActionKind::Require { library }, .. }) if library == "io"));
+    run.resume(json!({"library":"io","methods":{"read":"read_file"}}), false).unwrap();
+    assert_eq!(returned(run), json!(true));
+    assert_eq!(compiler::required_libraries("function main(){require('host:process/promises');}"), vec!["process"]);
+}
+
+#[test]
+fn concrete_module_entry_accepts_its_contract_annotation() {
+    let program = compile_body("/** @module Return the incremented input. */ function worker(n){return n+1;}", "worker").unwrap();
+    assert!(!program.functions["worker"].virtual_task);
+    assert_eq!(returned(Runtime::task_program(program, "worker", vec![json!(4)]).unwrap()), json!(5));
+    let program = compile_body("/** @module Return judged input. */ function worker(n){return judge(n);}\n/** @virtual Judge n; return number. */ function judge(n){}", "worker").unwrap();
+    assert!(program.functions["judge"].virtual_task);
+    assert!(compile_body("/** @module Missing implementation. */ function worker(){}", "worker").is_err());
+    assert!(compile("function main(){return worker();}\n/** @module Real code in a declaration. */ function worker(){return 1;}").is_err());
+    assert!(compile_body("/** @module Implement entry. */ function worker(){\n/** @module A separate, nested declaration. */ function worker(){return 1;} return worker();}", "worker").is_err());
 }
 
 #[test]
@@ -775,10 +840,7 @@ fn compatibility_date_invalid_and_local_components() {
         local.getFullYear(),local.getMonth(),local.getDate(),local.getHours(),local.getMinutes(),local.getSeconds(),local.getMilliseconds(),
         local.getDay(),new Date(99,0,1).getFullYear(),Number.isNaN(new Date(8640000000000001).getTime())];
     }"#)),json!([true,true,"Invalid Date",null,"null",2000,0,2,3,4,5,6,0,1999,true]));
-    for expression in ["new Date().toLocaleString()","new Date().toLocaleDateString()","new Date().toLocaleTimeString()"] {
-        let error=compile(&format!("function main(){{io.write({{}});return {expression};}}")).unwrap_err().to_string();
-        assert!(error.contains("locale data") && error.contains("toISOString"),"{error}");
-    }
+    assert_eq!(returned(runtime("function main(){const d=new Date(0);return [d.toLocaleString('en-US',{timeZone:'UTC'}),d.toLocaleDateString('en-US',{timeZone:'UTC'}),d.toLocaleTimeString('en-US',{timeZone:'UTC'})];}")),json!(["1/1/1970, 12:00:00 AM","1/1/1970","12:00:00 AM"]));
 }
 
 #[test]
@@ -853,9 +915,7 @@ fn returned(mut r: Runtime) -> Value {
 #[test]
 fn regular_expressions_validate_limits_and_resume_with_saved_state() {
     for source in [
-        r"function main(){return /(?=x)/.test('x');}",
-        r"function main(){return /(a)\1/.test('aa');}",
-        r"function main(){return /x/y.test('x');}",
+        r"function main(){return /x/v.test('x');}",
         r"function main(){return /x/gg.test('x');}",
     ] {
         assert!(compile(source).is_err(), "should reject {source}");
@@ -1318,7 +1378,6 @@ fn dynamic_regexp_constructor_evaluates_arguments_and_survives_suspension() {
 fn executable_extensions_and_unknown_data_methods_are_rejected_before_effects() {
     for expression in [
         "x!",
-        "(1,2)",
     ] {
         let error = compile(&format!(
             "function main(){{let x=1;io.write({{path:'never'}});\nreturn {expression};}}"
@@ -1719,7 +1778,6 @@ fn version_eight_rejects_javascript_extensions_at_every_source_entry() {
     // Valid-looking code can precede invalid syntax: compilation must reject
     // the entire source, including unused functions, before any effects run.
     for fragment in [
-        "class Hidden { #field=1; }",
         "yield io.read({});",
         "yield* rows;",
         "await io.read({});",
@@ -1735,7 +1793,6 @@ fn version_eight_rejects_javascript_extensions_at_every_source_entry() {
         "const infinity = value + 1e999;",
         "const hidden = data.check(1n);",
         "const runtime = process.exit();",
-        "const runtime = data.check([,]);",
         "return import('module');",
     ] {
         let body = format!(
@@ -1797,8 +1854,6 @@ fn version_eight_rejects_javascript_extensions_at_every_source_entry() {
         compile_entry(&source, "work").unwrap_or_else(|e| panic!("{fragment}: {e}"));
     }
     for source in [
-        "class Hidden { #field=1; } function main(){return 1;}",
-        "function main(){return 1;} class Unused { field=1; }",
         "import {tools} from '@agent/runtime'; function main(){return 1;}",
         "export function main(){return 1;}",
         "type Result = string; function main(){return 1;}",
@@ -2232,7 +2287,7 @@ fn loop_jumps_unwind_only_the_handlers_they_leave() {
         matches!(runtime("function main(){while(true){try{break;}catch(inner){return 'leaked';}}throw 'outside';}").next(),State::Failed(e) if e["message"]=="outside")
     );
     assert!(
-        matches!(runtime("function main(){try{while(true){}}catch(error){return 'cannot hide exhaustion';}}").next(),State::Failed(e) if e["code"]=="INSTRUCTION_BUDGET_EXHAUSTED" && e["used"]==1_000_000)
+        matches!(runtime("function main(){try{while(true){}}catch(error){return 'cannot hide exhaustion';}}").next(),State::Failed(e) if e["code"]=="INSTRUCTION_BUDGET_EXHAUSTED" && e["used"]==runtime::INSTRUCTION_LIMIT)
     );
 }
 
@@ -2421,7 +2476,6 @@ fn require_takes_a_library_name_and_gives_its_methods_to_the_hooks_of_that_sourc
     for source in [
         "function main(){const name='ppt';return require(name);}",
         "function main(){return require('ppt', 1);}",
-        "function main(){return require('host:ppt');}",
         "function main(){return require('a b');}",
     ] {
         assert!(compile(source).is_err(), "{source}");
@@ -2732,7 +2786,7 @@ function main(){
 
 #[test]
 fn jumps_and_throws_leave_exactly_the_scopes_they_cross() {
-    // At the final effect only `total` and `rows` are in scope: nothing from
+    // At the final effect only `total`, `rows`, and implicit `arguments` remain: nothing from
     // the loop bodies or try blocks remains after break, continue or throw.
     let source = r#"
 function main(){
@@ -2758,7 +2812,7 @@ function main(){
     ));
     assert_eq!(
         run.named_bindings().keys().cloned().collect::<Vec<_>>(),
-        ["rows", "total"]
+        ["arguments", "rows", "total"]
     );
 }
 

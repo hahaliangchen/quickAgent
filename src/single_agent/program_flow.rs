@@ -1,4 +1,4 @@
-//! Adapter from flow pseudocode to the existing tool/Agent boundary.
+//! Adapter from executable JS plans to the existing tool/Agent boundary.
 //! It synthesizes normal tool exchanges; it never calls filesystem/plugin APIs directly.
 use super::*;
 use crate::agent_program::{self, Action, Runtime, State, runtime::ActionKind};
@@ -156,9 +156,8 @@ pub(super) fn function_task(
     } else {
         function.description.clone()
     };
-    // The declaration decides: a @module is written as code, a @virtual is a
-    // tool loop. A program saved before @module existed has no leaf tools on a
-    // virtual declared in its main program, which was then written as code.
+    // Compilation/host linking records the legacy role here. Actual dispatch
+    // checks the durable AI ancestry in scheduled_function_task below.
     let role = if !function.virtual_task {
         "body"
     } else if function.module_task || function.leaf_tools.is_none() {
@@ -187,9 +186,50 @@ pub(super) fn function_task(
     }
     Ok(task)
 }
+/// Count AI boundaries in the durable call path, not ordinary JS frames or
+/// model-provided annotations. Fixing/reloading a module keeps its boundary.
+fn current_ai_layer(s: &Session<'_>, w: &Window) -> Result<usize> {
+    let boundary = |task: &Value| task["module"] == true || matches!(task["role"].as_str(), Some("implement" | "leaf"));
+    let minimum = w.program_task.as_ref().map(|task| {
+        if task["role"] == "leaf" { 2 } else { usize::from(boundary(task)) }
+    }).unwrap_or(0);
+    let node = w.task_node_id.as_deref().or_else(|| s.scope.strip_prefix("node:")).or(s.task_node_id.as_deref());
+    let Some(node) = node else { return Ok(minimum) };
+    let conn = agent_service::open_db(s.state.workspace.root())?;
+    let path = crate::function_frames::path(&conn, s.task, node)?;
+    Ok(path.iter().filter(|node| boundary(&node.inputs["program_task"])).count().max(minimum))
+}
+
+/// Both synchronous and concurrent dispatch use this same host-owned layer
+/// check. The source marker never chooses a tool-loop/implementation role.
+pub(super) fn scheduled_function_task(
+    s: &Session<'_>, w: &Window, program: &agent_program::Program,
+    name: &str, arguments: &[Value], captured: &BTreeMap<String, Value>,
+) -> Result<Value> {
+    let mut task = function_task(program, name, arguments, captured)?;
+    let function = &program.functions[name];
+    let parent_layer = current_ai_layer(s, w)?;
+    let layer = parent_layer + usize::from(function.virtual_task);
+    ensure!(layer <= 2,
+        "VIRTUAL_LAYER_LIMIT: {name} would enter AI layer {layer}; layer 2 is a terminal judgment/tool loop and cannot create more AI work. Ordinary JS helpers do not add a layer.");
+    if function.virtual_task {
+        if layer == 1 {
+            ensure!(captured.is_empty(), "FIRST_LAYER_ARGUMENTS_REQUIRED: pass inputs to {name} as parameters; first-layer implementations do not capture caller variables");
+            task["role"] = json!("implement");
+            task["module"] = json!(true);
+        } else {
+            ensure!(!function.module_task,
+                "SECOND_LAYER_VIRTUAL_REQUIRED: @module belongs to layer 1; use @virtual for {name} inside an implementation");
+            task["role"] = json!("leaf");
+            task["module"] = json!(false);
+        }
+    }
+    task["ai_layer"] = json!(layer);
+    Ok(task)
+}
 /// What the AI does in a function window. Only AI functions call AI: a
-/// @module is written as code, a @virtual is a tool loop, and a module that
-/// failed is fixed in place by a fixer editing its file.
+/// first-layer virtual is implemented as code, a second-layer virtual is a
+/// tool loop, and failed saved code is edited by a fixer.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Role {
     Main,
@@ -268,10 +308,10 @@ pub(super) fn find_tool() -> Value {
 pub(super) fn write_program_tool(module: bool) -> Value {
     let mut properties = json!({"source":{"type":"string","minLength":1,"description":"The complete source for this submission."}});
     let description = if module {
-        properties["probe"] = json!({"type":"boolean","description":"If true, run this small read-only probe for the current arguments and return its observations to you. Omit it to save and run the reusable module implementation."});
+        properties["probe"] = json!({"type":"boolean","description":"If true, run a small probe with the current arguments. Only read_file, read_file_lines, search_text, list_dir and workspace_info may execute: shell and writes are forbidden even if their libraries import successfully. Omit probe to save and run the reusable module with its normal permissions."});
         "Run a small read-only probe with probe:true, or submit the complete reusable module implementation. Both use the contracted function signature. A probe returns its actual result to this same author; the final implementation is saved and returns to the caller. Call it as the only call in its reply. Code in reply text is never run."
     } else {
-        properties["revise_modules"] = json!({"type":"object","description":"Optional compatible improvements to saved modules, keyed by the top-level @module name. Keep the declaration identical. On its first call, the module author revises that saved version and stores the new implementation.",
+        properties["revise_modules"] = json!({"type":"object","description":"Optional compatible improvements to saved first-layer implementations, keyed by the top-level @virtual name. Keep the declaration identical. On its first call, the author revises that saved version and stores the new implementation.",
             "additionalProperties":{"type":"object","properties":{
                 "version":{"type":"integer","minimum":1,"description":"Current saved version from the module directory."},
                 "reason":{"type":"string","minLength":1,"maxLength":2000,"description":"Concrete improvement and existing behavior to preserve."}
@@ -284,12 +324,9 @@ pub(super) fn probe_read(name: &str) -> bool {
     matches!(name, "read_file" | "read_file_lines" | "search_text" | "list_dir" | "workspace_info")
 }
 fn probe_libraries(s: &Session<'_>, definitions: &[Value]) -> agent_program::libraries::Libraries {
-    let mut libraries = static_libraries(s, definitions);
-    for methods in libraries.values_mut() {
-        methods.retain(|_, target| probe_read(target));
-    }
-    libraries.retain(|_, methods| !methods.is_empty());
-    libraries
+    // Keep the same SDK surface as the implementation. Probe permissions are
+    // enforced at dispatch, not disguised as missing libraries/methods.
+    static_libraries(s, definitions)
 }
 pub(super) fn find_main_tool() -> Value {
     function(FIND, "Search by keywords for a library method needed for this task. Matching methods become callable until your program starts. Permissions are unchanged.",
@@ -522,7 +559,7 @@ pub(super) fn call_view(task: &Value) -> Result<Value> {
         .map(|(p, v)| ((*p).to_owned(), v.clone()))
         .collect::<serde_json::Map<_, _>>();
     let mut view = json!({"name":task["name"],"signature":format!("{}function {}({})",if task["async"] == true {"async "} else {""},task["name"].as_str().context("function name missing")?,names.join(", ")),
-        "role":task["role"],"description":task["description"],"bindings":bindings,"closure":task["captured"],
+        "role":task["role"],"ai_layer":task["ai_layer"],"description":task["description"],"bindings":bindings,"closure":task["captured"],
         "binding_rule":"bindings lists actual local parameter values. Use each parameter directly as in the signature; bindings is display metadata, never another property of a parameter. Arguments bind by position only, never by name or automatic object packing. closure lists the outer variables the description names with @uses, read when this function was called; in code they are variables in scope, as in a JavaScript closure."});
     // The libraries the contract names with @uses, whose instructions it has.
     if task["skills"].as_array().is_some_and(|skills| !skills.is_empty()) {
@@ -686,21 +723,19 @@ fn install_with(
         "model-defined libraries are unsupported"
     );
     let source = args["source"].as_str().context("source is required")?;
-    let program = agent_program::compile_with_libraries(source, libraries)?;
-    // The main program is the first layer of orchestration. AI work there is a
-    // module that another AI writes as code; hooks belong in that code, since
-    // a first-layer hook is usually cut too coarse to finish (design guide §3).
-    let hooks = program
-        .functions
-        .iter()
-        .filter(|(_, function)| function.virtual_task && !function.module_task)
-        .map(|(name, _)| name.rsplit('/').next().unwrap_or(name).to_owned())
-        .collect::<BTreeSet<_>>();
-    ensure!(
-        hooks.is_empty(),
-        "a main program declares the AI work it needs as /** @module */ functions; /** @virtual */ belongs in a module's own code. Mark {} as @module: an AI then writes each one as code that reads its material and calls small @virtual helpers itself",
-        hooks.into_iter().collect::<Vec<_>>().join(", ")
-    );
+    let mut program = agent_program::compile_with_libraries(source, libraries)?;
+    // The first layer declares capabilities. The host resolves their code;
+    // the author need not choose an implementation file or a second marker.
+    for (name, function) in &mut program.functions {
+        if function.virtual_task {
+            ensure!(function.uses.is_empty(),
+                "FIRST_LAYER_ARGUMENTS_REQUIRED: pass inputs to {name} as parameters instead of @uses; the host links its implementation independently");
+            function.module_task = true;
+            function.leaf_tools = None;
+            function.leaf_libraries.clear();
+            function.skills.clear();
+        }
+    }
     ensure!(
         args.as_object().is_some_and(|args| args.keys().all(|key| matches!(key.as_str(), "source" | "revise_modules"))),
         "write_program accepts source and optional revise_modules; put program data in the code or read it with the imported tools"
@@ -741,6 +776,8 @@ pub(super) fn install_body_with(
         .program_task
         .as_ref()
         .context("define_task_body requires a current task function")?;
+    ensure!(task["role"] != "leaf" && task["ai_layer"] != 2,
+        "VIRTUAL_LAYER_LIMIT: the second virtual layer executes its focused contract as a terminal tool loop; it cannot submit another implementation or create a third AI layer");
     let name = task["name"]
         .as_str()
         .context("current function name missing")?;
@@ -752,6 +789,7 @@ pub(super) fn install_body_with(
         libraries,
         scope.keys().cloned().collect(),
     )?;
+    validate_implementation(&program)?;
     let probe = args["probe"] == true;
     if probe {
         ensure!(!program.functions.values().any(|function| function.virtual_task),
@@ -778,6 +816,11 @@ pub(super) fn install_body_with(
     Ok(
         json!({"status":"started","function":entry,"version":agent_program::VERSION,"source_hash":crate::visual_artifacts::hash(source.as_bytes())}),
     )
+}
+pub(super) fn validate_implementation(program: &agent_program::Program) -> Result<()> {
+    ensure!(!program.functions.values().any(|function| function.virtual_task && function.module_task),
+        "SECOND_LAYER_VIRTUAL_REQUIRED: declare judgment helpers with @virtual inside the implementation; @module is a first-layer module, not another implementation layer");
+    Ok(())
 }
 pub(super) fn compiled_runtime(args: &Value) -> Result<Runtime> {
     compiled_runtime_with_scope(args, BTreeMap::new())
@@ -1244,7 +1287,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                 ActionKind::Call { name, args, captured } => {
                     let program = &w.program.as_ref().unwrap().program;
                     let function = &program.functions[name];
-                    let mut task = function_task(program, name, args, captured)?;
+                    let mut task = scheduled_function_task(s, w, program, name, args, captured)?;
                     let description = task["description"].clone();
                     if !function.virtual_task {
                         task["body"] = json!({"compiled":program});
@@ -1274,7 +1317,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                     let captured = program.functions[name].uses.iter()
                         .map(|used| Ok((used.clone(), input.get(used).cloned().context("captured variable missing")?)))
                         .collect::<Result<BTreeMap<_, _>>>()?;
-                    let task = function_task(program, name, &arguments, &captured)?;
+                    let task = scheduled_function_task(s, w, program, name, &arguments, &captured)?;
                     (
                         "create_task".into(),
                         json!({"goal":name,"briefing":description,"program_task":task,"call_site":at}),
@@ -1289,7 +1332,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                         if let Some(methods) = probe_libraries(s, &definitions).get(name) {
                             (json!({"library":library,"methods":methods}), false)
                         } else {
-                            (json!({"code":"MODULE_PROBE_READ_ONLY","message":"Only read-only file methods are available in a module probe"}), true)
+                            (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{library}' in this module scope")}), true)
                         }
                     } else {
                         link(s, &definitions, library)
@@ -1539,8 +1582,9 @@ mod tests {
             "max_output_tokens":128,"yield_time_ms":10000,
         });
         let module_source = format!(r#"
-            import * as process from "host:process";
+            /** @module Read JSON statistics and return only size and n. */
             async function stats() {{
+                const process = require("host:process");
                 const result = await process.exec_command({args});
                 assert(result.running === false, "stats command must finish before parsing");
                 assert(result.exit_code === 0, "stats command failed");
@@ -1652,7 +1696,6 @@ mod tests {
     #[test]
     fn source_adapters_reject_extensions_without_installing_a_program() {
         for source in [
-            "function work(){class Hidden { #field=1; } return 1;}",
             "function work(input: string){return input;}",
             "function work(){return ai({instruction:'value'});}",
             "function work(){return io.read({});} export function unused(){return 1;}",
@@ -1671,6 +1714,59 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn virtual_layer_management_uses_durable_ancestry_not_js_depth_or_claimed_layer() {
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let s = execution_test_session(&state, &cancel);
+        execution_frame(root.path(), "implementation", crate::function_frames::ROOT,
+            json!({"name":"work","module":true,"role":"implement","ai_layer":1}));
+        execution_frame(root.path(), "helper-a", "implementation", json!({"role":"body"}));
+        execution_frame(root.path(), "helper-b", "helper-a", json!({"role":"body","ai_layer":0}));
+        let mut w = Window { task_node_id:Some("helper-b".into()), program_task:Some(json!({"role":"body"})), ..Default::default() };
+        let program = agent_program::compile_body_with_scope(
+            "function work(){return judge();}\n/** @virtual Return one judgment. */ function judge(){}",
+            "work", agent_program::libraries::builtin(), Default::default()).unwrap();
+        let task = scheduled_function_task(&s, &w, &program, "judge", &[], &Default::default()).unwrap();
+        assert_eq!(task["ai_layer"], 2);
+        assert_eq!(task["role"], "leaf");
+        assert_eq!(task["module"], false);
+        execution_frame(root.path(), "judgment", "helper-b", task);
+        execution_frame(root.path(), "leaf-helper", "judgment", json!({"role":"body","ai_layer":0}));
+        w.task_node_id = Some("leaf-helper".into());
+        // A persisted/restored window has the same boundary. A bogus layer
+        // field on an ordinary helper cannot erase its two AI ancestors.
+        let w: Window = serde_json::from_value(serde_json::to_value(w).unwrap()).unwrap();
+        let error = scheduled_function_task(&s, &w, &program, "judge", &[], &Default::default()).unwrap_err();
+        assert!(error.to_string().contains("VIRTUAL_LAYER_LIMIT"));
+        let ordinary = scheduled_function_task(&s, &w, &program, "work", &[], &Default::default()).unwrap();
+        assert_eq!(ordinary["ai_layer"], 2);
+        assert_eq!(ordinary["role"], "body");
+    }
+
+    #[test]
+    fn first_virtual_layer_links_by_contract_and_requires_explicit_arguments() {
+        let source = "/** @virtual Increment n and return a number. */ function increment(n){} console.log(increment(1));";
+        let mut first = Window::default();
+        install(&mut first, &json!({"source":source})).unwrap();
+        let program = &first.program.as_ref().unwrap().program;
+        assert!(program.functions["increment"].module_task);
+        let first = function_task(program, "increment", &[json!(1)], &Default::default()).unwrap();
+        let mut old = Window::default();
+        install(&mut old, &json!({"source":source.replace("@virtual", "@module")})).unwrap();
+        let old = function_task(&old.program.as_ref().unwrap().program, "increment", &[json!(1)], &Default::default()).unwrap();
+        assert_eq!(super::super::modules::contract(&first).unwrap().key, super::super::modules::contract(&old).unwrap().key);
+        let mut invalid = Window::default();
+        let error = install(&mut invalid, &json!({"source":"const hidden=1;\n/** @virtual Read hidden.\n * @uses hidden\n */ function work(){} work();"})).unwrap_err();
+        assert!(error.to_string().contains("FIRST_LAYER_ARGUMENTS_REQUIRED"));
+        assert!(invalid.program.is_none());
+        let mut implementation = Window { program_task:Some(json!({"name":"work","parameters":[],"arguments":[],"module":true,"role":"implement"})), ..Default::default() };
+        let error = install_body(&mut implementation, &json!({"source":"function work(){return nested();}\n/** @module More implementation. */ function nested(){}"})).unwrap_err();
+        assert!(error.to_string().contains("SECOND_LAYER_VIRTUAL_REQUIRED"));
+        assert!(implementation.program.is_none());
     }
 
     #[test]
@@ -2206,6 +2302,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_virtual_layers_link_implementations_and_run_judgment_in_parallel() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("a.txt"), "blue").unwrap();
+        std::fs::write(root.path().join("b.txt"), "green").unwrap();
+        let authors = Arc::new(AtomicUsize::new(0));
+        let leaves = Arc::new(AtomicUsize::new(0));
+        let (written, judged) = (authors.clone(), leaves.clone());
+        run_scripted(root.path(), move |body| {
+            let messages = body["messages"].as_array().unwrap();
+            match role_of(body).as_str() {
+                "main" if messages.iter().any(|m| m["name"] == "program_result") => {
+                    let transcript = body["messages"].to_string();
+                    assert!(transcript.contains("BLUE") && transcript.contains("GREEN"));
+                    reply("Done.".into())
+                }
+                "main" => reply("```js\nconsole.log(await Promise.all([summarize('a.txt'),summarize('b.txt')]));\n/** @module Read path and return its uppercase contents. */\nasync function summarize(path){}\n```".into()),
+                "implement" => {
+                    written.fetch_add(1, Ordering::SeqCst);
+                    let input: Value = serde_json::from_str(messages.iter().find(|m| m["name"] == "program_task_input").unwrap()["content"].as_str().unwrap()).unwrap();
+                    assert_eq!(input["ai_layer"], 1);
+                    reply("```js\nimport io from 'io';\n/** @module Read path and return its uppercase contents. */\nasync function summarize(path){return await collect(path);}\nasync function collect(path){const evidence=io.read({path}).content;return await judge(evidence);}\n/** @virtual Return evidence uppercased as a JSON string. */\nasync function judge(evidence){}\n```".into())
+                }
+                "leaf" => {
+                    judged.fetch_add(1, Ordering::SeqCst);
+                    let input: Value = serde_json::from_str(messages.iter().find(|m| m["name"] == "program_task_input").unwrap()["content"].as_str().unwrap()).unwrap();
+                    assert_eq!(input["ai_layer"], 2);
+                    assert!(!tool_names(body).contains(&WRITE_PROGRAM.to_owned()));
+                    reply(json!(input["bindings"]["evidence"].as_str().unwrap().to_uppercase()).to_string())
+                }
+                role => panic!("unexpected role {role}"),
+            }
+        }).await;
+        assert_eq!(authors.load(Ordering::SeqCst), 1, "host links one implementation for concurrent calls");
+        assert_eq!(leaves.load(Ordering::SeqCst), 2);
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let saved: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='module/saved'", [], |r| r.get(0)).unwrap();
+        assert_eq!(saved, 1);
+    }
+
+    #[test]
+    fn second_virtual_layer_cannot_submit_more_ai_work() {
+        let mut leaf = Window { program_task:Some(json!({"name":"judge","parameters":[],"arguments":[],"role":"leaf","ai_layer":2})), ..Default::default() };
+        let error = install_body(&mut leaf, &json!({"source":"function judge(){return again();}\n/** @virtual More AI work. */ function again(){}"})).unwrap_err();
+        assert!(error.to_string().contains("VIRTUAL_LAYER_LIMIT"), "{error:#}");
+        assert!(leaf.program.is_none());
+    }
+
+    #[tokio::test]
+    async fn module_probe_reports_shell_permission_without_hiding_the_library() {
+        let root = TestRoot::new();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let seen = attempts.clone();
+        run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" => reply("```js\nconsole.log(check());\n/** @module Return a checked result. */\nfunction check(){}\n```".into()),
+            "implement" => {
+                let step = seen.fetch_add(1, Ordering::SeqCst);
+                let observations: Vec<Value> = body["messages"].as_array().unwrap().iter()
+                    .filter(|m| m["name"] == "module_probe_result")
+                    .map(|m| serde_json::from_str(m["content"].as_str().unwrap()).unwrap()).collect();
+                assert_eq!(observations.len(), step, "each syntax must reach the same runtime permission check");
+                if step > 0 {
+                    let error = observations.last().unwrap()["error"].to_string();
+                    assert!(error.contains("MODULE_PROBE_READ_ONLY") && error.contains("probe:true")
+                        && error.contains("shell") && error.contains("omit"), "{error}");
+                }
+                let binding = match step {
+                    0 => "const process=require('host:process');",
+                    1 => "const process=require('process');",
+                    2 => "",
+                    3 => return reply("```js\n/** @module Return a checked result. */\nfunction check(){return 'checked';}\n```".into()),
+                    _ => panic!("unexpected author request"),
+                };
+                let import = if step == 2 { "import process from 'process';" } else { "" };
+                let source = format!("{import}\n/** @module Return a checked result. */\nfunction check(){{{binding} return process.exec_command({{cmd:'echo forbidden > forbidden.txt'}});}}");
+                json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                    "tool_calls":[{"id":format!("probe-{step}"),"type":"function","function":{
+                        "name":"write_program","arguments":json!({"source":source,"probe":true}).to_string()}}]}}]})
+            }
+            role => panic!("unexpected role {role}"),
+        }).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        assert!(!root.path().join("forbidden.txt").exists());
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let shells: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='shell/start'", [], |r| r.get(0)).unwrap();
+        assert_eq!(shells, 0);
+    }
+
+    #[tokio::test]
     async fn module_author_observes_two_probes_before_installing_reusable_code() {
         let root = TestRoot::new();
         std::fs::write(root.path().join("first.txt"), "catalogue=blue.txt").unwrap();
@@ -2228,18 +2413,19 @@ mod tests {
                     match seen.fetch_add(1, Ordering::SeqCst) {
                         0 => probe("blocked-write", "import * as io from 'host:io';\nfunction readColour(path) { io.write({path:'forbidden.txt',content:'bad'}); }"),
                         1 => {
-                            assert!(body["messages"].to_string().contains("PROGRAM_SOURCE_INVALID"));
+                            assert_eq!(observations[0]["status"], "failed");
+                            assert!(observations[0]["error"].to_string().contains("MODULE_PROBE_READ_ONLY"));
                             probe("read-pointer", "import * as io from 'host:io';\nfunction readColour(path) { return io.read({path:path}).content; }")
                         }
                         2 => {
-                            assert_eq!(observations[0]["status"], "completed");
-                            let actual = observations[0]["result"].as_str().unwrap().strip_prefix("catalogue=").unwrap();
+                            assert_eq!(observations[1]["status"], "completed");
+                            let actual = observations[1]["result"].as_str().unwrap().strip_prefix("catalogue=").unwrap();
                             assert_eq!(actual, "blue.txt");
                             probe("read-catalogue", &format!("import * as io from 'host:io';\nfunction readColour(path) {{ return io.read({{path:{}}}).content; }}", json!(actual)))
                         }
                         3 => {
-                            assert_eq!(observations.len(), 2);
-                            assert_eq!(observations[1]["result"], "blue");
+                            assert_eq!(observations.len(), 3);
+                            assert_eq!(observations[2]["result"], "blue");
                             reply("```js\nimport * as io from 'host:io';\nfunction readColour(path) {\n  const catalogue = io.read({path:path}).content.split('=')[1];\n  return io.read({path:catalogue}).content;\n}\n```".into())
                         }
                         _ => panic!("the second invocation should load the saved implementation"),
@@ -2252,7 +2438,7 @@ mod tests {
         assert!(!root.path().join("forbidden.txt").exists());
         let conn = agent_service::open_db(root.path()).unwrap();
         let count = |kind| conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind=?1", [kind], |row| row.get::<_, i64>(0)).unwrap();
-        assert_eq!(count("program/probe_result"), 2);
+        assert_eq!(count("program/probe_result"), 3);
         assert_eq!(count("module/saved"), 1);
         assert_eq!(count("module/loaded"), 1);
         let output: String = conn.query_row("SELECT json_extract(data,'$.output') FROM agent_task_events WHERE kind='program/result'", [], |row| row.get(0)).unwrap();
@@ -2332,9 +2518,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_rejects_virtual_work_before_effects_and_accepts_a_module() {
+    async fn main_module_is_implemented_before_its_result_is_written() {
         let root = TestRoot::new();
-        const SOURCE: &str = "import * as io from \"host:io\";\nconst result = check();\nio.write({path: \"checked.txt\", content: result});\n/** @virtual */\nfunction check() {\n  // Return a string.\n}";
+        const SOURCE: &str = "import * as io from \"host:io\";\nconst result = check();\nio.write({path: \"checked.txt\", content: result});\n/** @module */\nfunction check() {\n  // Return a string.\n}";
         let requests = Arc::new(AtomicUsize::new(0));
         let seen = requests.clone();
         let path = root.path().join("checked.txt");
@@ -2342,18 +2528,13 @@ mod tests {
             0 => reply(format!("```js\n{SOURCE}\n```")),
             1 => {
                 assert!(!path.exists());
-                let messages = body["messages"].to_string();
-                assert!(messages.contains("PROGRAM_SOURCE_INVALID") && messages.contains("Mark check as @module"));
-                reply(format!("```js\n{}\n```", SOURCE.replace("@virtual", "@module")))
-            }
-            2 => {
                 assert_eq!(role_of(body), "implement");
                 reply("```js\nfunction check() { return 'checked'; }\n```".into())
             }
-            3 => reply("Done.".into()),
+            2 => reply("Done.".into()),
             _ => panic!("unexpected request"),
         }).await;
-        assert_eq!(requests.load(Ordering::SeqCst), 4);
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
         assert_eq!(std::fs::read_to_string(root.path().join("checked.txt")).unwrap(), "checked");
     }
 
@@ -2936,7 +3117,7 @@ mod tests {
                             let text = body.to_string();
                             assert!(!text.contains("texts.push(io.read") && !text.contains("await summarize("), "no earlier code sits in the new turn's context");
                             let listed = messages.iter().find(|m| m["name"] == "chat_modules").expect("the chat's modules are listed");
-                            assert!(listed["content"].as_str().unwrap().contains("/** @module */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}"), "{listed}");
+                            assert!(listed["content"].as_str().unwrap().contains("/** @virtual */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}"), "{listed}");
                             assert!(tool_names(&body).contains(&"read_session_history".to_owned()), "the main AI reads history itself");
                             json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
                                 "tool_calls":[{"id":"history","type":"function","function":{"name":"read_session_history","arguments":json!({"programs":true,"directory":".","turn":1}).to_string()}}]}}]})

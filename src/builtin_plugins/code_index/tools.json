@@ -1,0 +1,566 @@
+[
+  {
+    "name": "code_index__status",
+    "description": "Inspect existing Rust/TS index cache and parse-coverage issues without rebuilding it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": "string",
+          "enum": [
+            "rust",
+            "typescript"
+          ],
+          "description": "typescript also indexes JS/JSX/TSX; discover the project stack first."
+        },
+        "workspace_root": {
+          "type": "string",
+          "description": "Defaults to current workspace; relative roots resolve inside it."
+        }
+      },
+      "required": [
+        "language"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "exists": {
+          "type": "boolean"
+        },
+        "index": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "unindexed_total": {
+                  "type": "integer"
+                },
+                "coverage_issues": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "file_path": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "error": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "coverage_issues_truncated": {
+                  "type": "boolean"
+                },
+                "freshness_check": {
+                  "type": "string"
+                },
+                "files_indexed": {
+                  "type": "integer"
+                },
+                "symbols_indexed": {
+                  "type": "integer"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files_indexed": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "symbols_indexed": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "code_index__index",
+    "description": "Build or incrementally refresh the existing syn/SWC source index. Updates cache only, never project source. Scoped queries initialize and maintain indexes automatically; rebuilding first is optional.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": "string",
+          "enum": [
+            "rust",
+            "typescript"
+          ],
+          "description": "typescript also indexes JS/JSX/TSX; discover the project stack first."
+        },
+        "workspace_root": {
+          "type": "string",
+          "description": "Defaults to current workspace; relative roots resolve inside it."
+        }
+      },
+      "required": [
+        "language"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "files_indexed": {
+          "type": "integer"
+        },
+        "symbols_indexed": {
+          "type": "integer"
+        },
+        "generated_at_unix": {
+          "type": "integer"
+        },
+        "index_path": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "code_index__list",
+    "description": "List a paged Rust/TS symbol outline, optionally within a file or directory. Returns syntax facts and exact source positions, not architecture judgments.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": "string",
+          "enum": [
+            "rust",
+            "typescript"
+          ],
+          "description": "typescript also indexes JS/JSX/TSX; discover the project stack first."
+        },
+        "workspace_root": {
+          "type": "string",
+          "description": "Defaults to current workspace; relative roots resolve inside it."
+        },
+        "file_path": {
+          "type": "string"
+        },
+        "directory": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "include_locals": {
+          "type": "boolean"
+        },
+        "detailed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "language"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "symbols": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "file_path": {
+                "type": "string"
+              },
+              "start_line": {
+                "type": "integer"
+              },
+              "end_line": {
+                "type": "integer"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "signature": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "page": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "next_offset": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          }
+        },
+        "index": {
+          "type": "object",
+          "properties": {
+            "unindexed_total": {
+              "type": "integer"
+            },
+            "coverage_issues": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "file_path": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "coverage_issues_truncated": {
+              "type": "boolean"
+            },
+            "freshness_check": {
+              "type": "string"
+            },
+            "files_indexed": {
+              "type": "integer"
+            },
+            "symbols_indexed": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "code_index__search",
+    "description": "Search existing Rust/TS symbols by names, signatures and descriptions; narrow by file or directory. Initializes/refreshes the cache automatically. Inspect coverage issues before treating empty matches as absence.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": "string",
+          "enum": [
+            "rust",
+            "typescript"
+          ],
+          "description": "typescript also indexes JS/JSX/TSX; discover the project stack first."
+        },
+        "workspace_root": {
+          "type": "string",
+          "description": "Defaults to current workspace; relative roots resolve inside it."
+        },
+        "file_path": {
+          "type": "string"
+        },
+        "directory": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "include_locals": {
+          "type": "boolean"
+        },
+        "detailed": {
+          "type": "boolean"
+        },
+        "query": {
+          "type": "string"
+        },
+        "match_mode": {
+          "type": "string",
+          "enum": [
+            "any",
+            "all",
+            "phrase"
+          ]
+        }
+      },
+      "required": [
+        "language",
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "matches": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "file_path": {
+                "type": "string"
+              },
+              "start_line": {
+                "type": "integer"
+              },
+              "end_line": {
+                "type": "integer"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "signature": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "page": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer"
+            },
+            "offset": {
+              "type": "integer"
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "next_offset": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          }
+        },
+        "index": {
+          "type": "object",
+          "properties": {
+            "unindexed_total": {
+              "type": "integer"
+            },
+            "coverage_issues": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "file_path": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "coverage_issues_truncated": {
+              "type": "boolean"
+            },
+            "freshness_check": {
+              "type": "string"
+            },
+            "files_indexed": {
+              "type": "integer"
+            },
+            "symbols_indexed": {
+              "type": "integer"
+            }
+          }
+        },
+        "query": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "code_index__read",
+    "description": "Read the exact current source of a Rust/TS symbol and syntax-based callers/callees. Supply symbol_id from search/list, or file_path and name. Relationships do not prove dynamic dispatch or runtime reachability.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "type": "string",
+          "enum": [
+            "rust",
+            "typescript"
+          ],
+          "description": "typescript also indexes JS/JSX/TSX; discover the project stack first."
+        },
+        "workspace_root": {
+          "type": "string",
+          "description": "Defaults to current workspace; relative roots resolve inside it."
+        },
+        "symbol_id": {
+          "type": "string"
+        },
+        "file_path": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "include_context": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "language"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "file_path": {
+              "type": "string"
+            },
+            "start_line": {
+              "type": "integer"
+            },
+            "end_line": {
+              "type": "integer"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "signature": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "type": "string"
+        },
+        "relationship_accuracy": {
+          "type": "string"
+        },
+        "callers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        "callees": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        "suggested_reads": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        "index": {
+          "type": "object",
+          "properties": {
+            "unindexed_total": {
+              "type": "integer"
+            },
+            "coverage_issues": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "file_path": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "error": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "coverage_issues_truncated": {
+              "type": "boolean"
+            },
+            "freshness_check": {
+              "type": "string"
+            },
+            "files_indexed": {
+              "type": "integer"
+            },
+            "symbols_indexed": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    }
+  }
+]

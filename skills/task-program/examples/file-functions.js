@@ -1,4 +1,4 @@
-import * as io from "host:io";
+import * as io from "io";
 // 普通函数直接执行文件操作；内容写在代码里，不请求 AI 生成。
 const files = [
   {path: "notes/a.txt", content: "第一份文件"},
