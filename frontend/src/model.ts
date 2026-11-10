@@ -57,6 +57,8 @@ export interface ToolItem {
   readonly step?: number | undefined
   /** The program line that made the call. */
   readonly line?: number | undefined
+  /** In "approve for me" mode, what the AI reviewer decided about this call. */
+  readonly review?: { readonly decision: string; readonly reason: string } | undefined
 }
 
 /** A @virtual or @module call the program made. It runs in a frame of its own. */
@@ -386,6 +388,12 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
       results.set(id, { ...result, text: JSON.stringify({ ...value, ...completion }) })
     }
   }
+  const reviews = new Map<string, { decision: string; reason: string }>()
+  for (const event of events) {
+    if (event.type !== 'approval/review') continue
+    const id = stringOf(event.data.call_id)
+    if (id !== undefined) reviews.set(id, { decision: stringOf(event.data.decision) ?? '', reason: stringOf(event.data.reason) ?? '' })
+  }
   const frames = frameRecords(events)
   const childByCall = new Map<string, string>()
   for (const [id, frame] of frames) if (frame.role === 'temp' && frame.callId !== undefined) childByCall.set(frame.callId, id)
@@ -534,7 +542,7 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
           break
         }
         const location = recordOf(event.data.program_location)
-        items.push({ kind: 'tool', key, callId, name, arguments: raw, time: event.time, result, frame, step: numberOf(event.data.step), line: numberOf(location.line) })
+        items.push({ kind: 'tool', key, callId, name, arguments: raw, time: event.time, result, frame, step: numberOf(event.data.step), line: numberOf(location.line), review: reviews.get(callId) })
         break
       }
       case 'program/start':

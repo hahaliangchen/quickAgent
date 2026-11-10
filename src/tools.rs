@@ -358,7 +358,7 @@ impl Workspace {
         Ok(WorkspaceInfo {
             workspace_root: workspace.root.display().to_string(),
             platform: std::env::consts::OS.to_string(),
-            allowed_scope: "reads can use accessible absolute paths; structured writes must stay inside the selected workspace_root, including resolved symlinks and junctions; relative paths resolve below workspace_root".to_string(),
+            allowed_scope: "reads can use accessible absolute paths, and outside workspace_root they wait for the user's approval unless the permission mode is full access; structured writes must stay inside the selected workspace_root, including resolved symlinks and junctions; relative paths resolve below workspace_root".to_string(),
             default_ignored_dirs: NOISE_DIRS.to_vec(),
         })
     }

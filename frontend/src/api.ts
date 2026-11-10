@@ -6,7 +6,7 @@ export interface SkillPackage {
   pages: { id: string; title: string; entry: string; renderer: string }[]
 }
 
-export type PermissionMode = 'read_only' | 'workspace_write' | 'ask' | 'full_access'
+export type PermissionMode = 'read_only' | 'workspace_write' | 'ask' | 'auto_review' | 'full_access'
 
 export interface RequestContextMeta {
   readonly id: number
@@ -171,6 +171,7 @@ export interface ModelCatalog {
 }
 
 export interface SettingsData {
+  readonly web_search_provider?: string | null
   readonly bash_path?: string | null
   readonly pwsh_path?: string | null
   readonly shell_environment?: import('./shellSetup.ts').ShellStatus
@@ -198,6 +199,7 @@ export interface SaveProviderInput {
 }
 
 export interface SaveSettingsInput {
+  readonly web_search_provider?: string
   readonly bash_path?: string
   readonly pwsh_path?: string
   readonly plugin_models?: Readonly<Record<string,readonly ModelRef[]>>

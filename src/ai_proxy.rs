@@ -122,6 +122,8 @@ pub(crate) struct AiProxyConfig {
     plugin_generation: HashMap<String, crate::model_settings::PluginGeneration>,
     #[serde(default)]
     providers: HashMap<String, ProviderConfig>,
+    #[serde(default)]
+    web_search_provider: Option<String>,
     #[serde(flatten)]
     extra: HashMap<String, Value>,
 }
@@ -216,25 +218,86 @@ pub(crate) fn apply_agent_config(
         .collect();
 }
 
-pub(crate) fn dsh_config_path() -> std::path::PathBuf {
-    let home = std::env::var_os("DSH_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE").map(|v| std::path::PathBuf::from(v).join(".dsh"))
-        })
-        .or_else(|| std::env::var_os("HOME").map(|v| std::path::PathBuf::from(v).join(".dsh")))
-        .unwrap_or_else(|| std::path::PathBuf::from(".dsh"));
-    let profile = std::env::var("DSH_PROFILE").unwrap_or_else(|_| "web".into());
-    home.join("profiles").join(profile).join("cordis.patch.yml")
+/// The app's own configuration directory: `GROW_CONFIG_DIR`, else `grow`
+/// under the platform's configuration directory (`%APPDATA%` on Windows,
+/// `$XDG_CONFIG_HOME` or `~/.config` elsewhere).
+pub(crate) fn config_dir() -> std::path::PathBuf {
+    config_dir_from(|name| std::env::var_os(name), cfg!(windows))
+}
+
+fn config_dir_from(var: impl Fn(&str) -> Option<std::ffi::OsString>, windows: bool) -> std::path::PathBuf {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty()).map(std::path::PathBuf::from);
+    if let Some(dir) = set("GROW_CONFIG_DIR") {
+        return dir;
+    }
+    let base = if windows {
+        set("APPDATA").or_else(|| set("USERPROFILE").map(|home| home.join("AppData").join("Roaming")))
+    } else {
+        set("XDG_CONFIG_HOME").or_else(|| set("HOME").map(|home| home.join(".config")))
+    };
+    base.unwrap_or_else(|| std::path::PathBuf::from(".config")).join("grow")
+}
+
+/// Model providers: `providers.yml` in the configuration directory. Its
+/// generation settings, skill packages and credentials sit beside it.
+pub(crate) fn config_path() -> std::path::PathBuf {
+    config_dir().join("providers.yml")
 }
 
 fn credentials_path(config_path: &Path) -> std::path::PathBuf {
-    config_path
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("DSH profile path has a home directory")
-        .join(".credentials.yaml")
+    config_path.with_file_name("credentials.yaml")
+}
+
+/// Copy a configuration made by DSH (`~/.dsh`, or `DSH_HOME`) into the app's
+/// own directory, once, when the app has none yet. The DSH files are left
+/// untouched and are never read again afterwards.
+pub(crate) fn import_dsh_config(target: &Path) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let home = std::env::var_os("DSH_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|home| std::path::PathBuf::from(home).join(".dsh")));
+    match home {
+        Some(home) => import_dsh_config_from(target, &home),
+        None => Ok(None),
+    }
+}
+
+fn import_dsh_config_from(target: &Path, home: &Path) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let providers = target.join("providers.yml");
+    let profile = home.join("profiles").join("web");
+    let source = profile.join("cordis.patch.yml");
+    if providers.exists() || !source.is_file() {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(target)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let files = [
+        (profile.join("agent-generation.yml"), "agent-generation.yml"),
+        (profile.join("skill-packages.json"), "skill-packages.json"),
+        (home.join(".credentials.yaml"), "credentials.yaml"),
+        (home.join(".env"), ".env"),
+        // Copied last: its presence marks a complete import.
+        (source, "providers.yml"),
+    ];
+    for (from, name) in files {
+        let to = target.join(name);
+        if !from.is_file() || to.exists() {
+            continue;
+        }
+        let temporary = target.join(format!(".{name}.import.tmp"));
+        std::fs::copy(&from, &temporary)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&temporary, &to)?;
+    }
+    Ok(Some(home.to_path_buf()))
 }
 
 fn generation_settings_path(config_path: &Path) -> std::path::PathBuf {
@@ -453,6 +516,8 @@ pub(crate) fn load_config(config_path: &Path) -> anyhow::Result<AiProxyConfig> {
         config.default_provider = config.orchestrator_provider.clone();
     }
     let generation = read_yaml(&generation_settings_path(config_path), json!({}))?;
+    config.web_search_provider = generation["web_search_provider"].as_str()
+        .filter(|id| !id.trim().is_empty()).map(str::to_owned);
     let shell = crate::shell_environment::read_settings(config_path)?;
     config.bash_path = shell.bash_path;
     config.pwsh_path = shell.pwsh_path;
@@ -549,6 +614,27 @@ fn disk_revision(config_path: &Path) -> anyhow::Result<String> {
     Ok(format!("{:016x}", hasher.finish()))
 }
 
+fn web_provider(config: &AiProxyConfig) -> anyhow::Result<(&str, &ProviderConfig)> {
+    let id = config.web_search_provider.as_deref()
+        .context("WEB_NOT_CONFIGURED: choose a DeepSeek credential in Settings > Tools > Web search")?;
+    let provider = config.providers.get(id)
+        .context("WEB_NOT_CONFIGURED: the selected web search provider no longer exists")?;
+    let url = reqwest::Url::parse(&provider.url)?;
+    anyhow::ensure!(url.scheme() == "https" && url.host_str() == Some("api.deepseek.com")
+        && url.port_or_known_default() == Some(443) && url.username().is_empty() && url.password().is_none(),
+        "WEB_PROVIDER_UNSUPPORTED: web search currently requires an official DeepSeek provider");
+    anyhow::ensure!(!provider.api_key.is_empty(), "WEB_NOT_CONFIGURED: add an API key to the selected DeepSeek provider");
+    Ok((id, provider))
+}
+
+/// Resolve credentials inside the host. No key is accepted in tool arguments or results.
+pub(crate) fn web_search_credentials(config_path: &Path) -> anyhow::Result<(String, String)> {
+    let config = load_config(config_path)
+        .map_err(|_| anyhow::anyhow!("WEB_CONFIGURATION_ERROR: cannot load the saved provider settings"))?;
+    let (id, provider) = web_provider(&config)?;
+    Ok((id.to_owned(), provider.api_key.clone()))
+}
+
 fn settings_view(config: &AiProxyConfig, revision: String) -> Value {
     let mut providers: Vec<_> = config
         .providers
@@ -577,6 +663,7 @@ fn settings_view(config: &AiProxyConfig, revision: String) -> Value {
         "fast_mode": config.fast_mode,
                 "visual_tool":config.visual_tool,"delegate_agent":config.delegate_agent,
         "plugin_models":config.plugin_models,"plugin_generation":config.plugin_generation,
+        "web_search_provider":config.web_search_provider,
     })
 }
 
@@ -899,6 +986,9 @@ struct ProviderEdit {
 #[derive(Deserialize)]
 struct SettingsEdit {
     revision: String,
+    /// Omitted preserves the selection; an empty string disables web search.
+    #[serde(default)]
+    web_search_provider: Option<String>,
     #[serde(default)]
     bash_path: Option<String>,
     #[serde(default)]
@@ -1237,6 +1327,12 @@ fn save_settings(
         providers.insert(id, provider);
     }
     config.providers = providers;
+    if let Some(provider) = request.web_search_provider {
+        config.web_search_provider = nonempty(Some(provider));
+    }
+    if config.web_search_provider.is_some() {
+        web_provider(&config)?;
+    }
     config.model_capabilities = model_capabilities;
     config.orchestrator_provider = nonempty(request.orchestrator_provider);
     config.orchestrator_model = nonempty(request.orchestrator_model);
@@ -1396,12 +1492,12 @@ fn save_settings(
     );
     anyhow::ensure!(
         credentials.get("version").and_then(Value::as_u64) == Some(1),
-        "unsupported DSH credentials version"
+        "unsupported credentials version"
     );
     let refs = credentials
         .get_mut("refs")
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| anyhow::anyhow!("DSH credentials refs must be a mapping"))?;
+        .ok_or_else(|| anyhow::anyhow!("credentials refs must be a mapping"))?;
     let old_providers = plugin_config(&patch, "llm-pi-ai")
         .and_then(|v| v.get("providers"))
         .and_then(Value::as_object)
@@ -1498,6 +1594,7 @@ fn save_settings(
     let original_generation = read_yaml(&generation_path, json!({}))?;
     let mut generation_settings = original_generation.clone();
     let current_generation = json!({
+        "web_search_provider": config.web_search_provider,
         "bash_path": config.bash_path,
         "pwsh_path": config.pwsh_path,
         "provider_compatibility":config.providers.iter().map(|(id,p)|(id.clone(),json!({"prefix_system_messages":p.extra.get("prefixSystemMessages").and_then(Value::as_bool).unwrap_or(false)}))).collect::<HashMap<_,_>>(),
@@ -2222,6 +2319,84 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_search_credentials_are_explicit_independent_and_preserved_by_other_settings_edits() {
+        let root = std::env::temp_dir().join(crate::visual_artifacts::new_id());
+        let path = root.join("profiles/web/cordis.patch.yml");
+        write_yaml_atomic(&path,&json!([
+            {"id":"llm-pi-ai","config":{"providers":{
+                "main":{"baseURL":"https://main.example/v1","api":"openai-completions","apiKeyEnv":"MAIN_KEY","models":[{"id":"main-model"}]},
+                "search-a":{"baseURL":"https://api.deepseek.com/v1","api":"openai-completions","apiKeyEnv":"SEARCH_A_KEY","models":[{"id":"deepseek-flash"}]},
+                "search-b":{"baseURL":"https://api.deepseek.com/v1","api":"openai-completions","apiKeyEnv":"SEARCH_B_KEY","models":[{"id":"deepseek-flash"}]}
+            }}},
+            {"id":"agent-default-model","config":{"provider":"main","model":"main-model"}}
+        ])).unwrap();
+        write_yaml_atomic(&credentials_path(&path),&json!({"version":1,"refs":{"MAIN_KEY":"main-secret","SEARCH_A_KEY":"a-secret","SEARCH_B_KEY":"b-secret"},"records":{}})).unwrap();
+        assert!(web_search_credentials(&path).unwrap_err().to_string().contains("WEB_NOT_CONFIGURED"));
+        let initial=load_config(&path).unwrap();
+        let view=settings_view(&initial,disk_revision(&path).unwrap());
+        assert!(!view.to_string().contains("a-secret"));
+        let edit=|selection:Option<&str>,main:&str,model:&str| {
+            let latest=settings_view(&load_config(&path).unwrap(),disk_revision(&path).unwrap());
+            let mut value=json!({"revision":latest["revision"],"providers":latest["providers"],"orchestrator_provider":main,"orchestrator_model":model});
+            if let Some(id)=selection { value["web_search_provider"]=json!(id); }
+            serde_json::from_value::<SettingsEdit>(value).unwrap()
+        };
+        save_settings(&path,edit(Some("search-b"),"main","main-model")).unwrap().unwrap();
+        assert_eq!(web_search_credentials(&path).unwrap(),("search-b".into(),"b-secret".into()));
+        assert_eq!(load_config(&path).unwrap().orchestrator_provider.as_deref(),Some("main"));
+        // Switching the conversation's provider must not switch the search key.
+        save_settings(&path,edit(None,"search-a","deepseek-flash")).unwrap().unwrap();
+        assert_eq!(web_search_credentials(&path).unwrap().0,"search-b");
+        assert!(save_settings(&path,edit(Some("main"),"search-a","deepseek-flash")).unwrap_err().to_string().contains("WEB_PROVIDER_UNSUPPORTED"));
+        assert_eq!(web_search_credentials(&path).unwrap().0,"search-b");
+        save_settings(&path,edit(Some(""),"main","main-model")).unwrap().unwrap();
+        assert!(web_search_credentials(&path).unwrap_err().to_string().contains("WEB_NOT_CONFIGURED"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configuration_lives_in_the_apps_own_directory() {
+        let vars = |pairs: &'static [(&'static str, &'static str)]| move |name: &str| pairs.iter().find(|(key, _)| *key == name).map(|(_, value)| std::ffi::OsString::from(value));
+        assert_eq!(config_dir_from(vars(&[("HOME", "/home/u")]), false), std::path::PathBuf::from("/home/u/.config/grow"));
+        assert_eq!(config_dir_from(vars(&[("HOME", "/home/u"), ("XDG_CONFIG_HOME", "/x")]), false), std::path::PathBuf::from("/x/grow"));
+        assert_eq!(config_dir_from(vars(&[("HOME", "/home/u"), ("GROW_CONFIG_DIR", "/custom")]), false), std::path::PathBuf::from("/custom"));
+        assert_eq!(config_dir_from(vars(&[("APPDATA", "C:/Users/u/AppData/Roaming")]), true), std::path::PathBuf::from("C:/Users/u/AppData/Roaming").join("grow"));
+        assert_eq!(config_dir_from(vars(&[("HOME", "/home/u"), ("DSH_HOME", "/home/u/.dsh")]), false), std::path::PathBuf::from("/home/u/.config/grow"));
+        assert_eq!(credentials_path(std::path::Path::new("/c/grow/providers.yml")), std::path::PathBuf::from("/c/grow/credentials.yaml"));
+    }
+
+    #[test]
+    fn a_dsh_configuration_is_copied_once_and_left_untouched() {
+        let root = std::env::temp_dir().join(crate::visual_artifacts::new_id());
+        let home = root.join("dsh");
+        let target = root.join("grow");
+        std::fs::create_dir_all(home.join("profiles/web")).unwrap();
+        std::fs::write(home.join("profiles/web/cordis.patch.yml"), "- id: llm-pi-ai\n").unwrap();
+        std::fs::write(home.join("profiles/web/agent-generation.yml"), "bash_path: /bin/bash\n").unwrap();
+        std::fs::write(home.join("profiles/web/skill-packages.json"), "[]").unwrap();
+        std::fs::write(home.join(".credentials.yaml"), "version: 1\n").unwrap();
+        std::fs::write(home.join("settings.yaml"), "dsh only").unwrap();
+        assert_eq!(import_dsh_config_from(&target, &home).unwrap(), Some(home.clone()));
+        for (name, content) in [("providers.yml", "- id: llm-pi-ai\n"), ("agent-generation.yml", "bash_path: /bin/bash\n"), ("skill-packages.json", "[]"), ("credentials.yaml", "version: 1\n")] {
+            assert_eq!(std::fs::read_to_string(target.join(name)).unwrap(), content, "{name}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(target.join(name)).unwrap().permissions().mode() & 0o777, 0o600, "{name}");
+            }
+        }
+        assert!(!target.join("settings.yaml").exists() && !target.join(".env").exists());
+        assert!(std::fs::read_dir(&target).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+        std::fs::write(target.join("providers.yml"), "- id: changed\n").unwrap();
+        std::fs::write(home.join("profiles/web/cordis.patch.yml"), "- id: newer dsh\n").unwrap();
+        assert_eq!(import_dsh_config_from(&target, &home).unwrap(), None, "imported only once");
+        assert_eq!(std::fs::read_to_string(target.join("providers.yml")).unwrap(), "- id: changed\n");
+        assert_eq!(std::fs::read_to_string(home.join(".credentials.yaml")).unwrap(), "version: 1\n", "DSH files stay as they were");
+        assert_eq!(import_dsh_config_from(&root.join("empty"), &root.join("no-dsh")).unwrap(), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn retired_role_settings_are_not_executed_or_exposed_and_saved_files_survive() {

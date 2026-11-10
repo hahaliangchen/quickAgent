@@ -114,7 +114,7 @@ See the [desktop guide](desktop/README.md) for development, packaging, and platf
 | `WORKSPACE_ROOT` | Default task workspace; the startup directory by default. |
 | `AGENT_BIND` | Agent service address; defaults to `127.0.0.1:3001`. |
 | `MCP_BIND` | MCP service address; defaults to `127.0.0.1:3000`, with `/mcp` as its endpoint. |
-| `DSH_HOME`, `DSH_PROFILE` | Configuration directory and profile; default to `~/.dsh` and `web`. |
+| `GROW_CONFIG_DIR` | Configuration directory; defaults to `~/.config/grow` (honours `XDG_CONFIG_HOME`; `%APPDATA%\grow` on Windows). On first start without a configuration, the old one is copied once from `~/.dsh`. |
 | `AGENT_WEB_DIR` | Frontend build output directory; defaults to `frontend/dist`. |
 
 Configuration and conversations are stored locally. The desktop app uses the system application data directory by default; projects can be selected in the interface.

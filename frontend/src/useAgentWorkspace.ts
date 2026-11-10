@@ -45,6 +45,7 @@ export function useAgentWorkspace() {
   const [settingsOpen, setSettingsOpen] = useState(isSettingsRoute)
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
   const [selectedModelOverride, setSelectedModelOverride] = useState<string>()
+  const [selectedProviderOverride, setSelectedProviderOverride] = useState<string>()
   const [selectedEffortOverride, setSelectedEffortOverride] = useState<string | null>()
   const [selectedFastModeOverride, setSelectedFastModeOverride] = useState<boolean>()
 
@@ -93,6 +94,7 @@ export function useAgentWorkspace() {
 
   useEffect(() => {
     setSelectedModelOverride(undefined)
+    setSelectedProviderOverride(undefined)
     setSelectedEffortOverride(undefined)
     setSelectedFastModeOverride(undefined)
   }, [taskId])
@@ -206,6 +208,7 @@ export function useAgentWorkspace() {
 
   const selectModel = useCallback(async (providerId: string, modelId: string): Promise<void> => {
     setSelectedModelOverride(modelId)
+    setSelectedProviderOverride(providerId)
     try {
       const latest = settings ?? await api.getSettings()
       const capability = latest.providers.find(p => p.id === providerId)?.model_capabilities[modelId]
@@ -293,7 +296,12 @@ export function useAgentWorkspace() {
   const requestedEffort = selectedEffortOverride !== undefined
     ? selectedEffortOverride
     : (task?.reasoning_effort ?? settings?.reasoning_effort ?? '')
-  const modelProvider = settings?.providers.find(p => p.models.includes(modelName ?? ''))
+  // The same model can be offered by several providers, e.g. a personal and a
+  // company key: a model is identified by its provider and its id together.
+  const requestedProvider = selectedProviderOverride ?? task?.provider_name ?? settings?.orchestrator_provider ?? undefined
+  const modelProvider = settings?.providers.find(p => p.id === requestedProvider && p.models.includes(modelName ?? ''))
+    ?? settings?.providers.find(p => p.models.includes(modelName ?? ''))
+  const modelProviderId = modelProvider?.id ?? requestedProvider
   const reasoningEffort = resolveEffort(requestedEffort, modelProvider?.model_capabilities[modelName ?? '']?.reasoning_efforts ?? [])
   const fastMode = selectedFastModeOverride !== undefined
     ? selectedFastModeOverride
@@ -324,6 +332,7 @@ export function useAgentWorkspace() {
         content,requestId:attachment?.requestId??randomId(),
         permission_mode: permissionMode,
         model: modelName ?? undefined,
+        provider: modelProviderId,
         reasoning_effort: reasoningEffort ? reasoningEffort : undefined,
         fast_mode: fastMode,
       })
@@ -336,7 +345,7 @@ export function useAgentWorkspace() {
       setNotice(messageOf(cause))
       return false
     }
-  }, [api, activeWorkspace, projects, sidebarMode, fastMode, modelName, reasoningEffort, refreshTasks, session.reload, taskId])
+  }, [api, activeWorkspace, projects, sidebarMode, fastMode, modelName, modelProviderId, reasoningEffort, refreshTasks, session.reload, taskId])
 
   const stop = useCallback(() => {
     if (taskId === undefined) return
@@ -360,7 +369,7 @@ export function useAgentWorkspace() {
   return {
     info, settings, tasks, allTasks, taskId, task, parent, parentId, session,
     ready, isChild, running, heroPhase, composerNote,
-    modelName, reasoningEffort, fastMode,
+    modelName, modelProviderId, reasoningEffort, fastMode,
     projects, workspaces, activeWorkspace, selectWorkspace, addWorkspace, removeWorkspace, renameWorkspace,
     sidebarMode, changeSidebarMode, updateSession, deleteSession,
     folderDialogOpen, openFolderDialog, closeFolderDialog,

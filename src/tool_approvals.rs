@@ -40,10 +40,10 @@ pub fn needs_approval(
     if crate::shell_process::is_tool(name) {
         return name != "kill_session" && (
             (cfg!(windows) && (ban_execution || !matches!(mode, PermissionMode::FullAccess)))
-            || (!cfg!(windows) && matches!(mode, PermissionMode::Ask))
+            || (!cfg!(windows) && matches!(mode, PermissionMode::Ask | PermissionMode::AutoReview))
         );
     }
-    matches!(mode, PermissionMode::Ask)
+    matches!(mode, PermissionMode::Ask | PermissionMode::AutoReview)
         && (crate::project_process::is_execution(name) || !(PermissionMode::WorkspaceWrite.allows(name)
             && catalog.is_none_or(|c| {
                 c.packages
@@ -85,23 +85,80 @@ fn append(root: &FsPath, task: &str, kind: &str, data: &Value) -> Result<()> {
 
 /// Block a tool call until the user allows it, or fail it when they decline.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn wait(
     state: &AgentServiceState,
     task: &str,
+    model: &str,
     agent_id: Option<&str>,
     call_id: &str,
     name: &str,
     args: &Value,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    wait_with(state, task, model, agent_id, call_id, name, args, cancel, None).await
+}
+
+/// A read of paths outside the workspace waits for the user unless the
+/// permission mode is full access. Its grants are separate from command grants.
+#[allow(clippy::too_many_arguments)]
+pub async fn wait_outside_read(
+    state: &AgentServiceState,
+    task: &str,
+    model: &str,
+    agent_id: Option<&str>,
+    call_id: &str,
+    name: &str,
+    args: &Value,
+    paths: &[String],
+    cancel: &CancellationToken,
+) -> Result<()> {
+    wait_with(state, task, model, agent_id, call_id, name, args, cancel, Some(paths)).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn wait_with(
+    state: &AgentServiceState,
+    task: &str,
+    model: &str,
+    agent_id: Option<&str>,
+    call_id: &str,
+    name: &str,
+    args: &Value,
+    cancel: &CancellationToken,
+    outside: Option<&[String]>,
+) -> Result<()> {
     let root = state.workspace.root().to_path_buf();
     let project = crate::project_notes::task_project(&root, task)?;
     let mut scopes = grant_scopes(task, project.as_deref());
-    if crate::shell_process::is_tool(name) {
+    if outside.is_some() {
+        scopes = scopes.into_iter().map(|scope| format!("outside-read:{scope}")).collect();
+    } else if crate::shell_process::is_tool(name) {
         scopes = scopes.into_iter().map(|scope| format!("shell:{scope}")).collect();
     }
     if granted(&open(&root)?, &scopes)? {
         return Ok(());
+    }
+    // "Approve for me": a clear allow or deny needs no card; anything else,
+    // including a failed review, still waits for the user.
+    let mut review_reason = None;
+    if matches!(state.permission_mode, PermissionMode::AutoReview) {
+        let verdict = crate::approval_review::review(state, task, model, name, args, outside, cancel).await;
+        let (decision, reason) = match verdict {
+            Ok(crate::approval_review::Verdict::Allow(reason)) => ("allow", reason),
+            Ok(crate::approval_review::Verdict::Deny(reason)) => ("deny", reason),
+            Ok(crate::approval_review::Verdict::Ask(reason)) => ("ask", reason),
+            Err(error) => ("ask", format!("审查没有完成：{error:#}")),
+        };
+        append(&root, task, "approval/review",
+            &json!({"call_id":call_id,"tool":name,"decision":decision,"reason":reason,"agent_id":agent_id,"outside_paths":outside}))?;
+        match decision {
+            "allow" => return Ok(()),
+            "deny" => bail!(
+                "AI_REVIEW_DENIED: the approval reviewer declined {name}: {reason}. Do not retry it unchanged. Continue another way, or tell the user what you need so they can allow it."
+            ),
+            _ => review_reason = Some(reason),
+        }
     }
     let mut detail = args.to_string();
     if detail.len() > 2_000 {
@@ -119,7 +176,8 @@ pub async fn wait(
         "project":project,
         "full_arguments":crate::shell_process::is_tool(name).then_some(args),
         "unsandboxed":crate::shell_process::is_tool(name) && cfg!(windows),
-        "shell":crate::shell_process::is_tool(name).then_some(if cfg!(windows) {"PowerShell 7"} else {"Bash"})}),
+        "shell":crate::shell_process::is_tool(name).then_some(if cfg!(windows) {"PowerShell 7"} else {"Bash"}),
+        "outside_paths":outside,"review_reason":review_reason}),
     )?;
     let waited: Result<String> = async {
         loop {
@@ -178,6 +236,12 @@ pub async fn wait(
         "approval/decision",
         &json!({"call_id":call_id,"decision":decision}),
     )?;
+    if decision == "deny" && let Some(paths) = outside {
+        bail!(
+            "USER_DENIED: the user declined reading {} outside the workspace. Do not retry it. Continue with files inside the workspace, or tell the user what you need from those paths.",
+            paths.join(", ")
+        );
+    }
     if decision == "deny" {
         bail!(
             "USER_DENIED: the user declined running {name}. Do not retry the same operation. Continue with work that needs no command execution, or tell the user what they need to run or allow."
@@ -232,6 +296,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auto_review_reviews_exactly_what_ask_mode_would_ask() {
+        for name in ["exec_command", "write_stdin", "kill_session", "run_program", "run_project_script", "browser_open", "browser_close", "write_file", "read_file", "search_text"] {
+            for ban in [false, true] {
+                assert_eq!(needs_approval(PermissionMode::AutoReview, name, None, ban), needs_approval(PermissionMode::Ask, name, None, ban), "{name}");
+            }
+            assert_eq!(PermissionMode::AutoReview.allows(name), PermissionMode::Ask.allows(name), "{name}");
+        }
+        assert_eq!(serde_json::to_value(PermissionMode::AutoReview).unwrap(), "auto_review");
+    }
+
+    #[test]
     fn shell_approvals_reflect_missing_windows_sandbox_and_keep_cleanup_free() {
         for mode in [PermissionMode::ReadOnly, PermissionMode::WorkspaceWrite, PermissionMode::Ask, PermissionMode::FullAccess] {
             assert!(mode.allows("exec_command"));
@@ -253,7 +328,7 @@ mod tests {
         let command = format!("echo '{}tail'","x".repeat(2500));
         let args = json!({"cmd":command,"workdir":"."});
         let cancel = CancellationToken::new();
-        let waiter = wait(&state,"t",None,"shell-call","exec_command",&args,&cancel);
+        let waiter = wait(&state,"t","fake",None,"shell-call","exec_command",&args,&cancel);
         let decide = async {
             for _ in 0..50 {
                 let conn = open(&root)?;
@@ -332,19 +407,19 @@ mod tests {
             })
         };
         decide_later("c1", "deny");
-        let denied = wait(&state, "t", None, "c1", "run_program", &json!({}), &cancel)
+        let denied = wait(&state, "t", "fake", None, "c1", "run_program", &json!({}), &cancel)
             .await
             .unwrap_err();
         assert!(denied.to_string().contains("USER_DENIED"), "{denied:#}");
         decide_later("c2", "session");
-        wait(&state, "t", None, "c2", "run_program", &json!({}), &cancel)
+        wait(&state, "t", "fake", None, "c2", "run_program", &json!({}), &cancel)
             .await
             .unwrap();
         assert!(!awaiting(&open(&root).unwrap(), "t"));
         // Granted for the session: no question, returns at once.
         tokio::time::timeout(
             Duration::from_millis(50),
-            wait(&state, "t", None, "c3", "run_program", &json!({}), &cancel),
+            wait(&state, "t", "fake", None, "c3", "run_program", &json!({}), &cancel),
         )
         .await
         .unwrap()

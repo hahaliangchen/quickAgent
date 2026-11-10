@@ -25,6 +25,9 @@ import { ApprovalCards } from './ApprovalCards.tsx'
 import { RewindControl } from './RewindControl.tsx'
 import { SmoothMarkdown } from './SmoothMarkdown.tsx'
 
+/** What the AI reviewer decided in "approve for me" mode. */
+const REVIEW_LABELS: Record<string, string> = { allow: 'AI 审批 · 已允许', deny: 'AI 审批 · 已拒绝', ask: 'AI 审批 · 转交给你' }
+
 function TurnEnd({ reason, durationMs }: { reason: TurnEndReason; durationMs?: number | undefined }) {
   const durationText = durationMs !== undefined ? formatDuration(durationMs) : ''
   if (reason.kind === 'completed') {
@@ -121,14 +124,22 @@ function Item({
       </div>
     case 'tool':
       return (
-        <ToolRow
-          name={item.name}
-          rawArguments={item.arguments}
-          result={item.result}
-          stopped={turnClosed}
-          onOpenChild={onOpenTask}
-          line={item.line}
-        />
+        <>
+          <ToolRow
+            name={item.name}
+            rawArguments={item.arguments}
+            result={item.result}
+            stopped={turnClosed}
+            onOpenChild={onOpenTask}
+            line={item.line}
+          />
+          {item.review && (
+            <div className={css.interjection}>
+              <span className={css.interjectionTag}>{REVIEW_LABELS[item.review.decision] ?? 'AI 审批'}</span>
+              <span>{item.review.reason}</span>
+            </div>
+          )}
+        </>
       )
     case 'call':
     case 'program':

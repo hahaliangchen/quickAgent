@@ -21,7 +21,7 @@ impl ExecutionBoundary {
         }
         match mode {
             PermissionMode::ReadOnly => Self::ReadOnly,
-            PermissionMode::WorkspaceWrite | PermissionMode::Ask => Self::Workspace,
+            PermissionMode::WorkspaceWrite | PermissionMode::Ask | PermissionMode::AutoReview => Self::Workspace,
             PermissionMode::FullAccess => Self::Host,
         }
     }

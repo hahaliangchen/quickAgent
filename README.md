@@ -114,7 +114,7 @@ cargo run --manifest-path desktop/Cargo.toml
 | `WORKSPACE_ROOT` | 默认任务工作区；默认使用启动目录。 |
 | `AGENT_BIND` | Agent 服务监听地址；默认为 `127.0.0.1:3001`。 |
 | `MCP_BIND` | MCP 服务监听地址；默认为 `127.0.0.1:3000`，入口为 `/mcp`。 |
-| `DSH_HOME`、`DSH_PROFILE` | 配置目录与 profile；默认为 `~/.dsh` 和 `web`。 |
+| `GROW_CONFIG_DIR` | 配置目录；默认为 `~/.config/grow`（遵循 `XDG_CONFIG_HOME`，Windows 为 `%APPDATA%\grow`）。首次启动时如果目录里还没有配置，会从 `~/.dsh` 复制一次旧配置。 |
 | `AGENT_WEB_DIR` | 前端构建产物目录；默认为 `frontend/dist`。 |
 
 配置和会话保存在本地；桌面版默认使用系统应用数据目录，项目可在界面中选择。

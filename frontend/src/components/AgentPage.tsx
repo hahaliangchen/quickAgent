@@ -58,6 +58,7 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
           onSelectWorkspace: workspace.selectWorkspace,
           onOpenAddWorkspace: workspace.openFolderDialog,
           modelName: workspace.modelName ?? undefined,
+          modelProviderId: workspace.modelProviderId,
           reasoningEffort: workspace.reasoningEffort ?? undefined,
           fastMode: workspace.fastMode,
 
@@ -231,6 +232,7 @@ export function ConversationPage({
                   onSelectWorkspace: workspace.selectWorkspace,
                   onOpenAddWorkspace: workspace.openFolderDialog,
                   modelName: workspace.modelName ?? undefined,
+                  modelProviderId: workspace.modelProviderId,
                   reasoningEffort: workspace.reasoningEffort ?? undefined,
                   fastMode: workspace.fastMode,
 

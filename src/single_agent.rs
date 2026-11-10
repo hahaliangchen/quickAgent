@@ -1255,6 +1255,7 @@ async fn business_tool_inner(
         crate::tool_approvals::wait(
             s.state,
             s.task,
+            s.model,
             s.delegate_id(),
             call_id,
             name,
@@ -1275,6 +1276,10 @@ async fn business_tool_inner(
         };
         std::sync::Arc::new(crate::tools::Workspace::new(path)?)
     };
+    let outside = outside_read_paths(tool_workspace.root(), name, &args);
+    if !outside.is_empty() && !matches!(s.state.permission_mode, crate::agent_service::PermissionMode::FullAccess) {
+        crate::tool_approvals::wait_outside_read(s.state, s.task, s.model, s.delegate_id(), call_id, name, &args, &outside, s.cancel).await?;
+    }
     if crate::shell_process::is_tool(name) {
         return crate::shell_process::execute_program(
             s.state, &tool_workspace, s.task, s.turn, s.task_node_id.as_deref(),
@@ -1469,6 +1474,29 @@ async fn business_tool_inner(
         }
     }
     result
+}
+
+/// Paths a file read would reach outside the workspace, after links resolve.
+/// Reading them needs the user's approval unless the mode is full access.
+fn outside_read_paths(workspace: &std::path::Path, name: &str, args: &Value) -> Vec<String> {
+    if !(matches!(name, "list_dir" | "search_text") || crate::source_read::is_source_read(name)) {
+        return Vec::new();
+    }
+    let root = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
+    let base = args["workspace_root"].as_str().filter(|raw| !raw.trim().is_empty()).map(|raw| std::path::PathBuf::from(raw.trim()));
+    let outside = |path: std::path::PathBuf| !path.canonicalize().unwrap_or(path).starts_with(&root);
+    let mut found = Vec::new();
+    if let Some(base) = &base && outside(base.clone()) {
+        found.push(base.to_string_lossy().into_owned());
+    }
+    for raw in args["path"].as_str().into_iter().chain(args["paths"].as_array().into_iter().flatten().filter_map(Value::as_str)) {
+        let path = std::path::Path::new(raw);
+        let full = if path.is_absolute() { path.to_path_buf() } else { base.clone().unwrap_or_else(|| root.clone()).join(path) };
+        if outside(full) && !found.iter().any(|known| known == raw) {
+            found.push(raw.to_owned());
+        }
+    }
+    found
 }
 
 async fn load_saved_asset(s: &Session<'_>, args: &Value) -> Result<Value> {

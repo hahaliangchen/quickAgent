@@ -56,7 +56,7 @@ impl ToolPermission {
             Self::ReadOnly => true,
             Self::WorkspaceWrite => !matches!(mode, PermissionMode::ReadOnly),
             Self::Execution => {
-                !ban_execution && matches!(mode, PermissionMode::FullAccess | PermissionMode::Ask)
+                !ban_execution && matches!(mode, PermissionMode::FullAccess | PermissionMode::Ask | PermissionMode::AutoReview)
             }
         }
     }

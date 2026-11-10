@@ -57,6 +57,7 @@ mod symbol_index_state;
 mod symbol_query;
 mod function_frames;
 mod tool_approvals;
+mod approval_review;
 mod tools;
 mod ts_index;
 mod visual_artifacts;
@@ -126,9 +127,14 @@ async fn run_server(listener: TcpListener, workspace: Arc<Workspace>) -> anyhow:
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_timer(ChinaTime).init();
+    match ai_proxy::import_dsh_config(&ai_proxy::config_dir()) {
+        Ok(Some(from)) => info!(from = %from.display(), to = %ai_proxy::config_dir().display(), "imported the DSH configuration"),
+        Ok(None) => {}
+        Err(error) => tracing::warn!("could not import the DSH configuration: {error:#}"),
+    }
 
     if env::args().any(|arg| arg == "--probe-image-input") {
-        let result = ai_proxy::probe_default_image_input(&ai_proxy::dsh_config_path()).await?;
+        let result = ai_proxy::probe_default_image_input(&ai_proxy::config_path()).await?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
@@ -141,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
     info!(root = %workspace.root().display(), "workspace initialized");
 
     // Start the local agent and settings UI even before a model is configured.
-    let ai_config_path = ai_proxy::dsh_config_path();
+    let ai_config_path = ai_proxy::config_path();
     let ai_config_path = if ai_config_path.is_absolute() {
         ai_config_path
     } else {

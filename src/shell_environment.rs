@@ -17,7 +17,7 @@ pub struct ShellEnvironment {
 }
 
 pub fn resolve() -> Result<ShellEnvironment> {
-    let settings = read_settings(&crate::ai_proxy::dsh_config_path())?;
+    let settings = read_settings(&crate::ai_proxy::config_path())?;
     resolve_with_path(settings.active_path())
 }
 
@@ -149,7 +149,7 @@ impl ShellEnvironment {
 
 /// Local settings/diagnostics projection; a missing dependency is actionable data.
 pub fn description() -> Value {
-    let settings = read_settings(&crate::ai_proxy::dsh_config_path());
+    let settings = read_settings(&crate::ai_proxy::config_path());
     match settings {
         Ok(settings) => cached_description(settings.active_path()),
         Err(error) => status_json(Err(format!("{error:#}")), false, None, false),

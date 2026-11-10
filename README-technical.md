@@ -147,10 +147,10 @@ cargo run
 - `AGENT_BIND`：任务服务地址，默认 `127.0.0.1:3001`。
 - `MCP_BIND`：MCP 地址，默认 `127.0.0.1:3000`，入口为 `/mcp`。
 - `AGENT_WEB_DIR`：前端构建产物目录，默认 `frontend/dist`。
-- `DSH_HOME`、`DSH_PROFILE`：配置目录与 profile，默认 `~/.dsh` 和 `web`。
+- `GROW_CONFIG_DIR`：配置目录，默认 `~/.config/grow`（遵循 `XDG_CONFIG_HOME`，Windows 为 `%APPDATA%\grow`）。
 - `AGENT_BROWSER_PATH`：可选的 Chrome、Edge 或 Chromium 可执行文件路径。
 
-模型配置写入 profile 的 `cordis.patch.yml`，密钥存于 DSH 凭据文件；生成参数、视觉分析与协作模型覆盖配置存于 `agent-generation.yml`。任务请求会重新读取外部配置修改。
+配置目录下：模型提供商写入 `providers.yml`，密钥存于 `credentials.yaml`（权限 600）；生成参数、视觉分析与协作模型覆盖配置存于 `agent-generation.yml`；技能包列表存于 `skill-packages.json`。任务请求会重新读取外部配置修改。首次启动时如果目录里还没有 `providers.yml`，宿主会从 `~/.dsh`（或 `DSH_HOME`）复制一次旧配置，之后不再读写 `~/.dsh`。`providers.yml` 的内容格式暂时沿用原来的插件补丁结构。
 
 前端使用本地 Cordis 与 DSH UI renderer。来源与许可证见 [`frontend/src/dsh/SOURCE.md`](frontend/src/dsh/SOURCE.md) 和同目录的 `LICENSE`。
 

@@ -47,6 +47,9 @@ pub enum PermissionMode {
     WorkspaceWrite,
     /// Edits proceed; execution waits for the user's approval (tool_approvals).
     Ask,
+    /// As Ask, but an AI reviewer decides first and hands only unclear
+    /// operations to the user (approval_review).
+    AutoReview,
     #[default]
     FullAccess,
 }
@@ -59,7 +62,7 @@ impl PermissionMode {
             "run_program"
             | "install_dependencies"
             | "run_project_script"
-            | "stop_project_process" => matches!(self, Self::FullAccess | Self::Ask)
+            | "stop_project_process" => matches!(self, Self::FullAccess | Self::Ask | Self::AutoReview)
                 || (cfg!(target_os = "linux") && matches!(self, Self::WorkspaceWrite)),
             "browser_open"
             | "browser_read"
@@ -68,8 +71,8 @@ impl PermissionMode {
             | "browser_click"
             | "browser_press_key"
             | "browser_upload"
-            | "browser_screenshot" => matches!(self, Self::FullAccess | Self::Ask),
-            "browser_close" => matches!(self, Self::FullAccess | Self::Ask),
+            | "browser_screenshot" => matches!(self, Self::FullAccess | Self::Ask | Self::AutoReview),
+            "browser_close" => matches!(self, Self::FullAccess | Self::Ask | Self::AutoReview),
             _ => true,
         }
     }

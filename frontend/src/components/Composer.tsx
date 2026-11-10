@@ -60,7 +60,7 @@ function mentionInsert(path: string): string {
   return path.includes(' ') ? `@"${path}" ` : `@${path} `
 }
 
-export type DshPermissionMode = 'read_only' | 'workspace_write' | 'ask' | 'full_access'
+export type DshPermissionMode = 'read_only' | 'workspace_write' | 'ask' | 'auto_review' | 'full_access'
 
 const FULL_ACCESS_ICON = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8l1-5.5Z" /></svg>
 // Same shield as 仅可查看, with a question mark: commands and the browser ask first.
@@ -77,6 +77,7 @@ export function Composer({
   onSelectWorkspace,
   onOpenAddWorkspace,
   modelName = '',
+  modelProviderId,
   reasoningEffort,
   fastMode = false,
   settings,
@@ -98,6 +99,8 @@ export function Composer({
   onSelectWorkspace?: ((ws: string) => void) | undefined
   onOpenAddWorkspace?: (() => void) | undefined
   modelName?: string | undefined
+  /** The provider of the selected model; several providers can offer the same model id. */
+  modelProviderId?: string | undefined
   reasoningEffort?: string | null | undefined
   fastMode?: boolean | undefined
   settings?: SettingsData | undefined
@@ -125,7 +128,7 @@ export function Composer({
   const [permissionMode, setPermissionMode] = useState<DshPermissionMode>(() => {
     try {
       const saved = localStorage.getItem('dsh_permission_mode')
-      if (saved === 'read_only' || saved === 'workspace_write' || saved === 'ask' || saved === 'full_access') {
+      if (saved === 'read_only' || saved === 'workspace_write' || saved === 'ask' || saved === 'auto_review' || saved === 'full_access') {
         return saved
       }
     } catch {}
@@ -404,11 +407,21 @@ export function Composer({
   const wsName = workspaceName(activeWorkspace || workspacePath || '')
   const placeholder = t(variant === 'hero' ? 'placeholder.hero' : 'placeholder.default')
   const activeModelName = modelName || settings?.orchestrator_model || ''
-  const displayModel = activeModelName || t('app.configureModel')
   const providers = settings?.providers ?? []
 
-  const activeProvider = providers.find(p => p.models.includes(activeModelName))
+  const activeProviderId = modelProviderId ?? settings?.orchestrator_provider ?? undefined
+  const activeProvider = providers.find(p => p.id === activeProviderId && p.models.includes(activeModelName))
+    ?? providers.find(p => p.models.includes(activeModelName))
     ?? providers.find(p => p.id === settings?.orchestrator_provider)
+  // Group titles, with the id added when two providers share a display name.
+  const providerLabel = (provider: (typeof providers)[number]) => {
+    const label = provider.display_name || provider.id
+    return providers.some(other => other.id !== provider.id && (other.display_name || other.id) === label) ? `${label}（${provider.id}）` : label
+  }
+  // A model offered by several providers is shown with the one in use.
+  const sharedModel = providers.filter(p => p.models.includes(activeModelName)).length > 1
+  const activeModelLabel = activeModelName && sharedModel && activeProvider ? `${activeModelName} · ${providerLabel(activeProvider)}` : activeModelName
+  const displayModel = activeModelLabel || t('app.configureModel')
   const selectedCapability = (activeProvider && activeModelName ? activeProvider.model_capabilities[activeModelName] : undefined)
     ?? providers.find(p => p.id === settings?.orchestrator_provider)?.model_capabilities[settings?.orchestrator_model ?? '']
 
@@ -589,6 +602,12 @@ export function Composer({
                     <span>执行前询问</span>
                   </>
                 )}
+                {permissionMode === 'auto_review' && (
+                  <>
+                    {ASK_ICON}
+                    <span>自动审批</span>
+                  </>
+                )}
                 {permissionMode === 'workspace_write' && (
                   <>
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6">
@@ -728,7 +747,7 @@ export function Composer({
                 onClick={() => { setPane('model') }}
               >
                 <span className={modelCss.cellLabel}>模型</span>
-                <span className={modelCss.cellValue}>{activeModelName || '未选择'}</span>
+                <span className={modelCss.cellValue}>{activeModelLabel || '未选择'}</span>
                 <IconChevronRightOutlineRegular className={modelCss.cellChevron} size={12} />
               </button>
               <button
@@ -792,9 +811,9 @@ export function Composer({
                 ) : (
                   providers.map(provider => (
                     <section key={provider.id} className={modelCss.group}>
-                      <div className={modelCss.groupTitle}>{provider.display_name || provider.id}</div>
+                      <div className={modelCss.groupTitle}>{providerLabel(provider)}</div>
                       {provider.models.map((m) => {
-                        const selected = m === activeModelName
+                        const selected = provider.id === activeProvider?.id && m === activeModelName
                         return (
                           <button
                             key={`${provider.id}:${m}`}
@@ -937,6 +956,15 @@ export function Composer({
                   </svg>
                 </span>
               )}
+            </button>
+
+            <button type="button" className={codexCss.permOptionItem} onClick={() => handleSelectPermission('auto_review')}>
+              <span className={codexCss.permOptionIcon}>{ASK_ICON}</span>
+              <div className={codexCss.permOptionBody}>
+                <span className={codexCss.permOptionTitle}>自动审批</span>
+                <span className={codexCss.permOptionDesc}>需要确认的操作先由 AI 对照你的要求审查：明确该做的直接放行，明确不该做的拒绝，拿不准时再问你。命令的沙箱与执行前询问相同。</span>
+              </div>
+              {permissionMode === 'auto_review' && <span className={codexCss.permOptionCheck}>✓</span>}
             </button>
 
             {/* 3. 完全权限 (Full Access) */}

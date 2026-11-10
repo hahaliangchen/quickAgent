@@ -258,7 +258,7 @@ struct Settings {
     remotes: BTreeMap<String, remote::Config>,
 }
 fn settings_path() -> PathBuf {
-    crate::ai_proxy::dsh_config_path().with_file_name("skill-packages.json")
+    crate::ai_proxy::config_path().with_file_name("skill-packages.json")
 }
 fn settings() -> Result<Settings> {
     let path = settings_path();

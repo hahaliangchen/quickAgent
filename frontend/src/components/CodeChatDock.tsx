@@ -19,7 +19,7 @@ function rememberedTask(workspace: string): string | undefined {
 function permissionMode(): PermissionMode {
   try {
     const saved = localStorage.getItem('dsh_permission_mode')
-    if (saved === 'read_only' || saved === 'workspace_write' || saved === 'ask' || saved === 'full_access') return saved
+    if (saved === 'read_only' || saved === 'workspace_write' || saved === 'ask' || saved === 'auto_review' || saved === 'full_access') return saved
   } catch {}
   return 'ask'
 }

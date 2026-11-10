@@ -103,6 +103,8 @@ const EXACT: Record<string, Omit<ToolVisual, 'summary'>> = {
   view_image: { tone: 'media', icon: <ImageIcon />, title: '查看了图片' },
   browser_screenshot: { tone: 'media', icon: <ImageIcon />, title: '截取了页面' },
   http_probe: { tone: 'web', icon: <IconApiOutlineMedium />, title: '探测了接口' },
+  web__search: { tone: 'web', icon: <IconSearchOutlineMedium />, title: '搜索了网页' },
+  web__fetch: { tone: 'web', icon: <IconBrowseOutlineMedium />, title: '读取了网页' },
   run_program: { tone: 'run', icon: <TerminalIcon />, title: '运行了程序' },
   exec_command: { tone: 'run', icon: <TerminalIcon />, title: '运行了命令' },
   write_stdin: { tone: 'run', icon: <TerminalIcon />, title: '写入了命令输入' },
@@ -145,6 +147,8 @@ const shortNode = (value: unknown) => text(value) === 'n0' ? '主任务' : `子�
 
 function summaryFor(name: string, args: Record<string, unknown>): string | undefined {
   switch (name) {
+    case 'web__search': return text(args.query)
+    case 'web__fetch': return `${args.cursor ? '续读 · ' : ''}${text(args.url)}`
     case 'exec_command': return text(args.cmd)
     case 'write_stdin': return `会话 ${String(args.session_id ?? '未知')} · ${typeof args.chars === 'string' && args.chars.length > 0 ? JSON.stringify(args.chars) : '等待输出'}`
     case 'kill_session': return `会话 ${String(args.session_id ?? '未知')}`

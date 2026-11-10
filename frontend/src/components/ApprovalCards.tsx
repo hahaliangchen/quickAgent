@@ -12,6 +12,8 @@ interface PendingApproval {
   readonly workdir: string
   readonly shell: string
   readonly unsandboxed: boolean
+  readonly outside: readonly string[]
+  readonly reviewReason: string
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -20,6 +22,8 @@ const TOOL_LABELS: Record<string, string> = {
   stop_project_process: '停止项目进程', browser_open: '打开浏览器', browser_click: '在浏览器里点击',
   browser_press_key: '在浏览器里按键', browser_upload: '在浏览器里上传文件', browser_screenshot: '浏览器截图',
   browser_read: '读取浏览器页面', browser_wait: '等待浏览器页面', browser_diagnostics: '读取浏览器诊断', browser_close: '关闭浏览器',
+  read_file: '读取工作区外的文件', read_file_lines: '读取工作区外的文件', list_dir: '查看工作区外的目录', search_text: '在工作区外搜索',
+  read_rust_symbol: '读取工作区外的代码', read_ts_symbol: '读取工作区外的代码', read_go_symbol: '读取工作区外的代码', read_python_symbol: '读取工作区外的代码',
 }
 
 function argumentRecord(raw: unknown): Record<string, unknown> | undefined {
@@ -64,6 +68,8 @@ export function pendingApprovals(events: readonly AgentEvent[]): PendingApproval
         workdir: text(args.workdir) || text(args.project_path) || text(args.cwd),
         shell: text(event.data.shell) || text(args.shell),
         unsandboxed: event.data.unsandboxed === true || args.unsandboxed === true,
+        outside: Array.isArray(event.data.outside_paths) ? event.data.outside_paths.map(String) : [],
+        reviewReason: text(event.data.review_reason),
       }
     })
 }
@@ -91,6 +97,8 @@ export function ApprovalCards({ taskId, events, className }: { taskId: string; e
     return <div key={item.callId} className={css.card} role="alertdialog" aria-label={`是否允许${TOOL_LABELS[item.tool] ?? item.tool}`}>
       <div className={css.title}>要{TOOL_LABELS[item.tool] ?? `调用 ${item.tool}`}吗？</div>
       {item.unsandboxed && <p className={css.warning}>警告：此命令将在沙箱外执行（无沙箱隔离），可访问当前用户权限范围内的文件和系统资源。</p>}
+      {item.reviewReason && <p className={css.hint}>AI 审查拿不准：{item.reviewReason}</p>}
+      {item.outside.length > 0 && <p className={css.hint}>这些路径在当前工作区之外：{item.outside.join('、')}</p>}
       {item.shell && <p className={css.hint}>Shell：{item.shell}</p>}
       {item.workdir && <p className={css.hint}>工作目录：{item.workdir}</p>}
       <code className={css.command}>{item.summary}</code>

@@ -52,7 +52,7 @@ curl http://127.0.0.1:12891/health
 ```
 
 项目提供商 `qwen-local` 的地址位于
-`/home/goodtime/.dsh/profiles/web/cordis.patch.yml`，切换统一入口不会改变插件模型授权。
+`~/.config/grow/providers.yml`，切换统一入口不会改变插件模型授权。
 宿主在新一轮请求加载最新配置；已开始的轮次保持原来的提供商快照。
 
 需要回退时将该提供商地址改回 `http://10.10.10.201:12890/v1`。停止统一入口或新副本

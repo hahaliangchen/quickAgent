@@ -174,7 +174,13 @@ impl Untouched {
 pub(super) fn observe(root: &Path, task: &str, workspace: &Path, args: &Value, result: &Value) -> Result<Option<Value>> {
     let Some(raw) = args["path"].as_str() else { return Ok(None); };
     let Some(hash) = result["code_hash"].as_str() else { return Ok(None); };
-    let (work, rel, path) = key(workspace, raw)?;
+    // Reads may use accessible absolute paths, but only workspace files can be
+    // edited, so only they need a baseline. The read itself already succeeded.
+    let (work, rel, path) = match key(workspace, raw) {
+        Ok(key) => key,
+        Err(error) if matches!(error.downcast_ref::<crate::tools::ToolError>(), Some(crate::tools::ToolError::OutsideWorkspace(_))) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let current = crate::file_edit::snapshot(&path)?;
     if current.as_deref().map(crate::symbol_description::content_hash).as_deref() != Some(hash) {
         return Ok(Some(json!({"error_code":"ASSET_CONFLICT", "path":rel, "workspace":work,
@@ -649,6 +655,184 @@ mod tests {
         drop(conn);
         drop(state);
         let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_reads_an_accessible_file_outside_the_workspace_but_cannot_edit_it() -> Result<()> {
+        let outside = root();
+        let root = root();
+        fs::write(outside.join("settings.yaml"), "model: deepseek\nmax_tokens: 8192\n")?;
+        fs::create_dir_all(outside.join(".codex-workspace-mcp"))?;
+        fs::write(outside.join(".codex-workspace-mcp/codex_state.db"), "not for tools")?;
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let conn = crate::agent_service::open_db(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let session = super::super::Session {
+            agent_id: None, task_node_id: None, plugin: None,
+            state: &state, task: "task", model: "fake", turn: 1, cancel: &cancel,
+            ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+        };
+        let file = outside.join("settings.yaml").to_string_lossy().into_owned();
+        let read = super::super::business_tool(&session, "node", "read_file", json!({"path":file}), "read outside").await.context("read outside")?;
+        assert!(read.to_string().contains("max_tokens: 8192"), "{read}");
+        let lines = super::super::business_tool(&session, "node", "read_file_lines", json!({"path":file,"start_line":1,"end_line":1}), "lines outside").await.context("lines outside")?;
+        assert!(lines.to_string().contains("model: deepseek"), "{lines}");
+        let edit = super::super::business_tool(&session, "node", "write_file", json!({"path":file,"content":"changed"}), "write outside").await;
+        assert!(edit.as_ref().map(|value| value.to_string()).unwrap_or_else(|error| format!("{error:#}")).contains("outside the"), "{edit:?}");
+        assert_eq!(fs::read_to_string(outside.join("settings.yaml"))?, "model: deepseek\nmax_tokens: 8192\n");
+        let database = outside.join(".codex-workspace-mcp/codex_state.db").to_string_lossy().into_owned();
+        let denied = super::super::business_tool(&session, "node", "read_file", json!({"path":database}), "read state").await;
+        assert!(denied.as_ref().map(|value| value.to_string()).unwrap_or_else(|error| format!("{error:#}")).contains("SQLITE_STATE_FILE"), "{denied:?}");
+        drop(conn);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+        Ok(())
+    }
+
+    async fn answer_outside_read(root: &Path, decision: &str) -> Result<String> {
+        for _ in 0..200 {
+            let conn = crate::agent_service::open_db(root)?;
+            let pending: Option<String> = conn.query_row("SELECT call_id FROM tool_approval_pending WHERE task_id='task'", [], |r| r.get(0)).optional().unwrap_or(None);
+            if let Some(call) = pending {
+                conn.execute("INSERT OR IGNORE INTO tool_approvals(task_id,call_id,decision) VALUES ('task',?1,?2)", params![call, decision])?;
+                return Ok(call);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        anyhow::bail!("no approval was requested")
+    }
+
+    #[tokio::test]
+    async fn reading_outside_the_workspace_waits_for_approval_unless_full_access() -> Result<()> {
+        for mode in [crate::agent_service::PermissionMode::Ask, crate::agent_service::PermissionMode::ReadOnly] {
+            let outside = root();
+            let root = root();
+            fs::write(outside.join("settings.yaml"), "model: deepseek\n")?;
+            fs::write(root.join("inside.txt"), "inside\n")?;
+            let mut state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+            state.permission_mode = mode;
+            let conn = crate::agent_service::open_db(&root)?;
+            conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let session = super::super::Session {
+                agent_id: None, task_node_id: None, plugin: None,
+                state: &state, task: "task", model: "fake", turn: 1, cancel: &cancel,
+                ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+            };
+            let file = outside.join("settings.yaml").to_string_lossy().into_owned();
+            super::super::business_tool(&session, "node", "read_file", json!({"path":"inside.txt"}), "inside").await.context("inside read needs no approval")?;
+            assert!(!conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_task_events WHERE kind='approval/request')", [], |r| r.get::<_, bool>(0))?);
+            let (read, _) = tokio::join!(
+                super::super::business_tool(&session, "node", "read_file", json!({"path":file}), "outside once"),
+                answer_outside_read(&root, "once"));
+            assert!(read?.to_string().contains("model: deepseek"));
+            let (denied, _) = tokio::join!(
+                super::super::business_tool(&session, "node", "list_dir", json!({"path":outside.to_string_lossy()}), "outside denied"),
+                answer_outside_read(&root, "deny"));
+            assert!(format!("{:#}", denied.unwrap_err()).contains("USER_DENIED: the user declined reading"));
+            let (granted, _) = tokio::join!(
+                super::super::business_tool(&session, "node", "read_file_lines", json!({"path":file,"start_line":1,"end_line":1}), "outside session"),
+                answer_outside_read(&root, "session"));
+            granted?;
+            super::super::business_tool(&session, "node", "search_text", json!({"path":outside.to_string_lossy(),"query":"deepseek"}), "granted for the session").await.context("session grant covers later reads")?;
+            let request: Value = serde_json::from_str(&conn.query_row("SELECT data FROM agent_task_events WHERE kind='approval/request' ORDER BY seq LIMIT 1", [], |r| r.get::<_, String>(0))?)?;
+            assert_eq!(request["outside_paths"], json!([file]));
+            assert!(!conn.query_row("SELECT EXISTS(SELECT 1 FROM tool_approval_grants WHERE scope LIKE 'shell:%')", [], |r| r.get::<_, bool>(0))?, "a read grant is not a command grant");
+            drop(conn);
+            drop(state);
+            let _ = fs::remove_dir_all(root);
+            let _ = fs::remove_dir_all(outside);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auto_review_decides_clear_cases_and_hands_unclear_ones_to_the_user() -> Result<()> {
+        use axum::{Json, Router, routing::post};
+        use std::{collections::VecDeque, sync::{Arc, Mutex}};
+        let replies = Arc::new(Mutex::new(VecDeque::from([
+            "{\"decision\":\"allow\",\"reason\":\"读取用户要查的模型配置\"}".to_owned(),
+            "{\"decision\":\"deny\",\"reason\":\"与用户的要求无关\"}".to_owned(),
+            "{\"decision\":\"ask\",\"reason\":\"不确定用户是否想让它看这个目录\"}".to_owned(),
+            "我觉得可以".to_owned(),
+        ])));
+        let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app = Router::new().route("/v1/chat/completions", post({
+            let (replies, seen) = (replies.clone(), seen.clone());
+            move |Json(body): Json<Value>| {
+                seen.lock().unwrap().push(body);
+                let reply = replies.lock().unwrap().pop_front().unwrap_or_default();
+                async move {
+                    let chunk = json!({"choices":[{"delta":{"content":reply},"finish_reason":"stop"}]});
+                    ([("content-type", "text/event-stream")], format!("data: {chunk}\n\ndata: [DONE]\n\n"))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let outside = root();
+        let root = root();
+        fs::write(outside.join("settings.yaml"), "model: deepseek\n")?;
+        let mut state = crate::agent_service::tests::test_state(&root, address);
+        state.permission_mode = crate::agent_service::PermissionMode::AutoReview;
+        let conn = crate::agent_service::open_db(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+        conn.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('task',1,0,'user/message',?1)",
+            [json!({"model_content":"帮我整理 ~/.dsh 里配置的模型"}).to_string()])?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let session = super::super::Session {
+            agent_id: None, task_node_id: None, plugin: None,
+            state: &state, task: "task", model: "fake", turn: 1, cancel: &cancel,
+            ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+        };
+        let file = outside.join("settings.yaml").to_string_lossy().into_owned();
+        let count = |kind: &str| conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind=?1", [kind], |r| r.get::<_, i64>(0)).unwrap();
+
+        let read = super::super::business_tool(&session, "node", "read_file", json!({"path":file}), "allowed").await.context("allowed by the reviewer")?;
+        assert!(read.to_string().contains("model: deepseek"));
+        assert_eq!(count("approval/request"), 0, "a clear allow needs no card");
+        let prompt = seen.lock().unwrap()[0].to_string();
+        assert!(prompt.contains("帮我整理 ~/.dsh 里配置的模型") && prompt.contains("settings.yaml"), "{prompt}");
+
+        let denied = super::super::business_tool(&session, "node", "list_dir", json!({"path":outside.to_string_lossy()}), "denied").await;
+        assert!(format!("{:#}", denied.unwrap_err()).contains("AI_REVIEW_DENIED"));
+        assert_eq!(count("approval/request"), 0);
+
+        let (asked, _) = tokio::join!(
+            super::super::business_tool(&session, "node", "read_file", json!({"path":file}), "unclear"),
+            answer_outside_read(&root, "once"));
+        asked?;
+        let request: Value = serde_json::from_str(&conn.query_row("SELECT data FROM agent_task_events WHERE kind='approval/request' ORDER BY seq LIMIT 1", [], |r| r.get::<_, String>(0))?)?;
+        assert_eq!(request["review_reason"], "不确定用户是否想让它看这个目录");
+
+        let (unreadable, _) = tokio::join!(
+            super::super::business_tool(&session, "node", "read_file", json!({"path":file}), "unreadable review"),
+            answer_outside_read(&root, "deny"));
+        assert!(format!("{:#}", unreadable.unwrap_err()).contains("USER_DENIED"), "an unreadable review goes to the user");
+        assert_eq!(count("approval/review"), 4);
+        server.abort();
+
+        let offline = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let mut offline = offline;
+        offline.permission_mode = crate::agent_service::PermissionMode::AutoReview;
+        let session = super::super::Session {
+            agent_id: None, task_node_id: None, plugin: None,
+            state: &offline, task: "task", model: "fake", turn: 1, cancel: &cancel,
+            ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+        };
+        let (failed, _) = tokio::join!(
+            super::super::business_tool(&session, "node", "read_file", json!({"path":file}), "review failed"),
+            answer_outside_read(&root, "once"));
+        failed.context("a failed review falls back to the user's card")?;
+        drop(conn);
+        drop(state);
+        drop(offline);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
         Ok(())
     }
 

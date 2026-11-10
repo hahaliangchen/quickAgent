@@ -58,7 +58,7 @@ async fn real_luna_typescript_oop_acceptance_design() -> Result<()> {
     std::fs::create_dir_all(&evidence)?;
     std::fs::write(latest_run_marker("luna-ts-oop-five-latest"),evidence.to_string_lossy().as_bytes())?;
     let mut state=agent_service::tests::test_state(&evidence,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config); real_wire(&mut state);
     let model=state.model_map.get("gpt-6-luna").cloned().context("configured provider must retain Luna")?;
     let prompt="请为一个已有的五页中文 HTML 项目写 TypeScript 验收脚本：先理解工作区 README.md、docs/agent-program.md、docs/archive/generic-agent-design.md 的项目设计，再从整组页面是否有效介绍项目的角度，结合 runs/acceptance-five-ai-review 下五个 HTML 文件，检查整体和各页问题，并把结论、依据、问题和未检查事项写入 acceptance-report.md。不要修改页面。";
@@ -90,7 +90,7 @@ async fn real_luna_typescript_minimal_prompt() -> Result<()> {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("runs").join(format!("luna-html-js-single-responsibility-{}",agent_service::uuid_like()));
     std::fs::create_dir_all(&root)?;
     let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config); real_wire(&mut state);
     let model=state.model_map.get("gpt-6-luna").cloned().context("configured provider must retain Luna")?;
     let prompt="请用 JavaScript 写一份过程式代码，验收我已有的五页 HTML 项目。项目根目录是 /home/goodtime/Documents/project/codex-workspace-mcp，五个页面都在 runs/acceptance-five-ai-review 目录下，分别是 01-overview.html、02-program.html、03-tools.html、04-agents.html、05-quality.html。项目设计资料是根目录下的 README.md、docs/agent-program.md 和 docs/archive/generic-agent-design.md。
@@ -131,7 +131,7 @@ async fn real_model_async_five_pages_published_example() -> Result<()> {
     std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/agent-design-guide.md"),root.join("docs/agent-design-guide.md"))?;
     let source=include_str!("../../skills/task-program/examples/parallel-five-pages.js");
     let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config); real_wire(&mut state);
     let model=state.model_map.get(&state.default_model).cloned().unwrap_or_else(||state.default_model.clone());
     ensure!(!state.provider_url.is_empty() && !state.api_key.is_empty(),"configured model unavailable");
@@ -161,7 +161,7 @@ async fn real_model_serial_published_example() -> Result<()> {
     std::fs::create_dir_all(&root)?;
     let source=include_str!("../../skills/task-program/examples/serial.js");
     let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config); real_wire(&mut state);
     let model=state.model_map.get(&state.default_model).cloned().unwrap_or_else(||state.default_model.clone());
     ensure!(!state.provider_url.is_empty() && !state.api_key.is_empty(),"configured model unavailable");
@@ -211,7 +211,7 @@ fn real_with_effort(name: &str, effort: &str) -> Result<(std::path::PathBuf, Age
     let root=std::env::temp_dir().join(format!("{name}-{}",agent_service::uuid_like()));
     std::fs::create_dir_all(&root)?;
     let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config); real_wire(&mut state);
     if let Ok(provider)=std::env::var("REAL_PROVIDER") && !provider.is_empty() {
         ensure!(state.use_provider(&provider),"provider {provider} is not configured");
@@ -694,7 +694,7 @@ async fn real_model_builds_mini_webpack_over_four_turns() -> Result<()> {
     ensure!(root.is_dir(),"experiment directory does not exist");
     ensure!(std::fs::read_dir(&root)?.next().is_none(),"experiment directory must be empty");
     let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config); real_wire(&mut state);
     state.reasoning_effort=Some(real_effort("medium"));
     let model=std::env::var("REAL_MODEL").ok().filter(|m|!m.is_empty()).unwrap_or_else(||state.model_map.get(&state.default_model).cloned().unwrap_or_else(||state.default_model.clone()));
@@ -746,7 +746,7 @@ async fn real_model_small_feature_probe() -> Result<()> {
     let root=std::path::PathBuf::from(std::env::var("FEATURE_PROBE_ROOT")?);
     let model=std::env::var("REAL_MODEL")?;
     let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config); real_wire(&mut state); state.reasoning_effort=Some(std::env::var("FEATURE_PROBE_EFFORT").unwrap_or_else(|_|"medium".into()));
     ensure!(!state.provider_url.is_empty() && !state.api_key.is_empty(),"configured model unavailable");
     agent_service::open_db(&root)?.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('example','',?1,'running',0,0)",[&model])?;
@@ -781,7 +781,7 @@ async fn real_model_continues_mini_webpack_high_turn_five() -> Result<()> {
     let root=std::path::PathBuf::from(std::env::var("MINI_WEBPACK_ROOT").context("MINI_WEBPACK_ROOT is required")?);
     ensure!(root.join("mini-webpack.js").is_file(),"existing project not found");
     let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config); real_wire(&mut state);
     state.reasoning_effort=Some(real_effort("high"));
     let model=std::env::var("REAL_MODEL").unwrap_or_else(|_|"gpt-6-luna".into());
@@ -829,7 +829,7 @@ async fn real_model_analyzes_repository_snapshot() -> Result<()> {
     let provider=std::env::var("REAL_PROVIDER").unwrap_or_else(|_|"deepseek".into());
     let model=std::env::var("REAL_MODEL").unwrap_or_else(|_|"deepseek-flash".into());
     let mut state=agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config);
     ensure!(state.use_provider(&provider),"provider {provider} is not configured");
     ensure!(state.model_map.contains_key(&model),"model {model} is not configured for {provider}");
@@ -900,7 +900,7 @@ async fn real_model_node_analysis_plan_minimal_prompt() -> Result<()> {
     let evidence=std::path::PathBuf::from(std::env::var("NODE_PLAN_OUTPUT").context("NODE_PLAN_OUTPUT is required")?);
     std::fs::create_dir_all(&evidence)?;
     let mut state=agent_service::tests::test_state(&evidence,"127.0.0.1:1".parse()?);
-    let config=crate::ai_proxy::load_config(&crate::ai_proxy::dsh_config_path())?;
+    let config=crate::ai_proxy::load_config(&crate::ai_proxy::config_path())?;
     crate::ai_proxy::apply_agent_config(&mut state,&config);
     ensure!(state.use_provider("deepseek"),"deepseek is not configured");
     let model="deepseek-flash";

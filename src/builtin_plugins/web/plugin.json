@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "web",
+  "library": "web",
+  "title": "联网搜索",
+  "skill": "SKILL.md",
+  "tools": ["web__search", "web__fetch"]
+}

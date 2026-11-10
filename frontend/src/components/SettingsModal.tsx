@@ -51,6 +51,7 @@ interface DraftProvider {
 }
 
 interface DraftSettings {
+  web_search_provider: string
   bash_path: string
   pwsh_path: string
   plugin_models: Record<string,readonly ModelRef[]>
@@ -80,6 +81,7 @@ function parseModels(lines: string): string[] {
 
 function toDraft(data: SettingsData): DraftSettings {
   return {
+    web_search_provider: data.web_search_provider ?? '',
     bash_path: data.bash_path ?? '',
     pwsh_path: data.pwsh_path ?? '',
     revision: data.revision,
@@ -249,6 +251,7 @@ export function SettingsModal({
       const selectedCapability = draft.providers.find(p => p.id === draft.orchestrator_provider)
         ?.model_capabilities[draft.orchestrator_model]
       const saved = await api.saveSettings({
+        web_search_provider: draft.web_search_provider,
         ...(windowsShell ? { pwsh_path: draft.pwsh_path.trim() } : { bash_path: draft.bash_path.trim() }),
         revision: draft.revision,
         plugin_models: draft.plugin_models,
@@ -336,6 +339,7 @@ export function SettingsModal({
     const nextProviders = draft.providers.filter(p => p._draftId !== provider._draftId)
     updateDraft({
       providers: nextProviders,
+      web_search_provider: draft.web_search_provider === provider.id ? '' : draft.web_search_provider,
       orchestrator_provider: draft.orchestrator_provider === provider.id ? (nextProviders[0]?.id ?? '') : draft.orchestrator_provider,
       orchestrator_model: draft.orchestrator_provider === provider.id ? '' : draft.orchestrator_model,
     })
@@ -968,6 +972,25 @@ export function SettingsModal({
 
             {activeTab === 'tools' && draft !== null && (
               <section className={modelsCss.section}>
+                <div className={appearanceCss.block}>
+                  <div className={appearanceCss.label}>联网搜索</div>
+                  <div className={appearanceCss.group}>
+                    <div className={appearanceCss.row}>
+                      <div className={appearanceCss.rowText}>
+                        <span className={appearanceCss.rowTitle}>搜索凭据</span>
+                        <span className={appearanceCss.rowHint}>使用 DeepSeek 搜索和网页抓取服务，所有聊天模型共用。独立于主 Agent 的模型选择，按搜索和抓取请求计费。</span>
+                      </div>
+                      <div className={appearanceCss.control}>
+                        <select aria-label="联网搜索凭据" className={clsx(modelsCss.input, modelsCss.selectInput)} value={draft.web_search_provider} onChange={event => updateDraft({ web_search_provider: event.target.value })}>
+                          <option value="">未启用</option>
+                          {draft.providers.filter(p => {
+                            try { const url = new URL(p.url); return url.protocol === 'https:' && url.hostname === 'api.deepseek.com' && (!url.port || url.port === '443') && !url.username && !url.password } catch { return false }
+                          }).map(p => <option key={p._draftId} value={p.id}>{p.display_name || p.id}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                </div>
                 <div className={modelsCss.pageHead}>
                   <h2 className={modelsCss.title}>专用模型</h2>
                   <p className={modelsCss.intro}>视觉分析和协作子 Agent 可以单独选模型，复用目录中的提供商和能力配置。留空跟随主 Agent，任务参数单独保存。</p>
