@@ -426,7 +426,7 @@ export function Composer({
     ?? providers.find(p => p.id === settings?.orchestrator_provider)?.model_capabilities[settings?.orchestrator_model ?? '']
 
   const supportedEfforts = selectedCapability?.reasoning_efforts ?? []
-  const currentEffort = resolveEffort(reasoningEffort, supportedEfforts)
+  const currentEffort = resolveEffort(reasoningEffort, supportedEfforts, selectedCapability?.default_effort)
 
   const EFFORT_LABELS: Record<string, string> = {
     '': '默认',

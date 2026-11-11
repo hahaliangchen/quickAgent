@@ -170,6 +170,32 @@ impl Untouched {
     }
 }
 
+/// At the start of a turn, a managed file that changed since its baseline
+/// takes its current content as the baseline: between turns the user is in
+/// control, so what changed then is the world the new turn works on, not an
+/// external edit to stop on. A change made while a turn runs still conflicts.
+/// Returns the files whose baseline moved.
+pub(super) fn refresh_baselines(root: &Path, task: &str) -> Result<Vec<String>> {
+    let rows: Vec<(String, String, bool, Option<Vec<u8>>)> = connection(root)?
+        .prepare("SELECT workspace,path,exists_at_baseline,bytes FROM agent_file_baselines WHERE task_id=?1")?
+        .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut moved = Vec::new();
+    for (workspace, path, exists, bytes) in rows {
+        // Missing bytes for an existing baseline are not evidence of absence.
+        if exists && bytes.is_none() {
+            continue;
+        }
+        // An unreadable file keeps its baseline; the next write reports it.
+        let Ok(current) = crate::file_edit::snapshot(&Path::new(&workspace).join(&path)) else { continue };
+        if current != bytes {
+            save(root, task, &workspace, &path, current.as_deref(), true)?;
+            moved.push(path);
+        }
+    }
+    Ok(moved)
+}
+
 /// Only save a read snapshot if it matches the actual version delivered by the tool.
 pub(super) fn observe(root: &Path, task: &str, workspace: &Path, args: &Value, result: &Value) -> Result<Option<Value>> {
     let Some(raw) = args["path"].as_str() else { return Ok(None); };
@@ -606,6 +632,31 @@ mod tests {
         observe(&root, "task", &root, &json!({"path":"document.txt"}), &json!({"code_hash":crate::symbol_description::content_hash(b"external")}))?;
         let prepared = prepare(&root, "task", &root, "write_file", json!({"path":"document.txt","content":"agent"}))?;
         assert!(prepared.conflict()?);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// 2026-11-11: a file the task read in turn 1 was changed by another
+    /// session hours later; in turn 7 the AI read the new version and edited
+    /// it, and the turn failed on the six-hour-old baseline.
+    #[test]
+    fn a_change_made_between_turns_is_the_next_turns_starting_point() -> Result<()> {
+        let root = root();
+        let path = root.join("document.txt");
+        fs::write(&path, "original\n")?;
+        fs::write(root.join("untouched.txt"), "same\n")?;
+        let hash = |bytes: &[u8]| json!({"code_hash":crate::symbol_description::content_hash(bytes)});
+        observe(&root, "task", &root, &json!({"path":"document.txt"}), &hash(b"original\n"))?;
+        observe(&root, "task", &root, &json!({"path":"untouched.txt"}), &hash(b"same\n"))?;
+        // Between turns: another session changes the file.
+        fs::write(&path, "between\n")?;
+        assert_eq!(refresh_baselines(&root, "task")?, vec!["document.txt".to_owned()], "only the changed file moves");
+        let edit = prepare(&root, "task", &root, "edit_file", json!({"path":"document.txt","edits":[{"old_text":"between","new_text":"agent"}]}))?;
+        assert!(!edit.conflict()?, "the new turn edits what is there now");
+        // A change made while the turn runs still stops it.
+        fs::write(&path, "during\n")?;
+        let edit = prepare(&root, "task", &root, "edit_file", json!({"path":"document.txt","edits":[{"old_text":"during","new_text":"agent"}]}))?;
+        assert!(edit.conflict()?);
         fs::remove_dir_all(root)?;
         Ok(())
     }

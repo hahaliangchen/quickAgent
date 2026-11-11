@@ -54,6 +54,9 @@ const SHIKI_PRE_PROPS = {
   tabIndex: 0,
 } as const
 
+/** A settled card longer than this many lines starts folded to a short preview. */
+const FOLD_LINES = 12
+
 /** Completed-line group size; React reconciles groups while the DOM remains line-for-line identical. */
 const STREAMING_LINE_GROUP_SIZE = 32
 
@@ -72,7 +75,13 @@ export function CodeBlock({
   code, lang, streaming, className, contentRef, lineNumbers = false, showHeader = true, copyLabel, copiedLabel, toolbarLabels, wrap,
 }: CodeBlockProps) {
   const trimmed = code.endsWith('\n') ? code.slice(0, -1) : code
-  const sourceLines = lineNumbers ? trimmed.split('\n') : undefined
+  const lineCount = trimmed.split('\n').length
+  // Chat code cards (the ones that can fold) read like a source file: a
+  // numbered gutter once the snippet is more than a few lines.
+  const foldLabels = toolbarLabels?.expandLabel !== undefined && toolbarLabels.collapseLabel !== undefined
+    && toolbarLabels.linesLabel !== undefined ? toolbarLabels : undefined
+  const numbered = lineNumbers || (foldLabels !== undefined && lineCount > 3)
+  const sourceLines = numbered ? trimmed.split('\n') : undefined
   const rootRef = useRef<HTMLDivElement>(null)
   const highlighting = useViewportHighlighting(rootRef, lang)
   // Re-render when a lazy grammar finishes loading, so a fence that showed plain
@@ -154,8 +163,13 @@ export function CodeBlock({
     [streaming, highlighting, streamedBody, trimmed, lang, loaded],
   )
   const [copied, setCopied] = useState(false)
-  const [localWrapped, setWrapped] = useState(true)
+  // Chat cards keep source columns and scroll sideways, as a source view does.
+  const [localWrapped, setWrapped] = useState(foldLabels === undefined)
   const wrapped = wrap ?? localWrapped
+  // Long settled cards fold to a preview; a fence still streaming stays open.
+  const foldable = foldLabels !== undefined && streaming !== true && lineCount > FOLD_LINES
+  const [expanded, setExpanded] = useState(false)
+  const folded = foldable && !expanded
 
   const onCopy = useCallback(() => {
     if (copied) return
@@ -185,8 +199,8 @@ export function CodeBlock({
       )
 
   return (
-    <div ref={rootRef} className={clsx(css.block, 'md-code-block', lineNumbers && css.numbered, toolbarLabels !== undefined && css.card, className)}
-      data-line-numbers={lineNumbers || undefined}
+    <div ref={rootRef} className={clsx(css.block, 'md-code-block', numbered && css.numbered, toolbarLabels !== undefined && css.card, foldLabels !== undefined && css.source, className)}
+      data-line-numbers={numbered || undefined}
       data-code-wrap={toolbarLabels === undefined ? undefined : wrapped}
       style={sourceLines === undefined ? undefined : {
         '--dsl-code-block-line-number-width': `${Math.max(2, String(sourceLines.length).length)}ch`,
@@ -195,6 +209,7 @@ export function CodeBlock({
       {showHeader && <div className={css.bannerWrap}>
         {toolbarLabels !== undefined ? <CodeToolbar
           lang={lang} labels={toolbarLabels} copyLabel={copyLabel} copiedLabel={copiedLabel}
+          status={foldLabels?.linesLabel?.replace('{n}', String(lineCount))}
           copied={copied} wrapped={wrapped} onCopy={onCopy}
           onWrap={wrap === undefined ? () => { setWrapped(value => !value) } : undefined}
         /> : <div className={css.banner} data-code-block-banner>
@@ -206,7 +221,13 @@ export function CodeBlock({
           </div>
         </div>}
       </div>}
-      <div ref={contentRef} className={css.content} data-code-block-content>{body}</div>
+      <div ref={contentRef} className={css.content} data-code-block-content>
+        {foldable ? <div className={clsx(css.foldBody, folded && css.folded)}>{body}</div> : body}
+      </div>
+      {foldable && <button type="button" className={css.foldToggle} aria-expanded={expanded}
+        onClick={() => { setExpanded(value => !value) }}>
+        {expanded ? foldLabels.collapseLabel : foldLabels.expandLabel?.replace('{n}', String(lineCount))}
+      </button>}
     </div>
   )
 }

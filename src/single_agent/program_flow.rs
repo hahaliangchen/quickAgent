@@ -338,7 +338,7 @@ pub(super) fn write_program_tool(module: bool) -> Value {
                 "version":{"type":"integer","minimum":1,"description":"Current saved version from the module directory."},
                 "reason":{"type":"string","minLength":1,"maxLength":2000,"description":"Concrete improvement and existing behavior to preserve."}
             },"required":["version","reason"],"additionalProperties":false}});
-        "Hand over the program to run. The host writes source to a file in this chat's folder, compiles it, and when it compiles runs it once this reply ends; what the program prints and how it ended come back to you. Compile errors come back as this call's result, so call it again with the corrected program. Call it as the only call in its reply. Code in reply text is never run: write code there only to show it to the user."
+        "Hand over the program to run. The host writes source to a file in this chat's folder, compiles it, and when it compiles runs it once this reply ends; what the program logs with console.log and how it ended come back to you. Compile errors come back as this call's result, so call it again with the corrected program. Call it as the only call in its reply. Code in reply text is never run: write code there only to show it to the user."
     };
     function(WRITE_PROGRAM, description, properties, json!(["source"]))
 }

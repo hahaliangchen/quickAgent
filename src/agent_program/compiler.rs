@@ -2847,7 +2847,7 @@ fn compile_inner(
             "ReturnNotAllowed" if refinement => format!(
                 "return is only allowed inside a function; the host calls {entry} itself with this call's arguments, so put this code inside {entry}"
             ),
-            "ReturnNotAllowed" => "return is only allowed inside a function; a program ends after its last statement, so print what it found with console.log".to_owned(),
+            "ReturnNotAllowed" => "return is only allowed inside a function; a program ends after its last statement, so log what it found with console.log".to_owned(),
             _ => kind,
         }
     };

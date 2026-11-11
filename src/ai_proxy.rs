@@ -87,6 +87,26 @@ fn built_in_capabilities(model: &str) -> ModelCapabilities {
 fn default_api_type() -> String {
     "openai-completions".to_owned()
 }
+
+/// Reasoning levels a DSH model entry declares through `reasoningEfforts`.
+/// Keys are the levels the user can pick (`false`/`off` mean "no reasoning"),
+/// and the canonical order keeps the picker stable whatever the file order.
+fn declared_reasoning_efforts(metadata: &Value) -> Vec<String> {
+    const ORDER: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    let Some(levels) = metadata.get("reasoningEfforts").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut declared: Vec<&str> = levels
+        .keys()
+        .filter_map(|key| match key.as_str() {
+            "false" | "off" | "none" => Some("none"),
+            other => ORDER.iter().copied().find(|level| *level == other),
+        })
+        .collect();
+    declared.sort_by_key(|level| ORDER.iter().position(|known| known == level));
+    declared.dedup();
+    declared.into_iter().map(str::to_owned).collect()
+}
 /// The provider APIs the agent speaks: Chat Completions, and Responses as
 /// Codex uses it.
 fn agent_api(api_type: &str) -> bool {
@@ -595,6 +615,22 @@ pub(crate) fn load_config(config_path: &Path) -> anyhow::Result<AiProxyConfig> {
                 .or_insert_with(|| built_in_capabilities(model_id));
         }
         for (model, capability) in models {
+            // A model entry that names its own levels is honoured even when the
+            // generation settings do not repeat them.
+            if capability.reasoning_efforts.is_empty() {
+                if let Some(metadata) = provider.model_metadata.get(model) {
+                    capability.reasoning_efforts = declared_reasoning_efforts(metadata);
+                }
+            }
+            if capability.default_effort.is_none() {
+                if let Some(metadata) = provider.model_metadata.get(model) {
+                    capability.default_effort = metadata
+                        .get("defaultReasoningEffort")
+                        .and_then(Value::as_str)
+                        .filter(|level| capability.reasoning_efforts.iter().any(|own| own == level))
+                        .map(str::to_owned);
+                }
+            }
             if capability.image_probe.as_ref().is_some_and(|probe| {
                 provider.api_type != "openai-completions"
                     || probe["route_fingerprint"]
@@ -2717,6 +2753,69 @@ mod tests {
     }
 
     #[test]
+    fn model_entry_declared_levels_reach_the_catalog_and_the_settings_view() {
+        let root = std::env::temp_dir().join(crate::visual_artifacts::new_id());
+        let path = root.join("profiles/web/cordis.patch.yml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_yaml_atomic(&path, &json!([
+            {"id":"llm-pi-ai","config":{"providers":{
+                "deepseek":{"baseURL":"https://api.deepseek.com/v1","api":"openai-completions","models":[
+                    {"id":"deepseek-flash","contextWindow":1048576,"maxTokens":393216,
+                     "reasoningEfforts":{"low":"low","high":"high","max":"max"}}
+                ]},
+                "subapi":{"baseURL":"http://relay.example/v1","api":"openai-completions","models":[
+                    {"id":"gpt-6.1-sol","contextWindow":1050000,"maxTokens":128000,
+                     "reasoningEfforts":{"none":"none","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"}}
+                ]}
+            }}},
+            {"id":"agent-default-model","config":{"provider":"deepseek","model":"deepseek-flash"}}
+        ])).unwrap();
+        write_yaml_atomic(
+            &credentials_path(&path),
+            &json!({"version":1,"refs":{},"records":{}}),
+        )
+        .unwrap();
+        write_yaml_atomic(
+            &generation_settings_path(&path),
+            &json!({"model_capabilities":{"deepseek":{"deepseek-flash":{"reasoning_efforts":[],"image_input":"unknown"}}}}),
+        )
+        .unwrap();
+        let loaded = load_config(&path).unwrap();
+        // An entry that names its levels is selectable without repeating them.
+        assert_eq!(
+            loaded.model_capabilities["deepseek"]["deepseek-flash"].reasoning_efforts,
+            vec!["low", "high", "max"]
+        );
+        let view = catalog_view(&loaded);
+        assert_eq!(view["models"][0]["context_window"], 1_048_576);
+        assert_eq!(view["models"][0]["capabilities"]["reasoning_efforts"], json!(["low","high","max"]));
+        assert_eq!(view["models"][1]["capabilities"]["reasoning_efforts"], json!(["none","low","medium","high","xhigh","max"]));
+        assert_eq!(view["models"][1]["max_output_tokens"], 128_000);
+        // Generation settings still win when they name their own levels.
+        let mut generation = read_yaml(&generation_settings_path(&path), json!({})).unwrap();
+        generation["model_capabilities"]["deepseek"]["deepseek-flash"]["reasoning_efforts"] =
+            json!(["high"]);
+        write_yaml_atomic(&generation_settings_path(&path), &generation).unwrap();
+        let narrowed = load_config(&path).unwrap();
+        assert_eq!(
+            narrowed.model_capabilities["deepseek"]["deepseek-flash"].reasoning_efforts,
+            vec!["high"]
+        );
+        let settings = settings_view(&loaded, "rev".into());
+        let deepseek = settings["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "deepseek")
+            .unwrap();
+        assert_eq!(
+            deepseek["model_capabilities"]["deepseek-flash"]["reasoning_efforts"],
+            json!(["low","high","max"])
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn model_catalog_projects_registered_models_and_keeps_credentials_private() {
         let mut config: AiProxyConfig = serde_json::from_value(json!({
             "orchestrator_provider":"route", "orchestrator_model":"m",
@@ -2752,12 +2851,20 @@ mod tests {
         let mut state =
             crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
         apply_agent_config(&mut state, &config);
-        // What a request may use is capped, whatever the config declares.
+        // The model entry's declared window is what a request may use; only a
+        // model that declares nothing falls back to the conservative default.
         assert_eq!(
             crate::model_settings::context_window(&state, "upstream-m"),
+            500_000
+        );
+        assert_eq!(
+            crate::model_settings::context_window(&state, "m"),
+            500_000
+        );
+        assert_eq!(
+            crate::model_settings::context_window(&state, "undeclared"),
             crate::context_window::MAX_TOKENS
         );
-        assert_eq!(crate::model_settings::context_window(&state, "m"), crate::context_window::MAX_TOKENS);
         let _ = std::fs::remove_dir_all(root);
         assert_eq!(view["defaults"]["visual_tool"]["model"], "m");
         let encoded = view.to_string();

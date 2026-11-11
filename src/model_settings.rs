@@ -6,12 +6,16 @@ use serde::{Deserialize, Serialize};
 pub const OUTPUT_RESERVE: usize = 24_576;
 /// Used when the DSH model entry does not declare `maxTokens`.
 pub const DEFAULT_MAX_OUTPUT: usize = 32_768;
+/// Sanity ceiling for a declared context window. Real vendor values stay far
+/// below it; it only rejects a nonsensical declaration.
+pub const MAX_CONTEXT_WINDOW: usize = 2_000_000;
 
-/// A model's context window, never above MAX_TOKENS whatever its config declares.
+/// A model's own declared context window. An entry that declares nothing falls
+/// back to the conservative default instead of silently capping a real window.
 pub fn context_window(state: &AgentServiceState, model: &str) -> usize {
     declared_context_window(state, model)
         .unwrap_or(crate::context_window::MAX_TOKENS)
-        .min(crate::context_window::MAX_TOKENS)
+        .min(MAX_CONTEXT_WINDOW)
 }
 
 fn declared_context_window(state: &AgentServiceState, model: &str) -> Option<usize> {
@@ -108,8 +112,8 @@ impl ModelSettings {
         );
         ensure!(
             self.context_window
-                .is_none_or(|n| (32_768..=1_050_000).contains(&n)),
-            "context window must be between 32768 and 1050000 tokens"
+                .is_none_or(|n| (32_768..=MAX_CONTEXT_WINDOW).contains(&n)),
+            "context window must be between 32768 and {MAX_CONTEXT_WINDOW} tokens"
         );
         Ok(())
     }
@@ -272,6 +276,46 @@ mod tests {
         };
         empty.normalize().unwrap();
         assert_eq!(empty, ModelSettings::default());
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn a_declared_vendor_window_is_used_instead_of_the_default_cap() {
+        let root = std::env::temp_dir().join(crate::visual_artifacts::new_id());
+        std::fs::create_dir_all(&root).unwrap();
+        let mut state =
+            crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        state.provider_name = "deepseek".into();
+        state.provider_routes.insert(
+            "deepseek".into(),
+            crate::agent_service::AgentProviderRoute {
+                prefix_system_messages: false,
+                responses: false,
+                url: "https://api.deepseek.com/v1".into(),
+                api_key: "fixture-key".into(),
+                models: [("deepseek-flash".into(), "deepseek-flash".into())]
+                    .into_iter()
+                    .collect(),
+                max_output_tokens: [("deepseek-flash".into(), 393_216)].into_iter().collect(),
+                context_windows: [("deepseek-flash".into(), 1_048_576)].into_iter().collect(),
+            },
+        );
+        // The declared 1M window is what a request may use, not the fallback.
+        assert_eq!(context_window(&state, "deepseek-flash"), 1_048_576);
+        assert_eq!(input_budget(&state, "deepseek-flash"), 1_024_000);
+        assert_eq!(
+            output_tokens(&state, "deepseek-flash", 1_024_000, 1_000),
+            393_216
+        );
+        let mut declared = ModelSettings {
+            context_window: Some(1_048_576),
+            ..Default::default()
+        };
+        declared.normalize().unwrap();
+        let mut beyond_ceiling = ModelSettings {
+            context_window: Some(MAX_CONTEXT_WINDOW + 1),
+            ..Default::default()
+        };
+        assert!(beyond_ceiling.normalize().is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 }

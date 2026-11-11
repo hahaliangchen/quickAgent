@@ -143,3 +143,131 @@
   content: counter(source-line);
   user-select: none;
 }
+
+/* Chat code cards read like a GitHub source view: a framed white sheet, a
+   tinted header, a numbered gutter, monospace text that keeps its columns,
+   GitHub's syntax palette, and long blocks folded to a preview. Scoped to
+   these cards; other code surfaces keep the shared theme. */
+.source {
+  --gh-bg: #ffffff;
+  --gh-header: #f6f8fa;
+  --gh-border: #d1d9e0;
+  --gh-gutter: #59636e;
+  --gh-hover: #f6f8fa;
+  --gh-link: #0969da;
+  --gh-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --dsl-code-block-background: var(--gh-bg);
+  --dsl-code-block-border-radius: 6px;
+  --shiki-background: var(--gh-bg);
+  --shiki-foreground: #1f2328;
+  --shiki-token-constant: #0550ae;
+  --shiki-token-string: #0a3069;
+  --shiki-token-comment: #59636e;
+  --shiki-token-keyword: #cf222e;
+  --shiki-token-parameter: #953800;
+  --shiki-token-function: #8250df;
+  --shiki-token-string-expression: #116329;
+  --shiki-token-punctuation: #1f2328;
+  --shiki-token-link: #0a3069;
+
+  border: 1px solid var(--gh-border);
+  border-radius: 6px;
+  overflow: clip;
+}
+
+:global(body[data-ds-dark-theme]) .source {
+  --gh-bg: #0d1117;
+  --gh-header: #151b23;
+  --gh-border: #3d444d;
+  --gh-gutter: #9198a1;
+  --gh-hover: #151b23;
+  --gh-link: #4493f8;
+  --shiki-foreground: #f0f6fc;
+  --shiki-token-constant: #79c0ff;
+  --shiki-token-string: #a5d6ff;
+  --shiki-token-comment: #9198a1;
+  --shiki-token-keyword: #ff7b72;
+  --shiki-token-parameter: #ffa657;
+  --shiki-token-function: #d2a8ff;
+  --shiki-token-string-expression: #7ee787;
+  --shiki-token-punctuation: #f0f6fc;
+  --shiki-token-link: #a5d6ff;
+}
+
+.source [data-code-block-banner] {
+  padding: 6px 10px 6px 16px;
+  background: var(--gh-header);
+  border-bottom: 1px solid var(--gh-border);
+  border-radius: 0;
+}
+
+.source pre {
+  padding: 8px 16px;
+  font: 12px/20px var(--gh-mono);
+  border-radius: 0;
+}
+
+.source pre code {
+  font-family: var(--gh-mono);
+}
+
+.source.numbered pre {
+  padding-inline-start: 0;
+}
+
+.source.numbered pre code > :global(.line) {
+  padding-inline-start: calc(var(--dsl-code-block-line-number-width) + 40px);
+}
+
+.source.numbered pre code > :global(.line)::before {
+  width: calc(var(--dsl-code-block-line-number-width) + 16px);
+  color: var(--gh-gutter);
+}
+
+.source.numbered pre code > :global(.line):hover {
+  background: var(--gh-hover);
+}
+
+.source[data-code-wrap='false'] pre code {
+  width: max-content;
+  min-width: 100%;
+}
+
+.foldBody {
+  position: relative;
+}
+
+.folded {
+  max-height: calc(6 * 20px + 8px);
+  overflow: hidden;
+}
+
+.folded::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0;
+  height: 48px;
+  background: linear-gradient(to bottom, transparent, var(--dsl-code-block-background));
+  pointer-events: none;
+}
+
+.foldToggle {
+  display: block;
+  width: 100%;
+  padding: 6px 0;
+  border: 0;
+  border-top: 1px solid var(--gh-border, var(--dsw-alias-border-l2));
+  color: var(--gh-link, var(--dsw-alias-label-secondary));
+  background: var(--gh-header, var(--dsl-code-block-background));
+  font: 12px/20px var(--dsw-font-family);
+  cursor: pointer;
+}
+
+.foldToggle:hover {
+  text-decoration: underline;
+}
+
+.foldToggle:focus-visible {
+  outline: 1px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -2px;
+}

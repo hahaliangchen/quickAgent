@@ -642,7 +642,7 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
             "content":json!({"shell":shell,"workspace":workspace,
                 "access":"module_deterministic_code_only",
                 "memory":{"ai_input_limit_tokens":s.input_budget,"program_shell_output_limit_bytes":crate::shell_process::PROGRAM_OUTPUT_LIMIT,
-                    "boundary":"Command output stays in code until printed or passed to a virtual helper."},
+                    "boundary":"Command output stays in code until logged with console.log or passed to a virtual helper."},
                 "usage":if cfg!(windows) { "Use PowerShell 7 with Windows paths. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." } else { "Use Bash. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." }}).to_string()}));
         }
         let environment = crate::agent_program::ENVIRONMENT;
@@ -2597,7 +2597,8 @@ async fn stop_on_conflict(s: &Session<'_>, result: &Value) -> Result<()> {
             format!("文件 {} 在读取期间发生变化，未进行编辑。请决定如何处理；系统不会自动重试。", result["path"].as_str().unwrap_or(""))
         };
         append(s, "assistant/message", json!({"actor":"host","turn":s.turn,"message":{"role":"assistant","content":message}}), true).await?;
-        anyhow::bail!("ASSET_CONFLICT: {}", result);
+        // The message above carries the details; the turn's error only names it.
+        anyhow::bail!("ASSET_CONFLICT: 文件 {} 写入冲突，未覆盖，详情见上方说明", result["path"].as_str().unwrap_or(""));
     }
     Ok(())
 }
@@ -2608,7 +2609,11 @@ fn append_conflict_preview(output: &mut String, label: &str, preview: &Value, sa
     if let Some(text) = preview["text"].as_str() {
         let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
         let fence = "`".repeat((longest + 1).max(3));
-        output.push_str(&format!("\n\n{fence}text\n{text}\n{fence}"));
+        // Fence it in the file's language so the chat highlights it.
+        let lang = saved.and_then(|path| std::path::Path::new(path).extension()).and_then(|ext| ext.to_str())
+            .map(|ext| match ext { "rs" => "rust", "yml" => "yaml", "md" => "markdown", "py" => "python", "sh" => "bash", other => other })
+            .unwrap_or("text");
+        output.push_str(&format!("\n\n{fence}{lang}\n{text}\n{fence}"));
         if preview["truncated"] == true { output.push_str("\n（预览已截断，完整内容见保存的文件。）"); }
     } else { output.push_str("\n\n内容无法作为 UTF-8 文本预览，请查看保存的文件。"); }
 }
@@ -3037,6 +3042,12 @@ pub(crate) async fn run_task(
         }
     }
     settle_unanswered_calls(&s, &mut w).await?;
+    // What changed between turns is the user's, not an external edit (§9).
+    let (root, baseline_task) = (state.workspace.root().to_path_buf(), task.clone());
+    let refreshed = tokio::task::spawn_blocking(move || managed_files::refresh_baselines(&root, &baseline_task)).await??;
+    if !refreshed.is_empty() {
+        append(&s, "files/baselines_refreshed", json!({"turn":turn,"paths":refreshed}), false).await?;
+    }
     let unreadable = paused_programs::drop_unreadable(&s, &mut w).await?;
     let root = state.workspace.root().to_path_buf();
     let hydrate_task = task.clone();

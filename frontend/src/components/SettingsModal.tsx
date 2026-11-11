@@ -1051,7 +1051,7 @@ export function SettingsModal({
                             <span className={appearanceCss.rowHint}>单位 tokens</span>
                           </div>
                           <div className={appearanceCss.control}>
-                            <input className={modelsCss.input} type="number" min={32768} max={1050000} step={1} placeholder="留空跟随主 Agent" value={config.context_window ?? ''} onChange={e => update({ context_window: e.target.value === '' ? null : Number(e.target.value) })} />
+                            <input className={modelsCss.input} type="number" min={32768} max={2000000} step={1} placeholder="留空跟随主 Agent" value={config.context_window ?? ''} onChange={e => update({ context_window: e.target.value === '' ? null : Number(e.target.value) })} />
                           </div>
                         </div>
                       </div>

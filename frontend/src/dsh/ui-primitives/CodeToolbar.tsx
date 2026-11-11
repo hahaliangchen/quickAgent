@@ -14,6 +14,12 @@ export interface CodeToolbarLabels {
   wrapLabel: string
   /** Action that preserves source columns with horizontal scrolling. */
   unwrapLabel: string
+  /** Line count shown in the header; `{n}` is the count. Folding needs all three fold labels. */
+  linesLabel?: string | undefined
+  /** Action that shows a folded block in full; `{n}` is the line count. */
+  expandLabel?: string | undefined
+  /** Action that folds an expanded long block again. */
+  collapseLabel?: string | undefined
 }
 
 /** Display state and callbacks for a code card's toolbar. */

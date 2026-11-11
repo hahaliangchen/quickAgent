@@ -28,6 +28,21 @@ import { SmoothMarkdown } from './SmoothMarkdown.tsx'
 /** What the AI reviewer decided in "approve for me" mode. */
 const REVIEW_LABELS: Record<string, string> = { allow: 'AI 审批 · 已允许', deny: 'AI 审批 · 已拒绝', ask: 'AI 审批 · 转交给你' }
 
+/** A failed turn's reason, clamped to a few lines; a long one opens on click. */
+function TurnErrorMessage({ message }: { message: string }) {
+  const [open, setOpen] = useState(false)
+  const long = message.length > 240 || message.split('\n').length > 3
+  if (!long) return <span className={messageCss.turnErrorMessage}>{message}</span>
+  return (
+    <span className={messageCss.turnErrorMessage}>
+      <span className={open ? undefined : messageCss.turnErrorClamped}>{message}</span>
+      <button type="button" className={messageCss.turnErrorToggle} onClick={() => { setOpen(value => !value) }}>
+        {open ? '收起' : '展开详情'}
+      </button>
+    </span>
+  )
+}
+
 function TurnEnd({ reason, durationMs }: { reason: TurnEndReason; durationMs?: number | undefined }) {
   const durationText = durationMs !== undefined ? formatDuration(durationMs) : ''
   if (reason.kind === 'completed') {
@@ -49,7 +64,7 @@ function TurnEnd({ reason, durationMs }: { reason: TurnEndReason; durationMs?: n
           {t('message.turnError')}
           {durationText && <span className={css.turnDurationSpan}> (耗时 {durationText})</span>}
         </span>
-        <span className={messageCss.turnErrorMessage}>{reason.message}</span>
+        <TurnErrorMessage message={reason.message} />
       </div>
       {reason.code !== undefined && <code className={messageCss.turnErrorCode}>{reason.code}</code>}
     </div>
@@ -288,9 +303,10 @@ function AssistantTurnView({
       {notes.map(note => <NoteProposal key={note.key} callId={note.callId} rawArguments={note.arguments} workspace={workspace} />)}
 
       {/* 6. Codex-Style Edited Files Summary Card */}
-      {changes && <ChangesCard taskId={taskId} summary={changes} running={running} onChangesUpdated={onChangesUpdated} />}
+      {/* Shown once the turn ends, as Codex does: mid-turn it read as "done". */}
+      {!isTurnRunning && changes && <ChangesCard taskId={taskId} summary={changes} running={running} onChangesUpdated={onChangesUpdated} />}
       {trackingError && <p role="status" className={css.turnNote}>部分改动未能记录：{trackingError}</p>}
-      {!changes && flattenItems(turn.entries).some(item => item.kind === 'tool' && /^(write_file|replace_range|edit_file)$/.test(item.name) && item.result && !item.result.isError) && <p className={css.turnNote}>这轮没有可用的修改前后快照，无法显示准确统计或撤销。</p>}
+      {!isTurnRunning && !changes && flattenItems(turn.entries).some(item => item.kind === 'tool' && /^(write_file|replace_range|edit_file)$/.test(item.name) && item.result && !item.result.isError) && <p className={css.turnNote}>这轮没有可用的修改前后快照，无法显示准确统计或撤销。</p>}
       {/* 7. Error or Abort notices if any */}
       {turn.turnEnd && (
         <TurnEnd reason={turn.turnEnd.reason} durationMs={turn.durationMs} />

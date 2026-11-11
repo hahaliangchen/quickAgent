@@ -305,6 +305,28 @@
 
 .turnErrorMessage {
   color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+
+.turnErrorClamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.turnErrorToggle {
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  color: var(--dsw-alias-label-tertiary);
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.turnErrorToggle:hover {
+  color: var(--dsw-alias-label-primary);
 }
 
 .turnErrorCode {

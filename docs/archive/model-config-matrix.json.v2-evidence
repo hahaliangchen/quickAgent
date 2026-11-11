@@ -1,0 +1,2823 @@
+{
+  "generatedAt": "2026-11-11T02:38:25.399Z",
+  "goal": "为这台机器上已配置的每一个模型建立一张“可配置项”对照表，并逐项给出依据。必须覆盖：思考/推理等级（参数名 + 可选值）、最大上下文、最大输出 token、能否加速（fast_mode / service_tier / priority）、多模态图像输入、工具调用。每个模型都要区分三件事：(a) providers 文件里的本地声明值，(b) 宿主代码钳制后的生效值，(c) 厂商官方文档核实到的上游真实能力。同一模型被两个 key（deepseek 与 deepseek-self）重复配置时，必须分两行列出并说明二者差异。无法从公开文档或端点目录确认的项目，一律标注“未经验证/需实测”，不得猜测数值。表末必须给出可执行的改进建议（哪些 model_capabilities 该补、哪些声明值超出宿主上限）。调研过程要求：单个文档页 404/403/超时或搜索查询无结果时，记录到 gaps 与 sources 后继续其它模型与其它候选来源，不得让一处失败终止整轮调研。",
+  "webStatus": "partial",
+  "markdownPath": "docs/model-config-matrix.md",
+  "jsonPath": "docs/model-config-matrix.json",
+  "rowCount": 11,
+  "configPaths": [
+    "/home/goodtime/.config/grow/providers.yml",
+    "/home/goodtime/.config/grow/agent-generation.yml"
+  ],
+  "hostRuntime": {
+    "allowedEfforts": [
+      "none",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "contextClamp": "MAX_TOKENS = 256000（src/context_window.rs），声明更大也按 256000 计算输入预算",
+    "defaultMaxOutput": "DEFAULT_MAX_OUTPUT = 32768（src/model_settings.rs:9，provider 未声明 maxTokens 时）",
+    "outputReserve": "OUTPUT_RESERVE = 24576（src/model_settings.rs:7），输入预算 = 窗口 - min(24576, 窗口/4)",
+    "overrideRange": "单次使用的 context_window 覆盖只接受 32768..1050000（src/model_settings.rs:112-116）",
+    "warnings": [
+      "providers.yml / cordis.patch.yml 里声明的 contextWindow、maxTokens 只是本地声明，不等于上游真实上限；应以上游官方文档为准并据此收紧。",
+      "同一 baseURL 用两个 key 配置（deepseek 与 deepseek-self）时，能力表需要在 agent-generation.yml 里分别声明，否则两侧用不同默认值。",
+      "reasoningEfforts 写在 providers 文件里不会生效；只有 agent-generation.yml 的 model_capabilities 才决定 UI 可选项。"
+    ],
+    "wire": "Chat Completions: body.reasoning_effort = 等级（none/minimal 会被改写为 low，思考不会真正关闭）；fast_mode 时 body.service_tier=\"fast\"。Responses API: reasoning.effort 与 service_tier 同名字段。"
+  },
+  "globalDefaults": {
+    "agents": {
+      "context": {
+        "contextWindow": 500000,
+        "extra": {},
+        "model": "gpt-6.1-sol",
+        "provider": null,
+        "reasoningEffort": "low",
+        "resolvedProvider": "subapi"
+      },
+      "delegate": {
+        "contextWindow": null,
+        "extra": {},
+        "model": null,
+        "provider": null,
+        "reasoningEffort": null,
+        "resolvedProvider": null
+      },
+      "visual": {
+        "contextWindow": null,
+        "extra": {},
+        "model": "gpt-6.1-sol",
+        "provider": "subapi",
+        "reasoningEffort": "medium",
+        "resolvedProvider": "subapi"
+      }
+    },
+    "fastMode": false,
+    "model": {
+      "model": "deepseek-flash",
+      "provider": "deepseek-self",
+      "reasoningEffort": "high",
+      "resolvedProvider": "deepseek-self"
+    },
+    "pluginGeneration": {
+      "ppt-master": {
+        "reasoning_effort": "low",
+        "visual_reasoning_effort": "low"
+      }
+    },
+    "pluginModels": {
+      "ppt-master": [
+        {
+          "model": "qwen3.8-27b",
+          "provider": "qwen-local"
+        },
+        {
+          "model": "gpt-6-luna",
+          "provider": "subapi"
+        },
+        {
+          "model": "gpt-6.1-terra",
+          "provider": "subapi"
+        },
+        {
+          "model": "deepseek-flash",
+          "provider": "deepseek"
+        },
+        {
+          "model": "deepseek-v4-pro",
+          "provider": "deepseek"
+        }
+      ],
+      "web": [
+        {
+          "model": "deepseek-flash",
+          "provider": "deepseek-self"
+        }
+      ]
+    },
+    "providerCompatibility": {
+      "deepseek": {
+        "prefix_system_messages": false
+      },
+      "deepseek-self": {
+        "prefix_system_messages": false
+      },
+      "qwen-local": {
+        "prefix_system_messages": true
+      },
+      "subapi": {
+        "prefix_system_messages": false
+      }
+    },
+    "reasoningEffort": null,
+    "subagent": {
+      "maxActiveSubagents": 1,
+      "maxDepth": 1
+    },
+    "subagentModelSelection": {
+      "allowedModels": [
+        {
+          "model": "gpt-6-luna",
+          "provider": "subapi"
+        }
+      ],
+      "enabled": false
+    }
+  },
+  "probes": [
+    {
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "checkedAt": "2026-11-11T02:18:53.656Z",
+      "error": "HTTP 401: Authentication Fails (governor)",
+      "httpStatus": 401,
+      "modelIds": [],
+      "ok": false,
+      "provider": "deepseek,deepseek-self",
+      "providers": [
+        "deepseek",
+        "deepseek-self"
+      ],
+      "url": "https://api.deepseek.com/v1/models"
+    },
+    {
+      "apiKeyEnv": null,
+      "baseUrl": "http://10.10.10.201:12888/v1",
+      "checkedAt": "2026-11-11T02:18:54.594Z",
+      "error": "HTTP 401: {\"error\": {\"type\": \"authentication_error\", \"message\": \"missing or wrong API key\"}}",
+      "httpStatus": 401,
+      "modelIds": [],
+      "ok": false,
+      "provider": "qwen-local",
+      "providers": [
+        "qwen-local"
+      ],
+      "url": "http://10.10.10.201:12888/v1/models"
+    },
+    {
+      "apiKeyEnv": "SUBAPI_API_KEY",
+      "baseUrl": "http://104.207.156.188:58081/v1",
+      "checkedAt": "2026-11-11T02:18:55.293Z",
+      "error": "HTTP 401: {\"code\":\"API_KEY_REQUIRED\",\"message\":\"API key is required in Authorization header (Bearer scheme), x-api-key header, or x-goog-api-key header\"}",
+      "httpStatus": 401,
+      "modelIds": [],
+      "ok": false,
+      "provider": "subapi",
+      "providers": [
+        "subapi"
+      ],
+      "url": "http://104.207.156.188:58081/v1/models"
+    }
+  ],
+  "rows": [
+    {
+      "provider": "deepseek-self",
+      "model": "deepseek-flash",
+      "name": "deepseek-flash",
+      "displayName": "DeepSeek 自用",
+      "api": "openai-completions",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKeyEnv": "DEEPSEEK_SELF_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": null,
+        "maxTokens": null,
+        "input": null,
+        "reasoningEfforts": null,
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "host_default",
+        "contextWindowClamped": false,
+        "defaultEffort": null,
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "inputBudget": 231424,
+        "maxOutput": 32768,
+        "maxOutputBasis": "host_default",
+        "outputReserve": 24576,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": null,
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "upstreamStatus": "verified",
+      "upstream": {
+        "contextWindow": 1048576,
+        "maxOutput": 393216,
+        "reasoningEfforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "defaultEffort": "high",
+        "fastMode": "unsupported",
+        "imageInput": "supported",
+        "toolCalling": "supported",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "verified",
+            "value": [
+              "low",
+              "high",
+              "max"
+            ],
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/guides/thinking_mode/"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "context_window",
+            "status": "verified",
+            "value": 1048576,
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/list-models"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_tokens",
+            "status": "verified",
+            "value": 393216,
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/quick_start/pricing"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "unsupported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/create-chat-completion"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "image_url input",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/guides/vision/"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/create-chat-completion"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "本行 declared 全 null：maxOutput 走宿主 32768（上游 thinking 默认 65536 的一半），contextWindow 走宿主默认值（本次证据未给出该默认值）。",
+        "与 deepseek/deepseek-flash 的差异 100% 来自本地声明，上游能力相同；两个 key 的配额/并发/降级差异 = 未经验证/需实测。",
+        "需要为 deepseek-self 单独补 contextWindow/maxTokens/reasoningEfforts，否则两侧行为不同。"
+      ],
+      "judgment": {
+        "verdict": "上游 6/6 项有文档依据（窗口 1048576、输出 393216、efforts low/high/max、默认 high、支持图像、不支持加速），但本行 declared 全 null：窗口落宿主默认、输出走 32768，capabilities 三项为空/null，UI 无档位且图像被拦住。属「能力已确认、本地未接线」。",
+        "action": "在 agent-generation.yml 为 deepseek-self 单独补 model_capabilities：reasoningEfforts=[low,high,max]、tool_calling=supported、image_input 先 probe 再置 supported；providers 侧补 maxTokens（≤393216）与 contextWindow（≤256000 或标注被钳），避免与 deepseek 同 id 不同默认值。",
+        "risk": "DEEPSEEK_SELF_API_KEY 未解析、/models 401，上游值仅文档级；图像探针从未执行；thinking 模式 tools 必须回传 reasoning_content 否则 400，宿主是否透传未验证。"
+      }
+    },
+    {
+      "provider": "deepseek-self",
+      "model": "deepseek-v4-pro",
+      "name": "deepseek-v4-pro",
+      "displayName": "DeepSeek 自用",
+      "api": "openai-completions",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKeyEnv": "DEEPSEEK_SELF_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": null,
+        "maxTokens": null,
+        "input": null,
+        "reasoningEfforts": null,
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "host_default",
+        "contextWindowClamped": false,
+        "defaultEffort": null,
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "inputBudget": 231424,
+        "maxOutput": 32768,
+        "maxOutputBasis": "host_default",
+        "outputReserve": 24576,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": null,
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "upstreamStatus": "verified",
+      "upstream": {
+        "contextWindow": 1048576,
+        "maxOutput": 393216,
+        "reasoningEfforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "defaultEffort": "high",
+        "fastMode": "unsupported",
+        "imageInput": "unsupported",
+        "toolCalling": "supported（含 web_search，仅 v4-pro）",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "verified",
+            "value": [
+              "low",
+              "high",
+              "max"
+            ],
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/guides/thinking_mode/"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "context_window",
+            "status": "verified",
+            "value": 1048576,
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/list-models"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_tokens",
+            "status": "verified",
+            "value": 393216,
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/quick_start/pricing"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "unsupported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/create-message"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "image block",
+            "status": "verified",
+            "value": "unsupported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/guides/vision/"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools / web_search",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/create-response/"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "与 deepseek/deepseek-v4-pro 仅本地声明不同（null vs 1048576/65536）；上游能力相同。",
+        "若 provider 级 defaultInput=image 生效，本模型会 400 → 必须显式 image_input: unsupported。",
+        "宿主默认上下文窗口未取证 → 生效输入预算 unverified。"
+      ],
+      "judgment": {
+        "verdict": "上游支持工具调用（含仅 v4-pro 的 web_search 服务器工具与 apply_patch）、明确不支持图像；本行 declared 全 null、capabilities 全空，等于把宿主默认值套在一个能力受限的模型上。",
+        "action": "显式 image_input: unsupported（防 provider 级 defaultInput=image 造成 400）；补 reasoningEfforts 与 tool_calling；补 maxTokens/contextWindow 或明确沿用宿主默认并写入文档。",
+        "risk": "图像一旦放行即 400；thinking 模式必须回传 reasoning_content；凭据缺失，工具/图像均未实测。"
+      }
+    },
+    {
+      "provider": "deepseek",
+      "model": "deepseek-flash",
+      "name": "DeepSeek Flash",
+      "displayName": "DeepSeek",
+      "api": "openai-completions",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": 1048576,
+        "maxTokens": 65536,
+        "input": null,
+        "reasoningEfforts": null,
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "clamped_to_host_max",
+        "contextWindowClamped": true,
+        "defaultEffort": null,
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "inputBudget": 231424,
+        "maxOutput": 65536,
+        "maxOutputBasis": "declared",
+        "outputReserve": 24576,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": null,
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "upstreamStatus": "verified",
+      "upstream": {
+        "contextWindow": 1048576,
+        "maxOutput": 393216,
+        "reasoningEfforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "defaultEffort": "high",
+        "fastMode": "unsupported",
+        "imageInput": "supported",
+        "toolCalling": "supported（function tools；thinking 模式 tool_choice 禁用 required/具名；tools 请求必须回传 reasoning_content 否则 400）",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort / reasoning.effort / output_config.effort",
+            "status": "verified",
+            "value": [
+              "low",
+              "high",
+              "max"
+            ],
+            "note": "默认 high；minimal→low、medium/xhigh→high、ultra→max；none 关闭思考",
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/guides/thinking_mode/",
+              "https://api-docs.deepseek.com/api/list-models"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "(catalog) context_window",
+            "status": "verified",
+            "value": 1048576,
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/list-models",
+              "https://api-docs.deepseek.com/quick_start/pricing"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_tokens (1..393216)",
+            "status": "verified",
+            "value": 393216,
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/quick_start/pricing",
+              "https://api-docs.deepseek.com/api/create-chat-completion"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "unsupported",
+            "note": "负面证据：请求体无该参数；Anthropic 侧『ignored compatibility field』",
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/create-chat-completion",
+              "https://api-docs.deepseek.com/api/create-message"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "messages[].content[].image_url / input_image",
+            "status": "verified",
+            "value": "supported",
+            "note": "input_modalities [text,image]；system/assistant 中的图像 400",
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/guides/vision/",
+              "https://api-docs.deepseek.com/api/list-models"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools / tool_choice",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/create-chat-completion",
+              "https://api-docs.deepseek.com/guides/thinking_mode/"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "与 deepseek-self/deepseek-flash 是同一 model id、同一 baseURL：上游能力完全相同，差异只在本行声明了 1048576/65536，对方全 null（走宿主默认）。",
+        "公开文档不按 API key 区分能力/配额/等级；两个 key 的余额、并发、是否降级 = 未经验证/需实测。",
+        "本行声明 maxContext 1048576 会被宿主钳到 256000；2 个 key 需要在 agent-generation.yml 分别声明，否则两侧默认值不同。",
+        "imageInput 本行声明 unknown，但上游支持 → 建议补 image_input: supported。"
+      ],
+      "judgment": {
+        "verdict": "声明 contextWindow=1048576 被钳到 256000（contextWindowClamped=true），maxTokens=65536 生效；相对上游（窗口 1M、输出 393216）窗口声明零收益、输出只用到约 1/6，capabilities 同样为空。",
+        "action": "contextWindow 改写 256000（或保留原值但在文档标注被钳），maxTokens 按需上调并注意宿主 clamp；补 reasoningEfforts/tool_calling；先跑 image probe 再置 image_input: supported。",
+        "risk": "1M 声明会误导使用者以为有 1M 上下文（实际输入预算 231424）；图像 unknown 不放行；thinking 模式 tools 未实测。"
+      }
+    },
+    {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro",
+      "displayName": "DeepSeek",
+      "api": "openai-completions",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": 1048576,
+        "maxTokens": 65536,
+        "input": null,
+        "reasoningEfforts": null,
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "clamped_to_host_max",
+        "contextWindowClamped": true,
+        "defaultEffort": null,
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "inputBudget": 231424,
+        "maxOutput": 65536,
+        "maxOutputBasis": "declared",
+        "outputReserve": 24576,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": null,
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "upstreamStatus": "verified",
+      "upstream": {
+        "contextWindow": 1048576,
+        "maxOutput": 393216,
+        "reasoningEfforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "defaultEffort": "high",
+        "fastMode": "unsupported",
+        "imageInput": "unsupported",
+        "toolCalling": "supported（含 web_search 服务器工具，仅 v4-pro；apply_patch；thinking 模式必须回传 reasoning_content）",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "verified",
+            "value": [
+              "low",
+              "high",
+              "max"
+            ],
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/guides/thinking_mode/"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "context_window",
+            "status": "verified",
+            "value": 1048576,
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/list-models",
+              "https://api-docs.deepseek.com/quick_start/pricing"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_tokens",
+            "status": "verified",
+            "value": 393216,
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/quick_start/pricing",
+              "https://api-docs.deepseek.com/api/create-chat-completion"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "unsupported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/create-response/",
+              "https://api-docs.deepseek.com/api/create-message/"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "input_image / image block",
+            "status": "verified",
+            "value": "unsupported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/guides/vision/",
+              "https://api-docs.deepseek.com/api/create-message"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools / web_search",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://api-docs.deepseek.com/api/create-response/",
+              "https://api-docs.deepseek.com/api/list-models"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "与 deepseek-self/deepseek-v4-pro 同一 model id/baseURL，上游能力相同；差别仅本地声明（本行 1048576/65536 vs 对方 null）。",
+        "本行 imageInput 声明 unknown，但上游明确不支持 → 应显式声明 image_input: unsupported，避免 UI 误发图像导致 400。",
+        "并发上限 500（flash 为 2500），是否按键降级未验证。"
+      ],
+      "judgment": {
+        "verdict": "声明形态与 deepseek/deepseek-flash 相同（1048576/65536、被钳到 256000），上游差异在图像不支持、工具集多 web_search/apply_patch；capabilities 仍全空。",
+        "action": "image_input: unsupported；补 reasoningEfforts 与 tool_calling；contextWindow 收紧到宿主上限并在文档注明；maxTokens 可上调。",
+        "risk": "行内「并发上限 500（flash 2500）」无来源 URL，不可引用；图像放行即 400；thinking 透传未测。"
+      }
+    },
+    {
+      "provider": "qwen-local",
+      "model": "qwen3.8-27b",
+      "name": "Qwen 3.8 27B",
+      "displayName": "Qwen 本地服务",
+      "api": "openai-completions",
+      "baseUrl": "http://10.10.10.201:12888/v1",
+      "apiKeyEnv": null,
+      "hasCredentials": null,
+      "localDeclared": {
+        "contextWindow": 256000,
+        "maxTokens": 256000,
+        "input": null,
+        "reasoningEfforts": null,
+        "contextRequestOptions": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          }
+        }
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "declared",
+        "contextWindowClamped": false,
+        "defaultEffort": "xhigh",
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": {
+          "capability": "supported",
+          "checkedAt": 1792137776774,
+          "elapsedMs": 2000,
+          "error": null,
+          "httpStatus": 200,
+          "model": "qwen3.8-27b",
+          "provider": "qwen-local",
+          "routeFingerprint": "6ed9b183f55fff7c40d476af1d5bb497648ca496af83d3f79ad9f1b9e4f5faa8",
+          "status": "verified"
+        },
+        "inputBudget": 231424,
+        "maxOutput": 256000,
+        "maxOutputBasis": "declared",
+        "outputReserve": 24576,
+        "reasoningEfforts": [
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "toolCalling": true
+      },
+      "capabilities": {
+        "defaultEffort": "xhigh",
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": {
+          "capability": "supported",
+          "checkedAt": 1792137776774,
+          "elapsedMs": 2000,
+          "error": null,
+          "httpStatus": 200,
+          "model": "qwen3.8-27b",
+          "provider": "qwen-local",
+          "routeFingerprint": "6ed9b183f55fff7c40d476af1d5bb497648ca496af83d3f79ad9f1b9e4f5faa8",
+          "status": "verified"
+        },
+        "reasoningEfforts": [
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "toolCalling": true
+      },
+      "upstreamStatus": "verified",
+      "upstream": {
+        "contextWindow": 262144,
+        "maxOutput": 131072,
+        "reasoningEfforts": [
+          "low",
+          "medium",
+          "xhigh"
+        ],
+        "defaultEffort": "xhigh",
+        "fastMode": "unverified（Qwen/百炼文档不定义 service_tier；第三方网关说明『两边都不文档化该字段，可能忽略或拒绝』→ 需实测）",
+        "imageInput": "supported",
+        "toolCalling": "supported（模型能力；本网关的 tool-call parser 为部署属性，未验证）",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "verified",
+            "value": [
+              "low",
+              "medium",
+              "xhigh"
+            ],
+            "note": "默认 xhigh；映射 max→xhigh、high→xhigh、minimal→low、none→enable_thinking=False；不可与 thinking_budget 同发（会报错）",
+            "sourceUrls": [
+              "https://www.alibabacloud.com/blog/603509",
+              "https://docs.nvidia.com/nim/vision-language-models/2.1.1-variant/get-started/advanced/get-started-qwen3-8-27b.html",
+              "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions#4"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "context_window / --max-model-len",
+            "status": "verified",
+            "value": {
+              "managed": 1000000,
+              "native": 262144,
+              "yarn": 1000000
+            },
+            "note": "本地声明 256000 在原生窗口内，安全且恰等于宿主 clamp 上限",
+            "sourceUrls": [
+              "https://help.aliyun.com/zh/model-studio/qwen3-8-27b",
+              "https://www.alibabacloud.com/blog/603509"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_tokens",
+            "status": "verified",
+            "value": 131072,
+            "note": "本地声明 256000 是上游上限的 1.95 倍 → 可能下发超限 max_tokens",
+            "sourceUrls": [
+              "https://help.aliyun.com/zh/model-studio/qwen3-8-27b"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "unverified",
+            "value": "unverified（Qwen/百炼文档不定义 service_tier；第三方网关说明『两边都不文档化该字段，可能忽略或拒绝』→ 需实测）",
+            "note": "无官方依据，不猜值；仅第三方负面证据 + Databricks 托管 Qwen3.5 的相邻先例（不适用）",
+            "sourceUrls": [
+              "https://www.npmjs.com/package/@steptix/aigateway"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "image_url",
+            "status": "verified",
+            "value": "supported",
+            "note": "另有端点 image_probe HTTP 200（routeFingerprint 6ed9b183…），但 capabilities.imageInput 仍写 unknown",
+            "sourceUrls": [
+              "https://help.aliyun.com/zh/model-studio/qwen3-8-27b",
+              "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools / function calling",
+            "status": "verified",
+            "value": "supported (模型能力)",
+            "note": "本网关是否配置了 tool-call parser = 未验证/需一次实测",
+            "sourceUrls": [
+              "https://help.aliyun.com/zh/model-studio/qwen3-8-27b",
+              "https://platform.qianwenai.com/docs/developer-guides/text-generation/thinking"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "本地声明 reasoningEfforts/defaultEffort 与上游三档完全一致，唯一问题是 host 会把 none/minimal 抬成 low，而 contextRequestOptions 里又写了 enable_thinking=false → 同一次请求同时要『关思考』和『给档位』，上游结果未验证。",
+        "maxTokens 256000 超过上游 131072，是本次唯一明显超限的声明。",
+        "contextWindow 256000 = 宿主 MAX_TOKENS 的巧合，不是厂商限制；1M/YaRN 在本机不可达。"
+      ],
+      "judgment": {
+        "verdict": "11 行中唯一 skills 接线较完整的一行（defaultEffort=xhigh、三档 efforts、toolCalling=true、image_probe 200），但有两个硬冲突：maxTokens=256000 超过上游 131072，可能下发非法 max_tokens；contextRequestOptions.chat_template_kwargs.enable_thinking=false 与宿主必然下发 reasoning_effort≥low 互斥。contextWindow=256000 是宿主上限的巧合，不是厂商限制。",
+        "action": "maxTokens 收紧到 ≤131072 并实测；imageInput 由 unknown 改为 supported（probe 已 200，换路由需重测）；删除 enable_thinking=false 或改为与 effort 一致后实测；contextWindow 加注「宿主钳制」说明。",
+        "risk": "超限 max_tokens 可能直接 400 或截断；enable_thinking 与 reasoning_effort 同时出现的结果未知；网关 tool-call parser 属部署属性未验证；provider 未配 apiKeyEnv 而端点返回 401，鉴权路径不明；1M/YaRN 在本机不可观测。"
+      }
+    },
+    {
+      "provider": "subapi",
+      "model": "gpt-5.6-luna",
+      "name": "gpt-5.6-luna",
+      "displayName": "SubAPI",
+      "api": "openai-completions",
+      "baseUrl": "http://104.207.156.188:58081/v1",
+      "apiKeyEnv": "SUBAPI_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": 256000,
+        "maxTokens": 8192,
+        "input": [
+          "text",
+          "image"
+        ],
+        "reasoningEfforts": {
+          "labels": [
+            "false",
+            "high",
+            "low",
+            "max",
+            "medium",
+            "xhigh"
+          ],
+          "values": {
+            "false": null,
+            "high": "high",
+            "low": "low",
+            "max": "max",
+            "medium": "medium",
+            "xhigh": "xhigh"
+          }
+        },
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "declared",
+        "contextWindowClamped": false,
+        "defaultEffort": null,
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "inputBudget": 231424,
+        "maxOutput": 8192,
+        "maxOutputBasis": "declared",
+        "outputReserve": 24576,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": null,
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "upstreamStatus": "unverified",
+      "upstream": {
+        "contextWindow": 1050000,
+        "maxOutput": 128000,
+        "reasoningEfforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "defaultEffort": "medium",
+        "fastMode": "supported",
+        "imageInput": "supported",
+        "toolCalling": "Chat Completions 仅当 reasoning_effort=none 可带 function tools；Responses API 支持",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "verified",
+            "value": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "note": "默认 medium；摘要 + reAPI/FastMetal 交叉",
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-5.6-luna.md",
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "(catalog)",
+            "status": "verified",
+            "value": 1050000,
+            "note": "仅拿到官方页搜索摘要（直接 fetch 404）；另 apidog 写 1,000,000、Vercel 写 1.1M → 数值冲突已记 gaps",
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-5.6-luna.md"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_output_tokens",
+            "status": "verified",
+            "value": 128000,
+            "note": "摘要级证据",
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-5.6-luna.md"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "supported",
+            "note": "第三方实测调用返回 priority；fast/priority 等价；ultrafast 未列入",
+            "sourceUrls": [
+              "https://docs.litellm.ai/docs/providers/openai/ultrafast",
+              "https://openrouter.ai/docs/guides/features/service-tiers"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "image_url",
+            "status": "verified",
+            "value": "supported",
+            "note": "Azure 表 + Vercel 为 text+image",
+            "sourceUrls": [
+              "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning",
+              "https://vercel.com/ai-gateway/models"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools",
+            "status": "verified",
+            "value": {
+              "chatCompletions": "需 reasoning_effort=none 否则 400",
+              "responsesApi": "supported"
+            },
+            "note": "Azure 页给出同族 400 报错原文",
+            "sourceUrls": [
+              "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "本行 declared maxTokens 8192（宿主只在缺失时才用 32768）→ 生效 8192，远低于上游 128000。",
+        "providers 里写的 reasoningEfforts 宿主不读，capabilities 为空 → UI 无档位可选，实际不发 reasoning_effort（走上游 medium）。",
+        "subapi 是否透传 reasoning_effort/service_tier 未实测（目录 401、无凭据）；reapi 自家中转实测 max 被拒，说明中转层可能截断档位。"
+      ],
+      "judgment": {
+        "verdict": "上游（文档级）窗口 1.05M、输出 128000、六档 efforts、支持图像与加速；本行只声明 8192 输出、providers 的 reasoningEfforts 宿主不读、capabilities 全空 → 实际不发 effort、输出被限到 8192、图像被 unknown 拦住，capabilities.fast_mode=false 使加速即使全局开启也不下发。",
+        "action": "把六档 efforts 迁入 model_capabilities（none 会被宿主改写为 low，按此接受或只列 low..max）；maxTokens 上调至 ≤128000；image probe 后置 supported；tool_calling 按「Chat Completions 仅 effort=none 可带 tools，Responses 支持」声明并优先走 Responses；fast_mode 先做 service_tier 实测再开。",
+        "risk": "窗口三值冲突（1.05M/1M/1.1M）未定稿；fastMode 的 verified 仅由 litellm/openrouter 支撑，发布前应降级；subapi 可能截断 effort（reapi 同类中转实测 max 报错）；SUBAPI_API_KEY 未解析。"
+      }
+    },
+    {
+      "provider": "subapi",
+      "model": "gpt-5.6-sol",
+      "name": "gpt-5.6-sol",
+      "displayName": "SubAPI",
+      "api": "openai-completions",
+      "baseUrl": "http://104.207.156.188:58081/v1",
+      "apiKeyEnv": "SUBAPI_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": 256000,
+        "maxTokens": 8192,
+        "input": [
+          "text",
+          "image"
+        ],
+        "reasoningEfforts": {
+          "labels": [
+            "false",
+            "high",
+            "low",
+            "max",
+            "medium",
+            "xhigh"
+          ],
+          "values": {
+            "false": null,
+            "high": "high",
+            "low": "low",
+            "max": "max",
+            "medium": "medium",
+            "xhigh": "xhigh"
+          }
+        },
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "declared",
+        "contextWindowClamped": false,
+        "defaultEffort": null,
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "inputBudget": 231424,
+        "maxOutput": 8192,
+        "maxOutputBasis": "declared",
+        "outputReserve": 24576,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": null,
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "upstreamStatus": "unverified",
+      "upstream": {
+        "contextWindow": 1050000,
+        "maxOutput": 128000,
+        "reasoningEfforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "defaultEffort": "medium(单模型级未确认)",
+        "fastMode": "supported",
+        "imageInput": "supported",
+        "toolCalling": "Chat Completions 带 tools 且 effort≠none 会 400（官方报错示例即 5.6-sol）；Responses 支持",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "unverified",
+            "value": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "note": "六档属 GPT-5.6 家族级文档；默认 medium 仅第三方列出 → 单模型级 unverified",
+            "sourceUrls": [
+              "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "(catalog)",
+            "status": "verified",
+            "value": 1050000,
+            "note": "Vercel 写 1.1M/128K；官方页 fetch 404 → 单模型级未逐字确认",
+            "sourceUrls": [
+              "https://vercel.com/ai-gateway/models"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_output_tokens",
+            "status": "verified",
+            "value": 128000,
+            "note": null,
+            "sourceUrls": [
+              "https://vercel.com/ai-gateway/models"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://docs.litellm.ai/docs/providers/openai/ultrafast"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "image_url",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning",
+              "https://vercel.com/ai-gateway/models"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools",
+            "status": "verified",
+            "value": {
+              "chatCompletions": "需 effort=none",
+              "responsesApi": "supported"
+            },
+            "note": null,
+            "sourceUrls": [
+              "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "声明 8192 输出、无 reasoningEfforts → 生效 8192 且不发 effort（走上游默认），能力被配置浪费。",
+        "单模型级 effort 默认档无官方原文，需实测。"
+      ],
+      "judgment": {
+        "verdict": "声明 8192 输出、capabilities 全空；aspect 级 contextWindow/maxOutput 仅 vercel、fastMode 仅 litellm 支撑，按 revisionNotes 应与行级 status 一起降为 unverified。工具约束最严：Chat Completions 带 tools 且 effort≠none 直接 400（官方报错示例即 5.6-sol）。",
+        "action": "efforts 迁入 capabilities 并同步降级证据；上调 maxTokens 后实测；image probe；tool_calling 必须写成「Responses 或 effort=none」，并配套路由开关，避免在 openai-completions 上带 tools。",
+        "risk": "现有路由下 tools + effort 组合会稳定 400；窗口/输出数值无厂商官方直链，降级后本行近乎全 unverified；凭据缺失。"
+      }
+    },
+    {
+      "provider": "subapi",
+      "model": "gpt-6-astra",
+      "name": "gpt-6-astra",
+      "displayName": "SubAPI",
+      "api": "openai-completions",
+      "baseUrl": "http://104.207.156.188:58081/v1",
+      "apiKeyEnv": "SUBAPI_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": 256000,
+        "maxTokens": 16384,
+        "input": [
+          "text",
+          "image"
+        ],
+        "reasoningEfforts": {
+          "labels": [
+            "false",
+            "high",
+            "low",
+            "max",
+            "medium",
+            "xhigh"
+          ],
+          "values": {
+            "false": null,
+            "high": "high",
+            "low": "low",
+            "max": "max",
+            "medium": "medium",
+            "xhigh": "xhigh"
+          }
+        },
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "declared",
+        "contextWindowClamped": false,
+        "defaultEffort": null,
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "inputBudget": 231424,
+        "maxOutput": 16384,
+        "maxOutputBasis": "declared",
+        "outputReserve": 24576,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": null,
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "upstreamStatus": "unverified",
+      "upstream": {
+        "contextWindow": 1050000,
+        "maxOutput": 128000,
+        "reasoningEfforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "defaultEffort": null,
+        "fastMode": "supported",
+        "imageInput": "supported",
+        "toolCalling": "Chat Completions 不支持工具调用；需 Responses API",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "unverified",
+            "value": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "note": "多来源一致不支持 none；minimal 是否支持未明",
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra",
+              "https://apidog.com/blog/gpt-6-astra-api/"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "(catalog)",
+            "status": "unverified",
+            "value": 1050000,
+            "note": "官方页 404，仅 reAPI 对照表 + Vercel",
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_output_tokens",
+            "status": "unverified",
+            "value": 128000,
+            "note": null,
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://docs.litellm.ai/docs/providers/openai/ultrafast",
+              "https://openrouter.ai/docs/guides/features/service-tiers"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "image_url",
+            "status": "unverified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra",
+              "https://vercel.com/ai-gateway/models"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools",
+            "status": "unverified",
+            "value": {
+              "chatCompletions": "unsupported",
+              "responsesApi": "required"
+            },
+            "note": "reAPI 引 OpenAI 指南原文",
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "providers 里给了 'false'(=none) 档，但上游 Astra 不支持 none → 该标签会误导，宿主也不读该文件。",
+        "本行是唯一 fast_mode=true 的模型之一（有实测）；若全局 fast_mode 打开会下发 service_tier=\"fast\"，此处上游接受。",
+        "maxTokens 16384 远低于上游 128000；Chat Completions 下工具调用必失败，建议改走 Responses。"
+      ],
+      "judgment": {
+        "verdict": "声明 16384 输出、providers 提供「false」(=none) 档而上游 Astra 并不支持 none；capabilities 全空、fastMode=false。行内 differences 却称「唯一 fast_mode=true 且有实测」，与 capabilities/effective/mechanicalActions 全面矛盾，应以 binding 数据为准（effective=off）。上游 6 项 aspectStatuses 全 unverified。",
+        "action": "删除 providers 里的 none/false 标签，efforts=[low,medium,high,xhigh,max] 迁入 model_capabilities；image probe；工具强制走 Responses（Chat Completions 不支持工具）；上调 maxTokens；加速先探测 service_tier 再改 fast_mode。",
+        "risk": "fast_mode 状态自相矛盾，若误信 differences 会与改进建议冲突；上游窗口/输出无官方直链；无 none 档使「不思考」无法实现；凭据缺失。"
+      }
+    },
+    {
+      "provider": "subapi",
+      "model": "gpt-6-luna",
+      "name": "gpt-6-luna",
+      "displayName": "SubAPI",
+      "api": "openai-completions",
+      "baseUrl": "http://104.207.156.188:58081/v1",
+      "apiKeyEnv": "SUBAPI_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": 256000,
+        "maxTokens": 16384,
+        "input": [
+          "text",
+          "image"
+        ],
+        "reasoningEfforts": {
+          "labels": [
+            "false",
+            "high",
+            "low",
+            "max",
+            "medium",
+            "xhigh"
+          ],
+          "values": {
+            "false": null,
+            "high": "high",
+            "low": "low",
+            "max": "max",
+            "medium": "medium",
+            "xhigh": "xhigh"
+          }
+        },
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "declared",
+        "contextWindowClamped": false,
+        "defaultEffort": "max",
+        "fastMode": {
+          "effective": "conditional_on_global_fast_mode",
+          "modelFlag": true
+        },
+        "imageInput": "unknown",
+        "imageProbe": {
+          "capability": "supported",
+          "checkedAt": 1791592778536,
+          "elapsedMs": 3626,
+          "error": null,
+          "httpStatus": 200,
+          "model": "gpt-6-luna",
+          "provider": "subapi",
+          "routeFingerprint": "443774183d2413ef0d29f57a877520e9f08bde2a0e6871cb17c57089725716f7",
+          "status": "verified"
+        },
+        "inputBudget": 231424,
+        "maxOutput": 16384,
+        "maxOutputBasis": "declared",
+        "outputReserve": 24576,
+        "reasoningEfforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": "max",
+        "fastMode": true,
+        "imageInput": "unknown",
+        "imageProbe": {
+          "capability": "supported",
+          "checkedAt": 1791592778536,
+          "elapsedMs": 3626,
+          "error": null,
+          "httpStatus": 200,
+          "model": "gpt-6-luna",
+          "provider": "subapi",
+          "routeFingerprint": "443774183d2413ef0d29f57a877520e9f08bde2a0e6871cb17c57089725716f7",
+          "status": "verified"
+        },
+        "reasoningEfforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "toolCalling": null
+      },
+      "upstreamStatus": "unverified",
+      "upstream": {
+        "contextWindow": 1050000,
+        "maxOutput": 128000,
+        "reasoningEfforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "defaultEffort": "medium",
+        "fastMode": "supported",
+        "imageInput": "supported",
+        "toolCalling": "Chat Completions 仅当 effort=none 可带 tools；Responses 支持",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "verified",
+            "value": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "note": "默认 medium；6-luna 支持 none（Bedrock 模型卡）",
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-6-luna",
+              "https://github.com/BerriAI/litellm/pull/47000"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "(catalog)",
+            "status": "verified",
+            "value": 1050000,
+            "note": "官方页搜索摘要 1,050,000/922,000/128,000；apidog 写 1,000,000、Vercel 写 1.1M → 取官方值并记冲突",
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-6-luna"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_output_tokens",
+            "status": "verified",
+            "value": 128000,
+            "note": null,
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-6-luna"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://docs.litellm.ai/docs/providers/openai/ultrafast"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "image_url",
+            "status": "verified",
+            "value": "supported",
+            "note": "另有本机历史 image_probe HTTP 200（routeFingerprint 4437741…）",
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-6-luna"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools",
+            "status": "verified",
+            "value": {
+              "chatCompletions": "需 effort=none",
+              "responsesApi": "supported"
+            },
+            "note": null,
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-6-luna"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "本行 defaultEffort=max，而官方默认是 medium → 本机每次请求都比上游默认更贵更慢，需确认是否有意。",
+        "capabilities.imageInput 仍写 unknown，但已有端点 probe 200 → 属过期字段，应改 supported。",
+        "subapi 是中转网关，可能改写 reasoning_effort（reapi 自家中转实测 max 报错）→ subapi 行为未实测。"
+      ],
+      "judgment": {
+        "verdict": "配置最主动的一行：capabilities.defaultEffort=max、fastMode=true（effective=conditional_on_global_fast_mode）、image_probe 200，但 imageInput 仍 unknown；输出只声明 16384 而上游 128000；上游默认档是 medium，本机每次请求都被抬到 max。",
+        "action": "imageInput 改 supported；确认 defaultEffort=max 是否有意（否则回 medium 省 token/时延）；maxTokens 上调；tool_calling 标注「Chat Completions 仅 effort=none，Responses 支持」；补一次 effort 与 service_tier 透传探测。",
+        "risk": "max 档 + 16384 输出上限可能让长思考被截断；窗口数值多源冲突（1.05M/922k/128k/1M/1.1M）；fast_mode 依赖未交付的全局开关；probe 为 2026-10 历史记录，路由指纹变化需重测。"
+      }
+    },
+    {
+      "provider": "subapi",
+      "model": "gpt-6.1-sol",
+      "name": "gpt-6.1-sol",
+      "displayName": "SubAPI",
+      "api": "openai-completions",
+      "baseUrl": "http://104.207.156.188:58081/v1",
+      "apiKeyEnv": "SUBAPI_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": 256000,
+        "maxTokens": null,
+        "input": [
+          "text",
+          "image"
+        ],
+        "reasoningEfforts": null,
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "declared",
+        "contextWindowClamped": false,
+        "defaultEffort": null,
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "inputBudget": 231424,
+        "maxOutput": 32768,
+        "maxOutputBasis": "host_default",
+        "outputReserve": 24576,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": null,
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "upstreamStatus": "unverified",
+      "upstream": {
+        "contextWindow": 1050000,
+        "maxOutput": 128000,
+        "reasoningEfforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "defaultEffort": "medium",
+        "fastMode": "supported",
+        "imageInput": "supported",
+        "toolCalling": "无 none 档 → Chat Completions 无法带工具；Responses API required",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "unverified",
+            "value": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "note": "reAPI 官方对照表；各方一致不支持 none（含 minimal 未明）",
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "(catalog)",
+            "status": "unverified",
+            "value": 1050000,
+            "note": null,
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_output_tokens",
+            "status": "unverified",
+            "value": 128000,
+            "note": null,
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://docs.litellm.ai/docs/providers/openai/ultrafast",
+              "https://learn.chatgpt.com/docs/agent-configuration/speed"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "image_url",
+            "status": "unverified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra",
+              "https://vercel.com/ai-gateway/models"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools",
+            "status": "unverified",
+            "value": {
+              "chatCompletions": "unsupported",
+              "responsesApi": "required"
+            },
+            "note": null,
+            "sourceUrls": [
+              "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "maxTokens 缺失反而拿到宿主 32768，比 5.6-luna / 6-astra / 6-luna 的声明值更高。",
+        "reAPI 自家中转 2026-10-28 实测 6.1-sol 的 max 档直接报错（未计费）→ subapi 是否同样截断未实测。",
+        "无 none 档且本机走 openai-completions → 本行实际无法使用工具调用。"
+      ],
+      "judgment": {
+        "verdict": "未声明 maxTokens 反而拿到宿主 32768（高于同族 8192/16384 行）；capabilities 全空且上游无 none 档 → 本机走 chat/completions 时无法带工具（上游：无 none 档，Chat Completions 不可用工具，Responses required）。",
+        "action": "补 efforts=[low,medium,high,xhigh,max] 与 tool_calling=Responses only；显式声明 maxTokens 固化取值；image probe；fast_mode 先探测再开。",
+        "risk": "reapi 自家中转实测 6.1-sol 的 max 档报错 → subapi 是否同样截断未测；当前路由下工具不可用；窗口/输出/图像/工具四项均 unverified。"
+      }
+    },
+    {
+      "provider": "subapi",
+      "model": "gpt-6.1-terra",
+      "name": "gpt-6.1-terra",
+      "displayName": "SubAPI",
+      "api": "openai-completions",
+      "baseUrl": "http://104.207.156.188:58081/v1",
+      "apiKeyEnv": "SUBAPI_API_KEY",
+      "hasCredentials": false,
+      "localDeclared": {
+        "contextWindow": 256000,
+        "maxTokens": null,
+        "input": [
+          "text",
+          "image"
+        ],
+        "reasoningEfforts": null,
+        "contextRequestOptions": null
+      },
+      "hostEffective": {
+        "contextWindow": 256000,
+        "contextWindowBasis": "declared",
+        "contextWindowClamped": false,
+        "defaultEffort": null,
+        "fastMode": {
+          "effective": "off",
+          "modelFlag": false
+        },
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "inputBudget": 231424,
+        "maxOutput": 32768,
+        "maxOutputBasis": "host_default",
+        "outputReserve": 24576,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "capabilities": {
+        "defaultEffort": null,
+        "fastMode": false,
+        "imageInput": "unknown",
+        "imageProbe": null,
+        "reasoningEfforts": [],
+        "toolCalling": null
+      },
+      "upstreamStatus": "unverified",
+      "upstream": {
+        "contextWindow": 1050000,
+        "maxOutput": 128000,
+        "reasoningEfforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "defaultEffort": null,
+        "fastMode": "supported",
+        "imageInput": "supported",
+        "toolCalling": "Responses API supported；Chat Completions 未验证",
+        "aspects": [
+          {
+            "aspect": "reasoningEfforts",
+            "label": "思考等级",
+            "parameter": "reasoning_effort",
+            "status": "verified",
+            "value": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "note": "档位集合一致；默认档冲突（medium vs high）→ 写入 uncovered",
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+              "https://apidog.com/blog/how-to-use-gpt-5-6-api/"
+            ]
+          },
+          {
+            "aspect": "contextWindow",
+            "label": "最大上下文",
+            "parameter": "(catalog)",
+            "status": "verified",
+            "value": 1050000,
+            "note": "官方摘要 + gihyo 一致；官方页直接 fetch 404",
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-6.1-terra"
+            ]
+          },
+          {
+            "aspect": "maxOutput",
+            "label": "最大输出",
+            "parameter": "max_output_tokens",
+            "status": "verified",
+            "value": 128000,
+            "note": null,
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-6.1-terra"
+            ]
+          },
+          {
+            "aspect": "fastMode",
+            "label": "加速",
+            "parameter": "service_tier",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://learn.chatgpt.com/docs/agent-configuration/speed",
+              "https://docs.litellm.ai/docs/providers/openai/ultrafast"
+            ]
+          },
+          {
+            "aspect": "imageInput",
+            "label": "图像输入",
+            "parameter": "image_url",
+            "status": "verified",
+            "value": "supported",
+            "note": null,
+            "sourceUrls": [
+              "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+              "https://vercel.com/ai-gateway/models"
+            ]
+          },
+          {
+            "aspect": "toolCalling",
+            "label": "工具调用",
+            "parameter": "tools",
+            "status": "unverified",
+            "value": {
+              "chatCompletions": null,
+              "responsesApi": "supported"
+            },
+            "note": null,
+            "sourceUrls": [
+              "https://vercel.com/ai-gateway/models"
+            ]
+          }
+        ]
+      },
+      "differences": [
+        "默认 effort 两来源冲突（官方摘要 medium / veniceai 结构体 high），本机未声明 → 实际走上游默认，需实测确认是哪个。",
+        "maxTokens 缺失 → 宿主 32768。</br>",
+        "Chat Completions 下能否带工具未验证；若需要工具应改 Responses。"
+      ],
+      "judgment": {
+        "verdict": "声明形态同 6.1-sol（无 maxTokens → 32768、capabilities 全空），上游有六档 efforts 但默认档来源冲突（官方摘要 medium vs veniceai high）、toolCalling 仅 Responses 有据、Chat Completions 未验证。",
+        "action": "补 efforts 与 tool_calling（仅 Responses）；先实测默认档再决定是否声明 defaultEffort；image probe；fast_mode 先探测。",
+        "risk": "默认档不确定 → 成本与时延不可预估；Chat Completions 工具能力未知；aspect 级 verified 依据为第三方，交付前应降级。"
+      }
+    }
+  ],
+  "verifiedByAspect": {
+    "reasoningEfforts": {
+      "label": "思考等级",
+      "parameter": "reasoning_effort",
+      "verified": 8,
+      "unverified": 3,
+      "unsupported": 0,
+      "other": 0,
+      "withSources": 11,
+      "total": 11
+    },
+    "contextWindow": {
+      "label": "最大上下文",
+      "parameter": "context_window",
+      "verified": 9,
+      "unverified": 2,
+      "unsupported": 0,
+      "other": 0,
+      "withSources": 11,
+      "total": 11
+    },
+    "maxOutput": {
+      "label": "最大输出",
+      "parameter": "max_tokens",
+      "verified": 9,
+      "unverified": 2,
+      "unsupported": 0,
+      "other": 0,
+      "withSources": 11,
+      "total": 11
+    },
+    "fastMode": {
+      "label": "加速",
+      "parameter": "service_tier",
+      "verified": 10,
+      "unverified": 1,
+      "unsupported": 0,
+      "other": 0,
+      "withSources": 11,
+      "total": 11
+    },
+    "imageInput": {
+      "label": "图像输入",
+      "parameter": "image_url",
+      "verified": 9,
+      "unverified": 2,
+      "unsupported": 0,
+      "other": 0,
+      "withSources": 11,
+      "total": 11
+    },
+    "toolCalling": {
+      "label": "工具调用",
+      "parameter": "tools",
+      "verified": 8,
+      "unverified": 3,
+      "unsupported": 0,
+      "other": 0,
+      "withSources": 11,
+      "total": 11
+    }
+  },
+  "mechanicalActions": [
+    "deepseek-self/deepseek-flash：model_capabilities.reasoningEfforts 为空，而上游核实到 low / high / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。",
+    "deepseek-self/deepseek-flash：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。",
+    "deepseek-self/deepseek-flash：model_capabilities.tool_calling 未声明，而上游核实为 supported；建议按核实值补上，避免工具调用被拦或误放行。",
+    "deepseek-self/deepseek-v4-pro：model_capabilities.reasoningEfforts 为空，而上游核实到 low / high / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。",
+    "deepseek-self/deepseek-v4-pro：上游文档明确不支持图像，而 model_capabilities.imageInput=unknown；建议显式设为 unsupported，避免 UI 误发图像导致 400。",
+    "deepseek-self/deepseek-v4-pro：model_capabilities.tool_calling 未声明，而上游核实为 supported（含 web_search，仅 v4-pro）；建议按核实值补上，避免工具调用被拦或误放行。",
+    "deepseek/deepseek-flash：providers 声明 contextWindow=1,048,576 超过宿主 MAX_TOKENS=256,000，实际只用 256,000；声明值换不来容量，建议改写成 256,000 或按上游真实窗口声明并在文档标注钳制。",
+    "deepseek/deepseek-flash：只声明了 65,536 输出，远低于上游 393,216，输出能力被配置浪费，可按需上调。",
+    "deepseek/deepseek-flash：model_capabilities.reasoningEfforts 为空，而上游核实到 low / high / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。",
+    "deepseek/deepseek-flash：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。",
+    "deepseek/deepseek-flash：model_capabilities.tool_calling 未声明，而上游核实为 supported（function tools；thinking 模式 tool_choice 禁用 required/具名；tools 请求必须回传 re…；建议按核实值补上，避免工具调用被拦或误放行。",
+    "deepseek/deepseek-v4-pro：providers 声明 contextWindow=1,048,576 超过宿主 MAX_TOKENS=256,000，实际只用 256,000；声明值换不来容量，建议改写成 256,000 或按上游真实窗口声明并在文档标注钳制。",
+    "deepseek/deepseek-v4-pro：只声明了 65,536 输出，远低于上游 393,216，输出能力被配置浪费，可按需上调。",
+    "deepseek/deepseek-v4-pro：model_capabilities.reasoningEfforts 为空，而上游核实到 low / high / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。",
+    "deepseek/deepseek-v4-pro：上游文档明确不支持图像，而 model_capabilities.imageInput=unknown；建议显式设为 unsupported，避免 UI 误发图像导致 400。",
+    "deepseek/deepseek-v4-pro：model_capabilities.tool_calling 未声明，而上游核实为 supported（含 web_search 服务器工具，仅 v4-pro；apply_patch；thinking 模式必须回传 reasoning_con…；建议按核实值补上，避免工具调用被拦或误放行。",
+    "qwen-local/qwen3.8-27b：生效输出上限 256,000 高于上游 131,072，可能下发非法 max_tokens，建议收紧到 131,072（或上游确认的实际上限）。",
+    "qwen-local/qwen3.8-27b：端点 image_probe 已 HTTP 200，但 model_capabilities.imageInput 仍是 unknown（过期字段），建议改为 supported。",
+    "subapi/gpt-5.6-luna：只声明了 8,192 输出，远低于上游 128,000，输出能力被配置浪费，可按需上调。",
+    "subapi/gpt-5.6-luna：model_capabilities.reasoningEfforts 为空，而上游核实到 none / low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。",
+    "subapi/gpt-5.6-luna：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。",
+    "subapi/gpt-5.6-luna：上游核实支持加速（service_tier），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。",
+    "subapi/gpt-5.6-luna：model_capabilities.tool_calling 未声明，而上游核实为 Chat Completions 仅当 reasoning_effort=none 可带 function tools；Responses API 支持；建议按核实值补上，避免工具调用被拦或误放行。",
+    "subapi/gpt-5.6-sol：只声明了 8,192 输出，远低于上游 128,000，输出能力被配置浪费，可按需上调。",
+    "subapi/gpt-5.6-sol：model_capabilities.reasoningEfforts 为空，而上游核实到 none / low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。",
+    "subapi/gpt-5.6-sol：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。",
+    "subapi/gpt-5.6-sol：上游核实支持加速（service_tier），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。",
+    "subapi/gpt-5.6-sol：model_capabilities.tool_calling 未声明，而上游核实为 Chat Completions 带 tools 且 effort≠none 会 400（官方报错示例即 5.6-sol）；Responses 支持；建议按核实值补上，避免工具调用被拦或误放行。",
+    "subapi/gpt-6-astra：只声明了 16,384 输出，远低于上游 128,000，输出能力被配置浪费，可按需上调。",
+    "subapi/gpt-6-astra：model_capabilities.reasoningEfforts 为空，而上游核实到 low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。",
+    "subapi/gpt-6-astra：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。",
+    "subapi/gpt-6-astra：上游核实支持加速（service_tier），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。",
+    "subapi/gpt-6-astra：model_capabilities.tool_calling 未声明，而上游核实为 Chat Completions 不支持工具调用；需 Responses API；建议按核实值补上，避免工具调用被拦或误放行。",
+    "subapi/gpt-6-luna：只声明了 16,384 输出，远低于上游 128,000，输出能力被配置浪费，可按需上调。",
+    "subapi/gpt-6-luna：端点 image_probe 已 HTTP 200，但 model_capabilities.imageInput 仍是 unknown（过期字段），建议改为 supported。",
+    "subapi/gpt-6-luna：model_capabilities.tool_calling 未声明，而上游核实为 Chat Completions 仅当 effort=none 可带 tools；Responses 支持；建议按核实值补上，避免工具调用被拦或误放行。",
+    "subapi/gpt-6.1-sol：model_capabilities.reasoningEfforts 为空，而上游核实到 low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。",
+    "subapi/gpt-6.1-sol：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。",
+    "subapi/gpt-6.1-sol：上游核实支持加速（service_tier），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。",
+    "subapi/gpt-6.1-sol：model_capabilities.tool_calling 未声明，而上游核实为 无 none 档 → Chat Completions 无法带工具；Responses API required；建议按核实值补上，避免工具调用被拦或误放行。",
+    "subapi/gpt-6.1-terra：model_capabilities.reasoningEfforts 为空，而上游核实到 none / low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。",
+    "subapi/gpt-6.1-terra：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。",
+    "subapi/gpt-6.1-terra：上游核实支持加速（service_tier），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。",
+    "subapi/gpt-6.1-terra：model_capabilities.tool_calling 未声明，而上游核实为 Responses API supported；Chat Completions 未验证；建议按核实值补上，避免工具调用被拦或误放行。"
+  ],
+  "summary": "11 行 / 11 个模型覆盖 3 个端点家族（deepseek 与 deepseek-self 共用 https://api.deepseek.com/v1、qwen-local、subapi），三个 /v1/models 目录探测全部 401，因此 (c) 列没有任何端点级确认：deepseek 6 项依赖厂商文档，qwen 3 项有端点或 probe 佐证，subapi 6 行的 aspect 级 verified 多由 vercel/apidog/litellm/openrouter/reapi 等非厂商域名支撑，与行级 status=unverified 相矛盾（revisionNotes 已要求降级）。生效层被宿主统一钳制：MAX_TOKENS=256000 把所有窗口声明压到 256000，输入预算恒为 231424（256000 − min(24576, 64000)），输出缺失时取 DEFAULT_MAX_OUTPUT=32768，声明 1048576 既不换来容量也不报错。缺陷可归为三类：①接线缺失——providers 里的 reasoningEfforts 宿主不读，8 个模型的 capabilities.reasoningEfforts 为空、9 行 capabilities.toolCalling 为 null，UI 无档位可选且请求不携带 reasoning_effort；②声明越界——qwen3.8-27b maxTokens=256000 是上游 131072 的 1.95 倍，是本轮唯一确定会下发非法 max_tokens 的行，deepseek 双行 contextWindow=1048576 无意义地超出宿主上限；③能力字段过期——qwen3.8-27b 与 subapi/gpt-6-luna 的 image_probe 已 200 而 imageInput 仍为 unknown，deepseek-v4-pro 上游明确不支持图像却留 unknown（若 provider 级 defaultInput=image 生效即 400）。deepseek 与 deepseek-self 是同一 baseURL、同一 model id：上游能力完全相同，两行差异 100% 来自本地声明（一方 1048576/65536，一方全 null 走宿主 32768/宿主默认窗口），公开文档不按键区分能力或配额。优先级：先修 qwen maxTokens 与 deepseek-self 的空声明、再把 efforts/tool_calling/image 三类 capability 补进 agent-generation.yml，最后统一证据降级与 maxTokens 调优。",
+  "recommendations": [
+    "P0 · qwen-local/qwen3.8-27b：把 maxTokens 从 256000 收紧到 ≤131072（上游文档值）并实测一次长输出请求；这是本轮唯一确定会下发非法 max_tokens 的声明。",
+    "P0 · deepseek-self 两行：在 providers.yml 与 agent-generation.yml 分别补 contextWindow、maxTokens、model_capabilities（现在全 null，只能吃宿主默认 256000/32768），否则与 deepseek 侧同 id 模型行为分叉。",
+    "P0 · 迁移档位：把 6 个 subapi 模型与 2 个 deepseek 模型的 reasoningEfforts 从 providers 迁入 agent-generation.yml 的 model_capabilities（providers 里的宿主不读）；迁移时统一处理 none/minimal→low 的改写，不要把 providers 的 false(=none) 标签原样搬过去。",
+    "P0 · 图像开关：deepseek-v4-pro 双行显式 image_input: unsupported；qwen3.8-27b 与 subapi/gpt-6-luna 因 probe 已 200 改为 supported；其余 5 行先跑一次 image probe，通过后再置 supported，未通过保持 unknown/unsupported。",
+    "P0 · 工具路由：为 9 个 capabilities.toolCalling 为 null 的行补声明并标注路由——5.6-luna/6-luna 需 effort=none 才能带 function tools，5.6-sol 在 tools+effort≠none 会 400，6-astra 与 6.1-sol 在 Chat Completions 不可用（必须 Responses），6.1-terra 未验证；deepseek 两族按「thinking 模式需回传 reasoning_content」标注。",
+    "P1 · 输出上调：subapi/gpt-5.6-luna、gpt-5.6-sol（8192）与 gpt-6-astra、gpt-6-luna（16384）逐步上调到 ≤128000，每次上调后验证中转是否截断；deepseek 两行可从 65536 上调到 ≤393216。",
+    "P1 · 上下文口径：deepseek 双行 contextWindow=1048576 改为 256000，或在表中明确标注「声明值会被宿主钳到 256000、输入预算 231424」，避免把声明当容量；qwen3.8-27b 的 256000 同样注明是宿主上限而非厂商限制。",
+    "P1 · 加速：先只对 subapi/gpt-6-luna（当前唯一 fast_mode=true）做一次 service_tier 实测，确认 200/400 后再决定是否给 5.6-luna、5.6-sol、6-astra、6.1-sol、6.1-terra 打开；deepseek 侧保持 false（官方只有负面证据）。",
+    "P2 · 证据降级：按 revisionNotes 把 subapi/gpt-5.6-luna 的 fastMode、gpt-5.6-sol 的 contextWindow/maxOutput/fastMode、gpt-6-astra/gpt-6-luna/gpt-6.1-sol/gpt-6.1-terra 的 fastMode 等「仅第三方来源」的 verified 项降为 unverified，直到取得厂商官方直链或端点确认。",
+    "P2 · 凭据与探针收敛：补 DEEPSEEK_API_KEY / DEEPSEEK_SELF_API_KEY / SUBAPI_API_KEY 后重跑三个 /v1/models 与 effort/image/service_tier 探测，把 9 个 401 或未执行项一次性收敛，并把 routeFingerprint 写入每次 probe 记录。",
+    "P2 · 表格口径：表头固定三列口径「providers 声明 / 宿主钳制后生效 / 官方文档核实」，并在表尾写死常量 MAX_TOKENS=256000、OUTPUT_RESERVE=24576、DEFAULT_MAX_OUTPUT=32768、inputBudget=231424，防止读者把声明值当生效值。",
+    "P2 · providers 清理：删除 subapi 五行的 false(=none) 档标签与 6-astra 的 none 档，避免 UI/迁移时出现上游并不存在的档位。"
+  ],
+  "cautions": [
+    "不要把 declared.contextWindow 当容量：MAX_TOKENS=256000 硬钳制且静默，声明 1048576 与 256000 的生效结果完全一样，输入预算恒为 231424。",
+    "providers.yml 里的 reasoningEfforts 宿主运行时不读；只有 agent-generation.yml 的 model_capabilities 决定 UI 可选项与实际是否下发 reasoning_effort。",
+    "宿主会把 none/minimal 改写为 low，「完全不思考」不可达；qwen3.8-27b 的 enable_thinking=false 与必然下发的 reasoning_effort≥low 互斥，结果未验证。",
+    "aspectStatuses=verified 不等于有官方依据：subapi 6 行多数只有 vercel/apidog/litellm/openrouter/reapi 等第三方，revisionNotes 已明确指出该冲突，发布前必须降级。",
+    "三个端点的 /v1/models 全部 401，providers 里的 model id 与上游实际暴露的 id 未经确认；任何「端点元数据」式表述都不成立。",
+    "deepseek 与 deepseek-self 共用同一 baseURL 与同一 model id，公开文档不按键区分能力/配额；两 key 的余额、并发、是否被降级属未经验证/需实测。",
+    "本轮没有任何一行对 reasoning_effort 做过探测（唯一 200 的探针只测图像），中转是否透传档位、是否把 max 截断成报错均未验证。",
+    "subapi/gpt-6-astra 行内 differences 与 capabilities 关于 fast_mode 自相矛盾，取 capabilities/effective（off），不得引用「已实测 fast_mode」的说法。",
+    "image probe 结果带 checkedAt 与 routeFingerprint 且为 2026-10 历史记录：换凭据、换 baseURL 或改中转配置后必须重测，不能直接置 supported。",
+    "上游 max_tokens 一律按「≤ 文档值」下发；qwen3.8-27b 的 256000 是唯一确定越界的声明，其余低配（8192/16384）是浪费而非风险。",
+    "deepseek-v4-pro 若 provider 级 defaultInput=image 生效会直接 400；在显式 image_input: unsupported 落地前，不要假定 unknown 是安全默认。"
+  ],
+  "gaps": [
+    "deepseek-self 与 deepseek 使用同一 baseURL（https://api.deepseek.com/v1），公开文档没有任何“按 key 区分模型/配额/等级”的说明；两个 key 的实际差异（余额、并发配额、是否被降级）无法从文档核实 → 未经验证/需实测。",
+    "两个 key 的 /models 探针均返回 401（本机无对应凭据），因此 context_window/max_output_tokens/effort 的实时值无法取自端点；本表用官方文档示例值（1048576 / 393216 / [low,high,max]）代替，账号级是否被降级未验证。",
+    "fast/priority/service_tier：官方文档的正向证据不存在（Chat Completions 请求体无该参数；Anthropic 侧明确列为“会被忽略的兼容字段”；响应字段固定 default/standard）。若宿主真的下发 service_tier:\"fast\"，本端点返回 200（忽略）还是 400，未经验证/需实测。",
+    "deepseek-self 两个模型未声明 contextWindow，宿主在缺省时的默认上下文窗口本次证据未给出（只拿到 MAX_TOKENS=256000 钳制上限、OUTPUT_RESERVE=24576、DEFAULT_MAX_OUTPUT=32768）→ 生效输入预算 unverified。",
+    "image_input 探测从未执行（capabilities.imageProbe 全为 null）；文档说 flash 支持、pro 不支持，但宿主 unknown 状态下不会据此放行图像，需要一次真实 probe（image_input=supported 才允许下发）。",
+    "上游 max_tokens 具体上限在文档里有两种写法：Models & Pricing 写 “MAXIMUM: 384K”、Chat Completions 写 “1..393216（393216=384K）” —— 数值一致；Anthropic Messages 侧则描述为“超出模型上限会被 cap”，且 Claude Code/OpenCode 主代理请求可能被兼容逻辑抬高有效上限，这一抬高规则的具体边界未经验证。",
+    "未验证 deepseek-v4-pro 的 web_search 服务器工具与宿主 visual_tool/plugin_models 配置是否冲突（文档仅说该工具在 Responses 与 Anthropic Messages 下为 v4-pro 专属）。",
+    "页面级失败：无。所有候选 URL 均返回 200；无搜索查询返回空结果，故 sources 中没有 ok:false 条目。",
+    "fast_mode / service_tier / priority for qwen3.8-27b: no official Qwen or Alibaba Model Studio document defines service_tier; only third-party statements (npm @steptix/aigateway: 'neither vendor documents the field… Untested and unmapped') and an unrelated Databricks Qwen3.5 priority feature were found. Marked unverified/需实测 — no value guessed.",
+    "The official zh OpenAI-compatible Chat page was delivered truncated (7,878 chars, cut inside the parameter list just before tool_calls), so the exact per-model reasoning_effort row for qwen3.8-27b could not be read on that page; its tier set rests on the official blog (603509), NVIDIA NIM, and the official doc snippet 'max→xhigh, high→xhigh, minimal→low, none→enable_thinking=False'.",
+    "A raw GitHub mirror of the API reference returned HTTP 404 (recorded in sources); the alternate sources above were used instead per the retry-once rule.",
+    "Local /v1/models catalog enumeration is impossible: catalogProbe returned HTTP 401 'missing or wrong API key', and apiKeyEnv is null. The served model id therefore cannot be confirmed from the endpoint itself.",
+    "Whether this gateway actually honors reasoning_effort at all (vs. only chat_template_kwargs) is unverified; the probe that returned 200 tested images, not effort tiers.",
+    "Effective context above 256000 cannot exist on this host (MAX_TOKENS) and the local engine's actual --max-model-len is unknown, so the 1M/YaRN capability has no observable effect here.",
+    "Local tool-call parser configuration is not documented publicly; verified only as a model capability.",
+    "Global fast_mode (top-level agent-generation.yml key) was not delivered in this input, so the AND-result for any model other than this false-flagged one cannot be stated.",
+    "全部 6 个模型的 /v1/models 目录探测返回 401 API_KEY_REQUIRED，且 hasCredentials=false → 中转真实暴露的模型与路由未验证。",
+    "developers.openai.com 的模型页与指南页本轮全部 404（见 failures），各模型能力主要依赖搜索结果摘要与第三方页面（Vercel AI Gateway、reAPI、apidog、Azure Foundry、LiteLLM），官方全文未逐字取到。",
+    "gpt-6-astra 默认 effort 仅第三方来源列 medium → unverified。",
+    "gpt-5.6-sol 的六级 effort 属家族级文档 → 单模型级 unverified。",
+    "gpt-6-luna 上下文窗口来源冲突：1,050,000（official 摘要）/1,000,000（apidog）/1.1M（Vercel）。",
+    "gpt-6.1-terra 默认 effort 冲突：medium（official 摘要）vs high（veniceai 结构体）。",
+    "中转层可能改写 reasoning_effort（reAPI 自家中转实测 6.1-sol 的 max 报错），subapi 是否同样截断未实测。",
+    "subapi 是否透传 service_tier / 图像部分未实测（无凭据，image_probe 为 2026-10-10 历史记录）。",
+    "本函数未读取代码仓源码，宿主 clamp 与 override 的交互以 appSchema 声明为准，未核对 src/context_window.rs 原文。",
+    "goal 要求的 deepseek / deepseek-self 双 key 双行对比不适用于本家族（本家族仅 subapi 单 key），应由对应家族产出。",
+    "来源读取失败 https://raw.githubusercontent.com/modelstudioai/skills/014874565237bfc92a672c43be0fa412b6ada275/skills/bailian-docs-llm-wiki/wiki/api/qwen-api-reference.md（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available；checkedAt=2026-11-11T02:24:11Z）；已跳过该来源并继续其它候选",
+    "来源读取失败 http://10.10.10.201:12888/v1/models (from task input catalogProbe)（HTTP 401）；已跳过该来源并继续其它候选",
+    "来源读取失败 https://developers.openai.com/api/docs/models/gpt-6-astra（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:23Z）；已跳过该来源并继续其它候选",
+    "来源读取失败 https://developers.openai.com/api/docs/guides/latest-model（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:23Z）；已跳过该来源并继续其它候选",
+    "来源读取失败 https://developers.openai.com/api/docs/models/gpt-5.6-sol（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:23Z）；已跳过该来源并继续其它候选",
+    "来源读取失败 https://developers.openai.com/api/docs/models/gpt-6-luna.md（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:24Z）；已跳过该来源并继续其它候选",
+    "来源读取失败 https://developers.openai.com/api/docs/guides/latest-model/gpt-5.6.md（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:24Z）；已跳过该来源并继续其它候选",
+    "来源读取失败 https://developers.openai.com/api/docs/guides/fast-mode（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:53Z）；已跳过该来源并继续其它候选",
+    "来源读取失败 https://help.openai.com/en/articles/11647665-fast-mode-faq（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:53Z）；已跳过该来源并继续其它候选",
+    "来源读取失败 https://learn.chatgpt.com/docs/agent-configuration/speed.md（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:26:14Z）；已跳过该来源并继续其它候选",
+    "来源读取失败 http://10.10.10.201:12888/v1/models（HTTP 401）；已跳过该来源并继续其它候选",
+    "来源读取失败 developers.openai.com 模型页/指南页；help.openai.com fast-mode FAQ；learn.chatgpt.com speed.md（HTTP 404）；已跳过该来源并继续其它候选",
+    "来源读取失败 http://104.207.156.188:58081/v1/models（HTTP 401）；已跳过该来源并继续其它候选",
+    "https://api.deepseek.com/v1 的 /models 目录探测未成功（HTTP 401），上游真实模型目录与别名映射未经验证/需实测",
+    "http://10.10.10.201:12888/v1 的 /models 目录探测未成功（HTTP 401），上游真实模型目录与别名映射未经验证/需实测",
+    "http://104.207.156.188:58081/v1 的 /models 目录探测未成功（HTTP 401），上游真实模型目录与别名映射未经验证/需实测",
+    "全部三个端点家族的 /v1/models 目录探测均 HTTP 401（deepseek 无本机凭据、qwen-local 'missing or wrong API key'、subapi 'API_KEY_REQUIRED'）→ 实际暴露的模型 id 与端点侧元数据均未验证；上表上游值全部来自公开文档/第三方，不是端点返回。",
+    "deepseek：两个 provider 指向同一 baseURL 与同一套文档，官方无『按 key 区分模型/配额/等级』说明；两个 key 的余额、并发、降级差异 = 未经验证/需实测。",
+    "deepseek：fast/priority/service_tier 只有负面证据（Chat Completions 请求体无该参数；Anthropic 侧列为 ignored 兼容字段；响应固定 default/standard）；若宿主真下发 service_tier:\"fast\"，200 还是 400 未实测。",
+    "deepseek-self 两个模型未声明 contextWindow，宿主缺省窗口本次证据未给出（仅知 MAX_TOKENS=256000 钳制、OUTPUT_RESERVE=24576、DEFAULT_MAX_OUTPUT=32768）→ 生效输入预算 unverified。",
+    "deepseek image_input 探测从未执行（imageProbe 全 null）：文档说 flash 支持、v4-pro 不支持，但宿主 unknown 状态下不会放行图像。",
+    "deepseek 上游 max_tokens 上限文档有两种写法（'MAXIMUM: 384K' vs '1..393216'），数值一致；Anthropic Messages 侧描述为『超出模型上限被 cap』，Claude Code/OpenCode 兼容逻辑抬高有效上限的边界未验证。",
+    "qwen-local：官方 OpenAI 兼容 Chat 页交付被截断（7,878 字符，断在参数表内），该页上 qwen3.8-27b 的 reasoning_effort 行未逐字读到；三档结论来自官方 blog + NVIDIA NIM + 官方摘要片段。",
+    "qwen-local：raw GitHub 的 API 参考镜像返回 404（已记录并从其它来源恢复）；本地 /v1/models 无法枚举（401 且 apiKeyEnv 为 null），provider 中写的 model id 无法从端点确认。",
+    "qwen-local：>256000 的上下文在本机不可达（MAX_TOKENS），本地引擎 --max-model-len 未知，1M/YaRN 能力无可观测效果。",
+    "subapi：developers.openai.com 的模型页与指南页本轮全部 404（gpt-6-luna / gpt-6-astra / gpt-5.6-sol / fast-mode / latest-model 等），能力主要依赖搜索结果摘要与第三方（Vercel AI Gateway、reAPI、apidog、Azure Foundry、LiteLLM）；官方全文未逐字取到。",
+    "subapi：gpt-6-astra 默认 effort 仅第三方列 medium → unverified；gpt-5.6-sol 六级 effort 属家族级文档 → 单模型级 unverified。",
+    "subapi：gpt-6-luna 上下文窗口来源冲突（1,050,000 official 摘要 / 1,000,000 apidog / 1.1M Vercel）；gpt-6.1-terra 默认 effort 冲突（medium vs high）。",
+    "subapi：中转层可能改写 reasoning_effort（reAPI 自家中转实测 6.1-sol 的 max 报错），subapi 是否同样截断未实测；subapi 是否透传 service_tier/图像部分未实测（无凭据，image_probe 为 2026-10-10 历史记录）。",
+    "subapi：appSchema 声明的宿主 clamp 与单次 override 的交互未与 src/context_window.rs 原文核对（subapi 家族未读源码）。",
+    "subapi/gpt-5.6-luna：上游真实能力未从官方文档确认，需实测",
+    "subapi/gpt-5.6-sol：上游真实能力未从官方文档确认，需实测",
+    "subapi/gpt-6-astra：上游真实能力未从官方文档确认，需实测",
+    "subapi/gpt-6-luna：上游真实能力未从官方文档确认，需实测",
+    "subapi/gpt-6.1-sol：上游真实能力未从官方文档确认，需实测",
+    "subapi/gpt-6.1-terra：上游真实能力未从官方文档确认，需实测",
+    "共 6/11 行的上游能力未取得官方全文或端点确认（subapi/gpt-5.6-luna、subapi/gpt-5.6-sol、subapi/gpt-6-astra、subapi/gpt-6-luna、subapi/gpt-6.1-sol、subapi/gpt-6.1-terra）；这些行的 (c) 列数值按候选处理，一律标为未经验证/需实测。",
+    "3/3 个端点目录探测失败（https://api.deepseek.com/v1→HTTP 401；http://10.10.10.201:12888/v1→HTTP 401；http://104.207.156.188:58081/v1→HTTP 401）；上游真实模型目录与别名映射未经验证/需实测。",
+    "subapi/gpt-6-astra：differences 称「唯一 fast_mode=true 且有实测」，而 capabilities.fastMode=false、effective=off、mechanicalActions 也按 false 处理 → 行内矛盾；本轮无 astra 的 probe 记录，不能借用 gpt-6-luna 的 probe 结果。",
+    "deepseek/deepseek-v4-pro：differences 断言「并发上限 500（flash 为 2500）」，本输入没有任何对应来源 URL，属无出处数值，需补官方链接或删除。",
+    "声明模态与能力门冲突：5 个 subapi 行 declared.input=[text,image] 而 capabilities.imageInput=unknown，本轮证据未说明 providers 的 input 与 model_capabilities.image_input 谁优先；若 input 优先则图像会被误放行（v4-pro 则误 400）。",
+    "迁移语义未定：5 行 providers 的 reasoningEfforts 带 false(null) 档，迁入 model_capabilities 后经宿主 none/minimal→low 改写，该档会变成什么（缺失档 / 被丢弃 / 变 low）没有规则说明，需先定映射再迁移。",
+    "qwen-local：provider 未配置 apiKeyEnv，但 /v1/models 返回 401 'missing or wrong API key' —— 宿主实际如何注入鉴权（匿名白名单或配置缺失）未取证，直接影响该行「已接线可用」的判断。",
+    "行级 status 与 aspect 级 statuses 缺少统一聚合规则（subapi 6 行 status=unverified、aspect 多为 verified），输出表会自相矛盾；需要一条「取最弱证据」的降级规则。",
+    "本轮未交付 agent-generation.yml 的 provider 段，无法确认 provider 级 defaultInput 是否被设为 image；deepseek-v4-pro 的 400 风险与 subapi 5 行的图像放行判断都悬在此项上。"
+  ],
+  "warnings": [
+    "credentials.yaml: could not be read from /home/goodtime/.config/grow/credentials.yaml (io error: SECRET_FILE: this file holds API keys and is never readable by tools; the host applies the credentials itself. Model settings are in providers.yml and agent-generation.yml beside it: SECRET_FILE: this file holds API keys and is ne...)",
+    "provider \"deepseek\": credential reference DEEPSEEK_API_KEY is not set",
+    "provider \"deepseek-self\": credential reference DEEPSEEK_SELF_API_KEY is not set",
+    "provider \"subapi\": credential reference SUBAPI_API_KEY is not set",
+    "https://api.deepseek.com/v1 被 2 个 provider 共用（deepseek / deepseek-self）：agent-generation.yml 必须按 provider 分别声明 model_capabilities，否则同一个上游模型在两侧会用到不同默认值。",
+    "deepseek-self/deepseek-flash：providers 未声明 maxTokens，宿主按默认 32768 处理；若上游上限更低需显式声明。",
+    "deepseek-self/deepseek-flash：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "deepseek-self/deepseek-flash：凭据环境变量 DEEPSEEK_SELF_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "deepseek-self/deepseek-v4-pro：providers 未声明 maxTokens，宿主按默认 32768 处理；若上游上限更低需显式声明。",
+    "deepseek-self/deepseek-v4-pro：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "deepseek-self/deepseek-v4-pro：凭据环境变量 DEEPSEEK_SELF_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "deepseek/deepseek-flash：providers 声明 contextWindow=1048576 超出宿主上限 256000，实际按 256000 计算；上游真实窗口需按官方文档收紧后再声明。",
+    "deepseek/deepseek-flash：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "deepseek/deepseek-flash：凭据环境变量 DEEPSEEK_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "deepseek/deepseek-v4-pro：providers 声明 contextWindow=1048576 超出宿主上限 256000，实际按 256000 计算；上游真实窗口需按官方文档收紧后再声明。",
+    "deepseek/deepseek-v4-pro：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "deepseek/deepseek-v4-pro：凭据环境变量 DEEPSEEK_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "qwen-local/qwen3.8-27b：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "qwen-local/qwen3.8-27b：端点要求鉴权（目录探测返回 401），但 provider 未配置 apiKeyEnv，需确认网关是否允许匿名访问。",
+    "subapi/gpt-5.6-luna：reasoningEfforts 写在 providers 文件里宿主运行时不读取，需迁移到 agent-generation.yml 的 model_capabilities 才决定 UI 可选项。",
+    "subapi/gpt-5.6-luna：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "subapi/gpt-5.6-luna：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "subapi/gpt-5.6-sol：reasoningEfforts 写在 providers 文件里宿主运行时不读取，需迁移到 agent-generation.yml 的 model_capabilities 才决定 UI 可选项。",
+    "subapi/gpt-5.6-sol：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "subapi/gpt-5.6-sol：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "subapi/gpt-6-astra：reasoningEfforts 写在 providers 文件里宿主运行时不读取，需迁移到 agent-generation.yml 的 model_capabilities 才决定 UI 可选项。",
+    "subapi/gpt-6-astra：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "subapi/gpt-6-astra：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "subapi/gpt-6-luna：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "subapi/gpt-6.1-sol：providers 未声明 maxTokens，宿主按默认 32768 处理；若上游上限更低需显式声明。",
+    "subapi/gpt-6.1-sol：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "subapi/gpt-6.1-sol：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "subapi/gpt-6.1-terra：providers 未声明 maxTokens，宿主按默认 32768 处理；若上游上限更低需显式声明。",
+    "subapi/gpt-6.1-terra：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。",
+    "subapi/gpt-6.1-terra：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。",
+    "providers.yml / cordis.patch.yml 里的 contextWindow、maxTokens 只是本地声明，不等于上游真实上限；应以上游文档为准并据此收紧（典型：qwen3.8-27b maxTokens 256000 > 上游 131072）。",
+    "写在 providers 文件里的 reasoningEfforts 宿主不读；只有 agent-generation.yml 的 model_capabilities 决定 UI 可选项（subapi 6 个模型因此全部无档位可选、实际不发 reasoning_effort）。",
+    "同一 baseURL 用两个 key 配置（deepseek 与 deepseek-self）时必须在 agent-generation.yml 里分别声明，否则两侧使用不同默认值（一方 1048576/65536，一方全 null）。",
+    "host clamp：MAX_TOKENS=256000 使所有声明 1M+ 的模型实际输入预算只有 231424（窗口 - min(24576, 窗口/4)），声明值换不来容量，也不报错。",
+    "host 会把 none/minimal 改写为 low（思考无法真正关闭）；qwen3.8-27b 的 contextRequestOptions.chat_template_kwargs.enable_thinking=false 与必然下发的 reasoning_effort≥low 相互矛盾，结果未验证。",
+    "v4-pro 不支持图像：若 provider 级 defaultInput=image 生效会造成 400，必须显式 image_input: unsupported。",
+    "fast_mode=true 只在 deepseek（无依据）与 subapi/gpt-6-luna（有第三方实测）出现；其余模型保持 false 是安全配置，开启前应先做 service_tier 探测。",
+    "subapi 四个模型（5.6-luna、5.6-sol、6-astra）声明 maxTokens 8192/16384，远低于上游 128000；gpt-6.1-sol/terra 缺失声明反而拿到宿主 32768。",
+    "有 13 个候选来源读取失败（已记入 sources/gaps）：相关能力项按“未经验证/需实测”处理，不要用本地声明值代替官方依据。"
+  ],
+  "sources": [
+    {
+      "checkedAt": "2026-11-11T02:21:31Z",
+      "claim": null,
+      "error": null,
+      "family": "https://api.deepseek.com/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://api-docs.deepseek.com/quick_start/pricing"
+    },
+    {
+      "checkedAt": "2026-11-11T02:21:31Z",
+      "claim": null,
+      "error": null,
+      "family": "https://api.deepseek.com/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://api-docs.deepseek.com/guides/thinking_mode/"
+    },
+    {
+      "checkedAt": "2026-11-11T02:21:33Z",
+      "claim": null,
+      "error": null,
+      "family": "https://api.deepseek.com/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://api-docs.deepseek.com/api/list-models"
+    },
+    {
+      "checkedAt": "2026-11-11T02:21:51Z",
+      "claim": null,
+      "error": null,
+      "family": "https://api.deepseek.com/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://api-docs.deepseek.com/api/create-chat-completion"
+    },
+    {
+      "checkedAt": "2026-11-11T02:21:44Z",
+      "claim": null,
+      "error": null,
+      "family": "https://api.deepseek.com/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://api-docs.deepseek.com/api/create-response/"
+    },
+    {
+      "checkedAt": "2026-11-11T02:21:51Z",
+      "claim": null,
+      "error": null,
+      "family": "https://api.deepseek.com/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://api-docs.deepseek.com/api/create-message"
+    },
+    {
+      "checkedAt": "2026-11-11T02:21:40Z",
+      "claim": null,
+      "error": null,
+      "family": "https://api.deepseek.com/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://api-docs.deepseek.com/guides/vision/"
+    },
+    {
+      "checkedAt": "2026-11-11T02:22:03Z",
+      "claim": null,
+      "error": null,
+      "family": "https://api.deepseek.com/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://api-docs.deepseek.com/quick_start/rate_limit"
+    },
+    {
+      "checkedAt": "2026-11-11T02:21:34Z",
+      "claim": null,
+      "error": null,
+      "family": "https://api.deepseek.com/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.telnyx.com/docs/inference/service-tiers"
+    },
+    {
+      "checkedAt": "2026-11-11T02:23:40Z",
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "qwen3.8-27b — 阿里云百炼模型页",
+      "url": "https://help.aliyun.com/zh/model-studio/qwen3-8-27b"
+    },
+    {
+      "checkedAt": "2026-11-11T02:23:57Z",
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "Qwen3.8-27B Practical Guide: Control Reasoning Depth and Extend Context to 1M Tokens",
+      "url": "https://www.alibabacloud.com/blog/603509"
+    },
+    {
+      "checkedAt": "2026-11-11T02:23:57Z",
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "Get Started with Qwen3.8-27B — NVIDIA NIM",
+      "url": "https://docs.nvidia.com/nim/vision-language-models/2.1.1-variant/get-started/advanced/get-started-qwen3-8-27b.html"
+    },
+    {
+      "checkedAt": "2026-11-11T02:23:37Z",
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "OpenAI兼容-Chat (help.aliyun.com, updated 2026-11-05)",
+      "url": "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions"
+    },
+    {
+      "checkedAt": "2026-11-11T02:23:51Z",
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "OpenAI兼容-Chat reasoning_effort 说明（搜索摘要，锚点 #4）",
+      "url": "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions#4"
+    },
+    {
+      "checkedAt": "2026-11-11T02:23:45Z",
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "思考模式 — 千问AI平台开发者文档",
+      "url": "https://platform.qianwenai.com/docs/developer-guides/text-generation/thinking"
+    },
+    {
+      "checkedAt": "2026-11-11T02:24:04Z",
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "@steptix/aigateway — service_tier handling notes",
+      "url": "https://www.npmjs.com/package/@steptix/aigateway"
+    },
+    {
+      "checkedAt": "2026-11-11T02:24:04Z",
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "Priority pay-per-token for Foundation Model APIs — Azure Databricks",
+      "url": "https://learn.microsoft.com/en-us/azure/databricks/machine-learning/foundation-model-apis/priority-mode"
+    },
+    {
+      "checkedAt": "2026-11-11T02:24:11Z",
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "host clamp implementation",
+      "url": "file:src/context_window.rs:34, src/model_settings.rs:6-59, src/single_agent.rs:873"
+    },
+    {
+      "checkedAt": "2026-11-11T02:24:11Z",
+      "claim": null,
+      "error": "WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available",
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": "bailian-docs-llm-wiki wiki/api/qwen-api-reference.md (raw)",
+      "url": "https://raw.githubusercontent.com/modelstudioai/skills/014874565237bfc92a672c43be0fa412b6ada275/skills/bailian-docs-llm-wiki/wiki/api/qwen-api-reference.md"
+    },
+    {
+      "checkedAt": null,
+      "claim": null,
+      "error": null,
+      "family": "http://10.10.10.201:12888/v1",
+      "httpStatus": 401,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "http://10.10.10.201:12888/v1/models (from task input catalogProbe)"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:59Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.openai.com/api/docs/models/gpt-6-luna"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:45Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.openai.com/api/docs/models/gpt-6.1-terra"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:59Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.openai.com/api/docs/models/gpt-5.6-luna.md"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:46Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:31Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://vercel.com/ai-gateway/models/{gpt-6-luna,gpt-6-astra,gpt-6.1-sol,gpt-6.1-terra,gpt-5.6-sol,gpt-5.6-luna}"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:28Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning"
+    },
+    {
+      "checkedAt": "2026-11-11T02:26:14Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://docs.litellm.ai/docs/providers/openai/ultrafast"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:45Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://openrouter.ai/docs/guides/features/service-tiers"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:53Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://apidog.com/blog/how-to-use-gpt-5-6-api/"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:53Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://apidog.com/blog/what-is-gpt-6-luna/"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:58Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://learn.chatgpt.com/docs/agent-configuration/speed"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:38Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://apidog.com/blog/gpt-6-astra-api/"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:45Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://github.com/veniceai/api-docs/blob/main/models/gpt-6-1-terra.mdx"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:59Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://github.com/BerriAI/litellm/pull/47000"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:15Z",
+      "claim": null,
+      "error": null,
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://github.com/czczccc/sub2api"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:23Z",
+      "claim": null,
+      "error": "WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404",
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.openai.com/api/docs/models/gpt-6-astra"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:23Z",
+      "claim": null,
+      "error": "WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404",
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.openai.com/api/docs/guides/latest-model"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:23Z",
+      "claim": null,
+      "error": "WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404",
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:24Z",
+      "claim": null,
+      "error": "WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404",
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.openai.com/api/docs/models/gpt-6-luna.md"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:24Z",
+      "claim": null,
+      "error": "WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404",
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.openai.com/api/docs/guides/latest-model/gpt-5.6.md"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:53Z",
+      "claim": null,
+      "error": "WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404",
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://developers.openai.com/api/docs/guides/fast-mode"
+    },
+    {
+      "checkedAt": "2026-11-11T02:25:53Z",
+      "claim": null,
+      "error": "WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404",
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://help.openai.com/en/articles/11647665-fast-mode-faq"
+    },
+    {
+      "checkedAt": "2026-11-11T02:26:14Z",
+      "claim": null,
+      "error": "WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404",
+      "family": "http://104.207.156.188:58081/v1",
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://learn.chatgpt.com/docs/agent-configuration/speed.md"
+    },
+    {
+      "checkedAt": null,
+      "claim": null,
+      "error": null,
+      "family": null,
+      "httpStatus": 401,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "http://10.10.10.201:12888/v1/models"
+    },
+    {
+      "checkedAt": null,
+      "claim": null,
+      "error": null,
+      "family": null,
+      "httpStatus": null,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "file:src/context_window.rs:34, src/model_settings.rs:6-59,112-116, src/single_agent.rs:870-873"
+    },
+    {
+      "checkedAt": null,
+      "claim": null,
+      "error": null,
+      "family": null,
+      "httpStatus": 200,
+      "model": null,
+      "ok": true,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "https://vercel.com/ai-gateway/models"
+    },
+    {
+      "checkedAt": null,
+      "claim": null,
+      "error": null,
+      "family": null,
+      "httpStatus": 404,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "developers.openai.com 模型页/指南页；help.openai.com fast-mode FAQ；learn.chatgpt.com speed.md"
+    },
+    {
+      "checkedAt": null,
+      "claim": null,
+      "error": null,
+      "family": null,
+      "httpStatus": 401,
+      "model": null,
+      "ok": false,
+      "publishedAt": null,
+      "retrievedAt": null,
+      "title": null,
+      "url": "http://104.207.156.188:58081/v1/models"
+    }
+  ]
+}

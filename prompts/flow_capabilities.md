@@ -29,7 +29,7 @@ Checks and errors
 - The whole source compiles before any effect; a diagnostic means nothing ran, so correct it and submit again. Undeclared names and unknown host library methods are rejected there.
 - Using a call of a top-level async function or a /promises tool directly as a value (reading a property, an operator, a condition, assert or a template) without await is a compile error; save the Promise or await it.
 - Tool and AI calls can fail, and exceptions can be handled. An uncaught error in a module goes to an AI that fixes the module's file, after which the call runs again; in the main program it goes back to the main AI. Do not repeat effects with unknown outcomes or claim acceptance based only on successful execution.
-- `console.log`, `info`, `warn`, `error` and `debug` print complete records: strings as they are, other values as JSON.
+- `console.log`, `info`, `warn`, `error` and `debug` output complete records: strings as they are, other values as JSON.
 
 Timers
 setTimeout, setInterval, clearTimeout, clearInterval and queueMicrotask work within the current turn. Handles are numbers, not Node Timeout objects. Pending timers keep the program alive, the end of the turn cancels them, and an overdue interval fires once without replaying missed ticks. They cannot schedule work across turns.

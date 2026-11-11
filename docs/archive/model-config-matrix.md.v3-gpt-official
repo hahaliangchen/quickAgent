@@ -1,0 +1,755 @@
+# 模型配置表（本机真实配置 × 上游官方核实）
+
+生成时间：2026-11-11T02:38:25.399Z
+
+> 目标：为这台机器上已配置的每一个模型建立一张“可配置项”对照表，并逐项给出依据。必须覆盖：思考/推理等级（参数名 + 可选值）、最大上下文、最大输出 token、能否加速（fast_mode / service_tier / priority）、多模态图像输入、工具调用。每个模型都要区分三件事：(a) providers 文件里的本地声明值，(b) 宿主代码钳制后的生效值，(c) 厂商官方文档核实到的上游真实能力。同一模型被两个 key（deepseek 与 deepseek-self）重复配置时，必须分两行列出并说明二者差异。无法从公开文档或端点目录确认的项目，一律标注“未经验证/需实测”，不得猜测数值。表末必须给出可执行的改进建议（哪些 model_capabilities 该补、哪些声明值超出宿主上限）。调研过程要求：单个文档页 404/403/超时或搜索查询无结果时，记录到 gaps 与 sources 后继续其它模型与其它候选来源，不得让一处失败终止整轮调研。
+
+本表覆盖 **11 个模型行 / 4 个 provider**（同一上游模型被两个 key 配置时分行列出）。产物：`docs/model-config-matrix.md`、`docs/model-config-matrix.json`。
+
+本轮联网核实状态：**webStatus=partial**；成功来源 35 条，失败来源 13 条；端点目录探测 3 个，失败 3 个。
+
+### 本轮修订说明
+- subapi/gpt-5.6-luna · fastMode：verified → unverified（来源：docs.litellm.ai、openrouter.ai）
+- subapi/gpt-5.6-sol · contextWindow：verified → unverified（来源：vercel.com）
+- subapi/gpt-5.6-sol · maxOutput：verified → unverified（来源：vercel.com）
+- subapi/gpt-5.6-sol · fastMode：verified → unverified（来源：docs.litellm.ai）
+- subapi/gpt-6-astra · fastMode：verified → unverified（来源：docs.litellm.ai、openrouter.ai）
+- subapi/gpt-6-luna · fastMode：verified → unverified（来源：docs.litellm.ai）
+- subapi/gpt-6.1-sol · fastMode：verified → unverified（来源：docs.litellm.ai、learn.chatgpt.com）
+- subapi/gpt-6.1-terra · fastMode：verified → unverified（来源：learn.chatgpt.com、docs.litellm.ai）
+- 规则：只有厂商官方文档或端点实测才算 verified；第三方代理/网关/博客仅作参考。
+- 其余章节（本地声明、宿主钳制、端点 401、gaps）未改动。
+- [AI] subapi/gpt-5.6-sol · fastMode：status=verified，唯一来源 docs.litellm.ai（第三方代理文档），非厂商官方
+- [AI] subapi/gpt-5.6-luna · fastMode：status=verified，来源仅 docs.litellm.ai + openrouter.ai，两者都不在 officialHosts；备注自认『第三方实测』
+- [AI] subapi/gpt-6-astra · fastMode：status=verified，来源仅 docs.litellm.ai + openrouter.ai（均第三方）
+- [AI] subapi/gpt-6-luna · fastMode：status=verified，唯一来源 docs.litellm.ai（第三方）
+- [AI] subapi/gpt-6.1-sol · fastMode：status=verified，来源 docs.litellm.ai + learn.chatgpt.com，两者均不在给定 officialHosts 白名单内
+- [AI] subapi/gpt-6.1-terra · fastMode：status=verified，来源 learn.chatgpt.com + docs.litellm.ai，两者均不在 officialHosts 白名单内
+- webStatus=partial；成功来源 33 条、失败来源 13 条
+- markdown：出现“web 工具不可用”但属历史/已被取代的表述 — | 官方/第三方文档 | 本轮 sources：35 条成功、13 条失败 | webStatus=partial；(c) 列逐项附 URL | | 旧版本表 | `docs/model-config-matrix.md` / `docs/model-config-matrix.json` | 本地…
+- [AI] subapi/gpt-5.6-luna · contextWindow：数值冲突未定稿（官方摘要 1,050,000 / apidog 1,000,000 / Vercel 1.1M），gaps 已记但未收敛
+- [AI] subapi/gpt-5.6-luna · imageInput / toolCalling：依据 learn.microsoft.com 的 GPT-5.6 家族级或 Azure 页面，单模型级未逐字确认（toolCalling 的 chatCompletions『需 reasoning_effort=none 否则 400』亦为同族推断）
+- [AI] subapi/gpt-6-luna · contextWindow：官方摘要同时出现 1,050,000 / 922,000 / 128,000 三个数值，且与 apidog、Vercel 冲突，取值需复核
+- [AI] subapi/gpt-6.1-terra · contextWindow / reasoningEfforts：官方页直接 fetch 404；档位集合一致但默认档 medium vs high 冲突，默认值仍属未覆盖项
+- [AI] subapi/gpt-6-astra / subapi/gpt-6.1-sol · reasoningEfforts：reapi.ai、apidog.com 均为第三方对照表，『不支持 none』『minimal 未明』缺官方出处，保持 unverified 是正确的
+- [AI] qwen-local/qwen3.8-27b · maxOutput：131072 有 help.aliyun.com 支撑，但本地声明 256000 为上游 1.95 倍，会下发超限 max_tokens —— 属配置缺陷，不是依据造假，故不入 blocking
+- [AI] qwen-local/qwen3.8-27b · imageInput / toolCalling：aspect 标 verified/supported 而同一记录内 capabilities.imageInput 仍为 unknown、网关 tool-call parser 未实测，属内部状态不同步，需一次实测后统一
+- [AI] qwen-local/qwen3.8-27b · fastMode：仅有 npmjs 第三方负面证据，保持 unverified 处理正确；不应以 Databricks 托管 Qwen3.5 的相邻先例补值
+- 审阅范围：11 行 / 本地配置 11 个模型 / 来源 33 成功 + 13 失败 / 宿主钳制 MAX_TOKENS=256000、OUTPUT_RESERVE=24576、DEFAULT_MAX_OUTPUT=32768
+
+## 0. 口径与图例
+
+| 标记 | 含义 |
+|---|---|
+| **(a) 本地声明** | `providers.yml` 中该 model 条目的 `contextWindow` / `maxTokens` / `input` / `reasoningEfforts`，以及 `agent-generation.yml` 的 `model_capabilities` |
+| **(b) 宿主生效** | 宿主代码钳制后的值：窗口 `min(声明, MAX_TOKENS=MAX_TOKENS = 256000（src/context_window.rs），声明更大也按 256000 计算输入预算)`；输入预算 = 窗口 − `min(输出预留=OUTPUT_RESERVE = 24576（src/model_settings.rs:7），输入预算 = 窗口 - min(24576, 窗口/4), 窗口/4)`；输出 = 声明值，缺省回落 `DEFAULT_MAX_OUTPUT=DEFAULT_MAX_OUTPUT = 32768（src/model_settings.rs:9，provider 未声明 maxTokens 时）`；单次 `context_window` 覆盖范围 单..次 |
+| **(c) 上游核实** | 官方文档 / 端点目录核实到的真实能力，逐项标 `verified` / `unverified` / `unsupported` |
+| ✅ / ⚠️ / ⛔ | verified / unverified（未经验证或需实测）/ unsupported |
+| 未经验证/需实测 | 没有公开文档或端点证据；本表不填猜测值 |
+
+宿主请求侧常量：允许等级 `none / low / medium / high / xhigh / max`；`none`/`minimal` 会被改写为 `low`；fast_mode 落地为请求体 `service_tier="fast"`。
+
+## 1. 数据来源与可信度
+
+| 类别 | 来源 | 本轮状态 |
+|---|---|---|
+| 本地配置 | `/home/goodtime/.config/grow/providers.yml`、`/home/goodtime/.config/grow/agent-generation.yml` | 已解析（声明值即 (a) 列） |
+| 宿主实现 | appSchema.runtimeFacts + 各家族端点说明 | 决定 (b) 列的钳制与默认值 |
+| 端点目录 | 3 个 `GET {baseURL}/models` 探测 | 失败 3 个（见第 6 节），上游目录未验证 |
+| 官方/第三方文档 | 本轮 sources：35 条成功、13 条失败 | webStatus=partial；(c) 列逐项附 URL |
+| 旧版本表 | `docs/model-config-matrix.md` / `docs/model-config-matrix.json` | 本地事实部分沿用；旧版“web 工具不可用”的结论已被本轮联网调研取代，联网列按本轮 sources 重写 |
+
+## 2. provider 清单
+
+| provider | api | baseURL | 凭据引用 | defaultInput | prefix_system_messages | 模型 |
+|---|---|---|---|---|---|---|
+| `deepseek` | openai-completions | https://api.deepseek.com/v1 | `DEEPSEEK_API_KEY` | — | false | `deepseek-flash`、`deepseek-v4-pro` |
+| `deepseek-self` | openai-completions | https://api.deepseek.com/v1 | `DEEPSEEK_SELF_API_KEY` | — | false | `deepseek-flash`、`deepseek-v4-pro` |
+| `qwen-local` | openai-completions | http://10.10.10.201:12888/v1 | `null` | — | true | `qwen3.8-27b` |
+| `subapi` | openai-completions | http://104.207.156.188:58081/v1 | `SUBAPI_API_KEY` | text / image | false | `gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-6-astra`、`gpt-6-luna`、`gpt-6.1-sol`、`gpt-6.1-terra` |
+
+## 3. 模型配置矩阵（(a) 本地声明 / (b) 宿主生效 / (c) 上游核实）
+
+### 3.1 上下文窗口与输出上限
+
+| # | 模型 | provider | (a) 声明 窗口/输出 | (b) 生效 窗口/输出 | 输入预算 | (c) 上游 窗口/输出 | 上游状态 |
+|---|---|---|---|---|---|---|---|
+| 1 | `deepseek-flash` | `deepseek-self` | 未声明 / 未声明 | 256,000 / 32,768 | 231,424 | 1,048,576 / 393,216 | ✅ verified |
+| 2 | `deepseek-v4-pro` | `deepseek-self` | 未声明 / 未声明 | 256,000 / 32,768 | 231,424 | 1,048,576 / 393,216 | ✅ verified |
+| 3 | `deepseek-flash` | `deepseek` | 1,048,576 / 65,536 | 256,000 / 65,536 | 231,424 | 1,048,576 / 393,216 | ✅ verified |
+| 4 | `deepseek-v4-pro` | `deepseek` | 1,048,576 / 65,536 | 256,000 / 65,536 | 231,424 | 1,048,576 / 393,216 | ✅ verified |
+| 5 | `qwen3.8-27b` | `qwen-local` | 256,000 / 256,000 | 256,000 / 256,000 | 231,424 | 262,144 / 131,072 | ✅ verified |
+| 6 | `gpt-5.6-luna` | `subapi` | 256,000 / 8,192 | 256,000 / 8,192 | 231,424 | 1,050,000 / 128,000（官方核对 6/7 项 verified，见 §11） | ⚠️ unverified（行级仍待端实测；上游 6/7 项官方 verified，见 §11） |
+| 7 | `gpt-5.6-sol` | `subapi` | 256,000 / 8,192 | 256,000 / 8,192 | 231,424 | 1,050,000 / 128,000（官方核对 3/7 项 verified，见 §11） | ⚠️ unverified（行级仍待端实测；上游 3/7 项官方 verified，见 §11） |
+| 8 | `gpt-6-astra` | `subapi` | 256,000 / 16,384 | 256,000 / 16,384 | 231,424 | 未取得 / 未取得（官方核对 0/7 项 verified，见 §11） | ⚠️ unverified（行级仍待端实测；上游 0/7 项官方 verified，见 §11） |
+| 9 | `gpt-6-luna` | `subapi` | 256,000 / 16,384 | 256,000 / 16,384 | 231,424 | 1,050,000 / 128,000（官方核对 7/7 项 verified，见 §11） | ⚠️ unverified（行级仍待端实测；上游 7/7 项官方 verified，见 §11） |
+| 10 | `gpt-6.1-sol` | `subapi` | 256,000 / 未声明 | 256,000 / 32,768 | 231,424 | 1,050,000 / 128,000（官方核对 2/7 项 verified，见 §11） | ⚠️ unverified（行级仍待端实测；上游 2/7 项官方 verified，见 §11） |
+| 11 | `gpt-6.1-terra` | `subapi` | 256,000 / 未声明 | 256,000 / 32,768 | 231,424 | 未取得 / 未取得（官方核对 0/7 项 verified，见 §11） | ⚠️ unverified（行级仍待端实测；上游 0/7 项官方 verified，见 §11） |
+
+### 3.2 能力开关（思考等级 / 加速 / 图像 / 工具调用）
+
+> 取代说明（2026-11-11T05:33:27.229Z，本轮（GPT 官方站点复核））：本表 c= 上游列与历史判断含上一轮结论（多由第三方来源支撑）；GPT 官方站点复核结果见 §11，冲突时以 §11 为准。
+
+| # | 模型 | provider | 思考等级 a=声明；b=启用；c=上游 | 默认档 a / c | 加速 a能力；b生效；c上游 | 图像 a；b；c | 工具 b / c |
+|---|---|---|---|---|---|---|---|
+| 1 | `deepseek-flash` | `deepseek-self` | a=未写；b=空→不可设置；c=low / high / max | a=未设 / c=high | a=否/未声明；b=模型标志=false，生效=off；c=✅ unsupported | a=unknown；b=unknown；c=✅ supported | b=未声明 / c=supported |
+| 2 | `deepseek-v4-pro` | `deepseek-self` | a=未写；b=空→不可设置；c=low / high / max | a=未设 / c=high | a=否/未声明；b=模型标志=false，生效=off；c=✅ unsupported | a=unknown；b=unknown；c=✅ unsupported | b=未声明 / c=supported（含 web_search，仅 v4-pro） |
+| 3 | `deepseek-flash` | `deepseek` | a=未写；b=空→不可设置；c=low / high / max | a=未设 / c=high | a=否/未声明；b=模型标志=false，生效=off；c=✅ unsupported | a=unknown；b=unknown；c=✅ supported | b=未声明 / c=supported（function tools；thinking 模式 tool_choice 禁用 require… |
+| 4 | `deepseek-v4-pro` | `deepseek` | a=未写；b=空→不可设置；c=low / high / max | a=未设 / c=high | a=否/未声明；b=模型标志=false，生效=off；c=✅ unsupported | a=unknown；b=unknown；c=✅ unsupported | b=未声明 / c=supported（含 web_search 服务器工具，仅 v4-pro；apply_patch；thinking … |
+| 5 | `qwen3.8-27b` | `qwen-local` | a=未写；b=low / medium / xhigh；c=low / medium / xhigh | a=xhigh / c=xhigh | a=否/未声明；b=模型标志=false，生效=off；c=⚠️ unverified（Qwen/百炼文档不定义 service_tier；第三… | a=unknown；b=unknown（probe ✅）；c=✅ supported | b=true / c=supported（模型能力；本网关的 tool-call parser 为部署属性，未验证） |
+| 6 | `gpt-5.6-luna` | `subapi` | a=false / high / low / max / medium / xhigh；b=空→不可设置；c=none / low / medium / high / xhigh / max | a=未设 / c=medium | a=否/未声明；b=模型标志=false，生效=off；c=⚠️ supported（未经验证） | a=unknown；b=unknown；c=✅ supported | b=未声明 / c=Chat Completions 仅当 reasoning_effort=none 可带 function tools… |
+| 7 | `gpt-5.6-sol` | `subapi` | a=false / high / low / max / medium / xhigh；b=空→不可设置；c=none / low / medium / high / xhigh / max | a=未设 / c=medium(单模型级未确认) | a=否/未声明；b=模型标志=false，生效=off；c=⚠️ supported（未经验证） | a=unknown；b=unknown；c=✅ supported | b=未声明 / c=Chat Completions 带 tools 且 effort≠none 会 400（官方报错示例即 5.6-so… |
+| 8 | `gpt-6-astra` | `subapi` | a=false / high / low / max / medium / xhigh；b=空→不可设置；c=low / medium / high / xhigh / max | a=未设 / c=未取得 | a=否/未声明；b=模型标志=false，生效=off；c=⚠️ supported（未经验证） | a=unknown；b=unknown；c=⚠️ supported | b=未声明 / c=Chat Completions 不支持工具调用；需 Responses API |
+| 9 | `gpt-6-luna` | `subapi` | a=false / high / low / max / medium / xhigh；b=none / low / medium / high / xhigh / max；c=none / low / medium / high / xhigh / max | a=max / c=medium | a=是；b=模型标志=true，生效=conditional_on_global_fast_mode；c=⚠️ supported（未经验证） | a=unknown；b=unknown（probe ✅）；c=✅ supported | b=未声明 / c=Chat Completions 仅当 effort=none 可带 tools；Responses 支持 |
+| 10 | `gpt-6.1-sol` | `subapi` | a=未写；b=空→不可设置；c=low / medium / high / xhigh / max | a=未设 / c=medium | a=否/未声明；b=模型标志=false，生效=off；c=⚠️ supported（未经验证） | a=unknown；b=unknown；c=⚠️ supported | b=未声明 / c=无 none 档 → Chat Completions 无法带工具；Responses API required |
+| 11 | `gpt-6.1-terra` | `subapi` | a=未写；b=空→不可设置；c=none / low / medium / high / xhigh / max | a=未设 / c=未取得 | a=否/未声明；b=模型标志=false，生效=off；c=⚠️ supported（未经验证） | a=unknown；b=unknown；c=✅ supported | b=未声明 / c=Responses API supported；Chat Completions 未验证 |
+
+## 4. 逐模型对照与判定
+
+> 取代说明（2026-11-11T05:33:27.229Z）：§4.6–§4.11（subapi 6 行 GPT）的 (c) 与依据为上一轮判断；GPT 官方站点复核结果见 §11，冲突时以 §11 为准。
+
+### 4.1 `deepseek-self/deepseek-flash`（DeepSeek 自用）
+
+- **端点**：`openai-completions` · https://api.deepseek.com/v1 · apiKeyEnv=`DEEPSEEK_SELF_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=未声明；maxTokens=未声明；input=未声明；reasoningEfforts=未写；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（host_default，clamped=否）；输入预算 231,424；输出 32,768（host_default）；defaultEffort=继承全局；fast_mode=模型标志=false，生效=off；imageInput=unknown；toolCalling=未声明
+- **(c) 上游核实**：状态 ✅ verified；窗口 1,048,576；输出 393,216；思考等级 low / high / max；默认档 high；加速 unsupported；图像 supported；工具调用 supported
+- **差异**：
+  - 本行 declared 全 null：maxOutput 走宿主 32768（上游 thinking 默认 65536 的一半），contextWindow 走宿主默认值（本次证据未给出该默认值）。
+  - 与 deepseek/deepseek-flash 的差异 100% 来自本地声明，上游能力相同；两个 key 的配额/并发/降级差异 = 未经验证/需实测。
+  - 需要为 deepseek-self 单独补 contextWindow/maxTokens/reasoningEfforts，否则两侧行为不同。
+- **判定**：上游 6/6 项有文档依据（窗口 1048576、输出 393216、efforts low/high/max、默认 high、支持图像、不支持加速），但本行 declared 全 null：窗口落宿主默认、输出走 32768，capabilities 三项为空/null，UI 无档位且图像被拦住。属「能力已确认、本地未接线」。
+- **建议**：在 agent-generation.yml 为 deepseek-self 单独补 model_capabilities：reasoningEfforts=[low,high,max]、tool_calling=supported、image_input 先 probe 再置 supported；providers 侧补 maxTokens（≤393216）与 contextWindow（≤256000 或标注被钳），避免与 deepseek 同 id 不同默认值。
+- **风险**：DEEPSEEK_SELF_API_KEY 未解析、/models 401，上游值仅文档级；图像探针从未执行；thinking 模式 tools 必须回传 reasoning_content 否则 400，宿主是否透传未验证。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：low / high / max — ✅ verified；依据 https://api-docs.deepseek.com/guides/thinking_mode/
+  - 最大上下文 · `context_window`：1048576 — ✅ verified；依据 https://api-docs.deepseek.com/api/list-models
+  - 最大输出 · `max_tokens`：393216 — ✅ verified；依据 https://api-docs.deepseek.com/quick_start/pricing
+  - 加速 · `service_tier`：unsupported — ✅ verified；依据 https://api-docs.deepseek.com/api/create-chat-completion
+  - 图像输入 · `image_url input`：supported — ✅ verified；依据 https://api-docs.deepseek.com/guides/vision/
+  - 工具调用 · `tools`：supported — ✅ verified；依据 https://api-docs.deepseek.com/api/create-chat-completion
+
+### 4.2 `deepseek-self/deepseek-v4-pro`（DeepSeek 自用）
+
+- **端点**：`openai-completions` · https://api.deepseek.com/v1 · apiKeyEnv=`DEEPSEEK_SELF_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=未声明；maxTokens=未声明；input=未声明；reasoningEfforts=未写；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（host_default，clamped=否）；输入预算 231,424；输出 32,768（host_default）；defaultEffort=继承全局；fast_mode=模型标志=false，生效=off；imageInput=unknown；toolCalling=未声明
+- **(c) 上游核实**：状态 ✅ verified；窗口 1,048,576；输出 393,216；思考等级 low / high / max；默认档 high；加速 unsupported；图像 unsupported；工具调用 supported（含 web_search，仅 v4-pro）
+- **差异**：
+  - 与 deepseek/deepseek-v4-pro 仅本地声明不同（null vs 1048576/65536）；上游能力相同。
+  - 若 provider 级 defaultInput=image 生效，本模型会 400 → 必须显式 image_input: unsupported。
+  - 宿主默认上下文窗口未取证 → 生效输入预算 unverified。
+- **判定**：上游支持工具调用（含仅 v4-pro 的 web_search 服务器工具与 apply_patch）、明确不支持图像；本行 declared 全 null、capabilities 全空，等于把宿主默认值套在一个能力受限的模型上。
+- **建议**：显式 image_input: unsupported（防 provider 级 defaultInput=image 造成 400）；补 reasoningEfforts 与 tool_calling；补 maxTokens/contextWindow 或明确沿用宿主默认并写入文档。
+- **风险**：图像一旦放行即 400；thinking 模式必须回传 reasoning_content；凭据缺失，工具/图像均未实测。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：low / high / max — ✅ verified；依据 https://api-docs.deepseek.com/guides/thinking_mode/
+  - 最大上下文 · `context_window`：1048576 — ✅ verified；依据 https://api-docs.deepseek.com/api/list-models
+  - 最大输出 · `max_tokens`：393216 — ✅ verified；依据 https://api-docs.deepseek.com/quick_start/pricing
+  - 加速 · `service_tier`：unsupported — ✅ verified；依据 https://api-docs.deepseek.com/api/create-message
+  - 图像输入 · `image block`：unsupported — ✅ verified；依据 https://api-docs.deepseek.com/guides/vision/
+  - 工具调用 · `tools / web_search`：supported — ✅ verified；依据 https://api-docs.deepseek.com/api/create-response/
+
+### 4.3 `deepseek/deepseek-flash`（DeepSeek）
+
+- **端点**：`openai-completions` · https://api.deepseek.com/v1 · apiKeyEnv=`DEEPSEEK_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=1,048,576；maxTokens=65,536；input=未声明；reasoningEfforts=未写；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（clamped_to_host_max，clamped=是）；输入预算 231,424；输出 65,536（declared）；defaultEffort=继承全局；fast_mode=模型标志=false，生效=off；imageInput=unknown；toolCalling=未声明
+- **(c) 上游核实**：状态 ✅ verified；窗口 1,048,576；输出 393,216；思考等级 low / high / max；默认档 high；加速 unsupported；图像 supported；工具调用 supported（function tools；thinking 模式 tool_choice 禁用 required/具名；tools 请求必须回传 reasoning_content 否则 4…
+- **差异**：
+  - 与 deepseek-self/deepseek-flash 是同一 model id、同一 baseURL：上游能力完全相同，差异只在本行声明了 1048576/65536，对方全 null（走宿主默认）。
+  - 公开文档不按 API key 区分能力/配额/等级；两个 key 的余额、并发、是否降级 = 未经验证/需实测。
+  - 本行声明 maxContext 1048576 会被宿主钳到 256000；2 个 key 需要在 agent-generation.yml 分别声明，否则两侧默认值不同。
+  - imageInput 本行声明 unknown，但上游支持 → 建议补 image_input: supported。
+- **判定**：声明 contextWindow=1048576 被钳到 256000（contextWindowClamped=true），maxTokens=65536 生效；相对上游（窗口 1M、输出 393216）窗口声明零收益、输出只用到约 1/6，capabilities 同样为空。
+- **建议**：contextWindow 改写 256000（或保留原值但在文档标注被钳），maxTokens 按需上调并注意宿主 clamp；补 reasoningEfforts/tool_calling；先跑 image probe 再置 image_input: supported。
+- **风险**：1M 声明会误导使用者以为有 1M 上下文（实际输入预算 231424）；图像 unknown 不放行；thinking 模式 tools 未实测。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort / reasoning.effort / output_config.effort`：low / high / max — ✅ verified；依据 https://api-docs.deepseek.com/guides/thinking_mode/ 、 https://api-docs.deepseek.com/api/list-models；说明：默认 high；minimal→low、medium/xhigh→high、ultra→max；none 关闭思考
+  - 最大上下文 · `(catalog) context_window`：1048576 — ✅ verified；依据 https://api-docs.deepseek.com/api/list-models 、 https://api-docs.deepseek.com/quick_start/pricing
+  - 最大输出 · `max_tokens (1..393216)`：393216 — ✅ verified；依据 https://api-docs.deepseek.com/quick_start/pricing 、 https://api-docs.deepseek.com/api/create-chat-completion
+  - 加速 · `service_tier`：unsupported — ✅ verified；依据 https://api-docs.deepseek.com/api/create-chat-completion 、 https://api-docs.deepseek.com/api/create-message；说明：负面证据：请求体无该参数；Anthropic 侧『ignored compatibility field』
+  - 图像输入 · `messages[].content[].image_url / input_image`：supported — ✅ verified；依据 https://api-docs.deepseek.com/guides/vision/ 、 https://api-docs.deepseek.com/api/list-models；说明：input_modalities [text,image]；system/assistant 中的图像 400
+  - 工具调用 · `tools / tool_choice`：supported — ✅ verified；依据 https://api-docs.deepseek.com/api/create-chat-completion 、 https://api-docs.deepseek.com/guides/thinking_mode/
+
+### 4.4 `deepseek/deepseek-v4-pro`（DeepSeek）
+
+- **端点**：`openai-completions` · https://api.deepseek.com/v1 · apiKeyEnv=`DEEPSEEK_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=1,048,576；maxTokens=65,536；input=未声明；reasoningEfforts=未写；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（clamped_to_host_max，clamped=是）；输入预算 231,424；输出 65,536（declared）；defaultEffort=继承全局；fast_mode=模型标志=false，生效=off；imageInput=unknown；toolCalling=未声明
+- **(c) 上游核实**：状态 ✅ verified；窗口 1,048,576；输出 393,216；思考等级 low / high / max；默认档 high；加速 unsupported；图像 unsupported；工具调用 supported（含 web_search 服务器工具，仅 v4-pro；apply_patch；thinking 模式必须回传 reasoning_content）
+- **差异**：
+  - 与 deepseek-self/deepseek-v4-pro 同一 model id/baseURL，上游能力相同；差别仅本地声明（本行 1048576/65536 vs 对方 null）。
+  - 本行 imageInput 声明 unknown，但上游明确不支持 → 应显式声明 image_input: unsupported，避免 UI 误发图像导致 400。
+  - 并发上限 500（flash 为 2500），是否按键降级未验证。
+- **判定**：声明形态与 deepseek/deepseek-flash 相同（1048576/65536、被钳到 256000），上游差异在图像不支持、工具集多 web_search/apply_patch；capabilities 仍全空。
+- **建议**：image_input: unsupported；补 reasoningEfforts 与 tool_calling；contextWindow 收紧到宿主上限并在文档注明；maxTokens 可上调。
+- **风险**：行内「并发上限 500（flash 2500）」无来源 URL，不可引用；图像放行即 400；thinking 透传未测。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：low / high / max — ✅ verified；依据 https://api-docs.deepseek.com/guides/thinking_mode/
+  - 最大上下文 · `context_window`：1048576 — ✅ verified；依据 https://api-docs.deepseek.com/api/list-models 、 https://api-docs.deepseek.com/quick_start/pricing
+  - 最大输出 · `max_tokens`：393216 — ✅ verified；依据 https://api-docs.deepseek.com/quick_start/pricing 、 https://api-docs.deepseek.com/api/create-chat-completion
+  - 加速 · `service_tier`：unsupported — ✅ verified；依据 https://api-docs.deepseek.com/api/create-response/ 、 https://api-docs.deepseek.com/api/create-message/
+  - 图像输入 · `input_image / image block`：unsupported — ✅ verified；依据 https://api-docs.deepseek.com/guides/vision/ 、 https://api-docs.deepseek.com/api/create-message
+  - 工具调用 · `tools / web_search`：supported — ✅ verified；依据 https://api-docs.deepseek.com/api/create-response/ 、 https://api-docs.deepseek.com/api/list-models
+
+### 4.5 `qwen-local/qwen3.8-27b`（Qwen 本地服务）
+
+- **端点**：`openai-completions` · http://10.10.10.201:12888/v1 · apiKeyEnv=`null` · 凭据已解析=未知
+- **(a) 本地声明**：contextWindow=256,000；maxTokens=256,000；input=未声明；reasoningEfforts=未写；contextRequestOptions=`{"chat_template_kwargs":{"enable_thinking":false}}`
+- **(b) 宿主生效**：窗口 256,000（declared，clamped=否）；输入预算 231,424；输出 256,000（declared）；defaultEffort=xhigh；fast_mode=模型标志=false，生效=off；imageInput=unknown（image_probe verified/HTTP 200，1792137776774）；toolCalling=true
+- **(c) 上游核实**：状态 ✅ verified；窗口 262,144；输出 131,072；思考等级 low / medium / xhigh；默认档 xhigh；加速 unverified（Qwen/百炼文档不定义 service_tier；第三方网关说明『两边都不文档化该字段，可能忽略或拒绝』→ 需实测）；图像 supported；工具调用 supported（模型能力；本网关的 tool-call parser 为部署属性，未验证）
+- **差异**：
+  - 本地声明 reasoningEfforts/defaultEffort 与上游三档完全一致，唯一问题是 host 会把 none/minimal 抬成 low，而 contextRequestOptions 里又写了 enable_thinking=false → 同一次请求同时要『关思考』和『给档位』，上游结果未验证。
+  - maxTokens 256000 超过上游 131072，是本次唯一明显超限的声明。
+  - contextWindow 256000 = 宿主 MAX_TOKENS 的巧合，不是厂商限制；1M/YaRN 在本机不可达。
+- **判定**：11 行中唯一 skills 接线较完整的一行（defaultEffort=xhigh、三档 efforts、toolCalling=true、image_probe 200），但有两个硬冲突：maxTokens=256000 超过上游 131072，可能下发非法 max_tokens；contextRequestOptions.chat_template_kwargs.enable_thinking=false 与宿主必然下发 reasoning_effort≥low 互斥。contextWindow=256000 是宿主上限的巧合，不是厂商限制。
+- **建议**：maxTokens 收紧到 ≤131072 并实测；imageInput 由 unknown 改为 supported（probe 已 200，换路由需重测）；删除 enable_thinking=false 或改为与 effort 一致后实测；contextWindow 加注「宿主钳制」说明。
+- **风险**：超限 max_tokens 可能直接 400 或截断；enable_thinking 与 reasoning_effort 同时出现的结果未知；网关 tool-call parser 属部署属性未验证；provider 未配 apiKeyEnv 而端点返回 401，鉴权路径不明；1M/YaRN 在本机不可观测。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：low / medium / xhigh — ✅ verified；依据 https://www.alibabacloud.com/blog/603509 、 https://docs.nvidia.com/nim/vision-language-models/2.1.1-variant/get-started/advanced/get-started-qwen3-8-27b.html 、 https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions#4；说明：默认 xhigh；映射 max→xhigh、high→xhigh、minimal→low、none→enable_thinking=False；不可与 thinking_budget 同发（会报错）
+  - 最大上下文 · `context_window / --max-model-len`：{"managed":1000000,"native":262144,"yarn":1000000} — ✅ verified；依据 https://help.aliyun.com/zh/model-studio/qwen3-8-27b 、 https://www.alibabacloud.com/blog/603509；说明：本地声明 256000 在原生窗口内，安全且恰等于宿主 clamp 上限
+  - 最大输出 · `max_tokens`：131072 — ✅ verified；依据 https://help.aliyun.com/zh/model-studio/qwen3-8-27b；说明：本地声明 256000 是上游上限的 1.95 倍 → 可能下发超限 max_tokens
+  - 加速 · `service_tier`：unverified（Qwen/百炼文档不定义 service_tier；第三方网关说明『两边都不文档化该字段，可能忽略或拒绝』→ 需实测） — ⚠️ unverified（未经验证/需实测）；依据 https://www.npmjs.com/package/@steptix/aigateway；说明：无官方依据，不猜值；仅第三方负面证据 + Databricks 托管 Qwen3.5 的相邻先例（不适用）
+  - 图像输入 · `image_url`：supported — ✅ verified；依据 https://help.aliyun.com/zh/model-studio/qwen3-8-27b 、 https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions；说明：另有端点 image_probe HTTP 200（routeFingerprint 6ed9b183…），但 capabilities.imageInput 仍写 unknown
+  - 工具调用 · `tools / function calling`：supported (模型能力) — ✅ verified；依据 https://help.aliyun.com/zh/model-studio/qwen3-8-27b 、 https://platform.qianwenai.com/docs/developer-guides/text-generation/thinking；说明：本网关是否配置了 tool-call parser = 未验证/需一次实测
+
+### 4.6 `subapi/gpt-5.6-luna`（SubAPI）
+
+- **端点**：`openai-completions` · http://104.207.156.188:58081/v1 · apiKeyEnv=`SUBAPI_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=256,000；maxTokens=8,192；input=text / image；reasoningEfforts=false / high / low / max / medium / xhigh；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（declared，clamped=否）；输入预算 231,424；输出 8,192（declared）；defaultEffort=继承全局；fast_mode=模型标志=false，生效=off；imageInput=unknown；toolCalling=未声明
+- **(c) 上游核实**：状态 ⚠️ unverified（未经验证/需实测）；窗口 1,050,000；输出 128,000；思考等级 none / low / medium / high / xhigh / max；默认档 medium；加速 supported（未经验证）；图像 supported；工具调用 Chat Completions 仅当 reasoning_effort=none 可带 function tools；Responses API 支持
+- **差异**：
+  - 本行 declared maxTokens 8192（宿主只在缺失时才用 32768）→ 生效 8192，远低于上游 128000。
+  - providers 里写的 reasoningEfforts 宿主不读，capabilities 为空 → UI 无档位可选，实际不发 reasoning_effort（走上游 medium）。
+  - subapi 是否透传 reasoning_effort/service_tier 未实测（目录 401、无凭据）；reapi 自家中转实测 max 被拒，说明中转层可能截断档位。
+- **判定**：上游（文档级）窗口 1.05M、输出 128000、六档 efforts、支持图像与加速；本行只声明 8192 输出、providers 的 reasoningEfforts 宿主不读、capabilities 全空 → 实际不发 effort、输出被限到 8192、图像被 unknown 拦住，capabilities.fast_mode=false 使加速即使全局开启也不下发。
+- **建议**：把六档 efforts 迁入 model_capabilities（none 会被宿主改写为 low，按此接受或只列 low..max）；maxTokens 上调至 ≤128000；image probe 后置 supported；tool_calling 按「Chat Completions 仅 effort=none 可带 tools，Responses 支持」声明并优先走 Responses；fast_mode 先做 service_tier 实测再开。
+- **风险**：窗口三值冲突（1.05M/1M/1.1M）未定稿；fastMode 的 verified 仅由 litellm/openrouter 支撑，已在本轮降级为未经验证；subapi 可能截断 effort（reapi 同类中转实测 max 报错）；SUBAPI_API_KEY 未解析。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：none / low / medium / high / xhigh / max — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-5.6-luna.md 、 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra；说明：默认 medium；摘要 + reAPI/FastMetal 交叉
+  - 最大上下文 · `(catalog)`：1050000 — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-5.6-luna.md；说明：仅拿到官方页搜索摘要（直接 fetch 404）；另 apidog 写 1,000,000、Vercel 写 1.1M → 数值冲突已记 gaps
+  - 最大输出 · `max_output_tokens`：128000 — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-5.6-luna.md；说明：摘要级证据
+  - 加速 · `service_tier`：supported — ⚠️ unverified（未经验证/需实测）；依据 https://docs.litellm.ai/docs/providers/openai/ultrafast 、 https://openrouter.ai/docs/guides/features/service-tiers；说明：第三方实测调用返回 priority；fast/priority 等价；ultrafast 未列入；说明（本轮降级）：仅第三方来源（无厂商官方直链），按「只有官方文档或端点实测才算 verified」降级，需实测/官方文档定案
+  - 图像输入 · `image_url`：supported — ✅ verified；依据 https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning 、 https://vercel.com/ai-gateway/models；说明：Azure 表 + Vercel 为 text+image
+  - 工具调用 · `tools`：{"chatCompletions":"需 reasoning_effort=none 否则 400","responsesApi":"supported"} — ✅ verified；依据 https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning；说明：Azure 页给出同族 400 报错原文
+
+### 4.7 `subapi/gpt-5.6-sol`（SubAPI）
+
+- **端点**：`openai-completions` · http://104.207.156.188:58081/v1 · apiKeyEnv=`SUBAPI_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=256,000；maxTokens=8,192；input=text / image；reasoningEfforts=false / high / low / max / medium / xhigh；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（declared，clamped=否）；输入预算 231,424；输出 8,192（declared）；defaultEffort=继承全局；fast_mode=模型标志=false，生效=off；imageInput=unknown；toolCalling=未声明
+- **(c) 上游核实**：状态 ⚠️ unverified（未经验证/需实测）；窗口 1,050,000；输出 128,000；思考等级 none / low / medium / high / xhigh / max；默认档 medium(单模型级未确认)；加速 supported（未经验证）；图像 supported；工具调用 Chat Completions 带 tools 且 effort≠none 会 400（官方报错示例即 5.6-sol）；Responses 支持
+- **差异**：
+  - 声明 8192 输出、无 reasoningEfforts → 生效 8192 且不发 effort（走上游默认），能力被配置浪费。
+  - 单模型级 effort 默认档无官方原文，需实测。
+- **判定**：声明 8192 输出、capabilities 全空；aspect 级 contextWindow/maxOutput 仅 vercel、fastMode 仅 litellm 支撑，按 revisionNotes 应与行级 status 一起降为 unverified。工具约束最严：Chat Completions 带 tools 且 effort≠none 直接 400（官方报错示例即 5.6-sol）。
+- **建议**：efforts 迁入 capabilities 并同步降级证据；上调 maxTokens 后实测；image probe；tool_calling 必须写成「Responses 或 effort=none」，并配套路由开关，避免在 openai-completions 上带 tools。
+- **风险**：现有路由下 tools + effort 组合会稳定 400；窗口/输出数值无厂商官方直链，降级后本行近乎全 unverified；凭据缺失。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：none / low / medium / high / xhigh / max — ⚠️ unverified（未经验证/需实测）；依据 https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning；说明：六档属 GPT-5.6 家族级文档；默认 medium 仅第三方列出 → 单模型级 unverified
+  - 最大上下文 · `(catalog)`：1050000 — ⚠️ unverified（未经验证/需实测）；依据 https://vercel.com/ai-gateway/models；说明：Vercel 写 1.1M/128K；官方页 fetch 404 → 单模型级未逐字确认；说明（本轮降级）：仅第三方来源（无厂商官方直链），按「只有官方文档或端点实测才算 verified」降级，需实测/官方文档定案
+  - 最大输出 · `max_output_tokens`：128000 — ⚠️ unverified（未经验证/需实测）；依据 https://vercel.com/ai-gateway/models；说明（本轮降级）：仅第三方来源（无厂商官方直链），按「只有官方文档或端点实测才算 verified」降级，需实测/官方文档定案
+  - 加速 · `service_tier`：supported — ⚠️ unverified（未经验证/需实测）；依据 https://docs.litellm.ai/docs/providers/openai/ultrafast；说明（本轮降级）：仅第三方来源（无厂商官方直链），按「只有官方文档或端点实测才算 verified」降级，需实测/官方文档定案
+  - 图像输入 · `image_url`：supported — ✅ verified；依据 https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning 、 https://vercel.com/ai-gateway/models
+  - 工具调用 · `tools`：{"chatCompletions":"需 effort=none","responsesApi":"supported"} — ✅ verified；依据 https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning
+
+### 4.8 `subapi/gpt-6-astra`（SubAPI）
+
+- **端点**：`openai-completions` · http://104.207.156.188:58081/v1 · apiKeyEnv=`SUBAPI_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=256,000；maxTokens=16,384；input=text / image；reasoningEfforts=false / high / low / max / medium / xhigh；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（declared，clamped=否）；输入预算 231,424；输出 16,384（declared）；defaultEffort=继承全局；fast_mode=模型标志=false，生效=off；imageInput=unknown；toolCalling=未声明
+- **(c) 上游核实**：状态 ⚠️ unverified（未经验证/需实测）；窗口 1,050,000；输出 128,000；思考等级 low / medium / high / xhigh / max；默认档 未取得；加速 supported（未经验证）；图像 supported；工具调用 Chat Completions 不支持工具调用；需 Responses API
+- **差异**：
+  - providers 里给了 'false'(=none) 档，但上游 Astra 不支持 none → 该标签会误导，宿主也不读该文件。
+  - 本行是唯一 fast_mode=true 的模型之一（有实测）；若全局 fast_mode 打开会下发 service_tier="fast"，此处上游接受。
+  - maxTokens 16384 远低于上游 128000；Chat Completions 下工具调用必失败，建议改走 Responses。
+- **判定**：声明 16384 输出、providers 提供「false」(=none) 档而上游 Astra 并不支持 none；capabilities 全空、fastMode=false。行内 differences 却称「唯一 fast_mode=true 且有实测」，与 capabilities/effective/mechanicalActions 全面矛盾，应以 binding 数据为准（effective=off）。上游 6 项 aspectStatuses 全 unverified。
+- **建议**：删除 providers 里的 none/false 标签，efforts=[low,medium,high,xhigh,max] 迁入 model_capabilities；image probe；工具强制走 Responses（Chat Completions 不支持工具）；上调 maxTokens；加速先探测 service_tier 再改 fast_mode。
+- **风险**：fast_mode 状态自相矛盾，若误信 differences 会与改进建议冲突；上游窗口/输出无官方直链；无 none 档使「不思考」无法实现；凭据缺失。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：low / medium / high / xhigh / max — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra 、 https://apidog.com/blog/gpt-6-astra-api/；说明：多来源一致不支持 none；minimal 是否支持未明
+  - 最大上下文 · `(catalog)`：1050000 — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra；说明：官方页 404，仅 reAPI 对照表 + Vercel
+  - 最大输出 · `max_output_tokens`：128000 — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra
+  - 加速 · `service_tier`：supported — ⚠️ unverified（未经验证/需实测）；依据 https://docs.litellm.ai/docs/providers/openai/ultrafast 、 https://openrouter.ai/docs/guides/features/service-tiers；说明（本轮降级）：仅第三方来源（无厂商官方直链），按「只有官方文档或端点实测才算 verified」降级，需实测/官方文档定案
+  - 图像输入 · `image_url`：supported — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra 、 https://vercel.com/ai-gateway/models
+  - 工具调用 · `tools`：{"chatCompletions":"unsupported","responsesApi":"required"} — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra；说明：reAPI 引 OpenAI 指南原文
+
+### 4.9 `subapi/gpt-6-luna`（SubAPI）
+
+- **端点**：`openai-completions` · http://104.207.156.188:58081/v1 · apiKeyEnv=`SUBAPI_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=256,000；maxTokens=16,384；input=text / image；reasoningEfforts=false / high / low / max / medium / xhigh；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（declared，clamped=否）；输入预算 231,424；输出 16,384（declared）；defaultEffort=max；fast_mode=模型标志=true，生效=conditional_on_global_fast_mode；imageInput=unknown（image_probe verified/HTTP 200，1791592778536）；toolCalling=未声明
+- **(c) 上游核实**：状态 ⚠️ unverified（未经验证/需实测）；窗口 1,050,000；输出 128,000；思考等级 none / low / medium / high / xhigh / max；默认档 medium；加速 supported（未经验证）；图像 supported；工具调用 Chat Completions 仅当 effort=none 可带 tools；Responses 支持
+- **差异**：
+  - 本行 defaultEffort=max，而官方默认是 medium → 本机每次请求都比上游默认更贵更慢，需确认是否有意。
+  - capabilities.imageInput 仍写 unknown，但已有端点 probe 200 → 属过期字段，应改 supported。
+  - subapi 是中转网关，可能改写 reasoning_effort（reapi 自家中转实测 max 报错）→ subapi 行为未实测。
+- **判定**：配置最主动的一行：capabilities.defaultEffort=max、fastMode=true（effective=conditional_on_global_fast_mode）、image_probe 200，但 imageInput 仍 unknown；输出只声明 16384 而上游 128000；上游默认档是 medium，本机每次请求都被抬到 max。
+- **建议**：imageInput 改 supported；确认 defaultEffort=max 是否有意（否则回 medium 省 token/时延）；maxTokens 上调；tool_calling 标注「Chat Completions 仅 effort=none，Responses 支持」；补一次 effort 与 service_tier 透传探测。
+- **风险**：max 档 + 16384 输出上限可能让长思考被截断；窗口数值多源冲突（1.05M/922k/128k/1M/1.1M）；fast_mode 依赖未交付的全局开关；probe 为 2026-10 历史记录，路由指纹变化需重测。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：none / low / medium / high / xhigh / max — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-6-luna 、 https://github.com/BerriAI/litellm/pull/47000；说明：默认 medium；6-luna 支持 none（Bedrock 模型卡）
+  - 最大上下文 · `(catalog)`：1050000 — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-6-luna；说明：官方页搜索摘要 1,050,000/922,000/128,000；apidog 写 1,000,000、Vercel 写 1.1M → 取官方值并记冲突
+  - 最大输出 · `max_output_tokens`：128000 — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-6-luna
+  - 加速 · `service_tier`：supported — ⚠️ unverified（未经验证/需实测）；依据 https://docs.litellm.ai/docs/providers/openai/ultrafast；说明（本轮降级）：仅第三方来源（无厂商官方直链），按「只有官方文档或端点实测才算 verified」降级，需实测/官方文档定案
+  - 图像输入 · `image_url`：supported — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-6-luna；说明：另有本机历史 image_probe HTTP 200（routeFingerprint 4437741…）
+  - 工具调用 · `tools`：{"chatCompletions":"需 effort=none","responsesApi":"supported"} — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-6-luna
+
+### 4.10 `subapi/gpt-6.1-sol`（SubAPI）
+
+- **端点**：`openai-completions` · http://104.207.156.188:58081/v1 · apiKeyEnv=`SUBAPI_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=256,000；maxTokens=未声明；input=text / image；reasoningEfforts=未写；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（declared，clamped=否）；输入预算 231,424；输出 32,768（host_default）；defaultEffort=继承全局；fast_mode=模型标志=false，生效=off；imageInput=unknown；toolCalling=未声明
+- **(c) 上游核实**：状态 ⚠️ unverified（未经验证/需实测）；窗口 1,050,000；输出 128,000；思考等级 low / medium / high / xhigh / max；默认档 medium；加速 supported（未经验证）；图像 supported；工具调用 无 none 档 → Chat Completions 无法带工具；Responses API required
+- **差异**：
+  - maxTokens 缺失反而拿到宿主 32768，比 5.6-luna / 6-astra / 6-luna 的声明值更高。
+  - reAPI 自家中转 2026-10-28 实测 6.1-sol 的 max 档直接报错（未计费）→ subapi 是否同样截断未实测。
+  - 无 none 档且本机走 openai-completions → 本行实际无法使用工具调用。
+- **判定**：未声明 maxTokens 反而拿到宿主 32768（高于同族 8192/16384 行）；capabilities 全空且上游无 none 档 → 本机走 chat/completions 时无法带工具（上游：无 none 档，Chat Completions 不可用工具，Responses required）。
+- **建议**：补 efforts=[low,medium,high,xhigh,max] 与 tool_calling=Responses only；显式声明 maxTokens 固化取值；image probe；fast_mode 先探测再开。
+- **风险**：reapi 自家中转实测 6.1-sol 的 max 档报错 → subapi 是否同样截断未测；当前路由下工具不可用；窗口/输出/图像/工具四项均 unverified。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：low / medium / high / xhigh / max — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra；说明：reAPI 官方对照表；各方一致不支持 none（含 minimal 未明）
+  - 最大上下文 · `(catalog)`：1050000 — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra
+  - 最大输出 · `max_output_tokens`：128000 — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra
+  - 加速 · `service_tier`：supported — ⚠️ unverified（未经验证/需实测）；依据 https://docs.litellm.ai/docs/providers/openai/ultrafast 、 https://learn.chatgpt.com/docs/agent-configuration/speed；说明（本轮降级）：仅第三方来源（无厂商官方直链），按「只有官方文档或端点实测才算 verified」降级，需实测/官方文档定案
+  - 图像输入 · `image_url`：supported — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra 、 https://vercel.com/ai-gateway/models
+  - 工具调用 · `tools`：{"chatCompletions":"unsupported","responsesApi":"required"} — ⚠️ unverified（未经验证/需实测）；依据 https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra
+
+### 4.11 `subapi/gpt-6.1-terra`（SubAPI）
+
+- **端点**：`openai-completions` · http://104.207.156.188:58081/v1 · apiKeyEnv=`SUBAPI_API_KEY` · 凭据已解析=否
+- **(a) 本地声明**：contextWindow=256,000；maxTokens=未声明；input=text / image；reasoningEfforts=未写；contextRequestOptions=无
+- **(b) 宿主生效**：窗口 256,000（declared，clamped=否）；输入预算 231,424；输出 32,768（host_default）；defaultEffort=继承全局；fast_mode=模型标志=false，生效=off；imageInput=unknown；toolCalling=未声明
+- **(c) 上游核实**：状态 ⚠️ unverified（未经验证/需实测）；窗口 1,050,000；输出 128,000；思考等级 none / low / medium / high / xhigh / max；默认档 未取得；加速 supported（未经验证）；图像 supported；工具调用 Responses API supported；Chat Completions 未验证
+- **差异**：
+  - 默认 effort 两来源冲突（官方摘要 medium / veniceai 结构体 high），本机未声明 → 实际走上游默认，需实测确认是哪个。
+  - maxTokens 缺失 → 宿主 32768。</br>
+  - Chat Completions 下能否带工具未验证；若需要工具应改 Responses。
+- **判定**：声明形态同 6.1-sol（无 maxTokens → 32768、capabilities 全空），上游有六档 efforts 但默认档来源冲突（官方摘要 medium vs veniceai high）、toolCalling 仅 Responses 有据、Chat Completions 未验证。
+- **建议**：补 efforts 与 tool_calling（仅 Responses）；先实测默认档再决定是否声明 defaultEffort；image probe；fast_mode 先探测。
+- **风险**：默认档不确定 → 成本与时延不可预估；Chat Completions 工具能力未知；aspect 级 verified 依据为第三方，交付前应降级。
+- **依据（逐项）**：
+  - 思考等级 · `reasoning_effort`：none / low / medium / high / xhigh / max — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-6.1-terra 、 https://apidog.com/blog/how-to-use-gpt-5-6-api/；说明：档位集合一致；默认档冲突（medium vs high）→ 写入 uncovered
+  - 最大上下文 · `(catalog)`：1050000 — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-6.1-terra；说明：官方摘要 + gihyo 一致；官方页直接 fetch 404
+  - 最大输出 · `max_output_tokens`：128000 — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-6.1-terra
+  - 加速 · `service_tier`：supported — ⚠️ unverified（未经验证/需实测）；依据 https://learn.chatgpt.com/docs/agent-configuration/speed 、 https://docs.litellm.ai/docs/providers/openai/ultrafast；说明（本轮降级）：仅第三方来源（无厂商官方直链），按「只有官方文档或端点实测才算 verified」降级，需实测/官方文档定案
+  - 图像输入 · `image_url`：supported — ✅ verified；依据 https://developers.openai.com/api/docs/models/gpt-6.1-terra 、 https://vercel.com/ai-gateway/models
+  - 工具调用 · `tools`：{"chatCompletions":null,"responsesApi":"supported"} — ⚠️ unverified（未经验证/需实测）；依据 https://vercel.com/ai-gateway/models
+
+## 5. 上游核实覆盖度（按可配置项）
+
+| 可配置项 | 参数名 | ✅ verified | ⚠️ unverified | ⛔ unsupported | 合计 | 有 URL 依据 |
+|---|---|---|---|---|---|---|
+| 思考等级 | `reasoning_effort` | 8 | 3 | 0 | 11 | 11 |
+| 最大上下文 | `context_window` | 8 | 3 | 0 | 11 | 11 |
+| 最大输出 | `max_tokens` | 8 | 3 | 0 | 11 | 11 |
+| 加速 | `service_tier` | 4 | 7 | 0 | 11 | 11 |
+| 图像输入 | `image_url` | 9 | 2 | 0 | 11 | 11 |
+| 工具调用 | `tools` | 8 | 3 | 0 | 11 | 11 |
+
+## 6. 端点模型目录探测（`GET {baseURL}/models`）
+
+| 端点 | provider | 凭据引用 | HTTP | 结果 | 模型数 | 错误 | 检查时间 |
+|---|---|---|---|---|---|---|---|
+| https://api.deepseek.com/v1/models | deepseek、deepseek-self | `DEEPSEEK_API_KEY` | 401 | ❌ 失败 | 0 | HTTP 401: Authentication Fails (governor) | 2026-11-11T02:18:53.656Z |
+| http://10.10.10.201:12888/v1/models | qwen-local | `null` | 401 | ❌ 失败 | 0 | HTTP 401: {"error": {"type": "authentication_error", "message": "missing or wrong API key"}} | 2026-11-11T02:18:54.594Z |
+| http://104.207.156.188:58081/v1/models | subapi | `SUBAPI_API_KEY` | 401 | ❌ 失败 | 0 | HTTP 401: {"code":"API_KEY_REQUIRED","message":"API key is required in Authorization header (Bearer scheme), x-api-key … | 2026-11-11T02:18:55.293Z |
+
+## 7. 未经验证 / 需实测（gaps）
+
+1. deepseek-self 与 deepseek 使用同一 baseURL（https://api.deepseek.com/v1），公开文档没有任何“按 key 区分模型/配额/等级”的说明；两个 key 的实际差异（余额、并发配额、是否被降级）无法从文档核实 → 未经验证/需实测。
+2. 两个 key 的 /models 探针均返回 401（本机无对应凭据），因此 context_window/max_output_tokens/effort 的实时值无法取自端点；本表用官方文档示例值（1048576 / 393216 / [low,high,max]）代替，账号级是否被降级未验证。
+3. fast/priority/service_tier：官方文档的正向证据不存在（Chat Completions 请求体无该参数；Anthropic 侧明确列为“会被忽略的兼容字段”；响应字段固定 default/standard）。若宿主真的下发 service_tier:"fast"，本端点返回 200（忽略）还是 400，未经验证/需实测。
+4. deepseek-self 两个模型未声明 contextWindow，宿主在缺省时的默认上下文窗口本次证据未给出（只拿到 MAX_TOKENS=256000 钳制上限、OUTPUT_RESERVE=24576、DEFAULT_MAX_OUTPUT=32768）→ 生效输入预算 unverified。
+5. image_input 探测从未执行（capabilities.imageProbe 全为 null）；文档说 flash 支持、pro 不支持，但宿主 unknown 状态下不会据此放行图像，需要一次真实 probe（image_input=supported 才允许下发）。
+6. 上游 max_tokens 具体上限在文档里有两种写法：Models & Pricing 写 “MAXIMUM: 384K”、Chat Completions 写 “1..393216（393216=384K）” —— 数值一致；Anthropic Messages 侧则描述为“超出模型上限会被 cap”，且 Claude Code/OpenCode 主代理请求可能被兼容逻辑抬高有效上限，这一抬高规则的具体边界未经验证。
+7. 未验证 deepseek-v4-pro 的 web_search 服务器工具与宿主 visual_tool/plugin_models 配置是否冲突（文档仅说该工具在 Responses 与 Anthropic Messages 下为 v4-pro 专属）。
+8. 页面级失败：无。所有候选 URL 均返回 200；无搜索查询返回空结果，故 sources 中没有 ok:false 条目。
+9. fast_mode / service_tier / priority for qwen3.8-27b: no official Qwen or Alibaba Model Studio document defines service_tier; only third-party statements (npm @steptix/aigateway: 'neither vendor documents the field… Untested and unmapped') and an unrelated Databricks Qwen3.5 priority feature were found. Marked unverified/需实测 — no value guessed.
+10. The official zh OpenAI-compatible Chat page was delivered truncated (7,878 chars, cut inside the parameter list just before tool_calls), so the exact per-model reasoning_effort row for qwen3.8-27b could not be read on that page; its tier set rests on the official blog (603509), NVIDIA NIM, and the official doc snippet 'max→xhigh, high→xhigh, minimal→low, none→enable_thinking=False'.
+11. A raw GitHub mirror of the API reference returned HTTP 404 (recorded in sources); the alternate sources above were used instead per the retry-once rule.
+12. Local /v1/models catalog enumeration is impossible: catalogProbe returned HTTP 401 'missing or wrong API key', and apiKeyEnv is null. The served model id therefore cannot be confirmed from the endpoint itself.
+13. Whether this gateway actually honors reasoning_effort at all (vs. only chat_template_kwargs) is unverified; the probe that returned 200 tested images, not effort tiers.
+14. Effective context above 256000 cannot exist on this host (MAX_TOKENS) and the local engine's actual --max-model-len is unknown, so the 1M/YaRN capability has no observable effect here.
+15. Local tool-call parser configuration is not documented publicly; verified only as a model capability.
+16. Global fast_mode (top-level agent-generation.yml key) was not delivered in this input, so the AND-result for any model other than this false-flagged one cannot be stated.
+17. 全部 6 个模型的 /v1/models 目录探测返回 401 API_KEY_REQUIRED，且 hasCredentials=false → 中转真实暴露的模型与路由未验证。
+18. developers.openai.com 的模型页与指南页本轮全部 404（见 failures），各模型能力主要依赖搜索结果摘要与第三方页面（Vercel AI Gateway、reAPI、apidog、Azure Foundry、LiteLLM），官方全文未逐字取到。
+19. gpt-6-astra 默认 effort 仅第三方来源列 medium → unverified。
+20. gpt-5.6-sol 的六级 effort 属家族级文档 → 单模型级 unverified。
+21. gpt-6-luna 上下文窗口来源冲突：1,050,000（official 摘要）/1,000,000（apidog）/1.1M（Vercel）。
+22. gpt-6.1-terra 默认 effort 冲突：medium（official 摘要）vs high（veniceai 结构体）。
+23. 中转层可能改写 reasoning_effort（reAPI 自家中转实测 6.1-sol 的 max 报错），subapi 是否同样截断未实测。
+24. subapi 是否透传 service_tier / 图像部分未实测（无凭据，image_probe 为 2026-10-10 历史记录）。
+25. 本函数未读取代码仓源码，宿主 clamp 与 override 的交互以 appSchema 声明为准，未核对 src/context_window.rs 原文。
+26. goal 要求的 deepseek / deepseek-self 双 key 双行对比不适用于本家族（本家族仅 subapi 单 key），应由对应家族产出。
+27. 来源读取失败 https://raw.githubusercontent.com/modelstudioai/skills/014874565237bfc92a672c43be0fa412b6ada275/skills/bailian-docs-llm-wiki/wiki/api/qwen-api-reference.md（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available；checkedAt=2026-11-11T02:24:11Z）；已跳过该来源并继续其它候选
+28. 来源读取失败 http://10.10.10.201:12888/v1/models (from task input catalogProbe)（HTTP 401）；已跳过该来源并继续其它候选
+29. 来源读取失败 https://developers.openai.com/api/docs/models/gpt-6-astra（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:23Z）；已跳过该来源并继续其它候选
+30. 来源读取失败 https://developers.openai.com/api/docs/guides/latest-model（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:23Z）；已跳过该来源并继续其它候选
+31. 来源读取失败 https://developers.openai.com/api/docs/models/gpt-5.6-sol（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:23Z）；已跳过该来源并继续其它候选
+32. 来源读取失败 https://developers.openai.com/api/docs/models/gpt-6-luna.md（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:24Z）；已跳过该来源并继续其它候选
+33. 来源读取失败 https://developers.openai.com/api/docs/guides/latest-model/gpt-5.6.md（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:24Z）；已跳过该来源并继续其它候选
+34. 来源读取失败 https://developers.openai.com/api/docs/guides/fast-mode（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:53Z）；已跳过该来源并继续其它候选
+35. 来源读取失败 https://help.openai.com/en/articles/11647665-fast-mode-faq（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:25:53Z）；已跳过该来源并继续其它候选
+36. 来源读取失败 https://learn.chatgpt.com/docs/agent-configuration/speed.md（HTTP 404：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404；checkedAt=2026-11-11T02:26:14Z）；已跳过该来源并继续其它候选
+37. 来源读取失败 http://10.10.10.201:12888/v1/models（HTTP 401）；已跳过该来源并继续其它候选
+38. 来源读取失败 developers.openai.com 模型页/指南页；help.openai.com fast-mode FAQ；learn.chatgpt.com speed.md（HTTP 404）；已跳过该来源并继续其它候选
+39. 来源读取失败 http://104.207.156.188:58081/v1/models（HTTP 401）；已跳过该来源并继续其它候选
+40. https://api.deepseek.com/v1 的 /models 目录探测未成功（HTTP 401），上游真实模型目录与别名映射未经验证/需实测
+41. http://10.10.10.201:12888/v1 的 /models 目录探测未成功（HTTP 401），上游真实模型目录与别名映射未经验证/需实测
+42. http://104.207.156.188:58081/v1 的 /models 目录探测未成功（HTTP 401），上游真实模型目录与别名映射未经验证/需实测
+43. 全部三个端点家族的 /v1/models 目录探测均 HTTP 401（deepseek 无本机凭据、qwen-local 'missing or wrong API key'、subapi 'API_KEY_REQUIRED'）→ 实际暴露的模型 id 与端点侧元数据均未验证；上表上游值全部来自公开文档/第三方，不是端点返回。
+44. deepseek：两个 provider 指向同一 baseURL 与同一套文档，官方无『按 key 区分模型/配额/等级』说明；两个 key 的余额、并发、降级差异 = 未经验证/需实测。
+45. deepseek：fast/priority/service_tier 只有负面证据（Chat Completions 请求体无该参数；Anthropic 侧列为 ignored 兼容字段；响应固定 default/standard）；若宿主真下发 service_tier:"fast"，200 还是 400 未实测。
+46. deepseek-self 两个模型未声明 contextWindow，宿主缺省窗口本次证据未给出（仅知 MAX_TOKENS=256000 钳制、OUTPUT_RESERVE=24576、DEFAULT_MAX_OUTPUT=32768）→ 生效输入预算 unverified。
+47. deepseek image_input 探测从未执行（imageProbe 全 null）：文档说 flash 支持、v4-pro 不支持，但宿主 unknown 状态下不会放行图像。
+48. deepseek 上游 max_tokens 上限文档有两种写法（'MAXIMUM: 384K' vs '1..393216'），数值一致；Anthropic Messages 侧描述为『超出模型上限被 cap』，Claude Code/OpenCode 兼容逻辑抬高有效上限的边界未验证。
+49. qwen-local：官方 OpenAI 兼容 Chat 页交付被截断（7,878 字符，断在参数表内），该页上 qwen3.8-27b 的 reasoning_effort 行未逐字读到；三档结论来自官方 blog + NVIDIA NIM + 官方摘要片段。
+50. qwen-local：raw GitHub 的 API 参考镜像返回 404（已记录并从其它来源恢复）；本地 /v1/models 无法枚举（401 且 apiKeyEnv 为 null），provider 中写的 model id 无法从端点确认。
+51. qwen-local：>256000 的上下文在本机不可达（MAX_TOKENS），本地引擎 --max-model-len 未知，1M/YaRN 能力无可观测效果。
+52. subapi：developers.openai.com 的模型页与指南页本轮全部 404（gpt-6-luna / gpt-6-astra / gpt-5.6-sol / fast-mode / latest-model 等），能力主要依赖搜索结果摘要与第三方（Vercel AI Gateway、reAPI、apidog、Azure Foundry、LiteLLM）；官方全文未逐字取到。
+53. subapi：gpt-6-astra 默认 effort 仅第三方列 medium → unverified；gpt-5.6-sol 六级 effort 属家族级文档 → 单模型级 unverified。
+54. subapi：gpt-6-luna 上下文窗口来源冲突（1,050,000 official 摘要 / 1,000,000 apidog / 1.1M Vercel）；gpt-6.1-terra 默认 effort 冲突（medium vs high）。
+55. subapi：中转层可能改写 reasoning_effort（reAPI 自家中转实测 6.1-sol 的 max 报错），subapi 是否同样截断未实测；subapi 是否透传 service_tier/图像部分未实测（无凭据，image_probe 为 2026-10-10 历史记录）。
+56. subapi：appSchema 声明的宿主 clamp 与单次 override 的交互未与 src/context_window.rs 原文核对（subapi 家族未读源码）。
+57. subapi/gpt-5.6-luna：上游真实能力未从官方文档确认，需实测
+58. subapi/gpt-5.6-sol：上游真实能力未从官方文档确认，需实测
+59. subapi/gpt-6-astra：上游真实能力未从官方文档确认，需实测
+60. subapi/gpt-6-luna：上游真实能力未从官方文档确认，需实测
+61. subapi/gpt-6.1-sol：上游真实能力未从官方文档确认，需实测
+62. subapi/gpt-6.1-terra：上游真实能力未从官方文档确认，需实测
+63. 共 6/11 行的上游能力未取得官方全文或端点确认（subapi/gpt-5.6-luna、subapi/gpt-5.6-sol、subapi/gpt-6-astra、subapi/gpt-6-luna、subapi/gpt-6.1-sol、subapi/gpt-6.1-terra）；这些行的 (c) 列数值按候选处理，一律标为未经验证/需实测。
+64. 3/3 个端点目录探测失败（https://api.deepseek.com/v1→HTTP 401；http://10.10.10.201:12888/v1→HTTP 401；http://104.207.156.188:58081/v1→HTTP 401）；上游真实模型目录与别名映射未经验证/需实测。
+65. subapi/gpt-6-astra：differences 称「唯一 fast_mode=true 且有实测」，而 capabilities.fastMode=false、effective=off、mechanicalActions 也按 false 处理 → 行内矛盾；本轮无 astra 的 probe 记录，不能借用 gpt-6-luna 的 probe 结果。
+66. deepseek/deepseek-v4-pro：differences 断言「并发上限 500（flash 为 2500）」，本输入没有任何对应来源 URL，属无出处数值，需补官方链接或删除。
+67. 声明模态与能力门冲突：5 个 subapi 行 declared.input=[text,image] 而 capabilities.imageInput=unknown，本轮证据未说明 providers 的 input 与 model_capabilities.image_input 谁优先；若 input 优先则图像会被误放行（v4-pro 则误 400）。
+68. 迁移语义未定：5 行 providers 的 reasoningEfforts 带 false(null) 档，迁入 model_capabilities 后经宿主 none/minimal→low 改写，该档会变成什么（缺失档 / 被丢弃 / 变 low）没有规则说明，需先定映射再迁移。
+69. qwen-local：provider 未配置 apiKeyEnv，但 /v1/models 返回 401 'missing or wrong API key' —— 宿主实际如何注入鉴权（匿名白名单或配置缺失）未取证，直接影响该行「已接线可用」的判断。
+70. 行级 status 与 aspect 级 statuses 缺少统一聚合规则（subapi 6 行 status=unverified、aspect 多为 verified），输出表会自相矛盾；需要一条「取最弱证据」的降级规则。
+71. 本轮未交付 agent-generation.yml 的 provider 段，无法确认 provider 级 defaultInput 是否被设为 image；deepseek-v4-pro 的 400 风险与 subapi 5 行的图像放行判断都悬在此项上。
+
+## 8. 配置告警（warnings）
+
+- credentials.yaml: could not be read from /home/goodtime/.config/grow/credentials.yaml (io error: SECRET_FILE: this file holds API keys and is never readable by tools; the host applies the credentials itself. Model settings are in providers.yml and agent-generation.yml beside it: SECRET_FILE: this file holds API keys and is ne...)
+- provider "deepseek": credential reference DEEPSEEK_API_KEY is not set
+- provider "deepseek-self": credential reference DEEPSEEK_SELF_API_KEY is not set
+- provider "subapi": credential reference SUBAPI_API_KEY is not set
+- https://api.deepseek.com/v1 被 2 个 provider 共用（deepseek / deepseek-self）：agent-generation.yml 必须按 provider 分别声明 model_capabilities，否则同一个上游模型在两侧会用到不同默认值。
+- deepseek-self/deepseek-flash：providers 未声明 maxTokens，宿主按默认 32768 处理；若上游上限更低需显式声明。
+- deepseek-self/deepseek-flash：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- deepseek-self/deepseek-flash：凭据环境变量 DEEPSEEK_SELF_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- deepseek-self/deepseek-v4-pro：providers 未声明 maxTokens，宿主按默认 32768 处理；若上游上限更低需显式声明。
+- deepseek-self/deepseek-v4-pro：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- deepseek-self/deepseek-v4-pro：凭据环境变量 DEEPSEEK_SELF_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- deepseek/deepseek-flash：providers 声明 contextWindow=1048576 超出宿主上限 256000，实际按 256000 计算；上游真实窗口需按官方文档收紧后再声明。
+- deepseek/deepseek-flash：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- deepseek/deepseek-flash：凭据环境变量 DEEPSEEK_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- deepseek/deepseek-v4-pro：providers 声明 contextWindow=1048576 超出宿主上限 256000，实际按 256000 计算；上游真实窗口需按官方文档收紧后再声明。
+- deepseek/deepseek-v4-pro：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- deepseek/deepseek-v4-pro：凭据环境变量 DEEPSEEK_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- qwen-local/qwen3.8-27b：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- qwen-local/qwen3.8-27b：端点要求鉴权（目录探测返回 401），但 provider 未配置 apiKeyEnv，需确认网关是否允许匿名访问。
+- subapi/gpt-5.6-luna：reasoningEfforts 写在 providers 文件里宿主运行时不读取，需迁移到 agent-generation.yml 的 model_capabilities 才决定 UI 可选项。
+- subapi/gpt-5.6-luna：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- subapi/gpt-5.6-luna：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- subapi/gpt-5.6-sol：reasoningEfforts 写在 providers 文件里宿主运行时不读取，需迁移到 agent-generation.yml 的 model_capabilities 才决定 UI 可选项。
+- subapi/gpt-5.6-sol：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- subapi/gpt-5.6-sol：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- subapi/gpt-6-astra：reasoningEfforts 写在 providers 文件里宿主运行时不读取，需迁移到 agent-generation.yml 的 model_capabilities 才决定 UI 可选项。
+- subapi/gpt-6-astra：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- subapi/gpt-6-astra：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- subapi/gpt-6-luna：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- subapi/gpt-6.1-sol：providers 未声明 maxTokens，宿主按默认 32768 处理；若上游上限更低需显式声明。
+- subapi/gpt-6.1-sol：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- subapi/gpt-6.1-sol：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- subapi/gpt-6.1-terra：providers 未声明 maxTokens，宿主按默认 32768 处理；若上游上限更低需显式声明。
+- subapi/gpt-6.1-terra：model_capabilities.fast_mode 未开启（或不存在），即使全局 fast_mode 打开也不会下发 service_tier/加速参数。
+- subapi/gpt-6.1-terra：凭据环境变量 SUBAPI_API_KEY 在本轮未解析，能力核实只能依赖公开文档，图像/工具调用仍需实测。
+- providers.yml / cordis.patch.yml 里的 contextWindow、maxTokens 只是本地声明，不等于上游真实上限；应以上游文档为准并据此收紧（典型：qwen3.8-27b maxTokens 256000 > 上游 131072）。
+- 写在 providers 文件里的 reasoningEfforts 宿主不读；只有 agent-generation.yml 的 model_capabilities 决定 UI 可选项（subapi 6 个模型因此全部无档位可选、实际不发 reasoning_effort）。
+- 同一 baseURL 用两个 key 配置（deepseek 与 deepseek-self）时必须在 agent-generation.yml 里分别声明，否则两侧使用不同默认值（一方 1048576/65536，一方全 null）。
+- host clamp：MAX_TOKENS=256000 使所有声明 1M+ 的模型实际输入预算只有 231424（窗口 - min(24576, 窗口/4)），声明值换不来容量，也不报错。
+- host 会把 none/minimal 改写为 low（思考无法真正关闭）；qwen3.8-27b 的 contextRequestOptions.chat_template_kwargs.enable_thinking=false 与必然下发的 reasoning_effort≥low 相互矛盾，结果未验证。
+- v4-pro 不支持图像：若 provider 级 defaultInput=image 生效会造成 400，必须显式 image_input: unsupported。
+- fast_mode=true 只在 deepseek（无依据）与 subapi/gpt-6-luna（有第三方实测）出现；其余模型保持 false 是安全配置，开启前应先做 service_tier 探测。
+- subapi 四个模型（5.6-luna、5.6-sol、6-astra）声明 maxTokens 8192/16384，远低于上游 128000；gpt-6.1-sol/terra 缺失声明反而拿到宿主 32768。
+- 有 13 个候选来源读取失败（已记入 sources/gaps）：相关能力项按“未经验证/需实测”处理，不要用本地声明值代替官方依据。
+
+## 9. 来源清单（含失败来源）
+
+| # | 端点家族 | URL | 结果 | 检查时间 |
+|---|---|---|---|---|
+| 1 | https://api.deepseek.com/v1 | https://api-docs.deepseek.com/quick_start/pricing | ✅ 成功（HTTP 200） | 2026-11-11T02:21:31Z |
+| 2 | https://api.deepseek.com/v1 | https://api-docs.deepseek.com/guides/thinking_mode/ | ✅ 成功（HTTP 200） | 2026-11-11T02:21:31Z |
+| 3 | https://api.deepseek.com/v1 | https://api-docs.deepseek.com/api/list-models | ✅ 成功（HTTP 200） | 2026-11-11T02:21:33Z |
+| 4 | https://api.deepseek.com/v1 | https://api-docs.deepseek.com/api/create-chat-completion | ✅ 成功（HTTP 200） | 2026-11-11T02:21:51Z |
+| 5 | https://api.deepseek.com/v1 | https://api-docs.deepseek.com/api/create-response/ | ✅ 成功（HTTP 200） | 2026-11-11T02:21:44Z |
+| 6 | https://api.deepseek.com/v1 | https://api-docs.deepseek.com/api/create-message | ✅ 成功（HTTP 200） | 2026-11-11T02:21:51Z |
+| 7 | https://api.deepseek.com/v1 | https://api-docs.deepseek.com/guides/vision/ | ✅ 成功（HTTP 200） | 2026-11-11T02:21:40Z |
+| 8 | https://api.deepseek.com/v1 | https://api-docs.deepseek.com/quick_start/rate_limit | ✅ 成功（HTTP 200） | 2026-11-11T02:22:03Z |
+| 9 | https://api.deepseek.com/v1 | https://developers.telnyx.com/docs/inference/service-tiers | ✅ 成功（HTTP 200） | 2026-11-11T02:21:34Z |
+| 10 | http://10.10.10.201:12888/v1 | https://help.aliyun.com/zh/model-studio/qwen3-8-27b | ✅ 成功（HTTP 200） | 2026-11-11T02:23:40Z |
+| 11 | http://10.10.10.201:12888/v1 | https://www.alibabacloud.com/blog/603509 | ✅ 成功（HTTP 200） | 2026-11-11T02:23:57Z |
+| 12 | http://10.10.10.201:12888/v1 | https://docs.nvidia.com/nim/vision-language-models/2.1.1-variant/get-started/advanced/get-started-qwen3-8-27b.html | ✅ 成功（HTTP 200） | 2026-11-11T02:23:57Z |
+| 13 | http://10.10.10.201:12888/v1 | https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions | ✅ 成功（HTTP 200） | 2026-11-11T02:23:37Z |
+| 14 | http://10.10.10.201:12888/v1 | https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions#4 | ✅ 成功（HTTP 200） | 2026-11-11T02:23:51Z |
+| 15 | http://10.10.10.201:12888/v1 | https://platform.qianwenai.com/docs/developer-guides/text-generation/thinking | ✅ 成功（HTTP 200） | 2026-11-11T02:23:45Z |
+| 16 | http://10.10.10.201:12888/v1 | https://www.npmjs.com/package/@steptix/aigateway | ✅ 成功（HTTP 200） | 2026-11-11T02:24:04Z |
+| 17 | http://10.10.10.201:12888/v1 | https://learn.microsoft.com/en-us/azure/databricks/machine-learning/foundation-model-apis/priority-mode | ✅ 成功（HTTP 200） | 2026-11-11T02:24:04Z |
+| 18 | http://10.10.10.201:12888/v1 | file:src/context_window.rs:34, src/model_settings.rs:6-59, src/single_agent.rs:873 | ✅ 成功 | 2026-11-11T02:24:11Z |
+| 19 | http://10.10.10.201:12888/v1 | https://raw.githubusercontent.com/modelstudioai/skills/014874565237bfc92a672c43be0fa412b6ada275/skills/bailian-docs-llm-wiki/wiki/api/qwen-api-reference.md | ❌ 失败（HTTP 404）：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was avail… | 2026-11-11T02:24:11Z |
+| 20 | http://10.10.10.201:12888/v1 | http://10.10.10.201:12888/v1/models (from task input catalogProbe) | ❌ 失败（HTTP 401） | — |
+| 21 | http://104.207.156.188:58081/v1 | https://developers.openai.com/api/docs/models/gpt-6-luna | ✅ 成功 | 2026-11-11T02:25:59Z |
+| 22 | http://104.207.156.188:58081/v1 | https://developers.openai.com/api/docs/models/gpt-6.1-terra | ✅ 成功 | 2026-11-11T02:25:45Z |
+| 23 | http://104.207.156.188:58081/v1 | https://developers.openai.com/api/docs/models/gpt-5.6-luna.md | ✅ 成功 | 2026-11-11T02:25:59Z |
+| 24 | http://104.207.156.188:58081/v1 | https://reapi.ai/resources/gpt-6-1-sol-vs-gpt-6-astra | ✅ 成功 | 2026-11-11T02:25:46Z |
+| 25 | http://104.207.156.188:58081/v1 | https://vercel.com/ai-gateway/models/{gpt-6-luna,gpt-6-astra,gpt-6.1-sol,gpt-6.1-terra,gpt-5.6-sol,gpt-5.6-luna} | ✅ 成功 | 2026-11-11T02:25:31Z |
+| 26 | http://104.207.156.188:58081/v1 | https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning | ✅ 成功 | 2026-11-11T02:25:28Z |
+| 27 | http://104.207.156.188:58081/v1 | https://docs.litellm.ai/docs/providers/openai/ultrafast | ✅ 成功 | 2026-11-11T02:26:14Z |
+| 28 | http://104.207.156.188:58081/v1 | https://openrouter.ai/docs/guides/features/service-tiers | ✅ 成功 | 2026-11-11T02:25:45Z |
+| 29 | http://104.207.156.188:58081/v1 | https://apidog.com/blog/how-to-use-gpt-5-6-api/ | ✅ 成功 | 2026-11-11T02:25:53Z |
+| 30 | http://104.207.156.188:58081/v1 | https://apidog.com/blog/what-is-gpt-6-luna/ | ✅ 成功 | 2026-11-11T02:25:53Z |
+| 31 | http://104.207.156.188:58081/v1 | https://learn.chatgpt.com/docs/agent-configuration/speed | ✅ 成功 | 2026-11-11T02:25:58Z |
+| 32 | http://104.207.156.188:58081/v1 | https://apidog.com/blog/gpt-6-astra-api/ | ✅ 成功 | 2026-11-11T02:25:38Z |
+| 33 | http://104.207.156.188:58081/v1 | https://github.com/veniceai/api-docs/blob/main/models/gpt-6-1-terra.mdx | ✅ 成功 | 2026-11-11T02:25:45Z |
+| 34 | http://104.207.156.188:58081/v1 | https://github.com/BerriAI/litellm/pull/47000 | ✅ 成功 | 2026-11-11T02:25:59Z |
+| 35 | http://104.207.156.188:58081/v1 | https://github.com/czczccc/sub2api | ✅ 成功 | 2026-11-11T02:25:15Z |
+| 36 | http://104.207.156.188:58081/v1 | https://developers.openai.com/api/docs/models/gpt-6-astra | ❌ 失败（HTTP 404）：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404 | 2026-11-11T02:25:23Z |
+| 37 | http://104.207.156.188:58081/v1 | https://developers.openai.com/api/docs/guides/latest-model | ❌ 失败（HTTP 404）：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404 | 2026-11-11T02:25:23Z |
+| 38 | http://104.207.156.188:58081/v1 | https://developers.openai.com/api/docs/models/gpt-5.6-sol | ❌ 失败（HTTP 404）：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404 | 2026-11-11T02:25:23Z |
+| 39 | http://104.207.156.188:58081/v1 | https://developers.openai.com/api/docs/models/gpt-6-luna.md | ❌ 失败（HTTP 404）：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404 | 2026-11-11T02:25:24Z |
+| 40 | http://104.207.156.188:58081/v1 | https://developers.openai.com/api/docs/guides/latest-model/gpt-5.6.md | ❌ 失败（HTTP 404）：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404 | 2026-11-11T02:25:24Z |
+| 41 | http://104.207.156.188:58081/v1 | https://developers.openai.com/api/docs/guides/fast-mode | ❌ 失败（HTTP 404）：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404 | 2026-11-11T02:25:53Z |
+| 42 | http://104.207.156.188:58081/v1 | https://help.openai.com/en/articles/11647665-fast-mode-faq | ❌ 失败（HTTP 404）：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404 | 2026-11-11T02:25:53Z |
+| 43 | http://104.207.156.188:58081/v1 | https://learn.chatgpt.com/docs/agent-configuration/speed.md | ❌ 失败（HTTP 404）：WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404 | 2026-11-11T02:26:14Z |
+| 44 | — | http://10.10.10.201:12888/v1/models | ❌ 失败（HTTP 401） | — |
+| 45 | — | file:src/context_window.rs:34, src/model_settings.rs:6-59,112-116, src/single_agent.rs:870-873 | ✅ 成功 | — |
+| 46 | — | https://vercel.com/ai-gateway/models | ✅ 成功（HTTP 200） | — |
+| 47 | — | developers.openai.com 模型页/指南页；help.openai.com fast-mode FAQ；learn.chatgpt.com speed.md | ❌ 失败（HTTP 404） | — |
+| 48 | — | http://104.207.156.188:58081/v1/models | ❌ 失败（HTTP 401） | — |
+
+## 10. 改进建议（可执行）
+
+### 10.1 声明值与 model_capabilities 的机械修正（由 (a)/(b)/(c) 数据直接推导）
+
+1. deepseek-self/deepseek-flash：model_capabilities.reasoningEfforts 为空，而上游核实到 low / high / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。
+2. deepseek-self/deepseek-flash：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。
+3. deepseek-self/deepseek-flash：model_capabilities.tool_calling 未声明，而上游核实为 supported；建议按核实值补上，避免工具调用被拦或误放行。
+4. deepseek-self/deepseek-v4-pro：model_capabilities.reasoningEfforts 为空，而上游核实到 low / high / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。
+5. deepseek-self/deepseek-v4-pro：上游文档明确不支持图像，而 model_capabilities.imageInput=unknown；建议显式设为 unsupported，避免 UI 误发图像导致 400。
+6. deepseek-self/deepseek-v4-pro：model_capabilities.tool_calling 未声明，而上游核实为 supported（含 web_search，仅 v4-pro）；建议按核实值补上，避免工具调用被拦或误放行。
+7. deepseek/deepseek-flash：providers 声明 contextWindow=1,048,576 超过宿主 MAX_TOKENS=256,000，实际只用 256,000；声明值换不来容量，建议改写成 256,000 或按上游真实窗口声明并在文档标注钳制。
+8. deepseek/deepseek-flash：只声明了 65,536 输出，远低于上游 393,216，输出能力被配置浪费，可按需上调。
+9. deepseek/deepseek-flash：model_capabilities.reasoningEfforts 为空，而上游核实到 low / high / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。
+10. deepseek/deepseek-flash：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。
+11. deepseek/deepseek-flash：model_capabilities.tool_calling 未声明，而上游核实为 supported（function tools；thinking 模式 tool_choice 禁用 required/具名；tools 请求必须回传 re…；建议按核实值补上，避免工具调用被拦或误放行。
+12. deepseek/deepseek-v4-pro：providers 声明 contextWindow=1,048,576 超过宿主 MAX_TOKENS=256,000，实际只用 256,000；声明值换不来容量，建议改写成 256,000 或按上游真实窗口声明并在文档标注钳制。
+13. deepseek/deepseek-v4-pro：只声明了 65,536 输出，远低于上游 393,216，输出能力被配置浪费，可按需上调。
+14. deepseek/deepseek-v4-pro：model_capabilities.reasoningEfforts 为空，而上游核实到 low / high / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。
+15. deepseek/deepseek-v4-pro：上游文档明确不支持图像，而 model_capabilities.imageInput=unknown；建议显式设为 unsupported，避免 UI 误发图像导致 400。
+16. deepseek/deepseek-v4-pro：model_capabilities.tool_calling 未声明，而上游核实为 supported（含 web_search 服务器工具，仅 v4-pro；apply_patch；thinking 模式必须回传 reasoning_con…；建议按核实值补上，避免工具调用被拦或误放行。
+17. qwen-local/qwen3.8-27b：生效输出上限 256,000 高于上游 131,072，可能下发非法 max_tokens，建议收紧到 131,072（或上游确认的实际上限）。
+18. qwen-local/qwen3.8-27b：端点 image_probe 已 HTTP 200，但 model_capabilities.imageInput 仍是 unknown（过期字段），建议改为 supported。
+19. subapi/gpt-5.6-luna：只声明了 8,192 输出，远低于上游 128,000，输出能力被配置浪费，可按需上调。
+20. subapi/gpt-5.6-luna：model_capabilities.reasoningEfforts 为空，而上游核实到 none / low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。
+21. subapi/gpt-5.6-luna：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。
+22. subapi/gpt-5.6-luna：第三方记载支持加速（service_tier，未经厂商官方确认），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。
+23. subapi/gpt-5.6-luna：model_capabilities.tool_calling 未声明，而上游核实为 Chat Completions 仅当 reasoning_effort=none 可带 function tools；Responses API 支持；建议按核实值补上，避免工具调用被拦或误放行。
+24. subapi/gpt-5.6-sol：只声明了 8,192 输出，远低于上游 128,000，输出能力被配置浪费，可按需上调。
+25. subapi/gpt-5.6-sol：model_capabilities.reasoningEfforts 为空，而上游核实到 none / low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。
+26. subapi/gpt-5.6-sol：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。
+27. subapi/gpt-5.6-sol：第三方记载支持加速（service_tier，未经厂商官方确认），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。
+28. subapi/gpt-5.6-sol：model_capabilities.tool_calling 未声明，而上游核实为 Chat Completions 带 tools 且 effort≠none 会 400（官方报错示例即 5.6-sol）；Responses 支持；建议按核实值补上，避免工具调用被拦或误放行。
+29. subapi/gpt-6-astra：只声明了 16,384 输出，远低于上游 128,000，输出能力被配置浪费，可按需上调。
+30. subapi/gpt-6-astra：model_capabilities.reasoningEfforts 为空，而上游核实到 low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。
+31. subapi/gpt-6-astra：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。
+32. subapi/gpt-6-astra：第三方记载支持加速（service_tier，未经厂商官方确认），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。
+33. subapi/gpt-6-astra：model_capabilities.tool_calling 未声明，而上游核实为 Chat Completions 不支持工具调用；需 Responses API；建议按核实值补上，避免工具调用被拦或误放行。
+34. subapi/gpt-6-luna：只声明了 16,384 输出，远低于上游 128,000，输出能力被配置浪费，可按需上调。
+35. subapi/gpt-6-luna：端点 image_probe 已 HTTP 200，但 model_capabilities.imageInput 仍是 unknown（过期字段），建议改为 supported。
+36. subapi/gpt-6-luna：model_capabilities.tool_calling 未声明，而上游核实为 Chat Completions 仅当 effort=none 可带 tools；Responses 支持；建议按核实值补上，避免工具调用被拦或误放行。
+37. subapi/gpt-6.1-sol：model_capabilities.reasoningEfforts 为空，而上游核实到 low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。
+38. subapi/gpt-6.1-sol：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。
+39. subapi/gpt-6.1-sol：第三方记载支持加速（service_tier，未经厂商官方确认），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。
+40. subapi/gpt-6.1-sol：model_capabilities.tool_calling 未声明，而上游核实为 无 none 档 → Chat Completions 无法带工具；Responses API required；建议按核实值补上，避免工具调用被拦或误放行。
+41. subapi/gpt-6.1-terra：model_capabilities.reasoningEfforts 为空，而上游核实到 none / low / medium / high / xhigh / max；界面因此无档位可选，建议补进 agent-generation.yml（注意宿主会把 none/minimal 改写为 low）。
+42. subapi/gpt-6.1-terra：上游文档支持图像，而 model_capabilities.imageInput=unknown；宿主 unknown 状态不会放行图像，建议先跑一次 image probe，通过后设为 supported。
+43. subapi/gpt-6.1-terra：第三方记载支持加速（service_tier，未经厂商官方确认），但 model_capabilities.fast_mode=false，即使全局 fast_mode 打开也不会下发；如需提速请开启并先做一次实测。
+44. subapi/gpt-6.1-terra：model_capabilities.tool_calling 未声明，而上游核实为 Responses API supported；Chat Completions 未验证；建议按核实值补上，避免工具调用被拦或误放行。
+
+### 10.2 综合研判与优先级
+
+1. P0 · qwen-local/qwen3.8-27b：把 maxTokens 从 256000 收紧到 ≤131072（上游文档值）并实测一次长输出请求；这是本轮唯一确定会下发非法 max_tokens 的声明。
+2. P0 · deepseek-self 两行：在 providers.yml 与 agent-generation.yml 分别补 contextWindow、maxTokens、model_capabilities（现在全 null，只能吃宿主默认 256000/32768），否则与 deepseek 侧同 id 模型行为分叉。
+3. P0 · 迁移档位：把 6 个 subapi 模型与 2 个 deepseek 模型的 reasoningEfforts 从 providers 迁入 agent-generation.yml 的 model_capabilities（providers 里的宿主不读）；迁移时统一处理 none/minimal→low 的改写，不要把 providers 的 false(=none) 标签原样搬过去。
+4. P0 · 图像开关：deepseek-v4-pro 双行显式 image_input: unsupported；qwen3.8-27b 与 subapi/gpt-6-luna 因 probe 已 200 改为 supported；其余 5 行先跑一次 image probe，通过后再置 supported，未通过保持 unknown/unsupported。
+5. P0 · 工具路由：为 9 个 capabilities.toolCalling 为 null 的行补声明并标注路由——5.6-luna/6-luna 需 effort=none 才能带 function tools，5.6-sol 在 tools+effort≠none 会 400，6-astra 与 6.1-sol 在 Chat Completions 不可用（必须 Responses），6.1-terra 未验证；deepseek 两族按「thinking 模式需回传 reasoning_content」标注。
+6. P1 · 输出上调：subapi/gpt-5.6-luna、gpt-5.6-sol（8192）与 gpt-6-astra、gpt-6-luna（16384）逐步上调到 ≤128000，每次上调后验证中转是否截断；deepseek 两行可从 65536 上调到 ≤393216。
+7. P1 · 上下文口径：deepseek 双行 contextWindow=1048576 改为 256000，或在表中明确标注「声明值会被宿主钳到 256000、输入预算 231424」，避免把声明当容量；qwen3.8-27b 的 256000 同样注明是宿主上限而非厂商限制。
+8. P1 · 加速：先只对 subapi/gpt-6-luna（当前唯一 fast_mode=true）做一次 service_tier 实测，确认 200/400 后再决定是否给 5.6-luna、5.6-sol、6-astra、6.1-sol、6.1-terra 打开；deepseek 侧保持 false（官方只有负面证据）。
+9. P2 · 证据降级：按 revisionNotes 把 subapi/gpt-5.6-luna 的 fastMode、gpt-5.6-sol 的 contextWindow/maxOutput/fastMode、gpt-6-astra/gpt-6-luna/gpt-6.1-sol/gpt-6.1-terra 的 fastMode 等「仅第三方来源」的 verified 项降为 unverified，直到取得厂商官方直链或端点确认。
+10. P2 · 凭据与探针收敛：补 DEEPSEEK_API_KEY / DEEPSEEK_SELF_API_KEY / SUBAPI_API_KEY 后重跑三个 /v1/models 与 effort/image/service_tier 探测，把 9 个 401 或未执行项一次性收敛，并把 routeFingerprint 写入每次 probe 记录。
+11. P2 · 表格口径：表头固定三列口径「providers 声明 / 宿主钳制后生效 / 官方文档核实」，并在表尾写死常量 MAX_TOKENS=256000、OUTPUT_RESERVE=24576、DEFAULT_MAX_OUTPUT=32768、inputBudget=231424，防止读者把声明值当生效值。
+12. P2 · providers 清理：删除 subapi 五行的 false(=none) 档标签与 6-astra 的 none 档，避免 UI/迁移时出现上游并不存在的档位。
+
+### 10.3 实测与风险提示
+
+- 不要把 declared.contextWindow 当容量：MAX_TOKENS=256000 硬钳制且静默，声明 1048576 与 256000 的生效结果完全一样，输入预算恒为 231424。
+- providers.yml 里的 reasoningEfforts 宿主运行时不读；只有 agent-generation.yml 的 model_capabilities 决定 UI 可选项与实际是否下发 reasoning_effort。
+- 宿主会把 none/minimal 改写为 low，「完全不思考」不可达；qwen3.8-27b 的 enable_thinking=false 与必然下发的 reasoning_effort≥low 互斥，结果未验证。
+- aspectStatuses=verified 不等于有官方依据：subapi 6 行多数只有 vercel/apidog/litellm/openrouter/reapi 等第三方，revisionNotes 已明确指出该冲突，发布前必须降级。
+- 三个端点的 /v1/models 全部 401，providers 里的 model id 与上游实际暴露的 id 未经确认；任何「端点元数据」式表述都不成立。
+- deepseek 与 deepseek-self 共用同一 baseURL 与同一 model id，公开文档不按键区分能力/配额；两 key 的余额、并发、是否被降级属未经验证/需实测。
+- 本轮没有任何一行对 reasoning_effort 做过探测（唯一 200 的探针只测图像），中转是否透传档位、是否把 max 截断成报错均未验证。
+- subapi/gpt-6-astra 行内 differences 与 capabilities 关于 fast_mode 自相矛盾，取 capabilities/effective（off），不得引用「已实测 fast_mode」的说法。
+- image probe 结果带 checkedAt 与 routeFingerprint 且为 2026-10 历史记录：换凭据、换 baseURL 或改中转配置后必须重测，不能直接置 supported。
+- 上游 max_tokens 一律按「≤ 文档值」下发；qwen3.8-27b 的 256000 是唯一确定越界的声明，其余低配（8192/16384）是浪费而非风险。
+- deepseek-v4-pro 若 provider 级 defaultInput=image 生效会直接 400；在显式 image_input: unsupported 落地前，不要假定 unknown 是安全默认。
+
+### 10.4 总体结论
+
+11 行 / 11 个模型覆盖 3 个端点家族（deepseek 与 deepseek-self 共用 https://api.deepseek.com/v1、qwen-local、subapi），三个 /v1/models 目录探测全部 401，因此 (c) 列没有任何端点级确认：deepseek 6 项依赖厂商文档，qwen 3 项有端点或 probe 佐证，subapi 6 行的 aspect 级 verified 多由 vercel/apidog/litellm/openrouter/reapi 等非厂商域名支撑，与行级 status=unverified 相矛盾（revisionNotes 已要求降级）。生效层被宿主统一钳制：MAX_TOKENS=256000 把所有窗口声明压到 256000，输入预算恒为 231424（256000 − min(24576, 64000)），输出缺失时取 DEFAULT_MAX_OUTPUT=32768，声明 1048576 既不换来容量也不报错。缺陷可归为三类：①接线缺失——providers 里的 reasoningEfforts 宿主不读，8 个模型的 capabilities.reasoningEfforts 为空、9 行 capabilities.toolCalling 为 null，UI 无档位可选且请求不携带 reasoning_effort；②声明越界——qwen3.8-27b maxTokens=256000 是上游 131072 的 1.95 倍，是本轮唯一确定会下发非法 max_tokens 的行，deepseek 双行 contextWindow=1048576 无意义地超出宿主上限；③能力字段过期——qwen3.8-27b 与 subapi/gpt-6-luna 的 image_probe 已 200 而 imageInput 仍为 unknown，deepseek-v4-pro 上游明确不支持图像却留 unknown（若 provider 级 defaultInput=image 生效即 400）。deepseek 与 deepseek-self 是同一 baseURL、同一 model id：上游能力完全相同，两行差异 100% 来自本地声明（一方 1048576/65536，一方全 null 走宿主 32768/宿主默认窗口），公开文档不按键区分能力或配额。优先级：先修 qwen maxTokens 与 deepseek-self 的空声明、再把 efforts/tool_calling/image 三类 capability 补进 agent-generation.yml，最后统一证据降级与 maxTokens 调优。
+
+## 11. GPT 官方站点复核（本轮（GPT 官方站点复核））
+
+> 复核时间：2026-11-11T05:33:27.229Z；webStatus=partial；官方域来源 19 条（成功 5 条）；官方证据计数 5。
+> 官方域规则：hostname 等于 openai.com 或以 .openai.com 结尾，或 hostname 等于 chatgpt.com 或以 .chatgpt.com 结尾（含 developers.openai.com、platform.openai.com、help.openai.com、learn.chatgpt.com）；第三方（apidog、litellm、vercel、openrouter、venice 等）只作佐证，不能支撑 verified。
+> 证据分级：official_page（第一方页面正文逐字引用）> official_snippet（第一方页面/站内搜索摘要逐字引用）> none。上游规格项只要官方 URL 落在官方域、附官方原文引用并给出取值，即记 ✅ verified，并由 evidenceLevel 标明是页面正文还是搜索摘要；官方页正文直接抓取失败（如 HTTP 404）不否定摘要级证据，但已在 JSON 每项 note 写明该事实。纯第三方来源（apidog / litellm / vercel / openrouter / venice 等）只作佐证，不得支撑 verified。
+> 行级隔离：官方规格只是上游基准；subapi（http://104.207.156.188:58081/v1，api=openai-completions）是否 1:1 实现窗口/输出/effort 档位/service_tier/图像/tools 属端点属性，未经端实测，行级状态保持 ⚠️ unverified。
+
+### 11.1 逐模型 × 逐项官方复核
+
+| # | 模型 | 核对项 | 官方参数 | 官方值 | 状态 | 证据级别 | 本地一致性 | 官方来源 |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `gpt-5.6-luna` | 思考等级 | `reasoning_effort` | none / low / medium / high / xhigh / max | ✅ verified | official_snippet | local_lower | https://developers.openai.com/api/docs/models/gpt-5.6-luna |
+| 2 | `gpt-5.6-luna` | 默认思考档 | `reasoning_effort` | medium | ✅ verified | official_snippet | unknown | https://developers.openai.com/api/docs/models/gpt-5.6-luna |
+| 3 | `gpt-5.6-luna` | 最大上下文 | `(catalog)` | 1,050,000 | ✅ verified | official_snippet | local_lower | https://developers.openai.com/api/docs/models/gpt-5.6-luna |
+| 4 | `gpt-5.6-luna` | 最大输出 | `max_output_tokens` | 128,000 | ✅ verified | official_snippet | local_lower | https://developers.openai.com/api/docs/models/gpt-5.6-luna |
+| 5 | `gpt-5.6-luna` | 加速 | `service_tier` | 未取得 | ⚠️ unverified | official_snippet | unknown | https://developers.openai.com/api/reference/cli/resources/chat/subresources/completions/methods/retrieve |
+| 6 | `gpt-5.6-luna` | 图像输入 | `image_url` | supported | ✅ verified | official_snippet | match | https://developers.openai.com/api/docs/models/gpt-5.6-luna |
+| 7 | `gpt-5.6-luna` | 工具调用 | `tools` | {"chatCompletions":"endpoint v1/chat/completions 为 Supported","functionCalling":"supported","responsesApi":"supported (tools 表按 Responses API 列出)"} | ✅ verified | official_snippet | unknown | https://developers.openai.com/api/docs/models/gpt-5.6-luna |
+| 8 | `gpt-5.6-sol` | 思考等级 | `reasoning_effort` | 未取得 | ⚠️ unverified | official_snippet | unknown | https://developers.openai.com/api/docs/guides/upgrading-to-gpt-5p6-sol.md |
+| 9 | `gpt-5.6-sol` | 默认思考档 | `reasoning_effort` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 10 | `gpt-5.6-sol` | 最大上下文 | `(catalog)` | 1,050,000 | ✅ verified | official_snippet | local_lower | https://developers.openai.com/api/docs/models/gpt-5.6-sol.md |
+| 11 | `gpt-5.6-sol` | 最大输出 | `max_output_tokens` | 128,000 | ✅ verified | official_snippet | local_lower | https://developers.openai.com/api/docs/models/gpt-5.6-sol?frmapp=yes |
+| 12 | `gpt-5.6-sol` | 加速 | `service_tier` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 13 | `gpt-5.6-sol` | 图像输入 | `image_url` | supported | ✅ verified | official_snippet | match | https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest.md |
+| 14 | `gpt-5.6-sol` | 工具调用 | `tools` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 15 | `gpt-6-astra` | 思考等级 | `reasoning_effort` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 16 | `gpt-6-astra` | 默认思考档 | `reasoning_effort` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 17 | `gpt-6-astra` | 最大上下文 | `(catalog)` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 18 | `gpt-6-astra` | 最大输出 | `max_output_tokens` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 19 | `gpt-6-astra` | 加速 | `service_tier` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 20 | `gpt-6-astra` | 图像输入 | `image_url` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 21 | `gpt-6-astra` | 工具调用 | `tools` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 22 | `gpt-6-luna` | 思考等级 | `reasoning_effort` | none / low / medium / high / xhigh / max | ✅ verified | official_snippet | conflict | https://developers.openai.com/api/docs/models/gpt-6-luna |
+| 23 | `gpt-6-luna` | 默认思考档 | `reasoning_effort` | medium | ✅ verified | official_snippet | local_higher | https://developers.openai.com/api/docs/models/gpt-6-luna |
+| 24 | `gpt-6-luna` | 最大上下文 | `(catalog)` | 1,050,000 | ✅ verified | official_snippet | local_lower | https://developers.openai.com/api/docs/models/gpt-6-luna |
+| 25 | `gpt-6-luna` | 最大输出 | `max_output_tokens` | 128,000 | ✅ verified | official_snippet | local_lower | https://developers.openai.com/api/docs/models/gpt-6-luna |
+| 26 | `gpt-6-luna` | 加速 | `service_tier` | supported | ✅ verified | official_snippet | match | https://developers.openai.com/api/docs/models/gpt-6-luna.md |
+| 27 | `gpt-6-luna` | 图像输入 | `image_url` | supported | ✅ verified | official_snippet | match | https://developers.openai.com/api/docs/models/gpt-6-luna.md |
+| 28 | `gpt-6-luna` | 工具调用 | `tools` | {"chatCompletions":"supported only when reasoning_effort = none","responsesApi":"supported (built-in tools and function calling)"} | ✅ verified | official_snippet | unknown | https://developers.openai.com/api/docs/models/gpt-6-luna |
+| 29 | `gpt-6.1-sol` | 思考等级 | `reasoning_effort` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 30 | `gpt-6.1-sol` | 默认思考档 | `reasoning_effort` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 31 | `gpt-6.1-sol` | 最大上下文 | `(catalog)` | 1,050,000 | ✅ verified | official_snippet | local_lower | https://developers.openai.com/api/docs/models/gpt-6.1-sol |
+| 32 | `gpt-6.1-sol` | 最大输出 | `max_output_tokens` | 128,000 | ✅ verified | official_snippet | local_lower | https://developers.openai.com/api/docs/models/gpt-6.1-sol |
+| 33 | `gpt-6.1-sol` | 加速 | `service_tier` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 34 | `gpt-6.1-sol` | 图像输入 | `image_url` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 35 | `gpt-6.1-sol` | 工具调用 | `tools` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 36 | `gpt-6.1-terra` | 思考等级 | `reasoning_effort` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 37 | `gpt-6.1-terra` | 默认思考档 | `reasoning_effort` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 38 | `gpt-6.1-terra` | 最大上下文 | `(catalog)` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 39 | `gpt-6.1-terra` | 最大输出 | `max_output_tokens` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 40 | `gpt-6.1-terra` | 加速 | `service_tier` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 41 | `gpt-6.1-terra` | 图像输入 | `image_url` | 未取得 | ⚠️ unverified | none | unknown | — |
+| 42 | `gpt-6.1-terra` | 工具调用 | `tools` | 未取得 | ⚠️ unverified | none | unknown | — |
+
+计数：共 42 个核对项，其中 verified 18 项、unsupported 0 项，其余为 unverified（无第一方官方取值）。本节 verified 仅指上游官方规格，不代表 subapi 中转已实现。
+
+### 11.2 逐模型官方页与证据级别
+
+| 模型 | 官方页 | verified/总项 | official_page 项数 | 上一轮历史判定 |
+|---|---|---|---|---|
+| `gpt-5.6-luna` | https://developers.openai.com/api/docs/models/gpt-5.6-luna | 6/7 | 0 | 思考等级=✅ verified；最大上下文=✅ verified；最大输出=✅ verified；加速=⚠️ unverified；图像输入=✅ verified；工具调用=✅ verified |
+| `gpt-5.6-sol` | https://developers.openai.com/api/docs/models/gpt-5.6-sol | 3/7 | 0 | 思考等级=⚠️ unverified；最大上下文=⚠️ unverified；最大输出=⚠️ unverified；加速=⚠️ unverified；图像输入=✅ verified；工具调用=✅ verified |
+| `gpt-6-astra` | 未定位 | 0/7 | 0 | 思考等级=⚠️ unverified；最大上下文=⚠️ unverified；最大输出=⚠️ unverified；加速=⚠️ unverified；图像输入=⚠️ unverified；工具调用=⚠️ unverified |
+| `gpt-6-luna` | https://developers.openai.com/api/docs/models/gpt-6-luna | 7/7 | 0 | 思考等级=✅ verified；最大上下文=✅ verified；最大输出=✅ verified；加速=⚠️ unverified；图像输入=✅ verified；工具调用=✅ verified |
+| `gpt-6.1-sol` | https://developers.openai.com/api/docs/models/gpt-6.1-sol | 2/7 | 0 | 思考等级=⚠️ unverified；最大上下文=⚠️ unverified；最大输出=⚠️ unverified；加速=⚠️ unverified；图像输入=⚠️ unverified；工具调用=⚠️ unverified |
+| `gpt-6.1-terra` | 未定位 | 0/7 | 0 | 思考等级=✅ verified；最大上下文=✅ verified；最大输出=✅ verified；加速=⚠️ unverified；图像输入=✅ verified；工具调用=⚠️ unverified |
+
+### 11.3 复核后仍缺（按模型节选，完整清单见 §7 与 JSON gaps）
+
+- `gpt-5.6-luna`：相关 gap 14 条（列出前 5 条）
+  1. 官方页抓取失败：https://developers.openai.com/api/docs/models/gpt-5.6-luna.md → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  2. 官方页抓取失败：https://developers.openai.com/api/docs/models/gpt-5.6-luna → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  3. 未抓到任何含 gpt-5.6-luna 的官方页面正文（openai.com / chatgpt.com 候选 14 个）
+  4. gpt-5.6-luna/reasoningEfforts: 引用页本轮抓取失败（WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available），证据降级 unverified：https://developers.openai.com/api/docs/models/gpt-5.6-luna
+  5. gpt-5.6-luna/defaultEffort: 引用页本轮抓取失败（WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available），证据降级 unverified：https://developers.openai.com/api/docs/models/gpt-5.6-luna
+- `gpt-5.6-sol`：相关 gap 10 条（列出前 5 条）
+  1. 官方页抓取失败：https://developers.openai.com/api/docs/models/gpt-5.6-sol.md → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  2. 官方页抓取失败：https://developers.openai.com/api/docs/models/gpt-5.6-sol?frmapp=yes → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  3. 未抓到任何含 gpt-5.6-sol 的官方页面正文（openai.com / chatgpt.com 候选 14 个）
+  4. gpt-5.6-sol/contextWindow: 引用页本轮抓取失败（WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available），证据降级 unverified：https://developers.openai.com/api/docs/models/gpt-5.6-sol.md
+  5. gpt-5.6-sol/maxOutput: 引用页本轮抓取失败（WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available），证据降级 unverified：https://developers.openai.com/api/docs/models/gpt-5.6-sol?frmapp=yes
+- `gpt-6-astra`：相关 gap 14 条（列出前 5 条）
+  1. 官方页抓取失败：https://developers.openai.com/api/docs/models/gpt-6-astra.md → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  2. 官方页抓取失败：https://developers.openai.com/api/docs/models/gpt-6-astra → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  3. 未抓到任何含 gpt-6-astra 的官方页面正文（openai.com / chatgpt.com 候选 14 个）
+  4. gpt-6-astra: 官方页面正文两次 404，缺少 official_page 级原文；需要可访问的第一方规格页（如官方模型卡/定价/文档页）或截图存档。
+  5. gpt-6-astra: reasoningEfforts：缺官方档位集合（none/low/medium/high/xhigh/max 之类）与是否支持的原文。
+- `gpt-6-luna`：相关 gap 19 条（列出前 5 条）
+  1. 官方页抓取失败：https://developers.openai.com/api/docs/models/gpt-6-luna → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  2. 官方页抓取失败：https://developers.openai.com/api/docs/models/gpt-6-luna.md → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  3. 官方页抓取失败：https://developers.openai.com/ko-KR/api/docs/models/gpt-6-luna → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  4. 官方页抓取失败：https://developers.openai.com/zh-Hans/api/docs/models/gpt-6-luna → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  5. 官方页抓取失败：https://developers.openai.com/de-DE/api/docs/models/gpt-6-luna → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+- `gpt-6.1-sol`：相关 gap 9 条（列出前 5 条）
+  1. 未抓到任何含 gpt-6.1-sol 的官方页面正文（openai.com / chatgpt.com 候选 14 个）
+  2. gpt-6.1-sol: 缺少 gpt-6.1-sol 官方页正文（fetch 返回 404），无法提供 official_page 级逐字全文引用。
+  3. gpt-6.1-sol: 缺少官方对 reasoningEfforts 档位集合及默认档的原文。
+  4. gpt-6.1-sol: 缺少官方对 service_tier / 加速模式（priority、fast、flex 等）支持情况的原文。
+  5. gpt-6.1-sol: 缺少官方对 image_url 图像输入支持的原文。
+- `gpt-6.1-terra`：相关 gap 9 条（列出前 5 条）
+  1. 官方页抓取失败：https://developers.openai.com/api/docs/models/gpt-6.1-terra → WEB_PAGE_UNAVAILABLE: fetch returned HTTP 404; no usable page content was available
+  2. 未抓到任何含 gpt-6.1-terra 的官方页面正文（openai.com / chatgpt.com 候选 14 个）
+  3. gpt-6.1-terra: No official page, excerpt, or snippet for gpt-6.1-terra itself was delivered — the requested first-party evidence for this model is missing entirely, so officialPageUrl is null rather than filled with a sibling model's URL.
+  4. gpt-6.1-terra: Official-source gap: context window and max output for gpt-6.1-terra — would need developers.openai.com/api/docs/models/gpt-6.1-terra-type page text stating the token limits.
+  5. gpt-6.1-terra: Official-source gap: reasoning-effort ladder and default effort for gpt-6.1-terra (no official enumeration of none/low/medium/high/xhigh/max supplied).
+- 本轮官方复核 gap 共 73 条，已逐条写入 JSON gaps；本节仅节选各模型前若干条。
+
+### 11.4 官方域来源清单
+
+- https://developers.openai.com/api/docs/guides/upgrading-to-gpt-5p6-sol.md（developers.openai.com，evidenceLevel=official_snippet，ok）
+- https://developers.openai.com/api/docs/models/gpt-5.6-sol（developers.openai.com，evidenceLevel=official_snippet，ok）
+- https://developers.openai.com/api/docs/models/gpt-6.1-sol（developers.openai.com，evidenceLevel=official_snippet，ok）
+- https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest.md（developers.openai.com，evidenceLevel=official_snippet，ok）
+- https://developers.openai.com/api/reference/cli/resources/chat/subresources/completions/methods/retrieve（developers.openai.com，evidenceLevel=official_snippet，ok）
+- https://developers.openai.com/api/docs/models/gpt-5.6-luna（developers.openai.com，evidenceLevel=official_snippet，failed/HTTP 404）
+- https://developers.openai.com/api/docs/models/gpt-5.6-luna.md（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/api/docs/models/gpt-5.6-sol.md（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/api/docs/models/gpt-5.6-sol?frmapp=yes（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/api/docs/models/gpt-6-astra（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/api/docs/models/gpt-6-astra.md（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/api/docs/models/gpt-6-luna（developers.openai.com，evidenceLevel=official_snippet，failed/HTTP 404）
+- https://developers.openai.com/api/docs/models/gpt-6-luna.md（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/api/docs/models/gpt-6.1-terra（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/de-DE/api/docs/models/gpt-6-luna（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/ko-KR/api/docs/models/gpt-6-luna（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/pt-BR/api/docs/models/gpt-6-luna（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+- https://developers.openai.com/zh-Hans/api/docs/models/gpt-6-luna（developers.openai.com，evidenceLevel=none，failed/HTTP 404）
+
+### 11.5 复核告警
+
+- gpt-6-astra: 未定位到该模型的官方规格页
+- gpt-6.1-terra: 未定位到该模型的官方规格页
+- subapi/gpt-6-astra: 本轮未取得任何官方证据，全部核对项保持 unverified
+- subapi/gpt-6.1-terra: 本轮未取得任何官方证据，全部核对项保持 unverified
+- 官方站取证不完整：2/6 个模型没有任何官方证据
+- 官方规格是上游基准；中转 http://104.207.156.188:58081/v1 是否 1:1 实现属端点属性，需实测，不得据官方支持断言论中转支持
+
+> 说明：本节由 `applyGptOfficialUpdates` 依据官方复核结果回写，覆盖 §3.1 的 (c) 列与上游状态列、§3.2 与 §4 的上游判断；本地声明 (a) 与宿主生效 (b) 两列未改动。JSON 侧本次整份重新序列化（reflowed=true：键序与缩进规范化，语义与上表一致），未修改的字段取值保持不变。

@@ -212,7 +212,7 @@ export function useAgentWorkspace() {
     try {
       const latest = settings ?? await api.getSettings()
       const capability = latest.providers.find(p => p.id === providerId)?.model_capabilities[modelId]
-      const defaultEffort = resolveEffort(undefined, capability?.reasoning_efforts ?? [])
+      const defaultEffort = resolveEffort(undefined, capability?.reasoning_efforts ?? [], capability?.default_effort)
       setSelectedEffortOverride(defaultEffort || null)
       setSelectedFastModeOverride(false)
 
@@ -302,7 +302,8 @@ export function useAgentWorkspace() {
   const modelProvider = settings?.providers.find(p => p.id === requestedProvider && p.models.includes(modelName ?? ''))
     ?? settings?.providers.find(p => p.models.includes(modelName ?? ''))
   const modelProviderId = modelProvider?.id ?? requestedProvider
-  const reasoningEffort = resolveEffort(requestedEffort, modelProvider?.model_capabilities[modelName ?? '']?.reasoning_efforts ?? [])
+  const activeCapability = modelProvider?.model_capabilities[modelName ?? '']
+  const reasoningEffort = resolveEffort(requestedEffort, activeCapability?.reasoning_efforts ?? [], activeCapability?.default_effort)
   const fastMode = selectedFastModeOverride !== undefined
     ? selectedFastModeOverride
     : (task?.fast_mode ?? settings?.fast_mode ?? false)
