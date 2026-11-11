@@ -393,7 +393,10 @@ fn library_load_example(library: &str) -> String {
 }
 
 fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str) -> Result<()> {
-    if !page_allows(s, name) {
+    // The host publishes this editor only to a module fixer; modules::edit
+    // enforces the exact module path. It is not a plugin workspace-write tool.
+    let module_editor = name == "edit_file" && program_flow::role(w) == program_flow::Role::Fix;
+    if !module_editor && !page_allows(s, name) {
         // A library method called as a tool: say how it is called instead.
         let libraries = program_flow::library_catalog(s, definitions);
         let method = crate::agent_program::libraries::public_name(&libraries, name)
@@ -3317,6 +3320,48 @@ mod tests {
         let error = modules::edit(&session, &window, &json!({"path":"project.rs",
             "edits":[{"old_text":"keep me","new_text":"changed"}]})).unwrap_err();
         assert!(error.to_string().contains("only the module file"));
+        assert_eq!(std::fs::read_to_string(root.path().join("project.rs")).unwrap(), "keep me");
+    }
+
+    #[tokio::test]
+    async fn plugin_module_fixer_can_execute_its_scoped_editor() {
+        let root = TestRoot::new();
+        let mut state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        state.permission_mode = agent_service::PermissionMode::ReadOnly;
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
+        let cancel = CancellationToken::new();
+        let session = Session { agent_id:None, task_node_id:None, plugin:Some("ppt-master".into()), state:&state,
+            task:"task", model:"fake", turn:1, cancel:&cancel, ban_execution:false,
+            scope:"main".into(), parent:None, input_budget:INPUT_BUDGET };
+        let module_path = ".codex-workspace-mcp/module-to-fix.js";
+        std::fs::write(root.path().join(module_path), "async function inspectProject(input) { return null; }").unwrap();
+        std::fs::write(root.path().join("project.rs"), "keep me").unwrap();
+        let mut window = Window { program_task:Some(json!({"name":"inspectProject","module":true,"role":"implement",
+            "fix":{"path":module_path,"version":1}})), ..Default::default() };
+        let definitions = tools(&session, &window);
+        assert!(definitions.iter().any(|tool| tool["function"]["name"] == "edit_file"));
+        validate_tool(&session, &window, &definitions, "edit_file").unwrap();
+        // The same name stays blocked outside the fixer, even if a caller
+        // supplies the fixer's schema. Plugin scope is otherwise unchanged.
+        assert!(validate_tool(&session, &Window::default(), &definitions, "edit_file").is_err());
+        let implementing = Window { program_task:Some(json!({"module":true,"role":"implement"})), ..Default::default() };
+        assert!(validate_tool(&session, &implementing, &definitions, "edit_file").is_err());
+        assert!(validate_tool(&session, &window, &definitions, "write_file").is_err());
+        assert!(validate_tool(&session, &window, &definitions, "write_program").is_err());
+        let edit = |id: &str, path: &str, old: &str, new: &str| crate::model_stream::ToolCall {
+            call_id:id.into(), name:"edit_file".into(),
+            arguments:json!({"path":path,"edits":[{"old_text":old,"new_text":new}]}).to_string(),
+        };
+        let result = execute_call(&session, &mut window, &definitions, "fix", 1,
+            &edit("fix", module_path, "return null;", "return {ok: true};"), 1, None).await.unwrap();
+        assert!(!result.is_error, "{}", result.result);
+        assert_eq!(result.result["compiles"], true);
+        assert!(std::fs::read_to_string(root.path().join(module_path)).unwrap().contains("return {ok: true};"));
+        let denied = execute_call(&session, &mut window, &definitions, "fix", 2,
+            &edit("outside", "project.rs", "keep me", "changed"), 1, None).await.unwrap();
+        assert!(denied.is_error);
+        assert!(denied.result["error"].as_str().unwrap().contains("only the module file"));
         assert_eq!(std::fs::read_to_string(root.path().join("project.rs")).unwrap(), "keep me");
     }
 
