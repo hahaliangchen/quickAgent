@@ -1131,7 +1131,7 @@ fn outcome(s: &Session<'_>, printed: &[String], ended: std::result::Result<&Valu
             let at = error["stopped_at"].as_str().filter(|at| !at.is_empty())
                 .map(|at| format!("停在 {at}，这一步还没完成")).unwrap_or_else(|| "停在两步之间".into());
             let mut lines = vec![
-                format!("{label}被你停止，{at}。"),
+                format!("{label}已停止，{at}。"),
                 "程序的状态都保留着：下一条消息让我继续，我会从这一步接着跑，已完成的步骤不重做。".to_owned(),
             ];
             let interrupted: Vec<&str> = error["interrupted"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -2513,7 +2513,7 @@ mod tests {
         let kept: i64 = conn.query_row("SELECT count(*) FROM agent_task_nodes WHERE status IN ('paused','running','suspended') AND json_extract(data,'$.metadata.previous')=1", [], |r| r.get(0)).unwrap();
         assert_eq!(kept, 1, "the stopped program is kept for the next turn");
         let lines = program_lines(&conn);
-        let shown = lines.iter().find(|line| line.contains("被你停止")).unwrap_or_else(|| panic!("the stop outcome was shown: {lines:?}"));
+        let shown = lines.iter().find(|line| line.contains("已停止")).unwrap_or_else(|| panic!("the stop outcome was shown: {lines:?}"));
         assert!(shown.contains("summarize") && !shown.contains("previous"), "the user's copy says where it stopped, not how to resume: {shown}");
         run_task(state, "task".into(), "fake".into(), next_turn.into(), 20, CancellationToken::new(), 2, false).await.unwrap();
         server.abort();

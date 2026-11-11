@@ -24,6 +24,8 @@ pub const EXECUTION_LIMIT: Duration = Duration::from_secs(180);
 /// Longest one `tool_calls` request is held open.
 pub const MAX_WAIT: Duration = Duration::from_secs(25);
 pub const PAGE_CLOSED: &str = "PAGE_CLOSED";
+/// An accepted operation timed out; this does not prove that its page closed.
+pub const PAGE_TOOL_TIMEOUT: &str = "PAGE_TOOL_TIMEOUT";
 
 struct Call {
     id: String,
@@ -177,20 +179,25 @@ pub async fn call(
             _ = cancel.cancelled() => return Err(forget("task cancelled during page tool execution")),
             _ = tokio::time::sleep(Duration::from_secs(2)) => {}
         }
-        let gone = {
+        let failure = {
             let tasks = broker().tasks.lock().unwrap();
             match tasks.get(task) {
-                None => true,
+                None => Some(PAGE_CLOSED),
                 Some(entry) => match entry.waiting.get(&id).map(|(_, taken)| *taken) {
                     // Taken: the page is working on it; give it the execution limit.
-                    Some(Some(taken)) => taken.elapsed() > EXECUTION_LIMIT,
+                    Some(Some(taken)) => (taken.elapsed() > EXECUTION_LIMIT).then_some(PAGE_TOOL_TIMEOUT),
                     // Still queued: the owner must keep polling.
-                    Some(None) => !alive(entry),
-                    None => false,
+                    Some(None) => (!alive(entry)).then_some(PAGE_CLOSED),
+                    None => None,
                 },
             }
         };
-        if gone {
+        if failure == Some(PAGE_TOOL_TIMEOUT) {
+            return Err(forget(&format!(
+                "{PAGE_TOOL_TIMEOUT}: 页面已接收 {name}，但 180 秒内没有返回结果。执行或保存结果尚未确认；任务未因超时取消。先读取当前页面和保存状态，核对实际结果后再决定是否重试，避免重复写入。"
+            )));
+        }
+        if failure == Some(PAGE_CLOSED) {
             return Err(forget(&format!(
                 "{PAGE_CLOSED}: 执行这个工具的页面没有响应（已关闭或断开），任务已放弃"
             )));
@@ -255,6 +262,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().starts_with(PAGE_CLOSED));
+        forget_task(&task);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_operation_timeout_is_not_a_closed_page_or_user_cancel() {
+        let task = format!("task-{}", crate::agent_service::uuid_like());
+        claim(&task, "page-a").unwrap();
+        let cancel = CancellationToken::new();
+        let caller = {
+            let task = task.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move { call(&task, "apply_html", json!({}), &cancel).await })
+        };
+        let taken = poll(&task, "page-a", Duration::from_secs(2)).await.unwrap();
+        let id = taken["calls"][0]["call_id"].as_str().unwrap().to_owned();
+        {
+            let mut tasks = broker().tasks.lock().unwrap();
+            let entry = tasks.get_mut(&task).unwrap();
+            entry.waiting.get_mut(&id).unwrap().1 = Some(Instant::now() - EXECUTION_LIMIT - Duration::from_secs(1));
+        }
+        let error = caller.await.unwrap().unwrap_err().to_string();
+        assert!(error.starts_with(PAGE_TOOL_TIMEOUT), "{error}");
+        assert!(!error.starts_with(PAGE_CLOSED));
+        assert!(!cancel.is_cancelled());
+        assert!(reply(&task, "page-a", &id, json!({"ok":true})).is_err());
+        let tasks = broker().tasks.lock().unwrap();
+        assert!(tasks[&task].waiting.is_empty());
+        assert!(tasks[&task].queue.is_empty());
+        drop(tasks);
         forget_task(&task);
     }
 
