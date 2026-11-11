@@ -1327,6 +1327,12 @@ async fn business_tool_inner(
     if !outside.is_empty() && !matches!(s.state.permission_mode, crate::agent_service::PermissionMode::FullAccess) {
         crate::tool_approvals::wait_outside_read(s.state, s.task, s.model, s.delegate_id(), call_id, name, &args, &outside, s.cancel).await?;
     }
+    // Full access may edit a file outside the project (design guide §9).
+    let outside_edit = outside_edit(&tool_workspace, s.state.permission_mode, name, &args)?;
+    let (tool_workspace, args) = match outside_edit.clone() {
+        Some((workspace, args)) => (workspace, args),
+        None => (tool_workspace, args),
+    };
     if crate::shell_process::is_tool(name) {
         return crate::shell_process::execute_program(
             s.state, &tool_workspace, s.task, s.turn, s.task_node_id.as_deref(),
@@ -1393,9 +1399,12 @@ async fn business_tool_inner(
     let args = managed.as_ref().map(|p| p.args.clone()).unwrap_or(args);
     // The main agent's edits are tracked in whichever project the task uses;
     // git delegates and plugin pages keep their own records.
+    // An edit outside the project is not part of its turn record: undo and
+    // the turn's change card are about the project.
     let result = if crate::workspace_changes::is_mutation(name)
         && s.delegate_id().is_none()
         && s.plugin.is_none()
+        && outside_edit.is_none()
     {
         crate::workspace_changes::execute_tracked(
             s.state.clone(),
@@ -1544,6 +1553,34 @@ fn environment_change_notice(previous: &Value, current: &Value) -> Option<String
         "[Host notice] Since the previous turn, {}. Tool errors, denials and capability limits seen in earlier turns describe the old setup and may no longer hold. Before working around one, try the direct way again; if it now works, stop relying on the old conclusion, including in module descriptions you revise.",
         changes.join(" and ")
     ))
+}
+
+/// A file edit outside the workspace, allowed in full access: the call runs
+/// with the file's own directory as its root, so hash checks, baselines and
+/// the write itself work as for project files. Credential and host state
+/// files stay closed. None when the edit is an ordinary project edit.
+fn outside_edit(workspace: &crate::tools::Workspace, mode: crate::agent_service::PermissionMode, name: &str, args: &Value)
+    -> Result<Option<(std::sync::Arc<crate::tools::Workspace>, Value)>> {
+    if !matches!(name, "write_file" | "edit_file" | "replace_range")
+        || args["workspace_root"].as_str().is_some_and(|root| !root.trim().is_empty())
+    {
+        return Ok(None);
+    }
+    let Some(raw) = args["path"].as_str().map(str::trim).filter(|raw| std::path::Path::new(raw).is_absolute()) else { return Ok(None) };
+    let path = std::path::Path::new(raw);
+    let (Some(parent), Some(file)) = (path.parent(), path.file_name()) else { return Ok(None) };
+    let Ok(parent) = parent.canonicalize() else { return Ok(None) };
+    let root = workspace.root().canonicalize().unwrap_or_else(|_| workspace.root().to_path_buf());
+    if parent.starts_with(&root) {
+        return Ok(None);
+    }
+    ensure!(matches!(mode, crate::agent_service::PermissionMode::FullAccess),
+        "OUTSIDE_WORKSPACE_EDIT: editing {raw} outside the project needs full access; ask the user to switch the permission mode or to make the change");
+    crate::database::check_source_access(&parent.join(file))?;
+    let mut args = args.clone();
+    args["path"] = json!(file.to_string_lossy());
+    args["workspace_root"] = json!(parent.to_string_lossy());
+    Ok(Some((std::sync::Arc::new(crate::tools::Workspace::new(&parent)?), args)))
 }
 
 /// Paths a file read would reach outside the workspace, after links resolve.

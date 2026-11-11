@@ -137,7 +137,7 @@ fn link(s: &Session<'_>, definitions: &[Value], spec: &str) -> (Value, bool) {
 /// failed require says what to use instead of only what is missing.
 fn node_module_hint(name: &str) -> Option<&'static str> {
     Some(match name {
-        "fs" => "read, list, search and write files with require('io'); io.read and io.list accept absolute paths, including outside the workspace once allowed",
+        "fs" => "read, list, search and write files with require('io'); io.read and io.list accept absolute paths, including outside the workspace once allowed; in full access io.write and io.edit do too",
         "child_process" => "run commands with require('process').exec_command inside a module implementation",
         "https" | "net" | "undici" => "fetch pages with require('web').fetch, or check a local service with require('http').probe",
         "crypto" | "zlib" | "buffer" | "stream" | "util" | "events" | "worker_threads" | "readline" | "v8" | "vm" => {

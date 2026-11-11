@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_reads_an_accessible_file_outside_the_workspace_but_cannot_edit_it() -> Result<()> {
+    async fn agent_reads_an_accessible_file_outside_the_workspace_and_in_full_access_writes_it() -> Result<()> {
         let outside = root();
         let root = root();
         fs::write(outside.join("settings.yaml"), "model: deepseek\nmax_tokens: 8192\n")?;
@@ -731,8 +731,9 @@ mod tests {
         let lines = super::super::business_tool(&session, "node", "read_file_lines", json!({"path":file,"start_line":1,"end_line":1}), "lines outside").await.context("lines outside")?;
         assert!(lines.to_string().contains("model: deepseek"), "{lines}");
         let edit = super::super::business_tool(&session, "node", "write_file", json!({"path":file,"content":"changed"}), "write outside").await;
-        assert!(edit.as_ref().map(|value| value.to_string()).unwrap_or_else(|error| format!("{error:#}")).contains("outside the"), "{edit:?}");
-        assert_eq!(fs::read_to_string(outside.join("settings.yaml"))?, "model: deepseek\nmax_tokens: 8192\n");
+        // Full access may edit outside the project (design guide §9).
+        assert_eq!(edit?["changed"], true);
+        assert_eq!(fs::read_to_string(outside.join("settings.yaml"))?, "changed");
         let database = outside.join(".codex-workspace-mcp/codex_state.db").to_string_lossy().into_owned();
         let denied = super::super::business_tool(&session, "node", "read_file", json!({"path":database}), "read state").await;
         assert!(denied.as_ref().map(|value| value.to_string()).unwrap_or_else(|error| format!("{error:#}")).contains("SQLITE_STATE_FILE"), "{denied:?}");
@@ -975,6 +976,60 @@ mod tests {
         drop(conn);
         drop(state);
         let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    /// 2026-11-11: updating a few lines of ~/.config/grow took a module and a
+    /// shell each time, and rebuilding the YAML in code lost a provider.
+    #[tokio::test]
+    async fn full_access_edits_a_file_outside_the_project_in_place() -> Result<()> {
+        let root = root();
+        let outside = self::root();
+        let config = outside.join("providers.yml");
+        fs::write(&config, "deepseek:\n  contextWindow: 262144\nqwen: kept\n")?;
+        let mut state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let conn = crate::agent_service::open_db(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let path = config.to_string_lossy().into_owned();
+        let edit = |old: &str, new: &str| json!({"path":path,"edits":[{"old_text":old,"new_text":new}]});
+        // Without full access the edit is refused and says why.
+        state.permission_mode = crate::agent_service::PermissionMode::Ask;
+        {
+            let session = super::super::Session {
+                agent_id: None, task_node_id: None, plugin: None,
+                state: &state, task: "task", model: "fake", turn: 1, cancel: &cancel,
+                ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+            };
+            let refused = super::super::business_tool(&session, "node", "edit_file", edit("262144", "1048576"), "ask").await;
+            assert!(format!("{refused:?}").contains("OUTSIDE_WORKSPACE_EDIT"), "{refused:?}");
+        }
+        state.permission_mode = crate::agent_service::PermissionMode::FullAccess;
+        let session = super::super::Session {
+            agent_id: None, task_node_id: None, plugin: None,
+            state: &state, task: "task", model: "fake", turn: 1, cancel: &cancel,
+            ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+        };
+        let edited = super::super::business_tool(&session, "node", "edit_file", edit("262144", "1048576"), "edit").await?;
+        assert_eq!(edited["changed"], true, "{edited}");
+        assert_eq!(fs::read_to_string(&config)?, "deepseek:\n  contextWindow: 1048576\nqwen: kept\n", "only the edited text changed");
+        let recorded: i64 = conn.query_row("SELECT count(*) FROM agent_file_changes WHERE task_id='task'", [], |r| r.get(0)).unwrap_or(0);
+        assert_eq!(recorded, 0, "the project's turn record is about the project");
+        // It keeps a baseline like a project file: a change made beside it stops the next edit.
+        fs::write(&config, "deepseek:\n  contextWindow: 1048576\nqwen: changed by someone\n")?;
+        let conflict = super::super::business_tool(&session, "node", "edit_file", edit("1048576", "2000000"), "again").await?;
+        assert_eq!(conflict["error_code"], "ASSET_CONFLICT", "{conflict}");
+        // Host state files stay closed whatever the mode.
+        fs::create_dir_all(outside.join(".codex-workspace-mcp"))?;
+        let state_file = outside.join(".codex-workspace-mcp/codex_state.db");
+        fs::write(&state_file, "x")?;
+        let closed = super::super::business_tool(&session, "node", "write_file", json!({"path":state_file.to_string_lossy(),"content":"y"}), "state").await;
+        assert!(format!("{closed:?}").contains("SQLITE_STATE_FILE"), "{closed:?}");
+        assert_eq!(fs::read_to_string(&state_file)?, "x");
+        drop(conn);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
         Ok(())
     }
 
