@@ -1,5 +1,40 @@
 use super::*;
 use runtime::ActionKind;
+
+#[test]
+fn binary_chains_compile_and_run_on_a_runtime_worker_stack() {
+    std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(|| {
+        let count = 128;
+        let terms = (0..count).map(|i| format!("tag({i})")).collect::<Vec<_>>().join(" + ");
+        let source = format!("function main(){{const seen=[];function tag(n){{seen.push(n);return '<div>'+n+'</div>';}}const html='' + {terms};return [html,seen];}}");
+        let expected = (0..count).map(|i| format!("<div>{i}</div>")).collect::<String>();
+        assert_eq!(returned(runtime(&source)), json!([expected, (0..count).collect::<Vec<_>>() ]));
+        let arithmetic = (0..count).map(|_| " - 1 + 2 * 3").collect::<String>();
+        assert_eq!(returned(runtime(&format!("function main(){{return 0{arithmetic};}}"))), json!(count * 5));
+        // An opt-in production capture stays outside the repository: compiling
+        // it checks the actual failing input without executing its page writes.
+        if let Ok(path) = std::env::var("AGENT_BINARY_CHAIN_REPRO") {
+            let source = std::fs::read_to_string(path).unwrap();
+            let libraries = std::collections::BTreeMap::from([("ppt_master".to_owned(),std::collections::BTreeMap::from([("apply_html".to_owned(),"async-tool:ppt_master__apply_html".to_owned())]))]);
+            compile_with_libraries(&source, libraries).unwrap();
+        }
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+fn binary_chains_preserve_coercion_grouping_and_short_circuit_order() {
+    let source = "function main(){const seen=[];function term(n){seen.push(n);return {valueOf(){seen.push(n+10);return n;}};}const result=term(1)+term(2)+term(3);const empty=false&&(term(4)+term(5));const right=term(6)+(term(7)+term(8));return [result,empty,right,seen,2**3**2,20-5-3];}";
+    assert_eq!(returned(runtime(source)), json!([6,false,21,[1,2,11,12,3,13,6,7,8,17,18,16],512,12]));
+}
+
+#[test]
+fn binary_chains_still_reject_unawaited_tool_results() {
+    let source = "import * as ppt from 'ppt';const text='a'+'b'+ppt.read({});";
+    let libraries = std::collections::BTreeMap::from([("ppt".to_owned(),std::collections::BTreeMap::from([("read".to_owned(),"async-tool:ppt__read".to_owned())]))]);
+    let error = compile_with_libraries(source, libraries).err().expect("unawaited library call must be rejected").to_string();
+    assert!(error.contains("returns a Promise"), "{error}");
+}
+
 #[path="tests_stage3c.rs"]
 mod stage3c;
 #[path="tests_stage4.rs"]

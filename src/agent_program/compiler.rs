@@ -1597,6 +1597,71 @@ impl Compiler {
         Ok(Expr::Variable(dest))
     }
 
+    /// Binary chains are common in generated HTML. Keep the traversal on a
+    /// work stack: lower_inner has a large frame, so recursively lowering even
+    /// a few dozen concatenations can exhaust a runtime worker's native stack.
+    fn lower_binary(&mut self, root: &ast::BinExpr) -> Result<Expr> {
+        fn eager(binary: &ast::BinExpr) -> bool {
+            !matches!(binary.op, ast::BinaryOp::LogicalAnd | ast::BinaryOp::LogicalOr | ast::BinaryOp::NullishCoalescing)
+                && !(binary.op == ast::BinaryOp::In && matches!(&*binary.left, ast::Expr::PrivateName(_)))
+        }
+        enum Work<'a> {
+            Lower(&'a ast::Expr),
+            Right(&'a ast::BinExpr),
+            Finish(&'a ast::BinExpr, Expr),
+        }
+        let mut work = vec![Work::Right(root), Work::Lower(&root.left)];
+        let mut value = None;
+        while let Some(next) = work.pop() {
+            match next {
+                Work::Lower(expr) => {
+                    if let ast::Expr::Bin(binary) = expr && eager(binary) {
+                        self.reject_unawaited_operands(expr)?;
+                        work.push(Work::Right(binary));
+                        work.push(Work::Lower(&binary.left));
+                    } else {
+                        value = Some(self.lower(expr)?);
+                    }
+                }
+                Work::Right(binary) => {
+                    let left = self.snapshot(binary.left.span(), value.take().expect("binary left operand"));
+                    work.push(Work::Finish(binary, left));
+                    work.push(Work::Lower(&binary.right));
+                }
+                Work::Finish(binary, left) => {
+                    let right = self.snapshot(binary.right.span(), value.take().expect("binary right operand"));
+                    let op = match binary.op {
+                        ast::BinaryOp::EqEq => "==",
+                        ast::BinaryOp::NotEq => "!=",
+                        ast::BinaryOp::EqEqEq => "===",
+                        ast::BinaryOp::NotEqEq => "!==",
+                        ast::BinaryOp::Lt => "<",
+                        ast::BinaryOp::LtEq => "<=",
+                        ast::BinaryOp::Gt => ">",
+                        ast::BinaryOp::GtEq => ">=",
+                        ast::BinaryOp::Add => "+",
+                        ast::BinaryOp::Sub => "-",
+                        ast::BinaryOp::Mul => "*",
+                        ast::BinaryOp::Div => "/",
+                        ast::BinaryOp::Mod => "%",
+                        ast::BinaryOp::Exp => "**",
+                        ast::BinaryOp::BitAnd => "&",
+                        ast::BinaryOp::BitOr => "|",
+                        ast::BinaryOp::BitXor => "^",
+                        ast::BinaryOp::LShift => "<<",
+                        ast::BinaryOp::RShift => ">>",
+                        ast::BinaryOp::ZeroFillRShift => ">>>",
+                        ast::BinaryOp::In => "in",
+                        ast::BinaryOp::InstanceOf => "instanceof",
+                        _ => unreachable!("short-circuit operators use logical lowering"),
+                    };
+                    value = Some(Expr::Binary(op.into(), Box::new(left), Box::new(right)));
+                }
+            }
+        }
+        Ok(value.expect("binary expression result"))
+    }
+
     fn lower_inner(&mut self, e: &ast::Expr) -> Result<Expr> {
         self.reject_unawaited_operands(e)?;
         match e {
@@ -1724,43 +1789,17 @@ impl Compiler {
                 let object = self.lower(&b.right)?;
                 Ok(self.snapshot(b.span, Expr::NodeBuiltin("$$privateHas".into(), vec![object,key])))
             }
-            ast::Expr::Bin(b) => {
+            ast::Expr::Bin(b) if matches!(b.op, ast::BinaryOp::LogicalAnd | ast::BinaryOp::LogicalOr | ast::BinaryOp::NullishCoalescing) => {
                 let op = match b.op {
-                    ast::BinaryOp::EqEq => "==",
-                    ast::BinaryOp::NotEq => "!=",
-                    ast::BinaryOp::EqEqEq => "===",
-                    ast::BinaryOp::NotEqEq => "!==",
-                    ast::BinaryOp::Lt => "<",
-                    ast::BinaryOp::LtEq => "<=",
-                    ast::BinaryOp::Gt => ">",
-                    ast::BinaryOp::GtEq => ">=",
-                    ast::BinaryOp::Add => "+",
-                    ast::BinaryOp::Sub => "-",
-                    ast::BinaryOp::Mul => "*",
-                    ast::BinaryOp::Div => "/",
-                    ast::BinaryOp::Mod => "%",
                     ast::BinaryOp::LogicalAnd => "&&",
                     ast::BinaryOp::LogicalOr => "||",
                     ast::BinaryOp::NullishCoalescing => "??",
-                    ast::BinaryOp::Exp => "**",
-                    ast::BinaryOp::BitAnd => "&",
-                    ast::BinaryOp::BitOr => "|",
-                    ast::BinaryOp::BitXor => "^",
-                    ast::BinaryOp::LShift => "<<",
-                    ast::BinaryOp::RShift => ">>",
-                    ast::BinaryOp::ZeroFillRShift => ">>>",
-                    ast::BinaryOp::In => "in",
-                    ast::BinaryOp::InstanceOf => "instanceof",
+                    _ => unreachable!(),
                 };
                 let left = self.lower(&b.left)?;
-                if matches!(op, "&&" | "||" | "??") {
-                    return self.logical(op, left, &b.right, b.span);
-                }
-                let left = self.snapshot(b.left.span(), left);
-                let right = self.lower(&b.right)?;
-                let right = self.snapshot(b.right.span(), right);
-                Ok(Expr::Binary(op.into(), Box::new(left), Box::new(right)))
+                self.logical(op, left, &b.right, b.span)
             }
+            ast::Expr::Bin(b) => self.lower_binary(b),
             ast::Expr::Unary(u) => {
                 let op = match u.op {
                     ast::UnaryOp::Bang => "!",
