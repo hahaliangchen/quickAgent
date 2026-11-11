@@ -408,19 +408,50 @@ fn text(bytes: &Option<Vec<u8>>) -> Option<&str> {
     std::str::from_utf8(bytes).ok()
 }
 
+/// Cell budget for the exact LCS table. Larger residuals use Myers' greedy
+/// search, which costs O((n+m)·D) for D changed lines instead of n·m.
+const DIFF_TABLE_CELLS: usize = 4_000_000;
+/// Work budget for the greedy search, counted in diagonal steps and matched lines.
+const DIFF_SEARCH_STEPS: usize = 16_000_000;
+/// The greedy search keeps one entry per diagonal. Files below the 2 MiB snapshot
+/// limit fit in this many residual lines; beyond it the estimate is used instead.
+const DIFF_SEARCH_LINES: usize = 200_000;
+
 fn counts(before: &str, after: &str) -> (usize, usize, bool) {
-    let a: Vec<_> = before.split_inclusive('\n').collect();
-    let b: Vec<_> = after.split_inclusive('\n').collect();
-    let prefix = a.iter().zip(&b).take_while(|(a, b)| a == b).count();
-    let mut a = &a[prefix..];
-    let mut b = &b[prefix..];
+    counts_within(before, after, DIFF_TABLE_CELLS, DIFF_SEARCH_STEPS)
+}
+
+/// Added/deleted line counts and whether they are exact. A large file with a few
+/// edited lines is searched, not tabulated, so it reports its edited lines. Only
+/// a residual whose edit search exceeds the budget is `coarse`, and even then the
+/// numbers are a bounded estimate of the changed lines, never the whole file.
+fn counts_within(
+    before: &str,
+    after: &str,
+    table_cells: usize,
+    search_steps: usize,
+) -> (usize, usize, bool) {
+    let before_lines: Vec<_> = before.split_inclusive('\n').collect();
+    let after_lines: Vec<_> = after.split_inclusive('\n').collect();
+    let prefix = before_lines.iter().zip(&after_lines).take_while(|(a, b)| a == b).count();
+    let mut a = &before_lines[prefix..];
+    let mut b = &after_lines[prefix..];
     while !a.is_empty() && !b.is_empty() && a.last() == b.last() {
         a = &a[..a.len() - 1];
         b = &b[..b.len() - 1];
     }
-    if a.len().saturating_mul(b.len()) > 4_000_000 {
-        return (b.len(), a.len(), true);
+    if a.len().saturating_mul(b.len()) <= table_cells {
+        let common = lcs(a, b);
+        return (b.len() - common, a.len() - common, false);
     }
+    if let Some((added, deleted)) = myers(a, b, search_steps) {
+        return (added, deleted, false);
+    }
+    let (added, deleted) = estimate(a, b);
+    (added, deleted, true)
+}
+
+fn lcs(a: &[&str], b: &[&str]) -> usize {
     let mut row = vec![0usize; b.len() + 1];
     for line in a {
         let mut diagonal = 0;
@@ -434,8 +465,72 @@ fn counts(before: &str, after: &str) -> (usize, usize, bool) {
             diagonal = old;
         }
     }
-    let common = row[b.len()];
-    (b.len() - common, a.len() - common, false)
+    row[b.len()]
+}
+
+/// Myers' greedy forward search. Only the minimal edit distance is needed: the
+/// distance and both lengths give the added/deleted split, so a big file with a
+/// few changed lines stays exact without an n·m table.
+fn myers(a: &[&str], b: &[&str], budget: usize) -> Option<(usize, usize)> {
+    let (n, m) = (a.len() as isize, b.len() as isize);
+    let span = (n + m) as usize;
+    if span > DIFF_SEARCH_LINES {
+        return None;
+    }
+    let offset = span as isize;
+    let mut furthest = vec![0isize; 2 * span + 1];
+    let mut steps = 0usize;
+    for distance in 0..=span as isize {
+        let mut diagonal = -distance;
+        while diagonal <= distance {
+            let index = (diagonal + offset) as usize;
+            let mut x = if diagonal == -distance
+                || (diagonal != distance && furthest[index - 1] < furthest[index + 1])
+            {
+                furthest[index + 1]
+            } else {
+                furthest[index - 1] + 1
+            };
+            let mut y = x - diagonal;
+            while x < n && y < m && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
+                steps += 1;
+            }
+            furthest[index] = x;
+            steps += 1;
+            if steps > budget {
+                return None;
+            }
+            if x >= n && y >= m {
+                let delta = m - n;
+                return Some((((distance + delta) / 2) as usize, ((distance - delta) / 2) as usize));
+            }
+            diagonal += 2;
+        }
+    }
+    None
+}
+
+/// Bounded estimate for the rare search that is out of budget: a line whose
+/// multiplicity changed counts once, so a mostly intact file never looks rewritten.
+fn estimate(a: &[&str], b: &[&str]) -> (usize, usize) {
+    let mut balance: std::collections::HashMap<&str, isize> = std::collections::HashMap::new();
+    for line in a {
+        *balance.entry(line).or_insert(0) -= 1;
+    }
+    for line in b {
+        *balance.entry(line).or_insert(0) += 1;
+    }
+    let (mut added, mut deleted) = (0usize, 0usize);
+    for delta in balance.into_values() {
+        if delta > 0 {
+            added += delta as usize;
+        } else {
+            deleted += delta.unsigned_abs();
+        }
+    }
+    (added, deleted)
 }
 
 fn record(
@@ -1520,5 +1615,84 @@ mod tests {
             "the server checkout is untouched"
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    fn line_file(count: usize, label: &str) -> String {
+        (0..count).map(|i| format!("{label} {i}\n")).collect()
+    }
+
+    /// 3_000 lines on both sides exceed the exact table (9M cells), which is the
+    /// case that used to report the whole file as changed.
+    fn edited_big_file() -> (String, String, usize) {
+        let before = line_file(3_000, "line");
+        let mut lines: Vec<String> = before.lines().map(str::to_string).collect();
+        let mut changed = 0;
+        for index in (100..lines.len()).step_by(70) {
+            lines[index] = format!("line {index} edited");
+            changed += 1;
+        }
+        (before, lines.into_iter().map(|line| format!("{line}\n")).collect(), changed)
+    }
+
+    #[test]
+    fn a_large_file_reports_its_edited_lines() {
+        let (before, after, changed) = edited_big_file();
+        assert!(3_000 * 3_000 > DIFF_TABLE_CELLS, "the fixture must take the search path");
+        assert_eq!(counts(&before, &after), (changed, changed, false));
+    }
+
+    #[test]
+    fn an_out_of_budget_search_estimates_the_edited_lines_and_marks_them_coarse() {
+        let (before, after, changed) = edited_big_file();
+        // One step of search budget cannot reach the end of a 6_000-line residual.
+        assert_eq!(counts_within(&before, &after, 0, 1), (changed, changed, true));
+    }
+
+    #[test]
+    fn the_table_and_the_greedy_search_agree_on_small_inputs() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let alphabet = ["a\n", "b\n", "c\n", "d\n"];
+        for _ in 0..300 {
+            let (n, m) = ((next() % 13) as usize, (next() % 13) as usize);
+            let a: Vec<&str> = (0..n).map(|_| alphabet[(next() % 4) as usize]).collect();
+            let b: Vec<&str> = (0..m).map(|_| alphabet[(next() % 4) as usize]).collect();
+            let common = lcs(&a, &b);
+            let expected = (m - common, n - common, false);
+            let before = a.concat();
+            let after = b.concat();
+            assert_eq!(counts_within(&before, &after, usize::MAX, 0), expected, "table: {before:?} {after:?}");
+            assert_eq!(counts_within(&before, &after, 0, usize::MAX), expected, "search: {before:?} {after:?}");
+        }
+    }
+
+    #[test]
+    fn a_recorded_large_file_change_reports_exact_counts() -> Result<()> {
+        let base = std::env::temp_dir().join(format!("changes-counts-{}", crate::agent_service::uuid_like()));
+        fs::create_dir_all(&base)?;
+        crate::agent_service::open_db(&base)?.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','','fake','completed',0,0)",
+            [],
+        )?;
+        let (before, after, changed) = edited_big_file();
+        let image = |bytes: String| Image { exists: true, bytes: Some(bytes.into_bytes()), stamp: String::new() };
+        let mut before_snapshot = Snapshot::new();
+        before_snapshot.insert("big.txt".into(), image(before));
+        let mut after_snapshot = Snapshot::new();
+        after_snapshot.insert("big.txt".into(), image(after));
+        record(&base, "t", 1, before_snapshot, after_snapshot)?;
+        let value = summary(&base, "t", 1)?;
+        assert_eq!(value["files"][0]["coarse"], false);
+        assert_eq!(value["files"][0]["added"], changed);
+        assert_eq!(value["files"][0]["deleted"], changed);
+        assert_eq!(value["added"], changed);
+        assert_eq!(value["deleted"], changed);
+        let _ = fs::remove_dir_all(&base);
+        Ok(())
     }
 }

@@ -304,9 +304,12 @@ export function useAgentWorkspace() {
   const modelProviderId = modelProvider?.id ?? requestedProvider
   const activeCapability = modelProvider?.model_capabilities[modelName ?? '']
   const reasoningEffort = resolveEffort(requestedEffort, activeCapability?.reasoning_efforts ?? [], activeCapability?.default_effort)
-  const fastMode = selectedFastModeOverride !== undefined
+  const recordedFastMode = selectedFastModeOverride !== undefined
     ? selectedFastModeOverride
     : (task?.fast_mode ?? settings?.fast_mode ?? false)
+  // A model that declares no fast mode must not be sent the flag, or the whole
+  // settings save is rejected; an unknown capability is left alone.
+  const fastMode = recordedFastMode && (activeCapability === undefined || activeCapability.fast_mode)
 
   const pendingSession=useRef<Promise<string>|null>(null)
   const uploadedAttachments=useRef(new Map<File,{task:string;receiptId:string}>())

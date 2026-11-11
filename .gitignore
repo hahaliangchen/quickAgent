@@ -16,3 +16,5 @@
 
 # Local experiment workspaces, databases, dependencies and generated output.
 /scratch/
+__pycache__/
+*.py[cod]

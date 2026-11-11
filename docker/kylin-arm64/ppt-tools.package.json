@@ -1,0 +1,11 @@
+{
+  "name": "quickagent-kylin-ppt-environment",
+  "private": true,
+  "dependencies": {
+    "@napi-rs/canvas": "1.0.11",
+    "@noble/hashes": "1.8.0",
+    "jsdom": "25.0.1",
+    "playwright": "1.62.1",
+    "vite-node": "2.1.9"
+  }
+}

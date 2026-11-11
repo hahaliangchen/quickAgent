@@ -2783,6 +2783,47 @@ pub fn compile_with_libraries(
 ) -> Result<Program> {
     link_prelude(compile_inner(source, super::ENTRY, false, libraries, BTreeSet::new(), false)?)
 }
+/// A declared function nothing calls or passes on is work the author meant to
+/// run: the host calls no function for a program, only a module's entry. Name
+/// it instead of letting the program end having done nothing (2026-11-11: a
+/// main() that was never called made eighteen programs finish silently).
+/// The host checks what an AI submits; the VM's own tests keep their main()
+/// entry convention.
+pub fn uncalled_functions(source: &str, entry: Option<&str>) -> Result<()> {
+    let map: Lrc<SourceMap> = Default::default();
+    let file = map.new_source_file(FileName::Custom("agent-program.js".into()).into(), source.to_owned());
+    let mut parser = Parser::new_from(Lexer::new(Syntax::Es(EsSyntax::default()), Default::default(), StringInput::from(&*file), None));
+    let Ok(module) = parser.parse_module() else { return Ok(()) };
+    struct Scan { declared: Vec<(String, Span)>, exported: BTreeSet<String>, uses: BTreeMap<String, usize> }
+    impl Visit for Scan {
+        fn visit_fn_decl(&mut self, node: &ast::FnDecl) {
+            self.declared.push((node.ident.sym.to_string(), node.ident.span));
+            node.visit_children_with(self);
+        }
+        fn visit_export_decl(&mut self, node: &ast::ExportDecl) {
+            if let ast::Decl::Fn(function) = &node.decl { self.exported.insert(function.ident.sym.to_string()); }
+            node.visit_children_with(self);
+        }
+        fn visit_ident(&mut self, node: &ast::Ident) {
+            *self.uses.entry(node.sym.to_string()).or_default() += 1;
+        }
+    }
+    let mut scan = Scan { declared: Vec::new(), exported: BTreeSet::new(), uses: BTreeMap::new() };
+    module.visit_with(&mut scan);
+    for (name, span) in &scan.declared {
+        // Its own declaration is one occurrence; any other is a call or a hand-off.
+        if Some(name.as_str()) == entry || scan.exported.contains(name) || scan.uses.get(name).copied().unwrap_or(0) > 1 {
+            continue;
+        }
+        let at = map.lookup_char_pos(span.lo);
+        let who = match entry {
+            Some(entry) => format!("the host calls only {entry}, the implementation entry"),
+            None => "the host calls no function for you; a program runs its top-level statements in order".to_owned(),
+        };
+        bail!("TS_PROGRAM {}:{}: function {name} is declared but never called, so it would never run: {who}. Call it where it should run (for a main() helper, add `await main();` at the top level) or remove it", at.line, at.col.0 + 1);
+    }
+    Ok(())
+}
 #[cfg(test)]
 pub fn compile_body_with_libraries(
     source: &str,

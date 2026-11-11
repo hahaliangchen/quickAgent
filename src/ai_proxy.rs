@@ -89,23 +89,15 @@ fn default_api_type() -> String {
 }
 
 /// Reasoning levels a DSH model entry declares through `reasoningEfforts`.
-/// Keys are the levels the user can pick (`false`/`off` mean "no reasoning"),
-/// and the canonical order keeps the picker stable whatever the file order.
+/// Keys are folded onto the levels the host accepts (`false`/`off` mean "no
+/// reasoning", `minimal` is the same wire level as `low`), unknown keys are
+/// dropped, and the canonical order keeps the picker stable whatever the file
+/// order. A declared level is therefore always one settings can save.
 fn declared_reasoning_efforts(metadata: &Value) -> Vec<String> {
-    const ORDER: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
     let Some(levels) = metadata.get("reasoningEfforts").and_then(Value::as_object) else {
         return Vec::new();
     };
-    let mut declared: Vec<&str> = levels
-        .keys()
-        .filter_map(|key| match key.as_str() {
-            "false" | "off" | "none" => Some("none"),
-            other => ORDER.iter().copied().find(|level| *level == other),
-        })
-        .collect();
-    declared.sort_by_key(|level| ORDER.iter().position(|known| known == level));
-    declared.dedup();
-    declared.into_iter().map(str::to_owned).collect()
+    crate::model_settings::canonical_efforts(&levels.keys().cloned().collect::<Vec<_>>())
 }
 /// The provider APIs the agent speaks: Chat Completions, and Responses as
 /// Codex uses it.
@@ -627,9 +619,24 @@ pub(crate) fn load_config(config_path: &Path) -> anyhow::Result<AiProxyConfig> {
                     capability.default_effort = metadata
                         .get("defaultReasoningEffort")
                         .and_then(Value::as_str)
+                        .and_then(crate::model_settings::canonical_effort)
                         .filter(|level| capability.reasoning_efforts.iter().any(|own| own == level))
                         .map(str::to_owned);
                 }
+            }
+            // A level written by hand in the generation settings is folded onto
+            // one the host can save, so the settings screen never offers a level
+            // its own save would reject.
+            capability.reasoning_efforts =
+                crate::model_settings::canonical_efforts(&capability.reasoning_efforts);
+            // A default that folding removed falls back to "model default".
+            if capability.default_effort.as_deref().is_some_and(|default| {
+                !capability
+                    .reasoning_efforts
+                    .iter()
+                    .any(|own| own == default)
+            }) {
+                capability.default_effort = None;
             }
             if capability.image_probe.as_ref().is_some_and(|probe| {
                 provider.api_type != "openai-completions"
@@ -1304,10 +1311,11 @@ fn save_settings(
                 "provider {id} model {model}: verify image input on the saved route before marking it supported"
             );
             anyhow::ensure!(
-                capability.reasoning_efforts.iter().all(|effort| matches!(
-                    effort.as_str(),
-                    "none" | "low" | "medium" | "high" | "xhigh" | "max"
-                )),
+                capability
+                    .reasoning_efforts
+                    .iter()
+                    .all(|effort| crate::model_settings::canonical_effort(effort)
+                        .is_some_and(|known| known == effort.as_str())),
                 "provider {id} model {model} has an unsupported reasoning effort"
             );
             anyhow::ensure!(
@@ -1473,7 +1481,8 @@ fn save_settings(
         let effort = effort.trim();
         anyhow::ensure!(
             effort.is_empty()
-                || matches!(effort, "none" | "low" | "medium" | "high" | "xhigh" | "max"),
+                || crate::model_settings::canonical_effort(effort)
+                    .is_some_and(|known| known == effort),
             "unsupported reasoning effort"
         );
         config.reasoning_effort = (!effort.is_empty()).then(|| effort.to_owned());
@@ -2761,7 +2770,7 @@ mod tests {
             {"id":"llm-pi-ai","config":{"providers":{
                 "deepseek":{"baseURL":"https://api.deepseek.com/v1","api":"openai-completions","models":[
                     {"id":"deepseek-flash","contextWindow":1048576,"maxTokens":393216,
-                     "reasoningEfforts":{"low":"low","high":"high","max":"max"}}
+                     "reasoningEfforts":{"low":"low","high":"high","max":"max","false":null,"minimal":"minimal"}}
                 ]},
                 "subapi":{"baseURL":"http://relay.example/v1","api":"openai-completions","models":[
                     {"id":"gpt-6.1-sol","contextWindow":1050000,"maxTokens":128000,
@@ -2781,14 +2790,15 @@ mod tests {
         )
         .unwrap();
         let loaded = load_config(&path).unwrap();
-        // An entry that names its levels is selectable without repeating them.
+        // An entry that names its levels is selectable without repeating them;
+        // `false` and `minimal` fold onto levels the host can save.
         assert_eq!(
             loaded.model_capabilities["deepseek"]["deepseek-flash"].reasoning_efforts,
-            vec!["low", "high", "max"]
+            vec!["none", "low", "high", "max"]
         );
         let view = catalog_view(&loaded);
         assert_eq!(view["models"][0]["context_window"], 1_048_576);
-        assert_eq!(view["models"][0]["capabilities"]["reasoning_efforts"], json!(["low","high","max"]));
+        assert_eq!(view["models"][0]["capabilities"]["reasoning_efforts"], json!(["none","low","high","max"]));
         assert_eq!(view["models"][1]["capabilities"]["reasoning_efforts"], json!(["none","low","medium","high","xhigh","max"]));
         assert_eq!(view["models"][1]["max_output_tokens"], 128_000);
         // Generation settings still win when they name their own levels.
@@ -2810,7 +2820,18 @@ mod tests {
             .unwrap();
         assert_eq!(
             deepseek["model_capabilities"]["deepseek-flash"]["reasoning_efforts"],
-            json!(["low","high","max"])
+            json!(["none","low","high","max"])
+        );
+        // A level list written by hand in the generation settings folds too,
+        // otherwise the screen would offer a level its own save rejects.
+        let mut aliased = read_yaml(&generation_settings_path(&path), json!({})).unwrap();
+        aliased["model_capabilities"]["deepseek"]["deepseek-flash"]["reasoning_efforts"] =
+            json!(["minimal", "nano", "false"]);
+        write_yaml_atomic(&generation_settings_path(&path), &aliased).unwrap();
+        let folded = load_config(&path).unwrap();
+        assert_eq!(
+            folded.model_capabilities["deepseek"]["deepseek-flash"].reasoning_efforts,
+            vec!["none", "low"]
         );
         let _ = std::fs::remove_dir_all(root);
     }

@@ -1,0 +1,96 @@
+x-app-environment: &app-environment
+  MYSQL_HOST: db
+  MYSQL_DATABASE: ai_ppt
+  MYSQL_USER: ai_ppt
+  MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Run deploy.sh init to generate .env}
+  JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?Run deploy.sh init to generate .env}
+  CUSTOMER_ADMIN_PASSWORD: ${CUSTOMER_ADMIN_PASSWORD:?Run deploy.sh init to generate .env}
+  REDIS_ADDR: redis:6379
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?Run deploy.sh init to generate .env}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  PPT_RENDER_URL: http://renderer:8787
+
+services:
+  db:
+    image: quickagent-customer-mysql-arm64:8.0
+    pull_policy: never
+    platform: linux/arm64
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ai_ppt
+      MYSQL_USER: ai_ppt
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Run deploy.sh init to generate .env}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes: ["mysql-data:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping --host=127.0.0.1 --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  redis:
+    image: quickagent-customer-redis-arm64:7
+    pull_policy: never
+    platform: linux/arm64
+    restart: unless-stopped
+    environment: {REDIS_PASSWORD: "${REDIS_PASSWORD}"}
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  renderer:
+    image: quickagent-customer-ppt-renderer-arm64:20261111
+    pull_policy: never
+    platform: linux/arm64
+    init: true
+    restart: unless-stopped
+    shm_size: 1gb
+    environment:
+      QUICKAGENT_ARM64_EMULATED: ${QUICKAGENT_ARM64_EMULATED:-0}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  init:
+    image: quickagent-customer-ppt-arm64:20261111
+    pull_policy: never
+    platform: linux/arm64
+    profiles: ["setup"]
+    environment: *app-environment
+    volumes: ["./state:/state"]
+    command: ["init"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  app:
+    image: quickagent-customer-ppt-arm64:20261111
+    pull_policy: never
+    platform: linux/arm64
+    init: true
+    restart: unless-stopped
+    environment: *app-environment
+    ports: ["${PPT_BIND:-0.0.0.0}:${PPT_PORT:-8899}:8899"]
+    volumes: ["./state:/state"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      renderer: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8899/prod-api/health/filing-worker',timeout=3)"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+volumes:
+  mysql-data:
+  redis-data:

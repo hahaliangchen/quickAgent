@@ -181,26 +181,76 @@ fn latest_all(conn: &rusqlite::Connection, task: &str) -> Result<Vec<(String, St
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-/// The chat's modules, listed for an AI that writes code: declaring one again
-/// with the same name, parameters and contract reuses it.
-pub(super) fn system_message(root: &Path, task: &str) -> Option<Value> {
-    let conn = agent_service::open_db(root).ok()?;
-    let modules = latest_all(&conn, task).ok()?;
-    if modules.is_empty() {
-        return None;
-    }
-    let declarations = modules
-        .iter()
+type Row = (String, String, String, String, i64, String);
+/// On a window's first message: the module list its requests carry.
+pub(super) const LISTED: &str = "_chat_modules";
+/// On an update message: the module versions it announces.
+pub(super) const ANNOUNCED: &str = "_modules";
+/// Modules saved or changed after the window's list was made.
+pub(super) const UPDATE: &str = "chat_modules_update";
+const REUSE: &str = "Declare the same signature and contract to reuse one: the host links its saved implementation automatically, with no file import. Each path is in the chat's flow folder, not the workspace, so io cannot open it: read the source with read_session_history({programs:true, program:\"modules/<file>\"}), adding version for an earlier one.";
+
+fn declarations<'a>(modules: impl Iterator<Item = &'a Row>) -> String {
+    modules
         .map(|(key, name, signature, description, version, _)| {
             let comment = description.lines().map(|line| format!("  // {line}")).collect::<Vec<_>>().join("\n");
             let path = file_name(name, key);
             format!("modules/{path} (version {version})\n/** @virtual */\n{signature} {{\n{comment}\n}}")
         })
         .collect::<Vec<_>>()
-        .join("\n\n");
-    Some(json!({"role":"system","name":"chat_modules","content":format!(
-        "Modules this chat already has. Declare the same signature and contract to reuse one: the host links its saved implementation automatically, with no file import. Each path is in the chat's flow folder, not the workspace, so io cannot open it: read the source with read_session_history({{programs:true, program:\"modules/<file>\"}}), adding version for an earlier one.\n\n{declarations}"
-    )}))
+        .join("\n\n")
+}
+fn listing(modules: &[Row]) -> Option<String> {
+    (!modules.is_empty()).then(|| format!("Modules this chat already has. {REUSE}\n\n{}", declarations(modules.iter())))
+}
+fn versions<'a>(modules: impl Iterator<Item = &'a Row>) -> Value {
+    Value::Object(modules.map(|module| (module.0.clone(), json!(module.4))).collect())
+}
+
+/// The chat's modules, listed for an AI that writes code: declaring one again
+/// with the same name, parameters and contract reuses it. A window keeps the
+/// list its first request carried (see `announce`); messages without one get
+/// the chat's current list.
+pub(super) fn system_message(root: &Path, task: &str, messages: &[Value]) -> Option<Value> {
+    let content = match messages.first().and_then(|first| first.get(LISTED)) {
+        Some(listed) => listed["content"].as_str().map(str::to_owned),
+        None => listing(&latest_all(&agent_service::open_db(root).ok()?, task).ok()?),
+    }?;
+    Some(json!({"role":"system","name":"chat_modules","content":content}))
+}
+
+/// Keep a window's module list as its first request sent it, and tell the AI
+/// about modules saved or changed since in a message at the end of the
+/// conversation. Rewriting the list in place changed the request before the
+/// whole conversation, and the provider's prompt cache missed all of it
+/// (2026-11-11: 8 new modules cost 500k input tokens, 16% of the missed
+/// input). What is announced is read from the messages still in the window,
+/// so an update that left with folded history is announced again.
+pub(super) fn announce(root: &Path, task: &str, messages: &mut Vec<Value>) {
+    let Some(modules) = agent_service::open_db(root).ok().and_then(|conn| latest_all(&conn, task).ok()) else {
+        return;
+    };
+    let Some(first) = messages.first_mut().filter(|first| first["role"] == "system") else {
+        return;
+    };
+    if first.get(LISTED).is_none() {
+        first[LISTED] = json!({"content":listing(&modules),"versions":versions(modules.iter())});
+        return;
+    }
+    let mut known = first[LISTED]["versions"].as_object().cloned().unwrap_or_default();
+    for message in messages.iter().filter(|message| message["name"] == UPDATE) {
+        known.extend(message[ANNOUNCED].as_object().cloned().unwrap_or_default());
+    }
+    let changed = modules.iter().filter(|module| known.get(&module.0).and_then(Value::as_i64) != Some(module.4)).collect::<Vec<_>>();
+    if changed.is_empty() {
+        return;
+    }
+    let mut update = host_message(json!({"name":UPDATE,"content":format!(
+        "Modules saved or changed in this chat since the earlier list; a version here replaces any earlier listing of the same module. {REUSE}\n\n{}",
+        declarations(changed.iter().copied())
+    )}));
+    update[ANNOUNCED] = versions(changed.iter().copied());
+    messages.push(update);
 }
 
 /// Make the chat folder hold the latest surviving version of each module,
@@ -303,6 +353,7 @@ fn libraries(s: &Session<'_>, w: &Window) -> crate::agent_program::libraries::Li
 
 fn compile(s: &Session<'_>, w: &Window, name: &str, source: &str) -> Result<()> {
     let program = crate::agent_program::compile_body_with_scope(source, name, libraries(s, w), Default::default())?;
+    crate::agent_program::uncalled_functions(source, Some(name))?;
     program_flow::validate_implementation(&program)
 }
 

@@ -130,6 +130,7 @@ Linux 的工作区执行模式使用 **bubblewrap** 限制命令对工作区外�
 - [Agent 设计](docs/agent-design-guide.md)：核心架构与设计原则。部分文档可能落后于代码，实际行为以当前实现为准。
 - [流程语言手册](docs/agent-program.md)：虚函数、模块、并发、工具与语法范围。
 - [桌面端](desktop/README.md)：Tauri 开发与打包。
+- [麒麟 ARM64 工具环境](docs/kylin-arm64-environment.md)：QuickAgent、AI PPT 与 PPTX 引擎的 Docker 工具链和依赖。
 - [技能插件包接口](docs/skill_packages.md)：技能和工具扩展方式。
 - [模型请求诊断](docs/model_request_diagnostics.md)：排查模型连接与请求阶段问题。
 - [旧版技术说明快照](README-technical.md)：保留改写前的详细说明；部分内容可能已过时。

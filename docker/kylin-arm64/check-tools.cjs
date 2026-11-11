@@ -1,0 +1,17 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+assert.equal(process.arch, 'arm64');
+assert.equal(process.versions.node.split('.')[0], '22');
+const { createCanvas, GlobalFonts } = require(process.env.PPT_SVG_CANVAS_MODULE);
+const families = GlobalFonts.families;
+assert((Buffer.isBuffer(families) ? families.toString() : JSON.stringify(families)).includes('Noto Sans CJK SC'), 'Missing Chinese font');
+const canvas = createCanvas(320, 100);
+const ctx = canvas.getContext('2d');
+ctx.fillStyle = 'white'; ctx.fillRect(0, 0, 320, 100);
+ctx.fillStyle = 'black'; ctx.font = '28px "Noto Sans CJK SC"';
+ctx.fillText('麒麟 ARM64 / PPT', 10, 55);
+const png = canvas.toBuffer('image/png');
+assert(png.length > 1000, 'Canvas produced an empty image');
+fs.writeFileSync(process.argv[2], png);
+require('jsdom'); require('playwright');
+console.log('Node ARM64, native Canvas, CJK fonts and PPT modules: OK');

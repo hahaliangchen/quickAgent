@@ -184,7 +184,7 @@ fn vm_stage3b_inherited_async_method_keeps_receiver_through_await() {
 #[test]
 fn vm_stage3a_strict_this_and_method_receivers() {
     assert_eq!(returned(runtime("function main(){function receiver(){return this;}const a={n:7,receiver},b={n:9,receiver};const plain=a.receiver;return [this===undefined,receiver()===undefined,plain()===undefined,a.receiver()===a,b['receiver']()===b,(a.receiver)()===a,receiver.call(null)===null,receiver.call(3)===3,receiver.call('x')==='x'];}")),json!([true,true,true,true,true,true,true,true,true]));
-    let mut top=runtime("console.log(this===undefined);");
+    let mut top=top_level("console.log(this===undefined);");
     assert!(matches!(top.next(),State::Returned(_)));
     assert_eq!(top.logs(),["true"]);
 }
@@ -922,23 +922,28 @@ fn compile(source: &str) -> anyhow::Result<Program> {
     );
     compile_with_libraries(source, bindings)
 }
-/// The function a test drives: its `main` function when it declares one and
-/// has no top-level statements, otherwise the top-level program.
-fn entry_of(program: &Program) -> &'static str {
-    let top_level = program.functions[ENTRY].code.len() > 1;
-    if !top_level && program.functions.contains_key("main") { "main" } else { ENTRY }
-}
+/// Most of these tests drive one function by name, as the host drives a
+/// module implementation's entry: `main` is called with the arguments and its
+/// return value is the result. Nothing is guessed: JavaScript calls no function
+/// by itself, and a program's own top-level statements run with `top_level`.
 fn start(source: &str, args: Vec<Value>) -> Runtime {
-    let program = compile(source).unwrap();
-    let entry = entry_of(&program);
-    Runtime::new(program, entry, args).unwrap()
+    Runtime::new(compile(source).unwrap(), "main", args).unwrap()
 }
 fn start_task(program: Program, args: Vec<Value>) -> Runtime {
-    let entry = entry_of(&program);
-    Runtime::task_program(program, entry, args).unwrap()
+    Runtime::task_program(program, "main", args).unwrap()
 }
 fn runtime(source: &str) -> Runtime {
     start(source, vec![])
+}
+/// A program as the host runs one: its top-level statements, in order.
+fn top_level(source: &str) -> Runtime {
+    top_level_with(source, vec![])
+}
+fn top_level_with(source: &str, args: Vec<Value>) -> Runtime {
+    Runtime::new(compile(source).unwrap(), ENTRY, args).unwrap()
+}
+fn top_level_task(program: Program) -> Runtime {
+    Runtime::task_program(program, ENTRY, vec![]).unwrap()
 }
 fn returned(mut r: Runtime) -> Value {
     match r.next() {
@@ -2648,7 +2653,7 @@ judge(ppt);"#).unwrap();
 fn a_name_the_source_binds_shadows_a_library_it_did_not_import() {
     // Without imports the host's libraries are in scope by name, but a
     // variable the source declares is its own, as in plain JavaScript.
-    let mut run = runtime("const io = require(\"io\");\nconst text = io.read({path: \"a\"});\nconst echo = io.echo({});");
+    let mut run = top_level("const io = require(\"io\");\nconst text = io.read({path: \"a\"});\nconst echo = io.echo({});");
     let State::Action(action) = run.next() else { panic!("io is required at its line") };
     assert!(matches!(&action.kind, ActionKind::Require { library } if library == "io"));
     run.resume(json!({"library":"io","methods":{"read":"read_file"}}), false).unwrap();
@@ -2867,7 +2872,7 @@ fn caller_can_reject_an_inspection_result_for_a_different_input() {
 fn functions_share_module_variables_and_cannot_see_their_callers_locals() {
     // A top-level function and the top-level flow share one module binding.
     let source = "let count = 0; function bump(){ count++; return count; } bump(); bump(); test.record({count});";
-    let mut run = start(source, vec![json!(null)]);
+    let mut run = top_level_with(source, vec![json!(null)]);
     assert!(matches!(
         run.next(),
         State::Action(Action { kind: ActionKind::Tool { name, args }, .. })
@@ -3101,7 +3106,7 @@ fn model_written_five_page_acceptance_flow_compiles() {
 #[test]
 fn model_written_five_page_acceptance_flow_runs_with_recorded_receipts() {
     let source = include_str!("fixtures/model-five-page-acceptance.js");
-    let mut run = start_task(compile(source).unwrap(), vec![]);
+    let mut run = top_level_task(compile(source).unwrap());
     let pages = ["01-overview", "02-program-flow", "03-task-context", "04-parallel-agents", "05-verification"];
     let requirements: Vec<_> = pages.iter().enumerate().map(|(i, page)| json!({
         "file": format!("agent-design-html/{page}.html"), "purpose": "Document the design",
@@ -3283,7 +3288,7 @@ function main(){ try { throw {message:'bad'}; } catch ({message, code = 4}) { re
 #[test]
 fn m4_defaults_do_not_see_body_var_bindings() {
     let source = "const x=9;function read(a=x){var x=1;return a;}io.write({path:'out',content:String(read())});";
-    let mut run = start(source, vec![json!({})]);
+    let mut run = top_level_with(source, vec![json!({})]);
     assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Tool { ref args, .. }, .. }) if args["content"] == "9"));
     run = serde_json::from_value(serde_json::to_value(run).unwrap()).unwrap();
     run.resume(json!({}), false).unwrap();
@@ -3298,7 +3303,7 @@ fn m4_parameter_closures_keep_parameter_environment() {
     assert_eq!(returned(run), json!([2,1]));
     assert_eq!(returned(runtime("function f(a=1){function a(){return 3;}return a();}function main(){return f();}")), json!(3));
     let source = "const x=9;const f=function self(get=()=>self){var self=1;return get()===f;};io.write({path:'result',content:String(f())});";
-    let mut run = start(source, vec![json!({})]);
+    let mut run = top_level_with(source, vec![json!({})]);
     assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Tool { ref args, .. }, .. }) if args["content"] == "true"));
     run = serde_json::from_value(serde_json::to_value(run).unwrap()).unwrap();
     run.resume(json!({}), false).unwrap();
@@ -3308,7 +3313,7 @@ fn m4_parameter_closures_keep_parameter_environment() {
 #[test]
 fn m4_parameter_initializer_can_suspend_before_body_scope() {
     let source = "const path='outer';function read(a=io.read({path})){let path='inner';return [a.content,path];}io.write({path:'result',content:JSON.stringify(read())});";
-    let mut run = start(source, vec![json!({})]);
+    let mut run = top_level_with(source, vec![json!({})]);
     assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Tool { ref args, .. }, .. }) if args["path"] == "outer"));
     run = serde_json::from_value(serde_json::to_value(run).unwrap()).unwrap();
     run.resume(json!({"content":"ok"}), false).unwrap();
@@ -3537,7 +3542,7 @@ await write({path:"result.txt",content:result.text});
 /** @virtual Review the provided data and return {text:string}. */
 async function inspect(data) { throw new Error("Host must provide inspect"); }
 "#;
-    let mut run = start(source, vec![Value::Null]);
+    let mut run = top_level_with(source, vec![Value::Null]);
     assert!(
         matches!(run.next(), State::Action(a) if matches!(a.kind, ActionKind::Call { ref name, ref args, .. } if name == "inspect" && args[0] == "data"))
     );
@@ -4020,7 +4025,7 @@ const result = caller();
  */
 function judge(x) {}
 "#;
-    let mut run = runtime(source);
+    let mut run = top_level(source);
     let State::Action(action) = run.next() else { panic!("expected the virtual call") };
     let ActionKind::Call { name, args, captured } = action.kind else { panic!("expected a call") };
     assert_eq!((name.as_str(), args), ("judge", vec![json!("x")]));
@@ -4041,7 +4046,7 @@ await pending;
  */
 async function judge(x) {}
 "#;
-    let mut run = runtime(source);
+    let mut run = top_level(source);
     let crate::agent_program::runtime::ConcurrentState::Actions(actions) = run.next_concurrent() else { panic!("expected the async call") };
     let ActionKind::Call { captured, .. } = &actions[0].kind else { panic!("expected a call") };
     assert_eq!(captured["note"], json!("BEFORE"), "read when called, not when the host runs it");
@@ -4070,7 +4075,7 @@ function outer() {
 }
 const r = outer();
 "#;
-    let mut run = runtime(source);
+    let mut run = top_level(source);
     let State::Action(action) = run.next() else { panic!("expected the virtual task") };
     let ActionKind::Call { args, captured, .. } = action.kind else { panic!("expected inner") };
     assert_eq!(args, vec![json!("x")]);
@@ -4100,7 +4105,7 @@ const result = outer();
  */
 function draft(y) {}
 "#;
-    let mut run = runtime(source);
+    let mut run = top_level(source);
     let State::Action(first) = run.next() else { panic!("expected draft") };
     assert!(matches!(&first.kind, ActionKind::Call { name, .. } if name == "draft"));
     run.resume(json!("DRAFT"), false).unwrap();
@@ -4120,7 +4125,7 @@ const log = console.info;
 log({done: true}, null, undefined, "end");
 const result = console.error("x") === undefined;
 "#;
-    let mut run = runtime(source);
+    let mut run = top_level(source);
     while !matches!(run.next(), State::Returned(_) | State::Failed(_)) {}
     assert_eq!(run.logs(), [
         r#"found 2 files: [{"path":"a.txt"},{"path":"b.txt"}]"#,
@@ -4132,7 +4137,7 @@ const result = console.error("x") === undefined;
 
 #[test]
 fn console_retains_large_lines_without_a_character_cutoff() {
-    let mut run = runtime("console.log('页'.repeat(99999)); console.log('x'.repeat(100001));");
+    let mut run = top_level("console.log('页'.repeat(99999)); console.log('x'.repeat(100001));");
     assert!(matches!(run.next(), State::Returned(_)));
     assert_eq!(run.logs()[0].chars().count(), 99_999);
     assert_eq!(run.logs()[1].chars().count(), 100_001);
@@ -4194,4 +4199,25 @@ fn synchronous_library_method_returns_plain_value_regardless_of_function_type() 
     run.resume(json!({"slides":3}),false).unwrap();
     let error = returned(run);
     assert!(error.as_str().is_some_and(|s|s.contains("then") && s.contains("not a function")),"{error}");
+}
+
+/// 2026-11-11: eighteen programs declared `async function main()` and never
+/// called it, so each finished at once with nothing done.
+#[test]
+fn a_declared_function_nothing_calls_is_named_before_it_runs() {
+    use super::uncalled_functions;
+    let uncalled = uncalled_functions("async function main() { console.log(1); }", None).unwrap_err().to_string();
+    assert!(uncalled.contains("TS_PROGRAM 1:16") && uncalled.contains("main") && uncalled.contains("await main();"), "{uncalled}");
+    assert!(uncalled_functions("async function main() { console.log(1); }\nawait main();", None).is_ok());
+    // Any function, nested ones included, not only main.
+    let nested = uncalled_functions("function outer() { function helper() {} return 1; }\nconsole.log(outer());", None).unwrap_err().to_string();
+    assert!(nested.contains("helper"), "{nested}");
+    // Passed on as a value counts as used; a property named like it does not.
+    assert!(uncalled_functions("function pick(x) { return x; }\nconsole.log([1].map(pick));", None).is_ok());
+    assert!(uncalled_functions("function save() {}\nconst o = { save: 1 }; console.log(o.save);", None).is_err());
+    // A module's entry is called by the host; its unused helper is not.
+    assert!(uncalled_functions("async function summarize(paths) { return paths; }", Some("summarize")).is_ok());
+    let helper = uncalled_functions("async function summarize(paths) { return paths; }\nfunction unused() {}", Some("summarize")).unwrap_err().to_string();
+    assert!(helper.contains("unused") && helper.contains("only summarize"), "{helper}");
+    assert!(uncalled_functions("export function api() {}", None).is_ok());
 }

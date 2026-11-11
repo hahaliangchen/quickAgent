@@ -235,7 +235,10 @@ pub(super) fn scheduled_function_task(
     ensure!(layer <= 2,
         "VIRTUAL_LAYER_LIMIT: {name} would enter AI layer {layer}; layer 2 is a terminal judgment/tool loop and cannot create more AI work. Ordinary JS helpers do not add a layer.");
     if function.virtual_task {
-        if layer == 1 {
+        if layer == 1 && !function.module_task && super::main_virtual_leaves() {
+            task["role"] = json!("leaf");
+            task["module"] = json!(false);
+        } else if layer == 1 {
             ensure!(captured.is_empty(), "FIRST_LAYER_ARGUMENTS_REQUIRED: pass inputs to {name} as parameters; first-layer implementations do not capture caller variables");
             task["role"] = json!("implement");
             task["module"] = json!(true);
@@ -351,11 +354,12 @@ fn probe_libraries(s: &Session<'_>, definitions: &[Value]) -> agent_program::lib
     static_libraries(s, definitions)
 }
 pub(super) fn find_main_tool() -> Value {
-    function(FIND, "Search by keywords for a library method needed for this task. Matching methods become callable until your program starts. Permissions are unchanged.",
+    function(FIND, "Search by keywords for a library method needed for this task. Matches are methods for program code, called by their method name; your own tools stay as they are. Permissions are unchanged.",
         json!({"query":{"type":"string","minLength":1}}), json!(["query"]))
 }
 /// Tools the main AI can call directly, in addition to conversation tools.
-/// Other library methods can be discovered without expanding permissions.
+/// Other library methods can be discovered without expanding permissions;
+/// they are for its programs.
 pub(super) const FAMILIAR: [&str; 14] = [
     "read_file",
     "read_file_lines",
@@ -372,11 +376,13 @@ pub(super) const FAMILIAR: [&str; 14] = [
     "image_analysis_results",
     "read_attachment",
 ];
-/// Those methods and the ones the main AI found, which leave with its
-/// context when the program starts.
-pub(super) fn familiar(messages: &[Value]) -> BTreeSet<String> {
+/// Those methods, the same for every request of a window. What the main AI
+/// finds is not added: a tool list that changed mid-window changed the
+/// request ahead of the whole conversation, and the provider's prompt cache
+/// missed all of it (2026-11-11: 7 changes cost 737k input tokens, 24% of the
+/// missed input, for found methods the main AI never called itself).
+pub(super) fn familiar() -> BTreeSet<String> {
     let mut tools = FAMILIAR.iter().map(|tool| (*tool).to_owned()).collect::<BTreeSet<_>>();
-    tools.extend(found_tools(messages));
     tools.retain(|tool| !crate::project_process::is_execution(tool));
     tools
 }
@@ -536,7 +542,11 @@ pub(super) fn find(s: &Session<'_>, w: &Window, args: &Value) -> Result<Value> {
             method["setup_needed"] = json!(note);
         }
     }
-    Ok(json!({"methods":methods}))
+    let mut found = json!({"methods":methods});
+    if role(w) == Role::Main {
+        found["use"] = json!("Call a method from program code by its method name. These are not added to your own tools.");
+    }
+    Ok(found)
 }
 /// Files a function wrote successfully: write calls recorded under its frame,
 /// whether its AI or its program made them, whose results were not errors.
@@ -752,9 +762,14 @@ fn install_with(
     );
     let source = args["source"].as_str().context("source is required")?;
     let mut program = agent_program::compile_with_libraries(source, libraries)?;
+    agent_program::uncalled_functions(source, None)?;
     // The first layer declares capabilities. The host resolves their code;
     // the author need not choose an implementation file or a second marker.
     for (name, function) in &mut program.functions {
+        // Experiment: an explicit @virtual stays a leaf the main program calls.
+        if function.virtual_task && !function.module_task && super::main_virtual_leaves() {
+            continue;
+        }
         if function.virtual_task {
             ensure!(function.uses.is_empty(),
                 "FIRST_LAYER_ARGUMENTS_REQUIRED: pass inputs to {name} as parameters instead of @uses; the host links its implementation independently");
@@ -822,6 +837,7 @@ pub(super) fn install_body_with(
         libraries,
         scope.keys().cloned().collect(),
     )
+    .and_then(|program| agent_program::uncalled_functions(script.as_deref().unwrap_or(source), Some(name)).map(|()| program))
     .map_err(|error| {
         // Say exactly which function the code belongs in.
         let message = format!("{error:#}");
@@ -1673,7 +1689,7 @@ mod tests {
             json!({"role":"assistant","tool_calls":[{"id":"found","function":{"name":FIND}}]}),
             json!({"role":"tool","tool_call_id":"found","content":json!({"methods":[{"tool":"exec_command"},{"tool":"run_program"}]}).to_string()}),
         ];
-        assert!(!familiar(&messages).iter().any(|tool| crate::project_process::is_execution(tool)));
+        assert!(!familiar().iter().any(|tool| crate::project_process::is_execution(tool)));
         let leaf = Window { program_task: Some(json!({"role":"leaf","leaf_tools":["exec_command","run_program","get_project_process"]})),
             messages, ..Default::default() };
         assert!(!shell_code_allowed(&s, &leaf));
@@ -2314,7 +2330,8 @@ mod tests {
                 "leaf" => {
                     let n = rounds.fetch_add(1, Ordering::SeqCst);
                     assert!(n < 40, "the host must end the leaf instead of folding its context");
-                    let call = json!({"id":format!("read-{n}"),"type":"function","function":{"name":"read_file","arguments":json!({"path":"a.txt"}).to_string()}});
+                    // force_read: a repeated read of unchanged lines is otherwise only a pointer.
+                    let call = json!({"id":format!("read-{n}"),"type":"function","function":{"name":"read_file","arguments":json!({"path":"a.txt","force_read":true}).to_string()}});
                     json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[call]}}]})
                 }
                 other => panic!("unexpected role {other}"),
@@ -2555,6 +2572,46 @@ mod tests {
 
     /// 2026-11-11: io.read gave program code an AI's 60,000-character page;
     /// every module author probed several times to learn to page a file.
+    /// 2026-11-11: a review re-read about a quarter of what it had read, and
+    /// every later request carried both copies.
+    #[tokio::test]
+    async fn reading_again_what_is_still_in_context_returns_a_pointer() {
+        let root=TestRoot::new();
+        let state=agent_service::tests::test_state(root.path(),"127.0.0.1:9".parse().unwrap());
+        let cancel=CancellationToken::new();
+        let s=execution_test_session(&state,&cancel);
+        agent_service::open_db(root.path()).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",[]).unwrap();
+        let workspace=crate::session_browser::task_workspace(root.path(),"task").unwrap();
+        std::fs::write(workspace.join("notes.txt"),"one\ntwo\nthree\nfour\n").unwrap();
+        let mut w=Window::default();
+        let definitions=super::super::tools(&s,&w);
+        async fn read_into(s: &Session<'_>, w: &mut Window, definitions: &[Value], id: &str, name: &str, args: Value) -> Value {
+            let call=crate::model_stream::ToolCall{call_id:id.into(),name:name.into(),arguments:args.to_string()};
+            let executed=super::super::execute_call(s,w,definitions,"node",1,&call,1,None).await.unwrap();
+            // As the loop delivers it: tagged with its asset while loaded.
+            if let Some(reference)=&executed.asset_reference {
+                w.messages.push(crate::context_assets::tagged(json!({"role":"tool","tool_call_id":id,"content":executed.result.to_string()}),reference));
+            }
+            executed.result
+        }
+        let first=read_into(&s,&mut w,&definitions,"r1","read_file",json!({"path":"notes.txt"})).await;
+        assert!(first["content"].as_str().unwrap().contains("three"),"{first}");
+        let again=read_into(&s,&mut w,&definitions,"r2","read_file",json!({"path":"notes.txt"})).await;
+        assert_eq!(again["unchanged"],true,"{again}");
+        assert!(again.get("content").is_none(),"no second copy");
+        let part=read_into(&s,&mut w,&definitions,"r3","read_file_lines",json!({"path":"notes.txt","start_line":2,"end_line":3})).await;
+        assert_eq!(part["unchanged"],true,"lines inside an earlier read: {part}");
+        let forced=read_into(&s,&mut w,&definitions,"r4","read_file",json!({"path":"notes.txt","force_read":true})).await;
+        assert!(forced["content"].as_str().is_some(),"force_read gets the text: {forced}");
+        std::fs::write(workspace.join("notes.txt"),"one\nTWO\nthree\nfour\n").unwrap();
+        let changed=read_into(&s,&mut w,&definitions,"r5","read_file_lines",json!({"path":"notes.txt","start_line":2,"end_line":2})).await;
+        assert!(changed.get("unchanged").is_none() && changed["content"].as_str().unwrap().contains("TWO"),"a changed file is read: {changed}");
+        // Released from context, it comes back in full.
+        for message in w.messages.iter_mut() { message["_asset_state"]=json!("released"); }
+        let released=read_into(&s,&mut w,&definitions,"r6","read_file",json!({"path":"notes.txt"})).await;
+        assert!(released["content"].as_str().is_some(),"{released}");
+    }
+
     #[tokio::test]
     async fn program_code_reads_a_whole_file_in_one_call() {
         let root=TestRoot::new();
@@ -3521,6 +3578,149 @@ mod tests {
         }
         let systems = first.iter().take_while(|m| m["role"] == "system").count();
         assert_eq!(first[systems - 1]["name"], "chat_modules", "the growing module list comes last among the system messages");
+    }
+
+    /// The 2026-11-11 run after the three fixes above: each module saved
+    /// mid-turn still rewrote the module list ahead of the whole conversation
+    /// (8 times, 16% of the missed input). The window keeps the list its
+    /// first request carried, and later modules arrive at the end.
+    #[tokio::test]
+    async fn a_module_saved_mid_turn_is_announced_after_the_conversation() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("a.txt"), "alpha").unwrap();
+        std::fs::write(root.path().join("b.txt"), "beta").unwrap();
+        let save = |root: &std::path::Path, key: &str, name: &str, version: i64| {
+            let conn = agent_service::open_db(root).unwrap();
+            super::super::modules::schema(&conn).unwrap();
+            conn.execute("INSERT INTO agent_modules VALUES ('task',1,?1,?2,?3,'Return {text}.',?4,'',0,?4)",
+                rusqlite::params![key, name, format!("async function {name}(word)"), version]).unwrap();
+        };
+        save(root.path(), "k1", "shout", 1);
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let (log, folder) = (bodies.clone(), root.path().to_path_buf());
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            let read = |path: &str| json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                "tool_calls":[{"id":path,"type":"function","function":{"name":"read_file","arguments":json!({"path":path}).to_string()}}]}}]});
+            match log.len() {
+                1 => {
+                    // While the first reply is on its way, a new module and a
+                    // new version of the listed one are saved.
+                    save(&folder, "k2", "whisper", 1);
+                    save(&folder, "k1", "shout", 2);
+                    read("a.txt")
+                }
+                2 => read("b.txt"),
+                _ => reply("Done.".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 3);
+        let messages = |n: usize| bodies[n]["messages"].as_array().unwrap().clone();
+        let (first, second, third) = (messages(0), messages(1), messages(2));
+        let listed = first.iter().find(|m| m["name"] == "chat_modules").expect("the window lists the chat's modules");
+        assert!(listed["content"].as_str().unwrap().contains("(version 1)\n/** @virtual */\nasync function shout(word)"), "{listed}");
+        assert_eq!(&second[..first.len()], &first[..], "new modules leave everything already sent as it was");
+        assert_eq!(&third[..second.len()], &second[..], "and the announcement stays where it was made");
+        let updates = |messages: &[Value]| messages.iter().filter(|m| m["name"] == "chat_modules_update").cloned().collect::<Vec<_>>();
+        assert!(updates(&first).is_empty());
+        let update = match &updates(&second)[..] {
+            [update] => update.clone(),
+            other => panic!("one announcement expected: {other:?}"),
+        };
+        assert_eq!(second.last(), Some(&update), "it follows the conversation");
+        assert_eq!(update["role"], "user");
+        let said = serde_json::from_str::<Value>(update["content"].as_str().unwrap()).unwrap();
+        assert_eq!(said["not_a_user_request"], true);
+        let text = said["content"].as_str().unwrap();
+        assert!(text.contains("(version 1)\n/** @virtual */\nasync function whisper(word)"), "{text}");
+        assert!(text.contains("(version 2)\n/** @virtual */\nasync function shout(word)"), "{text}");
+        assert!(update.get("_modules").is_none() && first[0].get("_chat_modules").is_none(), "host bookkeeping stays off the wire");
+        assert_eq!(updates(&third).len(), 1, "a module is announced once");
+    }
+
+    /// The same run: the index of saved material outside the request was
+    /// rebuilt as each request's last message, about 1,200 tokens the cache
+    /// never held on 57% of requests. It now says only what is new, once.
+    #[tokio::test]
+    async fn saved_material_outside_the_request_is_indexed_once() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("a.txt"), "alpha").unwrap();
+        std::fs::write(root.path().join("b.txt"), "beta").unwrap();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let (log, folder) = (bodies.clone(), root.path().to_path_buf());
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            let call = |id: &str, name: &str, args: Value| json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                "tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]}}]});
+            match log.len() {
+                1 => call("a", "read_file", json!({"path":"a.txt"})),
+                2 => {
+                    let asset: String = agent_service::open_db(&folder).unwrap()
+                        .query_row("SELECT asset_id FROM agent_context_assets WHERE task_id='task'", [], |r| r.get(0)).unwrap();
+                    call("release", "release_assets", json!({"asset_ids":[asset],"reason":"read"}))
+                }
+                3 => call("b", "read_file", json!({"path":"b.txt"})),
+                _ => reply("Done.".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 4);
+        let messages = |n: usize| bodies[n]["messages"].as_array().unwrap().clone();
+        let indexes = |n: usize| messages(n).into_iter().filter(|m| m["name"] == "task_asset_index").collect::<Vec<_>>();
+        assert!(indexes(0).is_empty() && indexes(1).is_empty(), "what was read is in the request");
+        let index = match &indexes(2)[..] {
+            [index] => index.clone(),
+            other => panic!("one index expected once the file left the context: {other:?}"),
+        };
+        assert_eq!(messages(2).last(), Some(&index));
+        assert!(index.get("_assets").is_none(), "host bookkeeping stays off the wire");
+        let listed = serde_json::from_str::<Value>(index["content"].as_str().unwrap()).unwrap();
+        assert_eq!(listed["assets"].as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed["assets"][0]["source_path"], "a.txt", "{listed}");
+        let (third, fourth) = (messages(2), messages(3));
+        assert_eq!(&fourth[..third.len()], &third[..], "the index stays where it was sent");
+        assert_eq!(indexes(3), [index], "and is not sent again while nothing new is saved");
+    }
+
+    /// The same run: methods the main AI found joined its tools and left
+    /// again when its program started. Each change sent a different tool list
+    /// ahead of the whole conversation (7 times, 24% of the missed input),
+    /// and the main AI never called one of them itself.
+    #[tokio::test]
+    async fn what_the_main_ai_finds_leaves_its_tools_as_they_were() {
+        let root = TestRoot::new();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            let call = |id: &str, name: &str, args: Value| json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                "tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]}}]});
+            match log.len() {
+                1 => call("find", FIND, json!({"query":"memory"})),
+                2 => {
+                    let found = serde_json::from_str::<Value>(body["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap()).unwrap();
+                    let own = tool_names(body);
+                    let other = found["methods"].as_array().unwrap().iter().filter_map(|m| m["tool"].as_str())
+                        .find(|tool| !own.contains(&(*tool).to_owned())).expect("the search reaches methods beyond the main AI's own tools");
+                    assert!(found["use"].as_str().unwrap().contains("program code"), "{found}");
+                    call("direct", other, json!({}))
+                }
+                _ => reply("Done.".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 3);
+        assert_eq!(bodies[1]["tools"], bodies[0]["tools"], "finding methods changes no tool");
+        assert_eq!(bodies[2]["tools"], bodies[0]["tools"]);
+        let messages = |n: usize| bodies[n]["messages"].as_array().unwrap().clone();
+        assert_eq!(&messages(1)[..messages(0).len()], &messages(0)[..], "and nothing already sent");
+        assert_eq!(&messages(2)[..messages(1).len()], &messages(1)[..]);
+        let refused = messages(2).last().unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(refused.contains("TOOL_UNAVAILABLE") && refused.contains("program code"), "a found method is for programs: {refused}");
     }
 
     /// The 2026-11-11 run: a write_program call was cut off with 30104 of

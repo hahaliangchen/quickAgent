@@ -1,0 +1,52 @@
+[
+  {
+    "name": "node-v22.22.1-linux-arm64.tar.xz",
+    "url": "https://nodejs.org/dist/v22.22.1/node-v22.22.1-linux-arm64.tar.xz",
+    "sha256": "0f3550d58d45e5d3cf7103d9e3f69937f09fe82fb5dd474c66a5d816fa58c9ee"
+  },
+  {
+    "name": "go1.27.1.linux-arm64.tar.gz",
+    "url": "https://go.dev/dl/go1.27.1.linux-arm64.tar.gz",
+    "sha256": "3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec"
+  },
+  {
+    "name": "Python-3.12.11.tgz",
+    "url": "https://www.python.org/ftp/python/3.12.11/Python-3.12.11.tgz",
+    "sha256": "7b8d59af8216044d2313de8120bfc2cc00a9bd2e542f15795e1d616c51faf3d6"
+  },
+  {
+    "name": "rustup-init",
+    "url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init",
+    "sha256": "e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c"
+  },
+  {
+    "name": "wasm-pack-v0.15.1-aarch64-unknown-linux-musl.tar.gz",
+    "url": "https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.15.1/wasm-pack-v0.15.1-aarch64-unknown-linux-musl.tar.gz",
+    "sha256": "7004853c7925ae1984033b5f25866ec604bbc921ef956d5e6c5595bc5af6d30c"
+  },
+  {
+    "name": "ripgrep-15.1.0-aarch64-unknown-linux-gnu.tar.gz",
+    "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-aarch64-unknown-linux-gnu.tar.gz",
+    "sha256": "2b661c6ef508e902f388e9098d9c4c5aca72c87b55922d94abdba830b4dc885e"
+  },
+  {
+    "name": "libstdcxx-14.3.0-hef695bb_20.conda",
+    "url": "https://conda.anaconda.org/conda-forge/linux-aarch64/libstdcxx-14.3.0-hef695bb_20.conda",
+    "sha256": "54a7da766b1e8a7636358cd0ea7a7b0525a1a7ddb0ac9e6ce6f7fa361cf43fd1"
+  },
+  {
+    "name": "libgcc-14.3.0-h8acb6b2_20.conda",
+    "url": "https://conda.anaconda.org/conda-forge/linux-aarch64/libgcc-14.3.0-h8acb6b2_20.conda",
+    "sha256": "2290ab4234ebdf84608733a98bea1fbfb7211f1f5f7a2429405d40fd6b03c2e8"
+  },
+  {
+    "name": "NotoSansCJKsc-Regular.otf",
+    "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+    "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+  },
+  {
+    "name": "NotoCJK-LICENSE",
+    "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/LICENSE",
+    "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+  }
+]

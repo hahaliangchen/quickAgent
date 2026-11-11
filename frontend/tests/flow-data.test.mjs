@@ -24,3 +24,14 @@ test('cyclic diagrams remain finite and keep all nodes', () => {
   const data=parseFlowData(JSON.stringify({nodes:[{id:'a',label:'A'},{id:'b',label:'B'}],edges:[{source:'a',target:'b'},{source:'b',target:'a'}]}))
   assert.equal(layoutFlowData(data).size,2)
 })
+
+// 2026-11-11: four wrapped labels fed one check box; the fixed 85px rows put
+// the box under them and the edges took the long way round.
+test('layers clear the tallest wrapped label above them', () => {
+  const label = n => `agent-generation.yml: model_capabilities.qwen-local (${n} 行)`
+  const data = parseFlowData(JSON.stringify({nodes:[{id:'a',label:label(20)},{id:'b',label:label(58)},{id:'c',label:'短'},{id:'e',label:'YAML 重新解析校验'}],edges:[{source:'a',target:'e'},{source:'b',target:'e'},{source:'c',target:'e'}]}))
+  const p = layoutFlowData(data)
+  for (const id of ['a','b','c']) assert.ok(p.get(id).y + p.get(id).height < p.get('e').y, `${id} ends above the check`)
+  assert.ok(p.get('a').height > p.get('c').height, 'a wrapped label is taller')
+  assert.equal(p.get('e').level - p.get('a').level, 1)
+})

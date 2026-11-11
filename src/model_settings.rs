@@ -9,6 +9,34 @@ pub const DEFAULT_MAX_OUTPUT: usize = 32_768;
 /// Sanity ceiling for a declared context window. Real vendor values stay far
 /// below it; it only rejects a nonsensical declaration.
 pub const MAX_CONTEXT_WINDOW: usize = 2_000_000;
+/// Reasoning levels the host accepts, in picker order. A model entry may name
+/// other keys; they are folded into these by [`canonical_effort`] so a declared
+/// level is always one the settings screen can save and a request can send.
+pub const REASONING_EFFORTS: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
+
+/// The accepted level a declared one stands for, or `None` when the host has no
+/// equivalent. `minimal` maps to `low` because both reach the wire as `low`:
+/// thinking is never off, so the lowest level is the floor.
+pub fn canonical_effort(level: &str) -> Option<&'static str> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "false" | "off" | "none" => Some("none"),
+        "minimal" | "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => None,
+    }
+}
+
+/// Folds a declared level list onto the accepted ones, in picker order and
+/// without duplicates; keys the host cannot send are dropped.
+pub fn canonical_efforts(levels: &[String]) -> Vec<String> {
+    let mut folded: Vec<&str> = levels.iter().filter_map(|level| canonical_effort(level)).collect();
+    folded.sort_by_key(|level| REASONING_EFFORTS.iter().position(|known| known == level));
+    folded.dedup();
+    folded.into_iter().map(str::to_owned).collect()
+}
 
 /// A model's own declared context window. An entry that declares nothing falls
 /// back to the conservative default instead of silently capping a real window.
@@ -18,16 +46,33 @@ pub fn context_window(state: &AgentServiceState, model: &str) -> usize {
         .min(MAX_CONTEXT_WINDOW)
 }
 
-fn declared_context_window(state: &AgentServiceState, model: &str) -> Option<usize> {
-    state
-        .provider_routes
-        .get(&state.provider_name)
-        .and_then(|route| {
-            route
-                .context_windows
-                .get(route.models.get(model).map(String::as_str).unwrap_or(model))
+/// A vendor keys its declarations by its own model id while a request may name
+/// either side of an alias mapping, so look the alias up in both directions.
+fn declared<'a, V>(
+    table: &'a std::collections::HashMap<String, V>,
+    aliases: &'a std::collections::HashMap<String, String>,
+    model: &str,
+) -> Option<&'a V> {
+    let upstream = aliases.get(model).map(String::as_str).unwrap_or(model);
+    table
+        .get(upstream)
+        .or_else(|| table.get(model))
+        .or_else(|| {
+            aliases
+                .iter()
+                .find(|(_, mapped)| mapped.as_str() == model)
+                .and_then(|(local, _)| table.get(local))
         })
-        .copied()
+}
+
+fn declared_context_window(state: &AgentServiceState, model: &str) -> Option<usize> {
+    let route = state.provider_routes.get(&state.provider_name)?;
+    declared(&route.context_windows, &route.models, model).copied()
+}
+
+fn declared_max_output(state: &AgentServiceState, model: &str) -> Option<usize> {
+    let route = state.provider_routes.get(&state.provider_name)?;
+    declared(&route.max_output_tokens, &route.models, model).copied()
 }
 
 pub fn input_budget(state: &AgentServiceState, model: &str) -> usize {
@@ -45,12 +90,7 @@ pub fn output_tokens(
     input_budget: usize,
     input: usize,
 ) -> usize {
-    let declared = state
-        .provider_routes
-        .get(&state.provider_name)
-        .and_then(|route| route.max_output_tokens.get(model))
-        .copied()
-        .unwrap_or(DEFAULT_MAX_OUTPUT);
+    let declared = declared_max_output(state, model).unwrap_or(DEFAULT_MAX_OUTPUT);
     let capacity = input_budget.saturating_add(OUTPUT_RESERVE.min(input_budget / 3));
     declared
         .min(
@@ -104,10 +144,15 @@ impl ModelSettings {
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty());
         }
+        // An alias written by hand (`false`, `minimal`) is folded onto the level
+        // it stands for; a level the host cannot send is still refused.
+        if let Some(level) = self.reasoning_effort.as_deref().and_then(canonical_effort) {
+            self.reasoning_effort = Some(level.to_owned());
+        }
         ensure!(
             self.reasoning_effort
                 .as_deref()
-                .is_none_or(|s| matches!(s, "none" | "low" | "medium" | "high" | "xhigh" | "max")),
+                .is_none_or(|s| REASONING_EFFORTS.contains(&s)),
             "unsupported reasoning effort"
         );
         ensure!(
@@ -208,6 +253,11 @@ mod tests {
         assert_ne!(main.provider_name, routed.provider_name);
         assert_eq!(
             output_tokens(&routed, "mapped-model", 231_424, 1_000),
+            64_000
+        );
+        // The alias a request names resolves to the same declared limit.
+        assert_eq!(
+            output_tokens(&routed, "alias", 231_424, 1_000),
             64_000
         );
         assert_eq!(
@@ -317,5 +367,49 @@ mod tests {
         };
         assert!(beyond_ceiling.normalize().is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn a_declared_level_is_folded_onto_one_the_host_accepts() {
+        assert_eq!(canonical_effort(" minimal "), Some("low"));
+        assert_eq!(canonical_effort("LOW"), Some("low"));
+        assert_eq!(canonical_effort("false"), Some("none"));
+        assert_eq!(canonical_effort("off"), Some("none"));
+        assert_eq!(canonical_effort("max"), Some("max"));
+        assert_eq!(canonical_effort("nano"), None);
+        assert_eq!(canonical_effort(""), None);
+        // Every folded level is storable, so a model entry can never leave the
+        // settings screen with a value it refuses to save.
+        for level in ["minimal", "false", "off", "none", "low", "max"] {
+            let mut settings = ModelSettings {
+                reasoning_effort: canonical_effort(level).map(str::to_owned),
+                ..Default::default()
+            };
+            settings.normalize().unwrap();
+            assert_eq!(settings.reasoning_effort.as_deref(), canonical_effort(level));
+        }
+        // A hand-written level list folds in picker order, unknown keys dropped.
+        assert_eq!(
+            canonical_efforts(&[
+                "max".to_owned(),
+                "minimal".to_owned(),
+                "false".to_owned(),
+                "nano".to_owned(),
+                "high".to_owned(),
+            ]),
+            vec!["none", "low", "high", "max"]
+        );
+        assert!(canonical_efforts(&[]).is_empty());
+        // A stored alias is folded instead of failing the whole settings load.
+        let mut aliased = ModelSettings {
+            reasoning_effort: Some(" minimal ".to_owned()),
+            ..Default::default()
+        };
+        aliased.normalize().unwrap();
+        assert_eq!(aliased.reasoning_effort.as_deref(), Some("low"));
+        let mut unknown = ModelSettings {
+            reasoning_effort: Some("nano".to_owned()),
+            ..Default::default()
+        };
+        assert!(unknown.normalize().is_err());
     }
 }

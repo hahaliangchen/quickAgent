@@ -29,8 +29,28 @@ export function parseFlowData(source: string): FlowData | null {
   } catch { return null }
 }
 
-/** Place a directed graph in layers. Cyclic remainders keep their supplied order. */
-export function layoutFlowData(flow: FlowData): Map<string, {x:number; y:number}> {
+/** Node box width the diagram draws; layout and rendering share it. */
+export const FLOW_NODE_WIDTH = 190
+const LINE_HEIGHT = 20
+const TEXT_WIDTH = FLOW_NODE_WIDTH - 28
+const ROW_GAP = 56
+const COLUMN_GAP = 50
+
+/** A node's drawn height: its label wrapped at the box width (wide CJK, narrow Latin) plus padding. */
+export function flowNodeHeight(label: string): number {
+  const lines = label.split('\n').reduce((total, line) => {
+    const width = [...line].reduce((sum, char) => sum + (/[\u2e80-\u9fff\uff00-\uffef]/.test(char) ? 14 : 7.6), 0)
+    return total + Math.max(1, Math.ceil(width / TEXT_WIDTH))
+  }, 0)
+  return lines * LINE_HEIGHT + 27
+}
+
+/**
+ * Place a directed graph in layers. Each layer sits below the tallest box of
+ * the one above, so wrapped labels never overlap. Cyclic remainders keep
+ * their supplied order.
+ */
+export function layoutFlowData(flow: FlowData): Map<string, {x:number; y:number; level:number; height:number}> {
   const incoming = new Map(flow.nodes.map(node => [node.id, 0]))
   const levels = new Map(flow.nodes.map(node => [node.id, 0]))
   const outgoing = new Map(flow.nodes.map(node => [node.id, [] as string[]]))
@@ -44,9 +64,16 @@ export function layoutFlowData(flow: FlowData): Map<string, {x:number; y:number}
       if (incoming.get(target) === 0) queue.push(target)
     }
   }
+  const labels = new Map(flow.nodes.map(node => [node.id, node.label]))
   const groups = new Map<number, string[]>()
   for (const node of flow.nodes) { const level=levels.get(node.id)!; groups.set(level, [...groups.get(level) ?? [],node.id]) }
-  const result = new Map<string, {x:number;y:number}>()
-  for (const [level, ids] of groups) ids.forEach((id, index) => result.set(id,{x:(index-(ids.length-1)/2)*240,y:level*85}))
+  const result = new Map<string, {x:number;y:number;level:number;height:number}>()
+  let top = 0
+  for (const level of [...groups.keys()].sort((a, b) => a - b)) {
+    const ids = groups.get(level)!
+    const heights = ids.map(id => flowNodeHeight(labels.get(id)!))
+    ids.forEach((id, index) => result.set(id, {x:(index-(ids.length-1)/2)*(FLOW_NODE_WIDTH+COLUMN_GAP), y:top, level, height:heights[index]!}))
+    top += Math.max(...heights) + ROW_GAP
+  }
   return result
 }

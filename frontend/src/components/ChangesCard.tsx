@@ -45,6 +45,8 @@ export function ChangesCard({
 
   const rows = expanded ? data.files : data.files.slice(0, INITIAL_VISIBLE_COUNT)
   const remainingCount = data.files.length - INITIAL_VISIBLE_COUNT
+  // Counts that the server could only estimate keep the totals marked as such.
+  const approximate = useMemo(() => data.files.some(f => !f.reverted && f.coarse), [data.files])
 
   const totalAdded = useMemo(
     () => data.files.reduce((sum, f) => sum + (f.reverted ? 0 : f.added), 0),
@@ -160,7 +162,7 @@ export function ChangesCard({
                 {data.reverted ? '已撤销' : '已编辑'} {data.total} 个文件
               </span>
               <div className={css.totals}>
-                <span className={css.totalAdd}>+{totalAdded}</span>
+                {approximate && <small className={css.coarse} title="部分文件过大，行数为估算值">约</small>}<span className={css.totalAdd}>+{totalAdded}</span>
                 <span className={css.totalDel}>-{totalDeleted}</span>
               </div>
             </div>
@@ -219,11 +221,10 @@ export function ChangesCard({
                     <span className={css.fileStatNotice}>二进制</span>
                   ) : (
                     <>
-                      <span className={css.fileAdd}>+{file.added}</span>
-                      <span className={css.fileDel}>-{file.deleted}</span>
+                      <span className={css.fileAdd}>{file.coarse ? '约+' : '+'}{file.added}</span>
+                      <span className={css.fileDel}>{file.coarse ? '约-' : '-'}{file.deleted}</span>
                     </>
                   )}
-                  {file.coarse && <small className={css.coarse}> 粗略</small>}
                 </div>
               </button>
             )

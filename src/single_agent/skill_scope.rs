@@ -43,9 +43,12 @@ fn text(s: &Session<'_>, library: &str) -> Option<(String, String)> {
     let content = result.1["content"].as_str().filter(|text| !text.trim().is_empty())?.to_owned();
     Some((result.0, content))
 }
-/// Skills whose instructions this context already has: those its AI read.
+/// On a host message: the skill whose instructions it delivered.
+pub(super) const DELIVERED: &str = "_skill";
+/// Skills whose instructions this context already has: those its AI read and
+/// those the host delivered.
 fn loaded(messages: &[Value]) -> BTreeSet<String> {
-    messages
+    let read = messages
         .iter()
         .filter(|m| m[crate::context_assets::REFERENCE]["source_tool"] == "read_skill")
         .filter_map(|m| {
@@ -53,8 +56,9 @@ fn loaded(messages: &[Value]) -> BTreeSet<String> {
                 let parsed = serde_json::from_str::<Value>(m["content"].as_str()?).ok()?;
                 parsed.pointer("/original_result/skill").or_else(|| parsed.get("skill"))?.as_str().map(str::to_owned)
             })
-        })
-        .collect()
+        });
+    let delivered = messages.iter().filter_map(|m| m[DELIVERED].as_str().map(str::to_owned));
+    read.chain(delivered).collect()
 }
 /// The libraries the code this request's AI is responsible for references,
 /// and how to say so: the program or module it wrote, the module it fixes, or
@@ -94,9 +98,21 @@ fn referenced(role: &str, messages: &[Value]) -> (Vec<String>, &'static str) {
         }
     }
 }
-/// System messages with the instructions of the libraries the code this
-/// request's AI is responsible for references, except those it already has.
-pub(super) fn instructions(s: &Session<'_>, role: &str, messages: &[Value]) -> Vec<Value> {
+/// Give the AI the instructions of the libraries the code it is responsible
+/// for references, except those its window already has, in messages at the
+/// end of the conversation that stay in its history like a read_skill result.
+/// Inserting them among the system messages, and dropping them when the code
+/// no longer required the library, changed the request before the whole
+/// conversation, and the provider's prompt cache missed all of it (2026-11-10:
+/// twice, 29k and 37k input tokens with 6k cached). What was delivered is read
+/// from the messages still in the window, so instructions that left with
+/// folded history are delivered again while the code still requires them.
+pub(super) fn announce(s: &Session<'_>, messages: &mut Vec<Value>) {
+    let role = program_flow::request_role(messages);
+    let delivered = instructions(s, role, messages);
+    messages.extend(delivered);
+}
+fn instructions(s: &Session<'_>, role: &str, messages: &[Value]) -> Vec<Value> {
     let (libraries, reason) = referenced(role, messages);
     if libraries.is_empty() {
         return Vec::new();
@@ -112,9 +128,11 @@ pub(super) fn instructions(s: &Session<'_>, role: &str, messages: &[Value]) -> V
         .into_iter()
         .filter_map(|library| {
             let (skill, content) = text(s, &library)?;
-            present.insert(skill).then(|| {
-                json!({"role":"system","name":"skill_instructions",
-                    "content":format!("Instructions of the {library} library, which {reason}:\n\n{content}")})
+            present.insert(skill.clone()).then(|| {
+                let mut message = host_message(json!({"name":"skill_instructions",
+                    "content":format!("Instructions of the {library} library, which {reason}:\n\n{content}")}));
+                message[DELIVERED] = json!(skill);
+                message
             })
         })
         .collect()
