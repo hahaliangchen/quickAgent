@@ -2,7 +2,7 @@
 
 `web` 是宿主内置库，普通工具循环和 JavaScript 编排共用。搜索服务独立于对话模型：切换聊天模型不会切换搜索凭据。首个后端使用 [DeepSeek 官方 Search/Fetch API](https://api-docs.deepseek.com/guides/search/)。
 
-在“设置 → 工具 → 联网搜索”选择一个已配置的官方 DeepSeek 提供商，例如“DeepSeek 自用”，然后保存。Key 继续保存在已有本机凭据存储中；工具参数与返回值不包含 Key。未选择时调用会明确返回 `WEB_NOT_CONFIGURED`，不会自动选择其他账号。
+在“设置 → 专用模型 → 联网搜索 → 搜索凭据”选择一个已配置的官方 DeepSeek 提供商，例如“DeepSeek 自用”，然后保存。Key 继续保存在已有本机凭据存储中；工具参数与返回值不包含 Key。未选择时调用会明确返回 `WEB_NOT_CONFIGURED`，不会自动选择其他账号。
 
 可用方法：
 

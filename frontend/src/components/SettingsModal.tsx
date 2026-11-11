@@ -941,13 +941,14 @@ export function SettingsModal({
                 <div className={appearanceCss.block}>
                   <div className={appearanceCss.label}>插件可用模型</div>
                   <div className={appearanceCss.group}>
-                    {[...packages,...Object.keys(draft.plugin_models).filter(id=>!packages.some(p=>p.id===id)).map(id=>({id,title:`${id}（尚未连接）`}))].map(plugin=>{
+                    {[...packages,...Object.keys(draft.plugin_models).filter(id=>!packages.some(p=>p.id===id)).map(id=>({id,title:`${id} 插件（尚未连接）`}))].map(plugin=>{
                       const selected=draft.plugin_models[plugin.id]
                       const setModels=(models:readonly ModelRef[]|undefined)=>{const next={...draft.plugin_models};if(models===undefined)delete next[plugin.id];else next[plugin.id]=models;updateDraft({plugin_models:next})}
                       return <div key={plugin.id} className={appearanceCss.item}>
                         <div className={appearanceCss.row}>
                           <div className={appearanceCss.rowText}>
-                            <span className={appearanceCss.rowTitle}>{plugin.title || plugin.id}</span>
+                            {/* Named as the plugin, so "联网搜索" here is not mistaken for its credential setting under 专用模型. */}
+                            <span className={appearanceCss.rowTitle}>{(t=>t.includes('插件')?t:`${t} 插件`)(plugin.title || plugin.id)}</span>
                             <span className={appearanceCss.rowHint}>{selected===undefined?'未限制，可使用全部模型':`仅允许 ${selected.length} 个模型`}</span>
                           </div>
                           <Switch

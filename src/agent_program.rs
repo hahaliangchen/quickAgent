@@ -23,7 +23,7 @@ mod values;
 
 #[cfg(test)]
 pub use compiler::{compile, compile_body, compile_entry};
-pub use compiler::{compile_body_with_scope, compile_with_libraries, required_libraries};
+pub use compiler::{compile_body_with_scope, compile_with_libraries, probe_as_entry, required_libraries};
 pub use runtime::{Action, Runtime, State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -256,6 +256,9 @@ pub enum Effect {
 #[cfg(test)]
 pub const SKILL: &str = include_str!("../skills/task-program/SKILL.md");
 pub const ENVIRONMENT: &str = include_str!("../prompts/flow_environment.md");
+/// Said wherever the runtime lacks something code reached for: a rewrite
+/// by hand runs as slow VM loops, so the gap is reported and filled by the host.
+pub const NOT_AVAILABLE_HINT: &str = "Do not hand-write a replacement: use the built-ins in read_program_guide or a host library, take another permitted route, or report this capability as missing in your result.";
 pub const CAPABILITIES: &str = include_str!("../prompts/flow_capabilities.md");
 pub const BUILTIN_CONTRACTS: &str = include_str!("../prompts/flow_builtin_contracts.d.ts");
 

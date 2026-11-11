@@ -88,12 +88,13 @@ fn save_binding(
 ) -> Result<()> {
     schema(root)?;
     crate::agent_service::open_db(root)?.execute(
-        "INSERT INTO remote_plugin_sessions VALUES (?1,?2,?3,?4)",
+        "INSERT INTO remote_plugin_sessions VALUES (?1,?2,?3,?4) ON CONFLICT(task_id) DO NOTHING",
         params![task, plugin, c.subject, c.url()],
     )?;
-    active().write().unwrap().insert(task.into(), c.clone());
+    check_binding(root, task, plugin, c)?;
     Ok(())
 }
+
 fn check_binding(
     root: &std::path::Path,
     task: &str,
@@ -393,26 +394,29 @@ async fn handle(
             .as_str()
             .or_else(|| args["task_id"].as_str())
         {
-            let conversation = if binding(state.workspace.root(), task)?.is_none() {
+            let exists: bool = crate::agent_service::open_db(state.workspace.root())?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_tasks WHERE id=?1)", [task], |r| r.get(0),
+            )?;
+            ensure!(exists, "Session not found in this Agent database; start a new conversation");
+            let (conversation, extra) = if binding(state.workspace.root(), task)?.is_none() {
                 // An existing plugin-owned chat may predate remote bindings.
                 // Only the authenticated plugin can authorize its adoption.
                 crate::plugin_sessions::check(state.workspace.root(), task, plugin)?;
-                c.rpc(
+                let extra = c.rpc(
                     "plugin/session",
                     json!({"method":"open","arguments":args,"context":context(task,task)}),
                 )
                 .await?;
                 save_binding(state.workspace.root(), task, plugin, &c)?;
-                task.to_owned()
+                (task.to_owned(), extra)
             } else {
-                check_binding(state.workspace.root(), task, plugin, &c)?
-            };
-            let extra = c
-                .rpc(
+                let conversation = check_binding(state.workspace.root(), task, plugin, &c)?;
+                let extra = c.rpc(
                     "plugin/session",
                     json!({"method":"open","arguments":args,"context":context(task,&conversation)}),
-                )
-                .await?;
+                ).await?;
+                (conversation, extra)
+            };
             return Ok(Json(json!({"task_id":conversation,"plugin_state":extra})).into_response());
         }
         let response = crate::plugin_sessions::handle(
@@ -611,6 +615,16 @@ mod tests {
         active().write().unwrap().remove(task);
         let opened=value(handle(&runtime,state.clone(),"notes-test","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"task_id":task,"method":"open"})).await.unwrap()).await;
         assert_eq!(opened["task_id"], task);
+        // A stale business link must not fabricate a replacement chat under
+        // the original ID. History remains authoritative in the Agent database.
+        let error = handle(&runtime,state.clone(),"notes-test","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"task_id":"lost-chat","method":"open"})).await.unwrap_err();
+        assert!(error.to_string().contains("Session not found"));
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM agent_tasks WHERE id='lost-chat'", [], |r|r.get::<_,i64>(0)).unwrap(), 0);
+        // Existing host chats can never be claimed using recovery, even when
+        // the remote service would otherwise accept the supplied identifier.
+        db.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('host-chat','','fake','draft',0,0)",[]).unwrap();
+        assert!(handle(&runtime,state.clone(),"notes-test","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"task_id":"host-chat","method":"open"})).await.is_err());
+        assert!(crate::plugin_sessions::owner(&root,"host-chat").unwrap().is_none());
         runtime.shutdown().unwrap();
         server.abort();
         drop(db);

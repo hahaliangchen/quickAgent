@@ -13,7 +13,7 @@ pub(super) const RESUME: &str = "resume_previous_program";
 const PAUSED: &str = "paused";
 
 pub(super) fn resume_tool() -> Value {
-    function(RESUME, "Continue the program the user's message paused, from the step where it stopped, and return its return value. A paused program that is not resumed by the end of this turn is discarded.",
+    function(RESUME, "Continue the paused program from the step where it stopped, and return its return value. A program the user's message paused is discarded at the end of the turn unless resumed; one paused because it needed the user is kept through the next turn, and resuming retries the blocked step.",
         json!({}), json!([]))
 }
 
@@ -111,8 +111,10 @@ pub(super) fn step_label(action: &Action) -> String {
 }
 
 /// Move the main window's program into a paused frame of its own and leave the
-/// main AI free to answer the user. Returns where the program stopped.
-pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window) -> Result<String> {
+/// main AI free to answer the user. Returns where the program stopped. A
+/// program paused for a blocker is kept through the next turn, where the user
+/// has had the chance to resolve it.
+pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window, blocked: bool) -> Result<String> {
     program_flow::recover(s, w).await?;
     let stopped_at = stop_point(s, w)?;
     let runtime = w.program.take().context("no running program to pause")?;
@@ -138,6 +140,9 @@ pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window) -> Result<String
         node.metadata["parallel_owner"] = json!(node.node_id);
         node.metadata["file_write_clock"] = json!(clock);
         node.metadata["previous"] = json!(true);
+        if blocked {
+            node.metadata["kept_through_turn"] = json!(turn + 1);
+        }
         node.status = PAUSED.into();
         tree::emit(&tx, &task, "task/node_paused", &mut node, turn)?;
         let scope = tree::frame_scope(&node);
@@ -224,10 +229,26 @@ pub(super) async fn resume(s: &Session<'_>, w: &Window) -> Result<Option<(Value,
         Ok((at, frame, previous_id))
     })
     .await?;
-    let mut session = s.clone();
-    session.scope = start_scope;
-    session.task_node_id = frame.task_node_id.clone();
-    let result = Box::pin(run_loop(&session, &mut frame, 80, false)).await;
+    // It runs as a task of its own, like a concurrent call: polled in place,
+    // each resumed level would add a whole loop to the caller's stack, and a
+    // program resumed inside a resumed one overflowed it. The set ends the
+    // task if this call is dropped.
+    let (state, task, model, cancel) = (s.state.clone(), s.task.to_owned(), s.model.to_owned(), s.cancel.clone());
+    let (agent_id, plugin, parent) = (s.agent_id.clone(), s.plugin.clone(), s.parent.clone());
+    let (turn, ban_execution, input_budget) = (s.turn, s.ban_execution, s.input_budget);
+    let mut resumed = tokio::task::JoinSet::new();
+    resumed.spawn(async move {
+        let session = Session { agent_id, task_node_id: frame.task_node_id.clone(), plugin, state: &state, task: &task,
+            model: &model, turn, cancel: &cancel, ban_execution, scope: start_scope, parent, input_budget };
+        let result = run_loop(&session, &mut frame, 80, false).await;
+        (result, frame)
+    });
+    let (result, frame) = resumed.join_next().await.context("resumed program task missing")?.context("resumed program task failed")?;
+    // The user stopped the turn while it ran: its frames stay as they are and
+    // it is kept with the program that was resuming it (design guide §7.4).
+    if s.cancel.is_cancelled() {
+        anyhow::bail!("cancelled");
+    }
     let (task, turn, scope) = (s.task.to_owned(), s.turn, w.resumable.clone().unwrap_or_default());
     let returned = match &result {
         Ok(LoopResult::Answer) if is_previous(&frame) => frame.program_value.clone(),
@@ -290,19 +311,100 @@ async fn discard_frame(s: &Session<'_>, root: &str) -> Result<()> {
     .await
 }
 
-/// At the end of a turn, programs paused and not resumed are discarded.
-pub(super) async fn discard_unresumed(s: &Session<'_>, w: &mut Window) -> Result<()> {
+/// The frames of programs a blocker paused, kept for the next turn: the
+/// turn's final cleanup leaves their state as it is.
+pub(crate) fn kept_scopes(conn: &rusqlite::Connection, task: &str) -> Result<BTreeSet<String>> {
+    let nodes = tree::nodes(conn, task)?;
+    Ok(nodes.iter()
+        .filter(|node| node.metadata["previous"] == true && node.metadata["kept_through_turn"].is_u64()
+            && matches!(node.status.as_str(), "running" | "suspended" | PAUSED))
+        .flat_map(|root| chain(&nodes, &root.node_id))
+        .map(|node| tree::frame_scope(&node))
+        .collect())
+}
+
+/// Whether a window's program has asked to resume the paused one and has not
+/// got its result yet.
+pub(super) fn resumes_previous(w: &Window) -> bool {
+    w.program.as_ref().is_some_and(|runtime| {
+        runtime.pending.iter().cloned().chain(runtime.inflight_actions())
+            .any(|action| matches!(&action.kind, ActionKind::Tool { name, .. } if name == RESUME))
+    })
+}
+
+/// Keep a paused program through the next turn, with its frames as they are.
+/// A turn the user stopped does not use up the one turn it is kept for.
+pub(super) async fn keep_through_next_turn(s: &Session<'_>, scope: &str) -> Result<()> {
+    let (task, turn, scope) = (s.task.to_owned(), s.turn, scope.to_owned());
+    db(s.state.workspace.root(), move |conn| {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let root = tree::nodes(&tx, &task)?.into_iter().find(|node| node.metadata["previous"] == true && tree::frame_scope(node) == scope
+            && matches!(node.status.as_str(), "running" | "suspended" | PAUSED));
+        if let Some(mut root) = root {
+            root.metadata["kept_through_turn"] = json!(turn + 1);
+            tree::emit(&tx, &task, "task/node_paused", &mut root, turn)?;
+            mark_paused(&tx, &task, &root.node_id, turn)?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+    .await
+}
+
+/// A kept program this host cannot read back, because another version of the
+/// host saved it, is discarded before the turn starts. Returns what the main
+/// AI is told, so it does not write a program that resumes nothing.
+pub(super) async fn drop_unreadable(s: &Session<'_>, w: &mut Window) -> Result<Option<String>> {
+    let Some(scope) = w.resumable.clone() else { return Ok(None) };
     let task = s.task.to_owned();
-    let paused = db(s.state.workspace.root(), move |conn| {
-        Ok(tree::nodes(conn, &task)?.into_iter()
+    let unreadable = db(s.state.workspace.root(), move |conn| {
+        let nodes = tree::nodes(conn, &task)?;
+        let Some(root) = nodes.iter().find(|node| node.metadata["previous"] == true && tree::frame_scope(node) == scope) else { return Ok(None) };
+        for member in chain(&nodes, &root.node_id) {
+            if !matches!(member.status.as_str(), "running" | "suspended" | PAUSED) {
+                continue;
+            }
+            let raw: Option<String> = conn
+                .query_row("SELECT state FROM agent_runtime_windows WHERE task_id=?1 AND scope=?2", params![task, tree::frame_scope(&member)], |r| r.get(0))
+                .optional()?;
+            let readable = match raw {
+                Some(raw) => serde_json::from_str::<Window>(&raw).is_ok_and(|frame| {
+                    frame.program.as_ref().is_none_or(|runtime| runtime.program.version == crate::agent_program::VERSION)
+                }),
+                None => member.node_id != root.node_id,
+            };
+            if !readable {
+                return Ok(Some(root.node_id.clone()));
+            }
+        }
+        Ok(None)
+    })
+    .await?;
+    let Some(root) = unreadable else { return Ok(None) };
+    discard_frame(s, &root).await?;
+    w.resumable = None;
+    save(s, w).await?;
+    append(s, "program/kept_unreadable", json!({"turn":s.turn,"frame":root}), false).await?;
+    Ok(Some("The program kept from the previous turn was saved by a different version of the host and cannot be read back, so it was discarded: previous.resume() is not available. The steps it finished are in the conversation history; write a new program for what remains.".into()))
+}
+
+/// At the end of a turn, programs paused and not resumed are discarded; one
+/// paused for a blocker this turn waits for the next.
+pub(super) async fn discard_unresumed(s: &Session<'_>, w: &mut Window) -> Result<()> {
+    let (task, turn) = (s.task.to_owned(), s.turn as u64);
+    let (paused, kept) = db(s.state.workspace.root(), move |conn| {
+        let (kept, paused): (Vec<_>, Vec<_>) = tree::nodes(conn, &task)?.into_iter()
             .filter(|node| node.metadata["previous"] == true && matches!(node.status.as_str(), "running" | "suspended" | PAUSED))
-            .map(|node| node.node_id).collect::<Vec<_>>())
+            .partition(|node| node.metadata["kept_through_turn"].as_u64().is_some_and(|last| last > turn));
+        Ok((paused.into_iter().map(|node| node.node_id).collect::<Vec<_>>(), kept.into_iter().map(|node| tree::frame_scope(&node)).collect::<Vec<_>>()))
     })
     .await?;
     for root in &paused {
         discard_frame(s, root).await?;
     }
-    if w.resumable.take().is_some() {
+    let resumable = w.resumable.clone().filter(|scope| kept.contains(scope));
+    if w.resumable != resumable {
+        w.resumable = resumable;
         save(s, w).await?;
     }
     Ok(())

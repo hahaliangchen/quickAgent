@@ -11,6 +11,42 @@ use std::{
 
 pub const FILE_LIMIT: usize = 16 * 1024 * 1024;
 const CACHE_LIMIT: usize = 64 * 1024 * 1024;
+/// The largest page an AI receives, and the page it gets when it names none.
+pub const PAGE_CHARS: u64 = 60_000;
+const DEFAULT_PAGE_CHARS: u64 = 24_000;
+/// Program code gets a read as a JS value, not as AI context, so one page
+/// holds a whole ordinary file: every file within the default max_bytes fits.
+/// 2026-11-11: six saved modules each paged 60,000 characters at a time.
+pub const PROGRAM_PAGE_CHARS: u64 = 2_000_000;
+/// Marks a read made by program code. Only the host sets it: every entry that
+/// takes arguments from a caller removes it first (`unmark`).
+pub const PROGRAM_READ: &str = "$program_read";
+
+/// Drop the host's own marks from arguments a caller supplied.
+pub fn unmark(args: &mut Value) {
+    if let Some(object) = args.as_object_mut() {
+        object.remove(PROGRAM_READ);
+    }
+}
+/// Mark a source read as made by program code.
+pub fn mark_program_read(name: &str, args: &mut Value) {
+    if is_source_read(name)
+        && let Some(object) = args.as_object_mut()
+    {
+        object.insert(PROGRAM_READ.into(), json!(true));
+    }
+}
+/// The paging sentence of a source read's contract, as an AI calling the tool
+/// reads it or as program code does.
+pub fn page_note(program: bool) -> String {
+    if program {
+        format!(
+            "In program code the content is a JS value, not AI context: without max_chars one call returns the whole file or requested range (complete:true) up to {PROGRAM_PAGE_CHARS} characters, so a file within max_bytes needs no paging loop."
+        )
+    } else {
+        format!("max_chars defaults to {DEFAULT_PAGE_CHARS}, max {PAGE_CHARS}.")
+    }
+}
 #[derive(Clone, PartialEq, Eq)]
 struct Stamp {
     size: u64,
@@ -204,10 +240,12 @@ pub fn page(result: &mut Value, args: &Value) -> io::Result<()> {
         )));
     }
     let until = until.min(material_end);
-    let budget = args["max_chars"]
-        .as_u64()
-        .unwrap_or(24_000)
-        .clamp(1000, 60_000) as usize;
+    let (default, most) = if args[PROGRAM_READ] == true {
+        (PROGRAM_PAGE_CHARS, PROGRAM_PAGE_CHARS)
+    } else {
+        (DEFAULT_PAGE_CHARS, PAGE_CHARS)
+    };
+    let budget = args["max_chars"].as_u64().unwrap_or(default).clamp(1000, most) as usize;
     if args["start_line"].as_u64() == Some(0) || args["end_line"].as_u64() == Some(0) {
         return Err(io::Error::other("line numbers start at 1"));
     }
@@ -271,9 +309,9 @@ pub fn page(result: &mut Value, args: &Value) -> io::Result<()> {
         }
     }
     if count > 0 && end < from {
-        return Err(io::Error::other(
-            "source_line_exceeds_page_budget: raise max_chars up to 60000 or use another focused range",
-        ));
+        return Err(io::Error::other(format!(
+            "source_line_exceeds_page_budget: raise max_chars up to {most} or use another focused range"
+        )));
     }
     let page = if count == 0 {
         String::new()
@@ -320,4 +358,53 @@ pub fn is_source_read(name: &str) -> bool {
             | "read_go_symbol"
             | "read_python_symbol"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paged(content: &str, args: Value) -> Value {
+        let mut result = json!({"content":content});
+        page(&mut result, &args).unwrap();
+        result
+    }
+
+    /// 2026-11-11: program code got an AI's 60,000-character page, and six
+    /// saved modules each wrote their own paging loop to read one file.
+    #[test]
+    fn program_code_reads_a_whole_file_and_an_ai_keeps_its_page() {
+        let content = "0123456789abcdefghi\n".repeat(10_000);
+        let ai = paged(&content, json!({"path":"a.md","max_chars":400_000}));
+        assert_eq!(ai["complete"], false);
+        assert_eq!(ai["returned_chars"], 60_000);
+        assert_eq!(ai["next_start_line"], 3001);
+
+        let program = paged(&content, json!({"path":"a.md", PROGRAM_READ:true}));
+        assert_eq!(program["complete"], true);
+        assert_eq!(program["content"].as_str().unwrap(), content);
+        assert!(program["next_start_line"].is_null());
+
+        // A program that asks for pages still gets them.
+        let asked = paged(&content, json!({"path":"a.md","max_chars":60_000, PROGRAM_READ:true}));
+        assert_eq!((asked["complete"].clone(), asked["returned_chars"].clone()), (json!(false), json!(60_000)));
+
+        // Past the program's own limit the same paging fields continue the read.
+        let huge = "0123456789abcdefghi\n".repeat(150_000);
+        let first = paged(&huge, json!({"path":"a.md", PROGRAM_READ:true}));
+        assert_eq!(first["complete"], false);
+        assert_eq!(first["returned_chars"], PROGRAM_PAGE_CHARS);
+        assert_eq!(first["next_start_line"], 100_001);
+    }
+
+    #[test]
+    fn only_the_host_marks_a_program_read() {
+        let mut supplied = json!({"path":"a.md", PROGRAM_READ:true});
+        unmark(&mut supplied);
+        assert_eq!(supplied, json!({"path":"a.md"}));
+        mark_program_read("search_text", &mut supplied);
+        assert_eq!(supplied, json!({"path":"a.md"}), "only source reads are marked");
+        mark_program_read("read_file", &mut supplied);
+        assert_eq!(supplied[PROGRAM_READ], true);
+    }
 }

@@ -16,6 +16,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod blockers;
 #[cfg(test)]
 mod documented_examples;
 mod function_scope;
@@ -73,6 +74,14 @@ struct Window {
     resumed: Option<(Value, bool)>,
     #[serde(default)]
     token_calibration: crate::context_window::TokenCalibration,
+    // Identical failures this turn, for noticing a call that keeps failing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    failures: BTreeMap<String, u32>,
+    #[serde(default)]
+    failure_turn: usize,
+    // The blocker the main AI was told to report, with its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocked: Option<(usize, Value)>,
 }
 impl Window {
     fn input_tokens(&self, s: &Session<'_>, body: &Value) -> usize {
@@ -615,7 +624,13 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     // leaf only calls its tools.
     if role != "leaf" {
         if code_shell_context(s) {
-        let shell = crate::shell_environment::description();
+        let mut shell = crate::shell_environment::description();
+        // When the host last checked the shell means nothing to the model,
+        // and its changing value made the provider's prompt cache miss
+        // everything after this message.
+        if let Some(shell) = shell.as_object_mut() {
+            shell.remove("cache");
+        }
         let project = crate::session_browser::task_workspace(s.state.workspace.root(), s.task)
             .ok().and_then(|path| crate::tools::Workspace::new(path).ok());
         let workspace = project.as_ref().unwrap_or(&s.state.workspace)
@@ -637,7 +652,11 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
         let libraries = program_flow::static_libraries(s, definitions);
         let mut headers = crate::agent_program::declarations::directory(&libraries);
         headers.push_str(&crate::agent_program::declarations::core_methods(&libraries, definitions));
-        headers.push_str(&crate::agent_program::declarations::third_party_index(&program_flow::requirable(s, definitions)));
+        let requirable = program_flow::requirable(s, definitions);
+        headers.push_str(&crate::agent_program::declarations::third_party_index(&requirable));
+        for (library, note) in program_flow::setup_notes(libraries.keys().chain(requirable.keys())) {
+            headers.push_str(&format!("// Library {library}: {note}\n"));
+        }
         for (skill, library) in program_flow::skill_library_names(s) {
             headers.push_str(&format!("// Skill ID {}: use read_skill with this ID for instructions; library {} is used with require.\n", serde_json::to_string(&skill).unwrap(), serde_json::to_string(&library).unwrap()));
         }
@@ -695,12 +714,22 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
         {
             frame_node = active.node_id;
         }
+        // Only material that is not in this request needs pointing at. Listing
+        // what is already here changed the request's last message every step,
+        // and the provider's prompt cache missed it every time (2026-11-11:
+        // about 930 tokens a request, 11% of the missed input).
         match crate::context_assets::frame_index(
             s.state.workspace.root(),
             s.task,
             &frame_node,
             messages,
-        ) {
+        )
+        .map(|mut index| {
+            if let Some(items) = index["assets"].as_array_mut() {
+                items.retain(|item| item["in_context"] != true);
+            }
+            index
+        }) {
             Ok(index)
                 if index["assets"]
                     .as_array()
@@ -733,10 +762,14 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
         wire.insert(1.min(wire.len()), message);
     }
     // An AI that writes code can reuse the modules this chat already has.
+    // The list grows during a turn, so it goes after the other system
+    // messages: a new module then leaves their prefix to the provider's
+    // prompt cache instead of invalidating everything after the role prompt.
     if matches!(role, "main" | "implement")
         && let Some(message) = modules::system_message(s.state.workspace.root(), s.task)
     {
-        wire.insert(1.min(wire.len()), message);
+        let after_system = wire.iter().take_while(|m| m["role"] == "system").count();
+        wire.insert(after_system, message);
     }
     for message in &mut wire {
         if let Some(object) = message.as_object_mut() {
@@ -1113,7 +1146,7 @@ async fn model_round(
             .observe(&calibration_route(s), estimate(&body), actual);
         append(s, "context/model_usage", json!({"turn":s.turn,"step":step,"request_node_id":node,
             "raw_estimated_input_tokens":estimate(&body),"calibrated_input_tokens":w.input_tokens(s,&body),
-            "usage":usage,"input_budget":s.input_budget}), false).await?;
+            "usage":usage,"input_budget":s.input_budget,"max_tokens":body["max_tokens"]}), false).await?;
     }
     // While checks are outstanding, buffer the model reply until we know it
     // is an action/progress message rather than an unverified final answer.
@@ -1187,6 +1220,14 @@ fn compact_cut_off_context(message: &mut Value) {
                 *args = json!("{}");
             }
         }
+        // A reply cut off while still reasoning has no text and no calls once
+        // its reasoning is dropped; providers reject such an assistant
+        // message ("content or tool_calls must be set", DeepSeek 2026-11-11).
+        let empty = object.get("content").is_none_or(|content| content.is_null() || content.as_str() == Some(""));
+        let calls = object.get("tool_calls").and_then(Value::as_array).is_some_and(|calls| !calls.is_empty());
+        if empty && !calls {
+            object.insert("content".into(), json!("[Cut off while reasoning, before any text or tool call.]"));
+        }
     }
 }
 async fn business_tool(
@@ -1196,10 +1237,13 @@ async fn business_tool(
     args: Value,
     call_id: &str,
 ) -> Result<Value> {
-    business_tool_inner(s,node,name,args,call_id,false).await
+    business_tool_inner(s,node,name,args,call_id,false,false).await
 }
+/// `module_code`: first-layer implementation code makes the call, which may
+/// run the OS. `program`: program code makes it, so what it reads is a JS
+/// value, not AI context, and a source read returns a whole file.
 async fn business_tool_inner(
-    s:&Session<'_>,node:&str,name:&str,args:Value,call_id:&str,module_code:bool,
+    s:&Session<'_>,node:&str,name:&str,args:Value,call_id:&str,module_code:bool,program:bool,
 ) -> Result<Value> {
     ensure!(!crate::project_process::is_execution(name) || module_code,
         "SHELL_MODULE_ONLY: OS execution is available only in first-layer implementation code. Declare a JSDoc @virtual function for the result needed (verified facts, counts or an evidence-based answer), then implement commands and output processing inside it; second-layer virtual helpers receive only prepared arguments.");
@@ -1438,7 +1482,10 @@ async fn business_tool_inner(
             }
             return Ok(output);
         }
-        agent_service::execute_tool(tool_workspace.clone(), s.state.tool_catalog.as_deref(), name, args.clone())
+        // Marked here, after approvals: they show the caller's own arguments.
+        let mut args = args.clone();
+        if program { crate::source_read::mark_program_read(name, &mut args); }
+        agent_service::execute_tool(tool_workspace.clone(), s.state.tool_catalog.as_deref(), name, args)
             .await
     };
     // A process still running in the background can write after this point,
@@ -1474,6 +1521,26 @@ async fn business_tool_inner(
         }
     }
     result
+}
+
+/// What changed in the host since the previous turn started, said to the
+/// model: failures it saw then may belong to the old permission mode or host
+/// version, and it would otherwise keep working around them as if fixed facts.
+fn environment_change_notice(previous: &Value, current: &Value) -> Option<String> {
+    let mut changes = Vec::new();
+    let text = |value: &Value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+    if previous["permission_mode"] != current["permission_mode"] && !previous["permission_mode"].is_null() {
+        changes.push(format!("the permission mode changed from {} to {}", text(&previous["permission_mode"]), text(&current["permission_mode"])));
+    }
+    // Turns recorded before versions were saved carry none: an unknown older host.
+    if previous["host_version"] != current["host_version"] {
+        let before = previous["host_version"].as_str().unwrap_or("an earlier version");
+        changes.push(format!("the host was updated from {before} to {}", text(&current["host_version"])));
+    }
+    (!changes.is_empty()).then(|| format!(
+        "[Host notice] Since the previous turn, {}. Tool errors, denials and capability limits seen in earlier turns describe the old setup and may no longer hold. Before working around one, try the direct way again; if it now works, stop relying on the old conclusion, including in module descriptions you revise.",
+        changes.join(" and ")
+    ))
 }
 
 /// Paths a file read would reach outside the workspace, after links resolve.
@@ -1628,7 +1695,9 @@ pub(crate) async fn cancel_saved_programs(state: &AgentServiceState, task: &str)
         let rows=tx.prepare("SELECT scope,state FROM agent_runtime_windows WHERE task_id=?1")?
             .query_map([&task],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (scope,raw) in rows {
+        // A program a blocker paused waits for the user's next turn.
+        let kept=paused_programs::kept_scopes(&tx,&task)?;
+        for (scope,raw) in rows.into_iter().filter(|(scope,_)|!kept.contains(scope)) {
             let mut window:Window=serde_json::from_str(&raw)?;
             if let Some(program)=window.program.as_mut().filter(|program|!program.finished) {
                 program.cancel();
@@ -1814,6 +1883,9 @@ fn spawn_call(children: &mut tokio::task::JoinSet<Result<()>>, s: &Session<'_>, 
         let mut child = child;
         match Box::pin(run_loop(&session, &mut child, 64, false)).await {
             Ok(LoopResult::Answer | LoopResult::Paused | LoopResult::Stopped) => Ok(()),
+            // The user stopped the turn: the call's frames stay as they are,
+            // for the next turn to resume or discard (design guide §7.4).
+            _ if cancel.is_cancelled() => Ok(()),
             result => {
                 if child.program.as_ref().is_some_and(|program| !program.inflight_actions().is_empty()) {
                     let mut cleanup = session.clone();
@@ -1851,9 +1923,23 @@ fn spawn_call(children: &mut tokio::task::JoinSet<Result<()>>, s: &Session<'_>, 
 /// others run a concurrent call or a resumed program.
 fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize, top: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LoopResult>> + Send + 'a>> {
     Box::pin(async move {
+        let mut async_children: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
+        // A resumed frame the user's stop cut off mid-step answers its open calls first.
+        if !top { settle_unanswered_calls(s, w).await?; }
+        let rounds = run_rounds(s, w, max_rounds, top, &mut async_children).await;
+        // The calls a failed loop leaves running stop before anyone reads their
+        // frames: a stopped turn keeps them as they are (design guide §7.4).
+        if rounds.is_err() { async_children.shutdown().await; }
+        rounds
+    })
+}
+/// The rounds of `run_loop`, boxed on their own: resumed programs nest loops,
+/// and the caller's frame must stay small.
+fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize, top: bool, children: &'a mut tokio::task::JoinSet<Result<()>>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<LoopResult>> + Send + 'a>> {
+    Box::pin(async move {
     let mut step = 0;
     let mut model_rounds = 0;
-    let mut async_children: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
+    let mut async_children = children;
     // The context in view is the current task's; create_task and finish switch it.
     let mut current = s.clone();
     'round: while model_rounds < max_rounds {
@@ -1866,9 +1952,10 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
             return Ok(LoopResult::Stopped);
         }
         activate_page_plugin(s, w).await?;
-        // The user spoke while a program ran: it pauses at this step, keeping
-        // its state, and the main AI hears the message.
-        if s.is_primary() && program_flow::in_program(w) && interjection_pending(s).await? {
+        // The user spoke while a program ran, or the host found a blocker only
+        // the user can resolve: it pauses at this step, keeping its state.
+        let blocked = if s.is_primary() && program_flow::in_program(w) { blockers::pause_requested(s).await? } else { None };
+        if s.is_primary() && program_flow::in_program(w) && (blocked.is_some() || interjection_pending(s).await?) {
             // Concurrent calls pause at their own next step; wait for them.
             while let Some(result) = async_children.join_next().await {
                 result.context("async function task failed")??;
@@ -1890,7 +1977,12 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
                 current.scope = "main".into();
                 continue;
             }
-            program_flow::pause_main(s, w, step).await?;
+            let ends_turn = blocked.is_some();
+            program_flow::pause_main(s, w, step, blocked).await?;
+            // A blocker's outcome is the turn's answer: the user acts next.
+            if ends_turn {
+                return Ok(LoopResult::Answer);
+            }
         }
         if s.is_primary() && w.parallel_root.is_none() {
             deliver_interjections(s, w).await?;
@@ -1936,7 +2028,7 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
                         if wait_for_program(w.program.as_mut().unwrap(), &mut async_children, s.cancel).await? { break; }
                         // Poll just the stop conditions, without serializing a
                         // potentially large Runtime again every 100 ms.
-                        if (s.is_primary() && interjection_pending(s).await?) || (!top && frame_interrupted(s,w).await?) { break; }
+                        if (s.is_primary() && (interjection_pending(s).await? || blockers::pause_requested(s).await?.is_some())) || (!top && frame_interrupted(s,w).await?) { break; }
                     }
                     continue;
                 }
@@ -1963,6 +2055,26 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
         if cut_off || calls.iter().any(|call| serde_json::from_str::<Value>(&call.arguments).is_err()) {
             cut_off_reply(s, w, &calls, &node, step, cut_off).await?;
             continue;
+        }
+        // The main AI was told to stop for the user and called tools anyway:
+        // none of them runs, and the host's own report ends the turn.
+        if !calls.is_empty() && w.program_task.is_none() && w.program.is_none()
+            && let Some(blocker) = blockers::pending(s, w)
+        {
+            for call in &calls {
+                append(s, "tool/call", json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
+                    "callId":call.call_id,"name":call.name,"arguments":call.arguments}), false).await?;
+                let result = json!({"code":"NOT_RUN","executed":false,"error":"the turn stopped for the user; this call did not run"});
+                let seq = append(s, "tool/result", json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
+                    "message":{"role":"tool","toolCallId":call.call_id,"isError":true,"content":[{"type":"text","text":result.to_string()}]},
+                    "meta":{"result":result}}), false).await?;
+                w.messages.push(sourced(json!({"role":"tool","tool_call_id":call.call_id,"content":result.to_string()}), s.task, seq));
+            }
+            let message = json!({"role":"assistant","content":blockers::report(&blocker)});
+            let seq = append(s, "assistant/message", json!({"actor":"host","turn":s.turn,"step":step,"message":message}), s.is_primary()).await?;
+            w.messages.push(sourced(message, s.task, seq));
+            save(s, w).await?;
+            return Ok(LoopResult::Answer);
         }
         // A reply whose only call is write_program hands over the program.
         if let [call] = calls.as_slice()
@@ -2103,6 +2215,7 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
         let mut released_assets = None;
         let mut overflow = false;
         let mut asked = None;
+        let mut blocker = None;
         for call in calls {
             let remaining=w.program.as_ref().map(|p|p.remaining_time());
             let executed=if let Some(remaining)=remaining {
@@ -2117,6 +2230,10 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
             let Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets: released }=executed;
             if call.name == program_flow::ASK && !is_error {
                 asked = result["question"].as_str().map(str::to_owned);
+            }
+            let blocked_here = is_error && crate::agent_program::runtime::is_user_blocker(&result);
+            if blocked_here {
+                blocker.get_or_insert_with(|| result.clone());
             }
             if released.is_some() {
                 released_assets = released;
@@ -2146,6 +2263,11 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
             }
             if asset_reference.is_some() {
                 delivery["delivery_reference"] = json!({"task_id":s.task,"event_seq":seq});
+            }
+            // In a function, the program pauses here; the AI reads this only
+            // after the user resumed it (blockers.rs).
+            if blocked_here && w.program_task.is_some() {
+                delivery = blockers::paused_delivery(&result);
             }
             let mut candidate = w.messages.clone();
             candidate.push(
@@ -2239,6 +2361,14 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
             // Named so code that catches errors can tell it apart and rethrow it.
             Some(json!({"$task_error":{"name":"WaitingForUser","code":program_flow::WAITING,"question":question,"function":function,
                 "message":"the function is waiting for the user's answer"}}))
+        } else if let Some(blocker) = blocker.as_ref().filter(|_| w.program_task.is_some()) {
+            // A function that hit a blocker pauses with the whole program at
+            // the top of the next round; resuming asks its AI again.
+            let mut blocker = blocker.clone();
+            blocker["function"] = w.program_task.as_ref().map(|task| task["name"].clone()).unwrap_or(Value::Null);
+            blockers::request_pause(s, &blocker).await?;
+            save(s, w).await?;
+            None
         } else if overflow {
             Some(json!({"$task_error":{"name":"ContextOverflow","code":"CONTEXT_OVERFLOW",
                 "message":"this function's context ran out before it finished; split the work into smaller calls",
@@ -2246,6 +2376,11 @@ fn run_loop<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usize
         } else {
             None
         };
+        if let Some(blocker) = blocker.filter(|_| w.program_task.is_none()) {
+            // The main AI gets one reply to tell the user; see above.
+            w.blocked = Some((s.turn, blocker));
+            save(s, w).await?;
+        }
         if let Some(error) = ended {
             let message = json!({"role":"assistant","content":error.to_string()});
             let seq = append(s, "assistant/message", json!({"actor":"host","turn":s.turn,"message":message}), false).await?;
@@ -2291,6 +2426,7 @@ async fn cut_off_reply(
         })
         .collect::<BTreeMap<_, _>>();
     let stopped = cut_off || failures.values().any(|error| error.is_eof());
+    let (spent, advice) = cut_off_advice(program_flow::output_split(s, node), "Generate repeated parts such as pages from one template in a loop, or have @virtual functions write the parts.");
     if let Some(reply) = w.messages.iter_mut().rev().find(|m| {
         m["role"] == "assistant"
             && m["tool_calls"].as_array().is_some_and(|calls| calls.iter().any(|c| c["id"].as_str().is_some_and(|id| failures.contains_key(id))))
@@ -2308,9 +2444,9 @@ async fn cut_off_reply(
             Some(error) if error.is_eof() => {
                 let received = call.arguments.chars().count();
                 let cause = if cut_off { "Your reply was cut off" } else { "Your reply was most likely cut off" };
-                json!({"code":"TOOL_ARGUMENTS_TRUNCATED","executed":false,"received_chars":received,
+                json!({"code":"TOOL_ARGUMENTS_TRUNCATED","executed":false,"received_chars":received,"output_tokens":spent,
                     "error":format!("the arguments of this {} call stop after {received} characters and are not complete JSON", call.name),
-                    "instruction":format!("{cause} at the model's output limit, which your reasoning counts toward as well. Nothing in that reply ran. Call again with shorter arguments: write the code once instead of drafting it in your reasoning first, generate repeated parts such as pages from one template in a loop, or have @virtual functions write the parts.")})
+                    "instruction":format!("{cause} at the model's output limit. Nothing in that reply ran; call again. {advice}")})
             }
             // The arguments are not replayed, so the text near the fault is
             // how the AI sees what to fix.
@@ -2329,13 +2465,31 @@ async fn cut_off_reply(
         w.messages.push(sourced(json!({"role":"tool","tool_call_id":call.call_id,"content":result.to_string()}), s.task, seq));
     }
     if calls.is_empty() {
-        let notice = json!({"code":"REPLY_TRUNCATED",
+        let (_, advice) = cut_off_advice(program_flow::output_split(s, node), "Hand over long work as a program with write_program.");
+        let notice = json!({"code":"REPLY_TRUNCATED","output_tokens":spent,
             "error":"your last reply stopped at the model's output limit, which your reasoning counts toward as well, so it is unfinished",
-            "instruction":"Continue with a shorter reply: do not draft in your reasoning what you will write anyway, and hand over long work as a program with write_program."});
+            "instruction":format!("Continue. {advice}")});
         let seq = append(s, "assistant/cut_off", json!({"actor":s.actor(),"turn":s.turn,"step":step,"nodeId":node,"notice":notice}), false).await?;
         w.messages.push(sourced(json!({"role":"user","name":"output_limit","content":notice.to_string()}), s.task, seq));
     }
     save(s, w).await
+}
+
+/// What to do after a cut-off, from where the output went. Reasoning that
+/// filled the limit needs less drafting, not shorter code (2026-11-11: 30104
+/// of 32768 tokens were reasoning; the code that fit next time was longer).
+fn cut_off_advice(split: Option<(u64, u64, u64)>, shorten: &str) -> (Value, String) {
+    match split {
+        Some((limit, reasoning, reply)) if reasoning >= reply => (
+            json!({"limit":limit,"reasoning":reasoning,"reply":reply}),
+            format!("Of the {limit}-token output limit, your reasoning used {reasoning} and the reply only {reply}: the reasoning filled it, not the code. Keep the same scope; settle the plan in a few lines of reasoning, then write the code once without drafting it in your reasoning first."),
+        ),
+        Some((limit, reasoning, reply)) => (
+            json!({"limit":limit,"reasoning":reasoning,"reply":reply}),
+            format!("Of the {limit}-token output limit, the reply itself used {reply} (reasoning {reasoning}): it is too long for one reply. {shorten}"),
+        ),
+        None => (Value::Null, format!("Your reasoning counts toward the limit too: write the code once instead of drafting it in your reasoning first. {shorten}")),
+    }
 }
 
 /// The text around the point where parsing JSON arguments failed.
@@ -2473,7 +2627,7 @@ struct Executed {
 #[allow(clippy::too_many_arguments)]
 async fn execute_call(
     s: &Session<'_>,
-    w: &Window,
+    window: &mut Window,
     definitions: &[Value],
     node: &str,
     step: usize,
@@ -2481,6 +2635,7 @@ async fn execute_call(
     call_count: usize,
     at: Option<&Value>,
 ) -> Result<Executed> {
+    let w: &Window = window;
     let mut skill_change = None;
     let mut released_assets = None;
     append(s,"tool/call",json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,"callId":call.call_id,"name":call.name,"arguments":call.arguments,
@@ -2488,7 +2643,8 @@ async fn execute_call(
     let mut material_source: Option<(String, Value)> = None;
     let mut refreshed_from: Option<Value> = None;
     let output=async {
-        let args:Value=serde_json::from_str(&call.arguments).context("invalid tool arguments JSON")?;
+        let mut args:Value=serde_json::from_str(&call.arguments).context("invalid tool arguments JSON")?;
+        crate::source_read::unmark(&mut args);
         if crate::project_process::is_execution(&call.name) {
             ensure!(at.is_some() && program_flow::shell_code_allowed(s,w),
                 "SHELL_MODULE_ONLY: declare @module for the needed result (facts, counts or an evidence-based answer), not merely a shell gateway. Run commands and process stdout in its deterministic code; do not expose shell to virtual hooks.");
@@ -2519,9 +2675,11 @@ async fn execute_call(
                 let node_ref = &node;
                 let futures = operations.iter().enumerate().map(|(index, operation)| {
                     let name = operation["name"].as_str().unwrap().to_owned();
-                    let input = operation["args"].clone();
+                    let mut input = operation["args"].clone();
+                    crate::source_read::unmark(&mut input);
                     let subcall = format!("{}-{}", call.call_id, index);
-                    async move { business_tool(s, node_ref, &name, input, &subcall).await }
+                    // Only a pending program makes this call.
+                    async move { business_tool_inner(s, node_ref, &name, input, &subcall, false, true).await }
                 });
                 let settled = futures::future::join_all(futures).await;
                 for (index, result) in settled.iter().enumerate() {
@@ -2566,11 +2724,16 @@ async fn execute_call(
                 use crate::agent_program::declarations;
                 let catalog = program_flow::library_catalog(s, definitions);
                 let selected = declarations::selected(&catalog, &args)?;
-                if args["overview"] == true {
-                    Ok(json!({"overview":declarations::overview(&selected, definitions)}))
+                let mut result = if args["overview"] == true {
+                    json!({"overview":declarations::overview(&selected, definitions)})
                 } else {
-                    Ok(json!({"declarations":declarations::headers(&selected, definitions)}))
+                    json!({"declarations":declarations::headers(&selected, definitions)})
+                };
+                let setup = program_flow::setup_notes(selected.keys());
+                if !setup.is_empty() {
+                    result["setup_needed"] = json!(setup);
                 }
+                Ok(result)
             },
             "propose_project_note" => {
                 ensure!(s.is_primary() && s.plugin.is_none(),"project notes are proposed by the main Agent of a code session");
@@ -2674,7 +2837,7 @@ async fn execute_call(
                 // their paths/versions even after its working window is gone.
                 if crate::context_assets::is_material_tool(name) || s.delegate_id().is_some() {material_source=Some((name.to_owned(),args.clone()));}
                 business_tool_inner(s,&node,name,args,&call.call_id,
-                    at.is_some() && program_flow::shell_code_allowed(s,w)).await
+                    at.is_some() && program_flow::shell_code_allowed(s,w), at.is_some()).await
             },
         }
     }.await;
@@ -2687,10 +2850,12 @@ async fn execute_call(
         anyhow::bail!("PLUGIN_UNAVAILABLE: {error:#}");
     }
     let is_error = output.is_err() || output.as_ref().is_ok_and(|value| value["error_code"] == "ASSET_CONFLICT" || value["host_denied"] == true);
-    let result = output.unwrap_or_else(|error| {
+    let mut result = output.unwrap_or_else(|error| {
             error.downcast_ref::<crate::shell_process::OutputCapacityError>()
                 .map(|error| error.0.clone()).unwrap_or_else(|| json!({"error":format!("{error:#}")}))
     });
+    // A failure only the user can resolve is marked before it is recorded.
+    blockers::mark(s, window, &call.name, &call.arguments, &mut result, is_error);
     let seq=append(s,"tool/result",json!({
         "actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
         "message":{"id":agent_service::uuid_like(),"role":"tool","toolCallId":call.call_id,"isError":is_error,
@@ -2717,6 +2882,60 @@ async fn execute_call(
         None
     };
     Ok(Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets })
+}
+
+/// Recover a completed result that was committed before the window update.
+/// When no result exists, record uncertainty instead of repeating the action.
+async fn settle_unanswered_calls(s: &Session<'_>, w: &mut Window) -> Result<()> {
+    let mut pending = BTreeMap::new();
+    for m in &w.messages {
+        for c in m["tool_calls"].as_array().into_iter().flatten() {
+            if let Some(id) = c["id"].as_str() {
+                pending.insert(id.to_owned(), m["source"]["seq"].as_i64().unwrap_or(-1));
+            }
+        }
+        if let Some(id) = m["tool_call_id"].as_str() {
+            pending.remove(id);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    for (id, after) in pending {
+        let (lookup_task, call) = (s.task.to_owned(), id.clone());
+        let existing = db(s.state.workspace.root(), move |conn| {
+            Ok(crate::session_history::load_events(
+                conn,
+                &lookup_task,
+                &crate::session_history::EventQuery {
+                    after: Some(after),
+                    kinds: &["tool/result"],
+                    call_id: Some(&call),
+                    newest: Some(1),
+                    ..Default::default()
+                },
+            )?
+            .pop()
+            .map(|event| (event.seq, event.raw)))
+        })
+        .await?;
+        let (seq, result) = if let Some((seq, raw)) = existing {
+            (
+                seq,
+                serde_json::from_str::<Value>(&raw)?["meta"]["result"].clone(),
+            )
+        } else {
+            let result = json!({"status":"interrupted","completion":"unknown","error":"Previous execution was interrupted. Inspect saved history and resource state before repeating an external action."});
+            let seq = append(s,"tool/result",json!({"actor":"host","turn":s.turn,"message":{"role":"tool","toolCallId":id,"isError":true,"content":[{"type":"text","text":result.to_string()}]},"meta":{"result":result}}),true).await?;
+            (seq, result)
+        };
+        w.messages.push(sourced(
+            json!({"role":"tool","tool_call_id":id,"content":result.to_string()}),
+            s.task,
+            seq,
+        ));
+    }
+    save(s, w).await
 }
 
 pub(crate) async fn run_task(
@@ -2814,53 +3033,8 @@ pub(crate) async fn run_task(
             append(&s,"agent/prompt_upgrade",json!({"turn":turn,"prompt_hash":crate::visual_artifacts::hash(MAIN_PROMPT.as_bytes())}),false).await?;
         }
     }
-    // Recover a completed result that was committed before the window update.
-    // When no result exists, record uncertainty instead of repeating the action.
-    let mut pending = BTreeMap::new();
-    for m in &w.messages {
-        for c in m["tool_calls"].as_array().into_iter().flatten() {
-            if let Some(id) = c["id"].as_str() {
-                pending.insert(id.to_owned(), m["source"]["seq"].as_i64().unwrap_or(-1));
-            }
-        }
-        if let Some(id) = m["tool_call_id"].as_str() {
-            pending.remove(id);
-        }
-    }
-    for (id, after) in pending {
-        let (lookup_task, call) = (task.clone(), id.clone());
-        let existing = db(state.workspace.root(), move |conn| {
-            Ok(crate::session_history::load_events(
-                conn,
-                &lookup_task,
-                &crate::session_history::EventQuery {
-                    after: Some(after),
-                    kinds: &["tool/result"],
-                    call_id: Some(&call),
-                    newest: Some(1),
-                    ..Default::default()
-                },
-            )?
-            .pop()
-            .map(|event| (event.seq, event.raw)))
-        })
-        .await?;
-        let (seq, result) = if let Some((seq, raw)) = existing {
-            (
-                seq,
-                serde_json::from_str::<Value>(&raw)?["meta"]["result"].clone(),
-            )
-        } else {
-            let result = json!({"status":"interrupted","completion":"unknown","error":"Previous execution was interrupted. Inspect saved history and resource state before repeating an external action."});
-            let seq = append(&s,"tool/result",json!({"actor":"host","turn":turn,"message":{"role":"tool","toolCallId":id,"isError":true,"content":[{"type":"text","text":result.to_string()}]},"meta":{"result":result}}),true).await?;
-            (seq, result)
-        };
-        w.messages.push(sourced(
-            json!({"role":"tool","tool_call_id":id,"content":result.to_string()}),
-            &task,
-            seq,
-        ));
-    }
+    settle_unanswered_calls(&s, &mut w).await?;
+    let unreadable = paused_programs::drop_unreadable(&s, &mut w).await?;
     let root = state.workspace.root().to_path_buf();
     let hydrate_task = task.clone();
     let mut restored = w.messages;
@@ -2869,11 +3043,32 @@ pub(crate) async fn run_task(
         Ok(restored)
     })
     .await??;
-    append(&s,"turn/start",json!({"turn":turn,"runtime":"single_agent","max_steps":max_rounds,"permission_mode":state.permission_mode}),false).await?;
+    let lookup_task = task.clone();
+    let previous_start = db(state.workspace.root(), move |conn| {
+        Ok(crate::session_history::load_events(
+            conn,
+            &lookup_task,
+            &crate::session_history::EventQuery { kinds: &["turn/start"], newest: Some(1), ..Default::default() },
+        )?
+        .pop()
+        .and_then(|event| serde_json::from_str::<Value>(&event.raw).ok()))
+    })
+    .await?;
+    let start = json!({"turn":turn,"runtime":"single_agent","max_steps":max_rounds,"permission_mode":state.permission_mode,"host_version":env!("CARGO_PKG_VERSION")});
+    let environment_notice = previous_start.as_ref().and_then(|previous| environment_change_notice(previous, &start));
+    let environment_notice = match (environment_notice, unreadable) {
+        (Some(changed), Some(dropped)) => Some(format!("{changed}\n{dropped}")),
+        (changed, dropped) => changed.or(dropped),
+    };
+    append(&s,"turn/start",start,false).await?;
     let expanded = if s.plugin.is_some() {
         prompt.clone()
     } else {
         crate::composer_catalog::expand_prompt(state.workspace.root(), &prompt)
+    };
+    let expanded = match &environment_notice {
+        Some(notice) => format!("{notice}\n\n{expanded}"),
+        None => expanded,
     };
     let admitted = crate::attachments::admitted(state.workspace.root(), &task, turn)?;
     let model_content = if admitted.iter().any(|part| part["type"] != "text") {
@@ -2899,6 +3094,12 @@ pub(crate) async fn run_task(
         task_frames::open_main_task(&s, &mut w, &prompt).await?;
     }
     let outcome = run_loop(&s, &mut w, max_rounds, true).await;
+    // A turn the user stopped keeps its program for the next turn, where the
+    // main AI decides whether to continue it (design guide §7.4). When it
+    // cannot be kept, the stop ends it as before.
+    if cancel.is_cancelled() && let Err(error) = program_flow::stop_main(&s, &mut w).await {
+        let _ = append(&s, "program/stop_not_kept", json!({"turn":turn,"error":format!("{error:#}")}), false).await;
+    }
     // A program paused and not resumed in this turn is discarded with it.
     paused_programs::discard_unresumed(&s, &mut w).await?;
     if !matches!(&outcome, Ok(LoopResult::Answer)) {
@@ -2964,6 +3165,17 @@ mod tests {
     fn timer_program(source: &str) -> agent_program::Runtime {
         let program=agent_program::compile(source).unwrap();
         agent_program::Runtime::new(program, agent_program::ENTRY, vec![]).unwrap()
+    }
+
+    #[test]
+    fn a_changed_permission_mode_or_host_version_is_announced_once() {
+        let current = json!({"permission_mode":"full_access","host_version":"0.2.0"});
+        assert_eq!(environment_change_notice(&json!({"permission_mode":"full_access","host_version":"0.2.0"}), &current), None);
+        let both = environment_change_notice(&json!({"permission_mode":"ask"}), &current).unwrap();
+        assert!(both.contains("permission mode changed from ask to full_access"), "{both}");
+        assert!(both.contains("updated from an earlier version to 0.2.0"), "{both}");
+        let mode = environment_change_notice(&json!({"permission_mode":"read_only","host_version":"0.2.0"}), &current).unwrap();
+        assert!(mode.contains("from read_only to full_access") && !mode.contains("updated"), "{mode}");
     }
 
     #[tokio::test]

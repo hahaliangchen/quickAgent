@@ -84,11 +84,61 @@ pub fn command(
         cmd.arg("--bind").arg(&root).arg(&root);
     }
     // ReadOnly keeps both the workspace and /tmp on the read-only root mount.
+    // Mounted last so a workspace that contains the config directory cannot
+    // expose them again.
+    for secret in secret_masks() {
+        cmd.arg("--ro-bind").arg("/dev/null").arg(secret);
+    }
     cmd.arg("--chdir").arg(&cwd).arg("--").arg(program);
     cmd.env("TMPDIR", "/tmp")
         .env("TMP", "/tmp")
         .env("TEMP", "/tmp");
     Ok(cmd)
+}
+
+/// The secret files that exist, as the sandbox sees them: each one is
+/// replaced by an empty read-only file, so a command reads nothing.
+fn secret_masks() -> Vec<PathBuf> {
+    let mut masks: Vec<PathBuf> = crate::ai_proxy::secret_files()
+        .into_iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .filter(|path| path.is_file())
+        .collect();
+    masks.dedup();
+    masks
+}
+
+/// Commands that name a secret file are refused before they start. The
+/// sandbox masks the files anyway; this covers execution outside it (full
+/// access, other platforms) and tells the AI why instead of handing it an
+/// empty file. A name alone is not enough: `.env` is common in projects, so
+/// the file's own directory must be named too.
+pub fn check_secret_reference(command: &str) -> Result<()> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    let normalized = command.replace('\\', "/");
+    for secret in crate::ai_proxy::secret_files() {
+        let (Some(dir), Some(name)) = (secret.parent(), secret.file_name().and_then(OsStr::to_str)) else { continue };
+        if !normalized.contains(name) {
+            continue;
+        }
+        let mut spellings = vec![dir.to_string_lossy().replace('\\', "/")];
+        if let Ok(canonical) = dir.canonicalize() {
+            spellings.push(canonical.to_string_lossy().replace('\\', "/"));
+        }
+        if let Some(relative) = home.as_deref().and_then(|home| dir.strip_prefix(home).ok()) {
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if !relative.is_empty() {
+                spellings.push(relative);
+            }
+        }
+        if spellings.iter().any(|dir| !dir.is_empty() && normalized.contains(dir.as_str())) {
+            anyhow::bail!(
+                "SECRET_FILE: the command names {}, which holds API keys; commands never read it. The host applies credentials itself through its libraries (web, model calls). Model settings are in providers.yml and agent-generation.yml beside it",
+                secret.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn find_bwrap(root: &Path) -> Option<PathBuf> {
@@ -102,6 +152,26 @@ fn find_bwrap(root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_naming_a_secret_file_are_refused() {
+        let secret = crate::ai_proxy::secret_files().remove(0);
+        let path = secret.to_string_lossy().into_owned();
+        let dir = secret.parent().unwrap().to_string_lossy().into_owned();
+        let name = secret.file_name().unwrap().to_string_lossy().into_owned();
+        for command in [format!("cat {path}"), format!("cd '{dir}' && head -5 {name}")] {
+            let error = check_secret_reference(&command).unwrap_err().to_string();
+            assert!(error.starts_with("SECRET_FILE"), "{command}: {error}");
+        }
+        if let Some(relative) = std::env::var_os("HOME").map(PathBuf::from).and_then(|home| secret.strip_prefix(home).ok().map(Path::to_path_buf)) {
+            let command = format!("base64 ~/{}", relative.display());
+            assert!(check_secret_reference(&command).is_err(), "{command}");
+        }
+        // The file name alone, or a project's own .env, is someone else's file.
+        for command in [format!("cat {name}"), "cat .env".to_owned(), "ls ~/.config".to_owned()] {
+            assert!(check_secret_reference(&command).is_ok(), "{command}");
+        }
+    }
 
     #[test]
     fn permission_modes_select_execution_boundary() {
@@ -172,6 +242,12 @@ mod tests {
         .into_iter()
         .map(OsStr::new)
         .collect();
+        expected.pop();
+        let masks = secret_masks();
+        for mask in &masks {
+            expected.extend([OsStr::new("--ro-bind"), OsStr::new("/dev/null"), mask.as_os_str()]);
+        }
+        expected.push(OsStr::new("--chdir"));
         expected.extend([root.as_os_str(), OsStr::new("--"), OsStr::new("/bin/sh")]);
         assert_eq!(args, expected);
     }

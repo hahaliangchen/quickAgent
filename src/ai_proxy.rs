@@ -252,14 +252,29 @@ fn credentials_path(config_path: &Path) -> std::path::PathBuf {
 /// own directory, once, when the app has none yet. The DSH files are left
 /// untouched and are never read again afterwards.
 pub(crate) fn import_dsh_config(target: &Path) -> anyhow::Result<Option<std::path::PathBuf>> {
-    let home = std::env::var_os("DSH_HOME")
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|home| std::path::PathBuf::from(home).join(".dsh")));
-    match home {
+    match dsh_home() {
         Some(home) => import_dsh_config_from(target, &home),
         None => Ok(None),
     }
+}
+
+fn dsh_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("DSH_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|home| std::path::PathBuf::from(home).join(".dsh")))
+}
+
+/// Files that hold API keys and other secrets: the app's own and the DSH ones
+/// it imports from. Source-file tools never open them; the host reads them
+/// itself, so a model never needs their contents.
+pub(crate) fn secret_files() -> Vec<std::path::PathBuf> {
+    let config = config_dir();
+    let mut files = vec![credentials_path(&config_path()), config.join(".env")];
+    if let Some(home) = dsh_home() {
+        files.extend([home.join(".credentials.yaml"), home.join(".env")]);
+    }
+    files
 }
 
 fn import_dsh_config_from(target: &Path, home: &Path) -> anyhow::Result<Option<std::path::PathBuf>> {
@@ -616,7 +631,7 @@ fn disk_revision(config_path: &Path) -> anyhow::Result<String> {
 
 fn web_provider(config: &AiProxyConfig) -> anyhow::Result<(&str, &ProviderConfig)> {
     let id = config.web_search_provider.as_deref()
-        .context("WEB_NOT_CONFIGURED: choose a DeepSeek credential in Settings > Tools > Web search")?;
+        .context("WEB_NOT_CONFIGURED: choose a DeepSeek credential in Settings (设置) > 专用模型 > 联网搜索 > 搜索凭据")?;
     let provider = config.providers.get(id)
         .context("WEB_NOT_CONFIGURED: the selected web search provider no longer exists")?;
     let url = reqwest::Url::parse(&provider.url)?;
@@ -2334,6 +2349,8 @@ mod tests {
         ])).unwrap();
         write_yaml_atomic(&credentials_path(&path),&json!({"version":1,"refs":{"MAIN_KEY":"main-secret","SEARCH_A_KEY":"a-secret","SEARCH_B_KEY":"b-secret"},"records":{}})).unwrap();
         assert!(web_search_credentials(&path).unwrap_err().to_string().contains("WEB_NOT_CONFIGURED"));
+        // The AI is told before it plans around web, not after the first call fails.
+        assert!(crate::builtin_plugins::web::setup_needed(&path).unwrap().contains("专用模型 → 联网搜索 → 搜索凭据"));
         let initial=load_config(&path).unwrap();
         let view=settings_view(&initial,disk_revision(&path).unwrap());
         assert!(!view.to_string().contains("a-secret"));
@@ -2345,6 +2362,7 @@ mod tests {
         };
         save_settings(&path,edit(Some("search-b"),"main","main-model")).unwrap().unwrap();
         assert_eq!(web_search_credentials(&path).unwrap(),("search-b".into(),"b-secret".into()));
+        assert!(crate::builtin_plugins::web::setup_needed(&path).is_none());
         assert_eq!(load_config(&path).unwrap().orchestrator_provider.as_deref(),Some("main"));
         // Switching the conversation's provider must not switch the search key.
         save_settings(&path,edit(None,"search-a","deepseek-flash")).unwrap().unwrap();

@@ -12,6 +12,15 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_PAGE_CHARS: usize = 12_000;
 const MAX_PAGE_CHARS: usize = 24_000;
 
+/// Why search and fetch cannot run yet, when the credential is missing.
+pub fn setup_needed(config_path: &Path) -> Option<String> {
+    let error = crate::ai_proxy::web_search_credentials(config_path).err()?.to_string();
+    Some(format!(
+        "NOT CONFIGURED: search and fetch fail until the user selects a search credential in 设置 → 专用模型 → 联网搜索 → 搜索凭据 ({}). Tell the user instead of planning work that depends on it.",
+        error.split(':').next().unwrap_or("WEB_NOT_CONFIGURED")
+    ))
+}
+
 struct WebClient {
     http: reqwest::Client,
     base: String,
@@ -113,7 +122,7 @@ impl WebClient {
         )
     }
 
-    async fn fetch(&self, root: &Path, args: &FetchArgs, url: &str) -> Result<Value> {
+    async fn fetch(&self, url: &str) -> Result<Page> {
         let data = self.post("fetch", json!({"url":url})).await?;
         let page = Page {
             url: url.to_owned(),
@@ -126,27 +135,71 @@ impl WebClient {
             !page.content.trim().is_empty(),
             "WEB_PAGE_UNAVAILABLE: page returned no usable content"
         );
-        let root = root.to_owned();
-        let limit = args.max_chars;
-        tokio::task::spawn_blocking(move || {
-            let bytes = serde_json::to_vec(&page)?;
-            let id = digest(&bytes);
-            let path = crate::file_edit::workspace_path(
-                &root,
-                &format!(".codex-workspace-mcp/web/{id}.json"),
-            )?;
-            std::fs::create_dir_all(path.parent().context("web snapshot directory missing")?)?;
-            let lock = crate::file_edit::file_lock(&path);
-            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = crate::file_edit::snapshot(&path)?;
-            ensure!(
-                previous.as_ref().is_none_or(|data| data == &bytes),
-                "WEB_SNAPSHOT_CHANGED: snapshot identity collision"
-            );
-            crate::file_edit::commit(&path, previous.as_deref(), &bytes)?;
-            page_result(&page, &id, 0, limit)
-        })
-        .await?
+        Ok(page)
+    }
+}
+
+/// Save a fetched page as an immutable snapshot and return its first page.
+async fn store(root: &Path, page: Page, limit: usize) -> Result<Value> {
+    let root = root.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let bytes = serde_json::to_vec(&page)?;
+        let id = digest(&bytes);
+        let path = crate::file_edit::workspace_path(
+            &root,
+            &format!(".codex-workspace-mcp/web/{id}.json"),
+        )?;
+        std::fs::create_dir_all(path.parent().context("web snapshot directory missing")?)?;
+        let lock = crate::file_edit::file_lock(&path);
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = crate::file_edit::snapshot(&path)?;
+        ensure!(
+            previous.as_ref().is_none_or(|data| data == &bytes),
+            "WEB_SNAPSHOT_CHANGED: snapshot identity collision"
+        );
+        crate::file_edit::commit(&path, previous.as_deref(), &bytes)?;
+        page_result(&page, &id, 0, limit)
+    })
+    .await?
+}
+
+/// A page read directly from the site first; the search service's crawler
+/// only when the direct request was blocked or failed; and when both fail,
+/// an error that says which part failed and that a real browser remains.
+async fn fetch_page(root: &Path, args: &FetchArgs, url: &str, config_path: std::path::PathBuf, http: reqwest::Client) -> Result<Value> {
+    let reason = match direct::fetch(url).await {
+        Ok(fetched) => {
+            let page = Page {
+                url: url.to_owned(),
+                title: fetched.title,
+                content: fetched.content,
+                provider: "direct".into(),
+                retrieved_at: chrono::Utc::now().to_rfc3339(),
+            };
+            return store(root, page, args.max_chars).await;
+        }
+        Err(direct::Failure::Missing(status)) => bail!(
+            "WEB_PAGE_NOT_FOUND: the site answered HTTP {status}: this page does not exist at this URL. Search for the current address instead of guessing variants of it."
+        ),
+        Err(direct::Failure::Other(reason)) => reason,
+    };
+    let credentials =
+        tokio::task::spawn_blocking(move || crate::ai_proxy::web_search_credentials(&config_path)).await?;
+    let Ok((provider, key)) = credentials else {
+        bail!(
+            "WEB_PAGE_UNAVAILABLE: reading the page directly failed ({reason}); the search service is not configured, so its crawler was not tried. The page may still exist: browser.open can load it in a real browser."
+        );
+    };
+    let client = WebClient { http, base: API_BASE.into(), provider, key };
+    match client.fetch(url).await {
+        Ok(page) => store(root, page, args.max_chars).await,
+        Err(error) => {
+            let service = error.to_string();
+            let service = service.split(';').next().unwrap_or(&service).to_owned();
+            bail!(
+                "WEB_PAGE_UNAVAILABLE: reading the page directly failed ({reason}) and the search service's crawler could not get it either ({service}). The page may still exist: browser.open can load it in a real browser."
+            )
+        }
     }
 }
 
@@ -315,6 +368,11 @@ async fn execute(
         ensure!(method == "search", "unknown web method");
         None
     };
+    // Reading a page needs no search credential: it is fetched directly
+    // first, and the service is only a fallback.
+    if let Some((args, url)) = fetch {
+        return fetch_page(workspace.root(), &args, &url, config_path, http).await;
+    }
     let (provider, key) =
         tokio::task::spawn_blocking(move || crate::ai_proxy::web_search_credentials(&config_path))
             .await??;
@@ -324,11 +382,7 @@ async fn execute(
         provider,
         key,
     };
-    if let Some((args, url)) = fetch {
-        client.fetch(workspace.root(), &args, &url).await
-    } else {
-        client.search(serde_json::from_value(args)?).await
-    }
+    client.search(serde_json::from_value(args)?).await
 }
 
 pub fn package() -> Result<crate::skill_packages::Package> {
@@ -380,6 +434,8 @@ pub fn package() -> Result<crate::skill_packages::Package> {
         }),
     )
 }
+
+mod direct;
 
 #[cfg(test)]
 mod tests;

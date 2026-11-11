@@ -4,17 +4,17 @@
 
 当前语言版本 **14**。使用常见 JS 基础语法表达流程，由 SWC 解析、Rust 执行持久化指令。内部值使用虚拟机堆以保留对象引用，变量按 JS 的块级作用域和词法作用域存放；宿主工具和 AI 仍通过 JSON 交接。**普通表达式由宿主确定性求值，智能判断必须写成显式任务函数。** 相同程序、相同输入和相同工具／任务返回值产生相同控制流；AI 任务及外部操作本身不因此变成确定性的。
 
-编排以 Node.js JavaScript 为编写目标：主层描述流程，尚未实现的能力用 @virtual 空函数声明，宿主负责链接其实现。module 实现中的 AI 判断用 @virtual。入口提示词聚焦这些职责，API 来自当前工具契约；运行时兼容性、预算和恢复细节按需查询。本手册记录当前执行器的真实能力，不代表完整 Node 标准库都已提供。编排使用 Node.js 不意味着被处理的项目也是 JavaScript。
+编排使用 JavaScript，主程序和 module 实现都由宿主的可恢复 Rust VM 执行，使用已支持的 JS 内置能力和宿主发布的库。主层描述流程，尚未实现的能力用 @virtual 空函数声明，宿主负责链接其实现。module 实现中的 AI 判断用 @virtual。入口提示词聚焦这些职责，API 来自当前工具契约；运行时兼容性、预算和恢复细节按需查询。被处理项目的技术栈由实际输入确定。
 
 ## 运行方式与工具导入
 
 主任务的 AI 用 `write_program({source})` 提交完整 JS，作为该条回复唯一的工具调用；宿主保存源码，编译通过后运行，结果回到主任务。回复正文中的代码只是展示，不会执行。程序像 JS 模块一样从顶层第一条语句开始顺序执行，没有入口函数，也不需要返回值；需要的数据写在代码里，或用导入的工具读取。
 
-宿主 SDK 使用普通 Node 风格的模块写法：`import io from "io"`、`import * as io from "io"`、`import {read as load} from "io"`，或在函数里 `const io = require("io")`。`host:` 是兼容别名，import 和 require 都接受，例如 `require("host:process")` 与 `require("process")` 加载同一个库对象。默认导入绑定库的方法集合。`<library>/promises` 提供异步方法。没有 import 的程序里，宿主自带的库按名字就能用；程序自己声明了同名变量时，这个名字归程序自己。这里的 `io`、`process` 是宿主 SDK，方法以已发布的工具契约为准，不能视为 Node 的 fs 或内置 process 对象。
+宿主 SDK 使用 import 或 require 加载：`import io from "io"`、`import * as io from "io"`、`import {read as load} from "io"`，或在函数里 `const io = require("io")`。`host:` 是兼容别名，import 和 require 都接受，例如 `require("host:process")` 与 `require("process")` 加载同一个库对象。默认导入绑定库的方法集合。`<library>/promises` 提供异步方法。没有 import 的程序里，宿主自带的库按名字就能用；程序自己声明了同名变量时，这个名字归程序自己。这里的 `io`、`process` 是宿主 SDK，方法以已发布的工具契约为准；VM 没有 Node 的全局 process 对象或 Buffer。
 
-插件和项目技能的库在用到的函数里用 `const ppt = require("ppt")` 加载；执行到这一行才链接，返回方法对象。同一次运行再次 require 同一库拿到同一个对象；找不到时抛出可捕获的 `MODULE_NOT_FOUND`。参数必须是库名字符串。静态 import 仅绑定当前已发布的宿主 SDK；第三方库通过 require 在运行时加载。工具以一个 JSON 对象传参，仍经过原权限检查。export、本地文件模块和动态 import 尚不支持。顶层运行完毕表示流程结束，不代表业务验收自动通过。
+插件和项目技能的库在用到的函数里用 `const ppt = require("ppt")` 加载；执行到这一行才链接，返回方法对象。同一次运行再次 require 同一库拿到同一个对象；找不到时抛出可捕获的 `MODULE_NOT_FOUND`。参数必须是库名字符串。静态 import 仅绑定当前已发布的宿主 SDK；宿主注册的第三方插件和技能库通过 require 在运行时加载。两种写法都不加载 Node 内置模块、npm 包或工作区 node_modules。确需 Node/npm 时，由第一层实现通过已发布的 process SDK 运行独立工作区脚本，检查退出码和实际输出后把数据返回流程。当前没有 `@node` 执行注解。工具以一个 JSON 对象传参，仍经过原权限检查。export、本地文件模块和动态 import 尚不支持。顶层运行完毕表示流程结束，不代表业务验收自动通过。
 
-`program_tool_headers` 是按用途组织的库目录。读代码时，用 `io.search` 在相关目录找定义或文本，再用 `io.read_lines` 查原文。用 `read_tool_contracts({libraries:["io"],overview:true})` 看该库的当前方法和用途，再用 `read_tool_contracts({methods:["io.read_lines"]})` 读单个方法的参数和返回字段。宿主也在目录下列出常用源码方法的短签名，字段来自工具契约。主 AI 可直接使用文件搜索和读取工具，模块作者的探路使用 `io` 的只读方法。
+`program_tool_headers` 是按用途组织的库目录。读代码时，用 `io.search` 在相关目录找定义或文本，再用 `io.read_lines` 查原文。用 `read_tool_contracts({libraries:["io"],overview:true})` 看该库的当前方法和用途，再用 `read_tool_contracts({methods:["io.read_lines"]})` 读单个方法的参数和返回字段。宿主也在目录下列出常用源码方法的短签名，字段来自工具契约。程序代码里的 `io.read` 和 `io.read_lines` 把内容交给 JS heap 而不是 AI 上下文：不传 `max_chars` 时一次返回整个文件或整个请求范围（`complete:true`），上限 200 万字符，超过才用 `next_start_line` 续读；`read_tool_contracts` 给程序作者看的契约按这个口径写。AI 直接调用同一工具时仍是默认 24000、最多 60000 字符一页。主 AI 可直接使用文件搜索和读取工具，模块作者的探路使用 `io` 的只读方法。
 
 Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`：`status / index / list / search / read`，共同参数为 `language: "rust" | "typescript"` 和可选的 `workspace_root`。查询会自动建立、维护现有 syn/SWC 索引；无需每次先全仓重建。搜索返回 `matches`，列表返回 `symbols`，读取返回 `content`、符号位置和基于语法的调用关系。按需查方法契约，留意分页及 `index.coverage_issues`；索引不是完整类型分析或运行时覆盖。模块用它采集相关源码，再让 `@virtual` 判断职责、架构和正确性。索引操作只更新缓存，不改源码；它使用正常模块执行，不属于 `probe:true` 的核心文件探路方法。
 
@@ -114,6 +114,7 @@ Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`�
 | 表达式 | + - * / %、一元 + - ! typeof、== != === !== < <= > >=、&& || ??、模板字符串、逗号运算符（从左到右执行并返回末项）；宿主直接计算，不创建模型任务 |
 | 收集及数据方法 | 本地数组 push；确定性的 includes/indexOf/slice/at/concat、字符串 lastIndexOf/startsWith/endsWith/trim/toLowerCase/toUpperCase/split/replace/replaceAll/match、正则 test、数组 join，以及 JSON.stringify/JSON.parse、Array.isArray、Object.keys/values |
 | 路径和 URL 计算 | `path.join/resolve/relative/normalize/dirname/basename/extname`、`url.parse`；由 Rust 直接计算，不访问文件系统 |
+| YAML | `require("yaml")` 的 `parse/stringify`、`require("js-yaml")` 的 `load/dump`；单个文档，映射的键转成字符串，合并键 `<<` 生效 |
 | 异步并发 | async 虚函数和异步工具返回 Promise；可用 Promise.all 等待，失败可由 try/catch 处理 |
 
 常见语法归约为已有赋值、分支、跳转、调用和返回结构，不为每种写法新增调度协议。for 的 continue 进入 update 再检查条件；while 的 continue 进入条件；do/while 的 continue 进入末尾条件。break/continue 只退出其跨越的异常处理现场，保留外围 catch。

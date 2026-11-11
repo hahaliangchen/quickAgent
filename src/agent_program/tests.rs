@@ -1079,6 +1079,121 @@ function main() {
     assert!(invalid.as_str().unwrap().starts_with("URL parse error:"));
 }
 
+#[test]
+fn text_encoder_and_buffer_byte_length_count_utf8_without_a_loop() {
+    let result = returned(runtime(
+        r#"
+function main() {
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode("é中");
+  return {
+    length: bytes.length, first: bytes[0], encoding: encoder.encoding,
+    inline: new TextEncoder().encode("ab").length,
+    empty: new TextEncoder().encode().length,
+    size: Buffer.byteLength("é中🙂"),
+    utf8: Buffer.byteLength("x", "utf8"),
+    kind: typeof TextEncoder,
+  };
+}
+"#,
+    ));
+    assert_eq!(result, json!({"length":5,"first":195,"encoding":"utf-8","inline":2,"empty":0,"size":9,"utf8":1,"kind":"function"}));
+    // What the runtime lacks is rejected with a request not to rewrite it by hand.
+    for source in ["function main(){return new TextDecoder().decode([104]);}", "function main(){return Buffer.from('x','utf8').length;}"] {
+        let error = compile(source).err().expect("unsupported").to_string();
+        assert!(error.contains("Do not hand-write a replacement"), "{source}: {error}");
+    }
+    let other = returned(runtime("function main(){try{return Buffer.byteLength('x','base64');}catch(error){return error.message;}}"));
+    assert!(other.as_str().unwrap().contains("only the utf8"), "{other}");
+    // A local TextEncoder is the program's own.
+    assert_eq!(
+        returned(runtime("function main(){function TextEncoder(){this.tag='mine';} return new TextEncoder().tag;}")),
+        json!("mine")
+    );
+}
+
+#[test]
+fn node_style_path_os_env_and_base64_resolve_to_runtime_builtins() {
+    // require of a module the runtime implements needs no host link.
+    let result = returned(runtime(
+        r#"
+function main() {
+  const p = require("path");
+  const os = require("node:os");
+  const home = os.homedir();
+  return {
+    joined: p.join(home, ".dsh"),
+    home: home,
+    env: process.env.HOME,
+    bracket: process.env["HOME"],
+    missing: process.env.GROW_SURELY_UNSET_VARIABLE === undefined,
+    platform: os.platform(),
+    round: atob(btoa("abÿ")),
+    decoded: atob(" aGk=\n"),
+    kinds: [typeof atob, typeof os],
+    globalHome: os.homedir() === home,
+  };
+}
+"#,
+    ));
+    let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap();
+    assert_eq!(result["home"], json!(home));
+    assert_eq!(result["joined"], json!(std::path::Path::new(&home).join(".dsh").to_string_lossy()));
+    if !cfg!(windows) {
+        assert_eq!((&result["env"], &result["bracket"]), (&json!(home), &json!(home)));
+    }
+    assert_eq!(result["missing"], json!(true));
+    assert_eq!(result["round"], json!("ab\u{ff}"));
+    assert_eq!(result["decoded"], json!("hi"));
+    assert_eq!(result["kinds"], json!(["function", "object"]));
+    assert_eq!(result["globalHome"], json!(true));
+    // Credentials stay out of flow values, and errors say what to do instead.
+    let denied = returned(runtime(
+        "function main(){try{return process.env.SUBAPI_API_KEY;}catch(error){return error.message;}}",
+    ));
+    assert!(denied.as_str().unwrap().contains("looks like a credential"), "{denied}");
+    let bad = returned(runtime("function main(){try{return atob('a');}catch(error){return error.message;}}"));
+    assert!(bad.as_str().unwrap().starts_with("InvalidCharacterError"), "{bad}");
+    let wide = returned(runtime("function main(){try{return btoa('中');}catch(error){return error.message;}}"));
+    assert!(wide.as_str().unwrap().starts_with("InvalidCharacterError"), "{wide}");
+    // A source's own `process` binding is left alone.
+    assert_eq!(
+        returned(runtime("function main(){const process={env:{A:'local'}};return process.env.A;}")),
+        json!("local")
+    );
+}
+
+
+#[test]
+fn yaml_packages_parse_and_stringify_with_the_runtime_parser() {
+    let result = returned(runtime(
+        r#"
+function main() {
+  const YAML = require("yaml");
+  const jsyaml = require("js-yaml");
+  const text = "base: &b\n  apiType: openai\n  timeout: 30\nproviders:\n  deepseek:\n    <<: *b\n    models: [chat, reasoner]\n  1: numeric key\nflag: yes\nempty:\n";
+  const parsed = YAML.parse(text);
+  return {
+    parsed,
+    same: JSON.stringify(jsyaml.load(text)) === JSON.stringify(parsed),
+    round: YAML.parse(YAML.stringify(parsed)),
+    dumped: typeof jsyaml.dump({a: [1, 2]}),
+    empty: YAML.parse(""),
+  };
+}
+"#,
+    ));
+    assert_eq!(result["parsed"]["providers"]["deepseek"], json!({"apiType":"openai","timeout":30,"models":["chat","reasoner"]}), "merge keys apply");
+    assert_eq!(result["parsed"]["providers"]["1"], json!("numeric key"));
+    assert_eq!(result["parsed"]["flag"], json!("yes"), "YAML 1.2: yes is a string");
+    assert_eq!(result["parsed"]["empty"], Value::Null);
+    assert_eq!(result["same"], json!(true));
+    assert_eq!(result["round"], result["parsed"]);
+    assert_eq!(result["dumped"], json!("string"));
+    assert_eq!(result["empty"], Value::Null);
+    let bad = returned(runtime("function main(){try{return require('yaml').parse('a: [1');}catch(error){return error.message;}}"));
+    assert!(bad.as_str().unwrap().starts_with("YAMLParseError"), "{bad}");
+}
 
 #[test]
 fn await_promise_all_suspends_once_and_returns_ordered_read_results() {

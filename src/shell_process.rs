@@ -248,6 +248,7 @@ async fn launch(
     turn: usize, owner: Option<&str>, args: &Value, cancel: &CancellationToken, ban: bool,
 ) -> Result<Arc<Session>> {
     let cmd_text = args["cmd"].as_str().filter(|s| !s.trim().is_empty()).context("cmd is required")?;
+    crate::process_sandbox::check_secret_reference(cmd_text)?;
     let root = workspace.root().canonicalize()?;
     let cwd_raw = args["workdir"].as_str().unwrap_or(".");
     let cwd = if Path::new(cwd_raw).is_absolute() { PathBuf::from(cwd_raw) } else { root.join(cwd_raw) };

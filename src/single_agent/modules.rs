@@ -20,7 +20,7 @@ pub(super) struct Revision {
     reason: String,
 }
 
-fn schema(conn: &rusqlite::Connection) -> Result<()> {
+pub(super) fn schema(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_modules(
             task_id TEXT NOT NULL, turn INTEGER NOT NULL, contract TEXT NOT NULL,
@@ -72,13 +72,45 @@ pub(super) fn revisions(
         let args = vec![Value::Null; function.params.len()];
         let declaration = program_flow::function_task(program, &name, &args, &BTreeMap::new())?;
         let contract = contract(&declaration)?;
-        let current = latest(s.state.workspace.root(), s.task, &contract.key)?
-            .with_context(|| format!("no saved implementation of {name} with this exact declaration; reuse its declaration or call this as a new contract"))?;
+        let Some(current) = latest(s.state.workspace.root(), s.task, &contract.key)? else {
+            anyhow::bail!("{}", unmatched_declaration(s.state.workspace.root(), s.task, &contract)?);
+        };
         ensure!(current.0 == revision.version,
             "{name} is now at version {}; inspect that version before revising it", current.0);
         revisions.insert(contract.key, revision);
     }
     Ok(revisions)
+}
+
+/// Why a revision names no saved module, with the declarations this chat
+/// did save under that name, so the next attempt can copy one exactly.
+fn unmatched_declaration(root: &Path, task: &str, contract: &Contract) -> Result<String> {
+    let conn = agent_service::open_db(root)?;
+    schema(&conn)?;
+    let mut statement = conn.prepare(
+        "SELECT signature,description,MAX(version) FROM agent_modules WHERE task_id=?1 AND name=?2 GROUP BY contract ORDER BY MAX(created_at) DESC LIMIT 5",
+    )?;
+    let saved = statement
+        .query_map(params![task, contract.name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let name = &contract.name;
+    if saved.is_empty() {
+        return Ok(format!("no saved implementation of {name} in this chat; declare it without revise_modules and the host writes it as a new contract"));
+    }
+    let mut message = format!("no saved implementation of {name} with this exact declaration. A revision keeps the signature and the contract comment exactly as saved; change only the implementation through `reason`. Saved declarations of {name}:");
+    for (signature, description, version) in saved {
+        let differs = match (signature == contract.signature, description == contract.description) {
+            (false, false) => "signature and comment differ",
+            (false, true) => "signature differs",
+            (true, false) => "comment differs",
+            (true, true) => "identical",
+        };
+        message.push_str(&format!("\n- version {version} ({differs}): signature {}; comment {}",
+            serde_json::to_string(&signature)?, serde_json::to_string(&description)?));
+    }
+    message.push_str(&format!("\nYour declaration: signature {}; comment {}",
+        serde_json::to_string(&contract.signature)?, serde_json::to_string(&contract.description)?));
+    Ok(message)
 }
 
 /// The module file, relative to the workspace, as the fixer is told it.
@@ -167,7 +199,7 @@ pub(super) fn system_message(root: &Path, task: &str) -> Option<Value> {
         .collect::<Vec<_>>()
         .join("\n\n");
     Some(json!({"role":"system","name":"chat_modules","content":format!(
-        "Modules this chat already has. Declare the same signature and contract to reuse one: the host links its saved implementation automatically, with no file import. Source paths are for inspection and revision.\n\n{declarations}"
+        "Modules this chat already has. Declare the same signature and contract to reuse one: the host links its saved implementation automatically, with no file import. Each path is in the chat's flow folder, not the workspace, so io cannot open it: read the source with read_session_history({{programs:true, program:\"modules/<file>\"}}), adding version for an earlier one.\n\n{declarations}"
     )}))
 }
 

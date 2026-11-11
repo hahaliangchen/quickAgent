@@ -906,7 +906,7 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         let (one, two) = (session(&state, &cancel, Some("one")), session(&state, &cancel, Some("two")));
         super::super::business_tool(&one, "node", "read_file", json!({"path":"document.txt"}), "read").await?;
-        let ran = super::super::business_tool_inner(&one, "node", "run_program", json!({"program":"python","args":["-c","import pathlib; pathlib.Path('document.txt').write_text('command')"]}), "run", true).await?;
+        let ran = super::super::business_tool_inner(&one, "node", "run_program", json!({"program":"python","args":["-c","import pathlib; pathlib.Path('document.txt').write_text('command')"]}), "run", true, false).await?;
         if ran["outcome"] == "spawn_failed" {
             // Python is not installed here.
             drop(conn);
@@ -943,7 +943,7 @@ mod tests {
         };
         let python = |code: &str| json!({"program":"python","args":["-c",format!("import pathlib; p = pathlib.Path('document.txt'); {code}")]});
         super::super::business_tool(&session, "node", "write_file", json!({"path":"document.txt","content":"second"}), "write").await?;
-        let ran = super::super::business_tool_inner(&session, "node", "run_program", python("p.write_text('command')"), "run", true).await?;
+        let ran = super::super::business_tool_inner(&session, "node", "run_program", python("p.write_text('command')"), "run", true, false).await?;
         if ran["outcome"] == "spawn_failed" {
             // Python is not installed here.
             drop(conn);
@@ -957,7 +957,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&path)?, "agent");
         // A change made outside before the next command still stops the edit after it.
         fs::write(&path, "outside")?;
-        super::super::business_tool_inner(&session, "node", "run_program", python("p.write_text(p.read_text() + '+command')"), "run again", true).await?;
+        super::super::business_tool_inner(&session, "node", "run_program", python("p.write_text(p.read_text() + '+command')"), "run again", true, false).await?;
         let conflict = super::super::business_tool(&session, "node", "edit_file", json!({"path":"document.txt","edits":[{"old_text":"agent","new_text":"again"}]}), "edit again").await?;
         assert_eq!(conflict["error_code"], "ASSET_CONFLICT", "{conflict}");
         assert_eq!(fs::read_to_string(&path)?, "outside+command");
@@ -989,7 +989,7 @@ mod tests {
         };
         super::super::business_tool(&session, "node", "read_file", json!({"path":"document.txt"}), "read").await?;
         let launch = json!({"project_path":".","script":"dev","background":true,"ready_url":format!("http://127.0.0.1:{port}/"),"wait_seconds":30});
-        let launched = match super::super::business_tool_inner(&session, "node", "run_project_script", launch, "launch", true).await {
+        let launched = match super::super::business_tool_inner(&session, "node", "run_project_script", launch, "launch", true, false).await {
             Ok(launched) => launched,
             // Node and npm are not installed here.
             Err(error) if format!("{error:#}").contains("runtime_bootstrap") => {
@@ -1002,7 +1002,7 @@ mod tests {
         };
         let written = fs::read_to_string(&path)?;
         let conflict = super::super::business_tool(&session, "node", "edit_file", json!({"path":"document.txt","edits":[{"old_text":"background","new_text":"agent"}]}), "edit").await?;
-        super::super::business_tool_inner(&session, "node", "stop_project_process", json!({"process_id":launched["process_id"]}), "stop", true).await?;
+        super::super::business_tool_inner(&session, "node", "stop_project_process", json!({"process_id":launched["process_id"]}), "stop", true, false).await?;
         assert_eq!(launched["running"], true, "{launched}");
         assert_eq!(written, "background");
         assert_eq!(conflict["error_code"], "ASSET_CONFLICT", "{conflict}");

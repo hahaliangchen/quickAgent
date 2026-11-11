@@ -257,7 +257,17 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
             };
             // Planning and native execution must receive the complete same
             // tool contract, including requirements after its first sentence.
-            let description = text(definition["description"].as_str().unwrap_or(""));
+            // These declarations are for program code, where a source read
+            // returns a whole file instead of an AI's page.
+            let program_read = crate::source_read::is_source_read(target)
+                && definition["parameters"]["properties"]["max_chars"].is_object();
+            let mut parameters = definition["parameters"].clone();
+            let mut description = definition["description"].as_str().unwrap_or("").to_owned();
+            if program_read {
+                description = description.replace(&crate::source_read::page_note(false), &crate::source_read::page_note(true));
+                parameters["properties"]["max_chars"] = json!({"type":"integer","minimum":1000,"maximum":crate::source_read::PROGRAM_PAGE_CHARS});
+            }
+            let description = text(&description);
             let returns = definition
                 .get("outputSchema")
                 .filter(|v| !v.is_null())
@@ -266,7 +276,7 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
             let prefix = if object { "" } else { "function " };
             result.push_str(&format!(
                 "  /** {description} */\n  {prefix}{method}(args: {}): {returns};\n",
-                schema_type(&definition["parameters"])
+                schema_type(&parameters)
             ));
         }
         result.push_str(if object { "};\n" } else { "}\n" });
@@ -320,7 +330,7 @@ pub fn core_methods(libraries: &Libraries, definitions: &[Value]) -> String {
         for (method, target) in methods {
             let (inputs, outputs, purpose): (&[&str], &[&str], &str) = match target.as_str() {
                 "list_dir" => (&["path", "recursive", "max_depth"], &["entries"], "Inspect the file layout."),
-                "read_file" => (&["path", "max_chars"], &["content", "complete"], "Read a small file."),
+                "read_file" => (&["path", "max_chars"], &["content", "complete"], "Read a file; in program code one call returns all of it."),
                 "read_file_lines" => (&["path", "start_line", "end_line", "max_chars"],
                     &["lines", "complete", "next_start_line", "next_column"], "Read only the needed source lines."),
                 "search_text" => (&["query", "path", "regex", "max_matches"], &["matches", "truncated"],
@@ -664,6 +674,20 @@ mod tests {
         assert!(selected(&libs, &json!({"libraries":["missing"]})).is_err());
         assert!(selected(&libs, &json!({"libraries":["io"],"overview":"yes"})).is_err());
         assert!(selected(&libs, &json!({})).is_err());
+    }
+    /// 2026-11-11: authors read "max 60000" in io.read's contract and wrote
+    /// paging loops, though program code may read a whole file.
+    #[test]
+    fn program_declarations_state_the_whole_file_read() {
+        let description = format!("Read a file. {} Reads are bounded.", crate::source_read::page_note(false));
+        let defs = [json!({"function":{"name":"read_file","description":description,"parameters":{"type":"object","required":["path"],
+            "properties":{"path":{"type":"string"},"max_chars":{"type":"integer","minimum":1000,"maximum":60000,"default":24000}}}}})];
+        let libs = libraries::catalog(&defs, &json!([]));
+        let chosen = selected(&libs, &json!({"methods":["io.read"]})).unwrap();
+        let signature = headers(&chosen, &defs);
+        assert!(signature.contains("whole file") && signature.contains("2000000"), "{signature}");
+        assert!(!signature.contains("60000") && !signature.contains("24000"), "{signature}");
+        assert!(signature.contains("Reads are bounded."), "the rest of the contract stays: {signature}");
     }
     #[test]
     fn original_contract_validator_preserves_local_references_and_constraints() {

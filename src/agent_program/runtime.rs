@@ -17,6 +17,15 @@ pub const INSTRUCTION_LIMIT: usize = 2_000_000;
 pub const PROGRAM_TIME_LIMIT_MS: i64 = 30 * 60 * 1000;
 fn instruction_limit() -> usize { INSTRUCTION_LIMIT }
 fn program_time_limit() -> i64 { PROGRAM_TIME_LIMIT_MS }
+/// A failure only the user can resolve (see single_agent/blockers.rs). Like a
+/// resource error, program code cannot catch it: the program stops there.
+pub const NEEDS_USER: &str = "NEEDS_USER";
+pub fn is_user_blocker(error: &Value) -> bool {
+    error["code"] == NEEDS_USER
+}
+fn stops_program(error: &Value) -> bool {
+    is_resource_error(error) || is_user_blocker(error)
+}
 pub fn is_resource_error(error: &Value) -> bool {
     matches!(error["code"].as_str(), Some("OUTPUT_OVER_CAPACITY" | "SHELL_OUTPUT_OVER_CAPACITY" | "INSTRUCTION_BUDGET_EXHAUSTED" | "PROGRAM_TIME_BUDGET_EXHAUSTED"))
 }
@@ -1648,7 +1657,7 @@ impl Runtime {
     }
     pub fn expire_time_budget(&mut self) { self.fail_capacity(self.budget_error(true)); }
     pub fn resume_action(&mut self, id: &str, value: Value, failed: bool) -> Result<()> {
-        if failed && is_resource_error(&value) {
+        if failed && stops_program(&value) {
             let at = self.inflight_async.get(id).map(|p| p.action.at.clone())
                 .or_else(|| self.pending.as_ref().filter(|p| p.id == id).map(|p| p.at.clone()))
                 .context("unknown or already completed action")?;
@@ -1677,7 +1686,7 @@ impl Runtime {
         );
         ensure!(self.program.prelude_hash == super::prelude::hash(), "program prelude changed");
         self.migrate_frames()?;
-        if failed && is_resource_error(&value) {
+        if failed && stops_program(&value) {
             let mut error = value;
             error["location"] = json!(self.pending.as_ref().context("no suspended effect")?.at);
             self.fail_capacity(error);

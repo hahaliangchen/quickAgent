@@ -96,7 +96,20 @@ export function ConversationPage({
   readonly onToggleRightPanel?: (() => void) | undefined
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
   const followTail = useRef(true)
+  // The chat width scales with the space the conversation actually has (the
+  // window minus the sidebar and any open side panel), which CSS reads from
+  // --dsh-conversation-column-width.
+  useLayoutEffect(() => {
+    const body = bodyRef.current
+    if (body === null) return
+    const publish = () => body.style.setProperty('--dsh-conversation-column-width', `${body.clientWidth}px`)
+    publish()
+    const observer = new ResizeObserver(publish)
+    observer.observe(body)
+    return () => observer.disconnect()
+  }, [])
   useEffect(() => { followTail.current = true }, [workspace.taskId, tab])
   useLayoutEffect(() => {
     const scroll = scrollRef.current
@@ -189,7 +202,7 @@ export function ConversationPage({
         </div>
       </header>
 
-      <div className={root.body}>
+      <div ref={bodyRef} className={root.body}>
         <div
           ref={scrollRef}
           className={root.scrollBody}

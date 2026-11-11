@@ -17,7 +17,24 @@ pub(crate) fn check_source_access(path: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
             "SQLITE_STATE_FILE: host database files are accessed through SQLite, not source-file tools"));
     }
+    if is_secret_file(&resolved, &crate::ai_proxy::secret_files()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+            "SECRET_FILE: this file holds API keys and is never readable by tools; the host applies the credentials itself. Model settings are in providers.yml and agent-generation.yml beside it"));
+    }
     Ok(())
+}
+
+/// Whether a resolved path is one of the secret files, compared after links
+/// resolve so another spelling or a symlink reaches the same answer.
+fn is_secret_file(resolved: &Path, secrets: &[std::path::PathBuf]) -> bool {
+    secrets.iter().any(|secret| {
+        let secret = secret.canonicalize().unwrap_or_else(|_| secret.clone());
+        if cfg!(windows) {
+            secret.to_string_lossy().eq_ignore_ascii_case(&resolved.to_string_lossy())
+        } else {
+            secret == resolved
+        }
+    })
 }
 
 pub fn init_db(workspace_root: &Path) -> Result<Connection> {
@@ -407,6 +424,26 @@ mod tests {
         let upgrade = tx.execute("UPDATE agent_tasks SET status='done' WHERE id='a'", []);
         assert!(upgrade.unwrap_err().to_string().contains("locked"));
         drop(tx);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn secret_files_are_matched_through_links_and_other_spellings() {
+        let root = std::env::temp_dir().join(format!("secret_files_{}", crate::agent_service::uuid_like()));
+        std::fs::create_dir_all(root.join("grow")).unwrap();
+        let secret = root.join("grow/credentials.yaml");
+        std::fs::write(&secret, "refs: {}\n").unwrap();
+        std::fs::write(root.join("grow/providers.yml"), "[]\n").unwrap();
+        let secrets = vec![secret.clone(), root.join("absent/.env")];
+        let resolve = |path: &std::path::Path| path.canonicalize().unwrap();
+        assert!(super::is_secret_file(&resolve(&secret), &secrets));
+        assert!(super::is_secret_file(&resolve(&root.join("grow/../grow/credentials.yaml")), &secrets));
+        assert!(!super::is_secret_file(&resolve(&root.join("grow/providers.yml")), &secrets), "model settings stay readable");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&secret, root.join("link.yaml")).unwrap();
+            assert!(super::is_secret_file(&resolve(&root.join("link.yaml")), &secrets), "a symlink reaches the same file");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

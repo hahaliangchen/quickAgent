@@ -213,7 +213,7 @@ pub(crate) fn session_programs(conn: &Connection, task: &str) -> Result<Value> {
                         // program/result existed, a finished program did too.
                         let run = &mut runs[index];
                         run.status = match failed.remove(&node) {
-                            Some(error) if error["code"] == "WAITING_FOR_USER" => "waiting",
+                            Some(error) if error["code"] == "WAITING_FOR_USER" || error["code"] == "NEEDS_USER" => "waiting",
                             Some(_) => "failed",
                             None => "completed",
                         };

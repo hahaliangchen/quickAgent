@@ -5,24 +5,51 @@
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["query"],
+      "required": [
+        "query"
+      ],
       "properties": {
-        "query": {"type": "string", "minLength": 1, "maxLength": 128, "description": "Search terms; supports site:, quoted phrases, lang:, after: and before:."},
-        "count": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5}
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Search terms; supports site:, quoted phrases, lang:, after: and before:."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 5
+        }
       }
     }
   },
   {
     "name": "web__fetch",
-    "description": "Read a source webpage as paged Markdown. Returns url, title, content, retrieved_at, snapshot_id, char_offset, returned_chars, total_chars, complete and next_cursor. If incomplete, call again with the same URL and cursor=next_cursor to read the unchanged snapshot without another network fetch. Unread text is not evidence.",
+    "description": "Read a source webpage as paged Markdown. The host requests the page directly first (public addresses only; HTML is converted to Markdown, Markdown and text pass through) and asks the search service's crawler only when that is blocked or fails, so reading a page needs no search credential. Returns url, title, content, provider, retrieved_at, snapshot_id, char_offset, returned_chars, total_chars, complete and next_cursor. If incomplete, call again with the same URL and cursor=next_cursor to read the unchanged snapshot without another network fetch. WEB_PAGE_NOT_FOUND means the site itself said the page does not exist; WEB_PAGE_UNAVAILABLE means neither fetcher could read it and the page may still exist, so browser.open can try it in a real browser. Unread text is not evidence.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["url"],
+      "required": [
+        "url"
+      ],
       "properties": {
-        "url": {"type": "string", "maxLength": 8192, "description": "HTTP(S) source URL without embedded credentials."},
-        "max_chars": {"type": "integer", "minimum": 1, "maximum": 24000, "default": 12000},
-        "cursor": {"type": "string", "maxLength": 256, "description": "next_cursor from a previous page. Omit for a fresh network fetch."}
+        "url": {
+          "type": "string",
+          "maxLength": 8192,
+          "description": "HTTP(S) source URL without embedded credentials."
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 24000,
+          "default": 12000
+        },
+        "cursor": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "next_cursor from a previous page. Omit for a fresh network fetch."
+        }
       }
     }
   }

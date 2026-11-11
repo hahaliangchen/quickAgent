@@ -6,6 +6,10 @@
   flex-direction: column;
   align-items: flex-end;
   gap: 6px;
+  /* Full row width, so the stack's 82% cap is a share of the column. In a
+     right-aligned parent the row would otherwise shrink to its text, and a
+     short message like "继续" would wrap at 82% of its own width. */
+  width: 100%;
 }
 
 .userStack {

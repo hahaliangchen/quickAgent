@@ -127,7 +127,7 @@ async fn fetch_pages_preserve_unicode_identity_and_never_repeat_the_network_requ
         cursor: None,
         max_chars: 3,
     };
-    let mut page = s.client.fetch(&f.0, &args, &args.url).await.unwrap();
+    let mut page = store(&f.0, s.client.fetch(&args.url).await.unwrap(), args.max_chars).await.unwrap();
     assert_eq!(page["content"], "开头🙂");
     assert_eq!(page["complete"], false);
     let id = page["snapshot_id"].clone();
@@ -270,7 +270,7 @@ async fn native_library_is_discoverable_compiles_and_reads_pages_in_read_only_mo
         cursor: None,
         max_chars: 3,
     };
-    let first = s.client.fetch(&f.0, &args, &args.url).await.unwrap();
+    let first = store(&f.0, s.client.fetch(&args.url).await.unwrap(), args.max_chars).await.unwrap();
     let runtime = PluginRuntime::new();
     let catalog = Arc::new(crate::builtin_plugins::ToolCatalog::default());
     let parent = runtime.mount(ROOT, Services(catalog.clone())).unwrap();

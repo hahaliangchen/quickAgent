@@ -155,7 +155,7 @@ async fn wait_with(
         match decision {
             "allow" => return Ok(()),
             "deny" => bail!(
-                "AI_REVIEW_DENIED: the approval reviewer declined {name}: {reason}. Do not retry it unchanged. Continue another way, or tell the user what you need so they can allow it."
+                "AI_REVIEW_DENIED: the approval reviewer declined {name}: {reason}. Do not retry it or work around it. Stop and tell the user what you need so they can allow it or choose another approach."
             ),
             _ => review_reason = Some(reason),
         }
@@ -238,13 +238,13 @@ async fn wait_with(
     )?;
     if decision == "deny" && let Some(paths) = outside {
         bail!(
-            "USER_DENIED: the user declined reading {} outside the workspace. Do not retry it. Continue with files inside the workspace, or tell the user what you need from those paths.",
+            "USER_DENIED: the user declined reading {} outside the workspace. Do not retry it or work around it. Stop and tell the user what you need from those paths.",
             paths.join(", ")
         );
     }
     if decision == "deny" {
         bail!(
-            "USER_DENIED: the user declined running {name}. Do not retry the same operation. Continue with work that needs no command execution, or tell the user what they need to run or allow."
+            "USER_DENIED: the user declined running {name}. Do not retry it or work around it. Stop and tell the user what they need to run or allow."
         );
     }
     Ok(())

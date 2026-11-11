@@ -1,5 +1,6 @@
 .root {
-  width: min(760px, calc(100% - 32px));
+  /* In a conversation it follows the message column; elsewhere 760px. */
+  width: min(var(--dsh-composer-card-max-width, 760px), calc(100% - 32px));
   margin: 0 auto 16px;
   position: relative;
   box-sizing: border-box;

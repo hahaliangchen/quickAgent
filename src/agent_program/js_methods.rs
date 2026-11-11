@@ -1775,13 +1775,17 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
         _ => {
             // Only the explicitly JSON-based library crosses this boundary.
             // An unknown native must name itself before inspecting arguments.
-            ensure!(super::builtins::arity(name).is_some(),"TypeError: {name} is unavailable in the flow runtime; consult the program guide for supported functions");
+            ensure!(super::builtins::arity(name).is_some(),"TypeError: {name} is unavailable in the flow runtime. {}", crate::agent_program::NOT_AVAILABLE_HINT);
             let mut values = Vec::with_capacity(args.len());
             for value in args {
                 values.push(heap.to_json(value)?);
             }
             // The built-ins name themselves in their errors.
             let result = super::builtins::call(name, values)?;
+            // An unset variable reads as undefined, as in Node.
+            if name == "process.env" && result.is_null() {
+                return Ok(VmValue::Undefined);
+            }
             heap.from_json(&result)?
         }
     })

@@ -81,8 +81,41 @@ fn bindings_each_module_call_initializes_its_own_top_level() {
 #[test]
 fn bindings_module_top_level_await_is_reported_where_it_is() {
     let error = compile_body("const ready = Promise.resolve(1);\nconst value = await ready;\nasync function work() { return value; }", "work").unwrap_err().to_string();
-    assert!(error.contains("TS_PROGRAM 2:15:") && error.contains("await inside its functions"), "{error}");
+    assert!(error.contains("TS_PROGRAM 2:15:") && error.contains("put this await inside work"), "{error}");
     assert!(compile_body("const f = async () => { await 1; };\nasync function work() { return 1; }", "work").is_ok());
+    // A parser error is explained, not just named.
+    let error = compile_body("const x = 1;\nreturn x;\nfunction work() { return 1; }", "work").unwrap_err().to_string();
+    assert!(error.contains("TS_PROGRAM 2:1:") && error.contains("put this code inside work") && !error.contains("ReturnNotAllowed"), "{error}");
+}
+
+/// The 2026-11-11 run: a module author wrote three probes as scripts (top-level
+/// await, a final return, a helper awaited at the top level) and each was
+/// rejected. A probe that never defines the called function runs as its body.
+#[test]
+fn bindings_a_probe_written_as_a_script_runs_as_the_called_function() {
+    use super::compiler::probe_as_entry;
+    let params = vec!["input".to_owned()];
+    for script in [
+        "const out = {};\nout.n = await Promise.resolve(input.n + 1);\nreturn out;",
+        "async function probe() {\n  return {n: await Promise.resolve(input.n + 1)};\n}\nconst out = await probe();\nreturn out;",
+    ] {
+        let source = probe_as_entry(script, "inspect", &params).expect("a script is wrapped");
+        assert_eq!(source.lines().count(), script.lines().count() + 1, "lines stay where they were: {source}");
+        let program = compile_body(&source, "inspect").unwrap();
+        assert_eq!(returned(Runtime::task_program(program, "inspect", vec![json!({"n":1})]).unwrap()), json!({"n":2}), "{script}");
+    }
+    // An import stays a module import, after the function, where it still hoists.
+    let source = probe_as_entry("import * as io from \"host:io\";\nconst info = io.workspace_info({});\nreturn typeof io.read;", "inspect", &params).unwrap();
+    assert!(source.ends_with("import * as io from \"host:io\";") && source.lines().nth(1).unwrap().contains("io.workspace_info"), "{source}");
+    assert!(compile_body(&source, "inspect").is_ok());
+    // Errors keep the line the author wrote.
+    let source = probe_as_entry("const a = 1;\nconst b = a.c.d;\nreturn b;", "inspect", &params).unwrap();
+    let program = compile_body(&source, "inspect").unwrap();
+    let error = Runtime::task_program(program, "inspect", vec![json!({})]).unwrap().next();
+    assert!(matches!(&error, State::Failed(e) if e.to_string().contains("\"line\":2")), "{error:?}");
+    // A source that defines the called function, or only declares, is left as it is.
+    assert!(probe_as_entry("async function inspect(input) { return 1; }", "inspect", &params).is_none());
+    assert!(probe_as_entry("function helper() {}", "inspect", &params).is_none());
 }
 
 #[test]

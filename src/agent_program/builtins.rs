@@ -1,10 +1,14 @@
-//! Pure path and URL operations for the flow runtime; no process or filesystem access.
+//! Pure path, URL, base64, YAML and read-only environment operations for the
+//! flow runtime; no process or filesystem access.
 use anyhow::{Context, Result, bail, ensure};
+use base64::Engine as _;
 use serde_json::{Value, json};
 use std::path::{Component, Path, PathBuf};
 
 const INPUT_LIMIT: usize = 64 * 1024;
 const OUTPUT_LIMIT: usize = 256 * 1024;
+/// base64 carries file-sized text, larger than a path or URL.
+const BASE64_LIMIT: usize = 4 * 1024 * 1024;
 
 pub(super) fn arity(name: &str) -> Option<(usize, usize)> {
     Some(match name {
@@ -12,8 +16,63 @@ pub(super) fn arity(name: &str) -> Option<(usize, usize)> {
         "path.relative" => (2, 2),
         "path.basename" | "url.parse" => (1, 2),
         "path.normalize" | "path.dirname" | "path.extname" => (1, 1),
+        "os.homedir" | "os.platform" | "os.tmpdir" => (0, 0),
+        "process.env" | "atob" | "btoa" => (1, 1),
+        "TextEncoder.encode" => (0, 1),
+        "Buffer.byteLength" => (1, 2),
+        "yaml.parse" | "yaml.load" => (1, 2),
+        "yaml.stringify" | "yaml.dump" => (1, 3),
         _ => return None,
     })
+}
+
+/// Environment variables whose names look like credentials stay unreadable:
+/// a flow's values reach model context and saved history.
+fn credential_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "COOKIE", "SESSION", "PRIVATE"]
+        .iter()
+        .any(|part| upper.contains(part))
+}
+
+/// Node's os.platform() names.
+fn platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
+/// atob: forgiving base64 to a binary string, one char per byte, as in Node.
+fn atob(input: &str) -> Result<String> {
+    let mut compact: String = input.chars().filter(|c| !matches!(c, ' ' | '\t' | '\n' | '\x0c' | '\r')).collect();
+    if compact.len() % 4 == 0 {
+        let padding = if compact.ends_with("==") { 2 } else { usize::from(compact.ends_with('=')) };
+        compact.truncate(compact.len() - padding);
+    }
+    let invalid = || anyhow::anyhow!("InvalidCharacterError: The string to be decoded is not correctly encoded.");
+    if compact.len() % 4 == 1 || !compact.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/') {
+        return Err(invalid());
+    }
+    let bytes = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::GeneralPurposeConfig::new()
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::RequireNone)
+            .with_decode_allow_trailing_bits(true),
+    )
+    .decode(compact.as_bytes())
+    .map_err(|_| invalid())?;
+    Ok(bytes.into_iter().map(char::from).collect())
+}
+
+/// btoa: a binary string (every char at most U+00FF) to base64.
+fn btoa(input: &str) -> Result<String> {
+    let bytes = input
+        .chars()
+        .map(|c| u8::try_from(u32::from(c)).map_err(|_| anyhow::anyhow!("InvalidCharacterError: Invalid character")))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
 fn separator(c: char) -> bool {
@@ -161,21 +220,138 @@ fn url_parse(input: &str, base: Option<&str>) -> Result<Value> {
     )
 }
 
+/// YAML in and out, as the `yaml` package's parse/stringify and js-yaml's
+/// load/dump do it: one document, mappings become objects with string keys,
+/// merge keys (`<<`) applied. Options are accepted and ignored.
+fn yaml(name: &str, args: &[Value]) -> Result<Option<Value>> {
+    match name {
+        "yaml.parse" | "yaml.load" => {
+            let text = args[0].as_str().with_context(|| format!("TypeError: {name} takes a YAML string"))?;
+            ensure!(text.len() <= BASE64_LIMIT, "{name} input exceeds {} KiB", BASE64_LIMIT / 1024);
+            let mut value: serde_yaml::Value = serde_yaml::from_str(text).map_err(|error| anyhow::anyhow!("YAMLParseError: {error}"))?;
+            value.apply_merge().map_err(|error| anyhow::anyhow!("YAMLParseError: {error}"))?;
+            Ok(Some(yaml_to_json(value)))
+        }
+        "yaml.stringify" | "yaml.dump" => {
+            let text = serde_yaml::to_string(&args[0])?;
+            ensure!(text.len() <= BASE64_LIMIT, "{name} output exceeds {} KiB", BASE64_LIMIT / 1024);
+            Ok(Some(json!(text)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn yaml_to_json(value: serde_yaml::Value) -> Value {
+    use serde_yaml::Value as Yaml;
+    match value {
+        Yaml::Null => Value::Null,
+        Yaml::Bool(b) => json!(b),
+        Yaml::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                json!(i)
+            } else if let Some(u) = n.as_u64() {
+                json!(u)
+            } else {
+                n.as_f64().and_then(serde_json::Number::from_f64).map_or(Value::Null, Value::Number)
+            }
+        }
+        Yaml::String(s) => json!(s),
+        Yaml::Sequence(items) => Value::Array(items.into_iter().map(yaml_to_json).collect()),
+        Yaml::Mapping(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| {
+                    let key = match yaml_to_json(key) {
+                        Value::String(s) => s,
+                        Value::Null => "null".to_owned(),
+                        other => other.to_string(),
+                    };
+                    (key, yaml_to_json(value))
+                })
+                .collect(),
+        ),
+        Yaml::Tagged(tagged) => yaml_to_json(tagged.value),
+    }
+}
+
+/// UTF-8 sizes and bytes, so code never counts them in a per-character loop
+/// that exhausts its instruction budget.
+fn text_encoding(name: &str, args: &[Value]) -> Result<Option<Value>> {
+    const ENCODE_LIMIT: usize = 256 * 1024;
+    Ok(Some(match name {
+        // Like the web API, encode() and encode(undefined) give no bytes.
+        "TextEncoder.encode" => {
+            let text = match args.first() {
+                None | Some(Value::Null) => "",
+                Some(Value::String(text)) => text.as_str(),
+                Some(_) => bail!("TypeError: TextEncoder.encode takes a string"),
+            };
+            ensure!(
+                text.len() <= ENCODE_LIMIT,
+                "RangeError: TextEncoder.encode input exceeds 256 KiB; use Buffer.byteLength(text) for a size"
+            );
+            json!(text.as_bytes())
+        }
+        "Buffer.byteLength" => {
+            let text = args[0].as_str().context("TypeError: Buffer.byteLength takes a string")?;
+            match args.get(1) {
+                None | Some(Value::Null) => {}
+                Some(Value::String(encoding)) if matches!(encoding.to_ascii_lowercase().as_str(), "utf8" | "utf-8") => {}
+                Some(other) => bail!("Buffer.byteLength supports only the utf8 encoding here, not {other}"),
+            }
+            json!(text.len())
+        }
+        _ => return Ok(None),
+    }))
+}
+
 pub(super) fn call(name: &str, args: Vec<Value>) -> Result<Value> {
-    let (min, max) = arity(name).with_context(||format!("{name} is unavailable in the flow runtime"))?;
+    let (min, max) = arity(name).with_context(||format!("{name} is unavailable in the flow runtime. {}", crate::agent_program::NOT_AVAILABLE_HINT))?;
     ensure!(
         (min..=max).contains(&args.len()),
         "invalid built-in argument count"
     );
+    if let Some(value) = yaml(name, &args)? {
+        return Ok(value);
+    }
+    if let Some(value) = text_encoding(name, &args)? {
+        return Ok(value);
+    }
     let strings = args
         .iter()
         .map(|v| v.as_str().context("built-in arguments must be strings"))
         .collect::<Result<Vec<_>>>()?;
+    let (input_limit, output_limit) = if matches!(name, "atob" | "btoa") {
+        (BASE64_LIMIT, BASE64_LIMIT * 2)
+    } else {
+        (INPUT_LIMIT, OUTPUT_LIMIT)
+    };
     ensure!(
-        serde_json::to_vec(&json!({"name":name,"args":args}))?.len() <= INPUT_LIMIT,
-        "built-in input exceeds 64 KiB"
+        serde_json::to_vec(&json!({"name":name,"args":args}))?.len() <= input_limit,
+        "built-in input exceeds {} KiB",
+        input_limit / 1024
     );
     let value = match name {
+        "atob" => json!(atob(strings[0])?),
+        "btoa" => json!(btoa(strings[0])?),
+        "os.platform" => json!(platform()),
+        "os.homedir" => {
+            let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+            json!(std::env::var(var).context("os.homedir: the home directory is not set")?)
+        }
+        "os.tmpdir" => {
+            // Node drops a trailing separator unless the path is a root.
+            let dir = std::env::temp_dir().to_string_lossy().into_owned();
+            let trimmed = dir.trim_end_matches(separator);
+            json!(if trimmed.is_empty() { dir.as_str() } else { trimmed })
+        }
+        "process.env" => {
+            ensure!(
+                !credential_name(strings[0]),
+                "process.env.{} looks like a credential and is not readable from flow code; pass what is needed explicitly or use a host library that handles the credential",
+                strings[0]
+            );
+            std::env::var(strings[0]).map(Value::String).unwrap_or(Value::Null)
+        }
         "path.normalize" => json!(normalize(strings[0], true)),
         "path.join" => {
             let joined = strings
@@ -244,8 +420,9 @@ pub(super) fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         _ => bail!("{name} is unavailable in the flow runtime"),
     };
     ensure!(
-        serde_json::to_vec(&value)?.len() <= OUTPUT_LIMIT,
-        "built-in output exceeds 256 KiB"
+        serde_json::to_vec(&value)?.len() <= output_limit,
+        "built-in output exceeds {} KiB",
+        output_limit / 1024
     );
     Ok(value)
 }
@@ -265,6 +442,15 @@ mod tests {
         assert!(call("path.join", vec![json!(17)]).is_err());
         assert!(call("path.join", vec![json!("x".repeat(INPUT_LIMIT))]).is_err());
         assert!(call("url.parse", vec![json!("relative")]).is_err());
+        // Node's atob rejects these too.
+        for bad in ["a", "YQ===", "Y=Q=", "YQ=", "a*b="] {
+            assert!(call("atob", vec![json!(bad)]).is_err(), "atob should reject {bad:?}");
+        }
+        assert!(call("btoa", vec![json!("中")]).is_err());
+        for name in ["SUBAPI_API_KEY", "GITHUB_TOKEN", "aws_secret_access_key", "DB_PASSWORD"] {
+            assert!(call("process.env", vec![json!(name)]).unwrap_err().to_string().contains("credential"), "{name}");
+        }
+        assert_eq!(call("process.env", vec![json!("GROW_SURELY_UNSET_VARIABLE")]).unwrap(), Value::Null);
     }
 
     #[cfg(unix)]
@@ -318,10 +504,21 @@ mod tests {
             ("url.parse", json!(["https://example.com/a?"])),
             ("url.parse", json!(["https://example.com/a#"])),
             ("url.parse", json!(["mailto:user@example.com"])),
+            ("atob", json!(["aGk="])),
+            ("atob", json!([" aG\tk=\n"])),
+            ("atob", json!(["YQ"])),
+            ("atob", json!(["YR=="])),
+            ("atob", json!(["/+8="])),
+            ("atob", json!([""])),
+            ("btoa", json!(["ab\u{ff}"])),
+            ("btoa", json!([""])),
+            ("os.platform", json!([])),
+            ("os.homedir", json!([])),
+            ("os.tmpdir", json!([])),
         ] {
             cases.push(json!({"name":name,"args":args}));
         }
-        let source = r#"const p=require('node:path');let b='';process.stdin.on('data',c=>b+=c);process.stdin.on('end',()=>{const v=JSON.parse(b);console.log(JSON.stringify(v.map(x=>{if(x.name==='url.parse'){const u=x.args.length===2?new URL(x.args[0],x.args[1]):new URL(x.args[0]);return {href:u.href,origin:u.origin,protocol:u.protocol,hostname:u.hostname,port:u.port,pathname:u.pathname,search:u.search,hash:u.hash}}return p[x.name.slice(5)](...x.args)})))})"#;
+        let source = r#"const p=require('node:path'),os=require('node:os');let b='';process.stdin.on('data',c=>b+=c);process.stdin.on('end',()=>{const v=JSON.parse(b);console.log(JSON.stringify(v.map(x=>{if(x.name==='url.parse'){const u=x.args.length===2?new URL(x.args[0],x.args[1]):new URL(x.args[0]);return {href:u.href,origin:u.origin,protocol:u.protocol,hostname:u.hostname,port:u.port,pathname:u.pathname,search:u.search,hash:u.hash}}if(x.name==='atob'||x.name==='btoa')return globalThis[x.name](...x.args);if(x.name.startsWith('os.'))return os[x.name.slice(3)]();return p[x.name.slice(5)](...x.args)})))})"#;
         let Ok(mut child) = Command::new("node")
             .arg("-e")
             .arg(source)

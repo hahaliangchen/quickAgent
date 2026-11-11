@@ -96,6 +96,15 @@ pub(super) fn requirable(s: &Session<'_>, definitions: &[Value]) -> BTreeMap<Str
     result
 }
 
+/// What the user still has to set up for each of these libraries, for the
+/// ones that need anything (builtin_plugins::setup_needed).
+pub(super) fn setup_notes<'a>(libraries: impl IntoIterator<Item = &'a String>) -> BTreeMap<String, String> {
+    libraries
+        .into_iter()
+        .filter_map(|library| crate::builtin_plugins::setup_needed(library).map(|note| (library.clone(), note)))
+        .collect()
+}
+
 /// Package IDs address skill instructions; library names address require().
 /// Project skills take precedence in read_skill, so never advertise a shadowed ID.
 pub(super) fn skill_library_names(s: &Session<'_>) -> Vec<(String, String)> {
@@ -122,7 +131,20 @@ fn link(s: &Session<'_>, definitions: &[Value], spec: &str) -> (Value, bool) {
     if super::skill_scope::exists(s, name) {
         return (json!({"library":spec,"methods":{}}), false);
     }
-    (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{spec}'; program_tool_headers lists the libraries")}), true)
+    (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{spec}'; {}", node_module_hint(name).unwrap_or("program_tool_headers lists the libraries"))}), true)
+}
+/// Where the work a Node built-in module would do is in this runtime, so a
+/// failed require says what to use instead of only what is missing.
+fn node_module_hint(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "fs" => "read, list, search and write files with require('io'); io.read and io.list accept absolute paths, including outside the workspace once allowed",
+        "child_process" => "run commands with require('process').exec_command inside a module implementation",
+        "https" | "net" | "undici" => "fetch pages with require('web').fetch, or check a local service with require('http').probe",
+        "crypto" | "zlib" | "buffer" | "stream" | "util" | "events" | "worker_threads" | "readline" | "v8" | "vm" => {
+            "this Node module is not part of the flow runtime; atob/btoa, TextEncoder, Buffer.byteLength, path, url, os and yaml are built in. Do not reimplement the module by hand: use those or a host library, or report the capability as missing"
+        }
+        _ => return None,
+    })
 }
 /// The libraries a hook's declaring code requires, the host's own or
 /// third-party ones; their methods join its tools.
@@ -309,7 +331,7 @@ pub(super) fn write_program_tool(module: bool) -> Value {
     let mut properties = json!({"source":{"type":"string","minLength":1,"description":"The complete source for this submission."}});
     let description = if module {
         properties["probe"] = json!({"type":"boolean","description":"If true, run a small probe with the current arguments. Only read_file, read_file_lines, search_text, list_dir and workspace_info may execute: shell and writes are forbidden even if their libraries import successfully. Omit probe to save and run the reusable module with its normal permissions."});
-        "Run a small read-only probe with probe:true, or submit the complete reusable module implementation. Both use the contracted function signature. A probe returns its actual result to this same author; the final implementation is saved and returns to the caller. Call it as the only call in its reply. Code in reply text is never run."
+        "Run a small read-only probe with probe:true, or submit the complete reusable module implementation. The implementation uses the contracted function signature; a probe may instead be a plain script, run as that function's body with its parameters bound to this call's arguments. A probe returns its actual result to this same author; the final implementation is saved and returns to the caller. Call it as the only call in its reply. Code in reply text is never run."
     } else {
         properties["revise_modules"] = json!({"type":"object","description":"Optional compatible improvements to saved first-layer implementations, keyed by the top-level @virtual name. Keep the declaration identical. On its first call, the author revises that saved version and stores the new implementation.",
             "additionalProperties":{"type":"object","properties":{
@@ -507,7 +529,13 @@ pub(super) fn find(s: &Session<'_>, w: &Window, args: &Value) -> Result<Value> {
     // Methods matching more of the query's words come first; ties keep the
     // catalog's order.
     matches.sort_by(|a, b| b.0.cmp(&a.0));
-    let methods = matches.into_iter().take(8).map(|(_, method)| method).collect::<Vec<_>>();
+    let mut methods = matches.into_iter().take(8).map(|(_, method)| method).collect::<Vec<_>>();
+    for method in &mut methods {
+        let library = method["method"].as_str().and_then(|name| name.split('.').next()).map(str::to_owned);
+        if let Some(note) = library.and_then(|library| crate::builtin_plugins::setup_needed(&library)) {
+            method["setup_needed"] = json!(note);
+        }
+    }
     Ok(json!({"methods":methods}))
 }
 /// Files a function wrote successfully: write calls recorded under its frame,
@@ -782,13 +810,28 @@ pub(super) fn install_body_with(
         .as_str()
         .context("current function name missing")?;
     let source = args["source"].as_str().context("source is required")?;
+    let parameters = task["parameters"].as_array().into_iter().flatten()
+        .filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>();
+    // A probe written as a script runs as the body of the function the host
+    // calls, so its top-level await and return work as they would there.
+    let script = if args["probe"] == true { agent_program::probe_as_entry(source, name, &parameters) } else { None };
     let scope = super::function_scope::values(w);
     let program = agent_program::compile_body_with_scope(
-        source,
+        script.as_deref().unwrap_or(source),
         name,
         libraries,
         scope.keys().cloned().collect(),
-    )?;
+    )
+    .map_err(|error| {
+        // Say exactly which function the code belongs in.
+        let message = format!("{error:#}");
+        if message.contains(&format!("inside {name}")) {
+            let declared = format!("{}function {name}({})", if task["async"] == true { "async " } else { "" }, parameters.join(", "));
+            anyhow::anyhow!("{message}: {declared} {{ … }}")
+        } else {
+            error
+        }
+    })?;
     validate_implementation(&program)?;
     let probe = args["probe"] == true;
     if probe {
@@ -857,9 +900,27 @@ pub(super) fn internal_call(w: &Window, call: &crate::model_stream::ToolCall) ->
         })
 }
 
+/// How a cut-off reply spent its output limit, as the service reported it:
+/// (limit, reasoning tokens, other output tokens).
+pub(super) fn output_split(s: &Session<'_>, node: &str) -> Option<(u64, u64, u64)> {
+    let conn = agent_service::open_db(s.state.workspace.root()).ok()?;
+    let raw: String = conn.query_row(
+        "SELECT data FROM agent_task_events WHERE task_id=?1 AND kind='context/model_usage' AND json_extract(data,'$.request_node_id')=?2 ORDER BY seq DESC LIMIT 1",
+        params![s.task, node], |r| r.get(0)).ok()?;
+    let event: Value = serde_json::from_str(&raw).ok()?;
+    let usage = &event["usage"];
+    let used = usage["completion_tokens"].as_u64().or_else(|| usage["output_tokens"].as_u64())?;
+    let reasoning = usage["completion_tokens_details"]["reasoning_tokens"].as_u64()
+        .or_else(|| usage["output_tokens_details"]["reasoning_tokens"].as_u64())?;
+    Some((event["max_tokens"].as_u64().unwrap_or(used), reasoning, used.saturating_sub(reasoning)))
+}
+
 fn recorded(s: &Session<'_>, id: &str) -> Result<Option<(i64, Value)>> {
     let conn = agent_service::open_db(s.state.workspace.root())?;
-    let sql = "SELECT seq,data FROM agent_task_events WHERE task_id=?1 AND ((kind='tool/result' AND json_extract(data,'$.message.toolCallId')=?2) OR (kind='subagent/event' AND json_extract(data,'$.event_type')='tool/result' AND json_extract(data,'$.event.message.toolCallId')=?2)) ORDER BY seq DESC LIMIT 1";
+    // A blocked call was never delivered: the program paused before it, and
+    // resuming runs the call again (blockers.rs).
+    let sql = "SELECT seq,data FROM agent_task_events WHERE task_id=?1 AND ((kind='tool/result' AND json_extract(data,'$.message.toolCallId')=?2) OR (kind='subagent/event' AND json_extract(data,'$.event_type')='tool/result' AND json_extract(data,'$.event.message.toolCallId')=?2))
+        AND COALESCE(json_extract(data,'$.meta.result.code'),'')<>'NEEDS_USER' ORDER BY seq DESC LIMIT 1";
     let row: Option<(i64, String)> = conn
         .query_row(sql, params![s.task, id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
@@ -1054,13 +1115,30 @@ fn outcome(s: &Session<'_>, printed: &[String], ended: std::result::Result<&Valu
                 "之后的步骤没有执行。".to_owned(),
             ]
         }
+        Err(error) if agent_program::runtime::is_user_blocker(error) => super::blockers::outcome_lines(&label, error),
+        Err(error) if error["code"] == PAUSED && error["blocker"].is_object() => {
+            super::blockers::paused_lines(&label, error["stopped_at"].as_str().unwrap_or(""), &error["blocker"])
+        }
         Err(error) if error["code"] == PAUSED => {
             let at = error["stopped_at"].as_str().filter(|at| !at.is_empty())
                 .map(|at| format!("停在 {at}，这一步还没完成")).unwrap_or_else(|| "停在两步之间".into());
             vec![
                 format!("{label}被你的新消息暂停，{at}。"),
-                "它的状态都保留着：要继续，在新程序里 import * as previous from \"host:previous/promises\"，previous.resume() 会从停下的地方接着跑，返回它的结果（Promise）；不调用，它会在这一轮结束时丢弃。".to_owned(),
+                "程序的状态都保留着。".to_owned(),
             ]
+        }
+        Err(error) if error["code"] == STOPPED => {
+            let at = error["stopped_at"].as_str().filter(|at| !at.is_empty())
+                .map(|at| format!("停在 {at}，这一步还没完成")).unwrap_or_else(|| "停在两步之间".into());
+            let mut lines = vec![
+                format!("{label}被你停止，{at}。"),
+                "程序的状态都保留着：下一条消息让我继续，我会从这一步接着跑，已完成的步骤不重做。".to_owned(),
+            ];
+            let interrupted: Vec<&str> = error["interrupted"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            if !interrupted.is_empty() {
+                lines.push(format!("停止时还在执行、没有做完的操作：{}。继续时，程序代码里的操作会从头再做一遍；AI 直接调用的，会告诉那个 AI 结果不确定，由它决定要不要再做。", interrupted.join("、")));
+            }
+            lines
         }
         Err(error) => {
             let message = error["message"].as_str().map(str::to_owned).unwrap_or_else(|| error.to_string());
@@ -1085,25 +1163,124 @@ fn outcome(s: &Session<'_>, printed: &[String], ended: std::result::Result<&Valu
     }
     Ok(lines.join("\n"))
 }
+/// How a program the user stopped ends: kept, to be resumed or left.
+const STOPPED: &str = "STOPPED_BY_USER";
+/// What the main AI weighs before continuing a program the user stopped, for
+/// its copy of the outcome only.
+const STOP_RESUME_HINT: &str = "The user stopped the turn while this program ran. It is kept through the next turn only. Read the user's next message before deciding. When they want the same work continued, write a new program with import * as previous from \"host:previous/promises\" and await previous.resume(): finished steps are not redone; an unfinished operation in program code runs again from its start, and a function's AI whose own call was cut off is told its result is unknown. When they changed what they want, or an unfinished operation must not run twice, do not resume it: write a new program for what is needed now, and the kept one is discarded at the end of the turn.";
+/// The tool calls of this turn that were still running when it stopped. A
+/// resumed program makes each of them again from its start.
+fn interrupted_steps(s: &Session<'_>) -> Result<Vec<String>> {
+    let conn = agent_service::open_db(s.state.workspace.root())?;
+    let rows = conn
+        .prepare("SELECT json_extract(c.data,'$.name'), json_extract(c.data,'$.program_location.line') FROM agent_task_events c
+            WHERE c.task_id=?1 AND c.kind='tool/call' AND json_extract(c.data,'$.turn')=?2
+            AND json_extract(c.data,'$.name') NOT IN ('create_task', ?3, ?4)
+            AND NOT EXISTS (SELECT 1 FROM agent_task_events r WHERE r.task_id=c.task_id AND r.kind='tool/result' AND r.seq>c.seq
+                AND json_extract(r.data,'$.message.toolCallId')=json_extract(c.data,'$.callId'))
+            ORDER BY c.seq")?
+        .query_map(params![s.task, s.turn as i64, WRITE_PROGRAM, super::paused_programs::RESUME], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().filter_map(|(name, line)| {
+        let name = name?;
+        let name = if name == "parallel_read_batch" { "并行读取".to_owned() } else { name };
+        Some(match line {
+            Some(line) => format!("第 {line} 行 {name}"),
+            None => format!("{name}（AI 直接调用）"),
+        })
+    }).collect())
+}
+/// Keep the main program of a turn the user stopped (design guide §7.4). The
+/// stop cut every frame off where it stood, so the program continues from
+/// what was saved: its windows and the event log, not what was in memory. It
+/// moves into a paused frame kept through the next turn, and its outcome
+/// tells the main AI where it stopped and which operations were unfinished;
+/// the main AI decides, with the user's next message, whether to resume it.
+/// Returns whether a program was kept.
+pub(super) async fn stop_main(s: &Session<'_>, w: &mut Window) -> Result<bool> {
+    let task = s.task.to_owned();
+    let main = db(s.state.workspace.root(), move |conn| {
+        let raw: Option<String> = conn
+            .query_row("SELECT state FROM agent_runtime_windows WHERE task_id=?1 AND scope='main'", [&task], |r| r.get(0))
+            .optional()?;
+        Ok(raw.and_then(|raw| serde_json::from_str::<Window>(&raw).ok()))
+    })
+    .await?;
+    let running = |main: &Window| main.program_task.is_none() && !main.module_probe
+        && main.program.as_ref().is_some_and(|program| !program.finished && program.program.version == agent_program::VERSION);
+    let Some(main) = main.filter(running) else {
+        // No program to keep. One kept from an earlier turn, which this turn
+        // had not resumed yet, waits one more turn.
+        if w.program_task.is_none() && let Some(scope) = w.resumable.clone() {
+            super::paused_programs::keep_through_next_turn(s, &scope).await?;
+        }
+        return Ok(false);
+    };
+    let mut session = s.clone();
+    session.scope = "main".into();
+    session.task_node_id = main.task_node_id.clone();
+    let s = &session;
+    *w = main;
+    // A program that was resuming an earlier one keeps that one too.
+    let resumed = w.resumable.clone().filter(|_| super::paused_programs::resumes_previous(w));
+    let console = printed(w);
+    let proposed = outcome(s, &console, Err(&json!({"code":STOPPED})))?;
+    let (required, fits) = delivery_capacity(s, w, &json!({"role":"assistant","content":proposed}));
+    let capacity = if fits { None } else {
+        Some(output_capacity_error(s, required, archive_program_output(s, w, &Value::Null).await?))
+    };
+    record_end(s, w, "stopped", json!({})).await?;
+    let stopped_at = super::paused_programs::pause_main(s, w, true).await?;
+    if let Some(scope) = resumed {
+        super::paused_programs::keep_through_next_turn(s, &scope).await?;
+    }
+    let stopped = json!({"code":STOPPED,"stopped_at":stopped_at,"interrupted":interrupted_steps(s)?});
+    let shown = outcome(s, &[], Err(&stopped))?;
+    let text = match capacity {
+        Some(error) => format!("{shown}\n输出没有交付；完整结果与读取引用：{error}"),
+        None => outcome(s, &console, Err(&stopped))?,
+    };
+    let step = {
+        let conn = agent_service::open_db(s.state.workspace.root())?;
+        conn.query_row("SELECT coalesce(max(json_extract(data,'$.step')),0) FROM agent_task_events WHERE task_id=?1 AND json_extract(data,'$.turn')=?2",
+            params![s.task, s.turn as i64], |r| r.get::<_, i64>(0))? as usize
+    };
+    end_program(s, w, step, Value::Null, format!("{text}\n{STOP_RESUME_HINT}"), Some(shown)).await?;
+    // The next turn goes on in this window: the main AI may write a program.
+    w.program_value = None;
+    save(s, w).await?;
+    Ok(true)
+}
+/// How to continue a program the user's message paused, for the main AI's
+/// copy of the outcome only.
+const INTERJECTION_RESUME_HINT: &str = "To continue it, write a new program with import * as previous from \"host:previous/promises\": previous.resume() returns a Promise that runs it on from where it stopped and resolves to its result. It can run beside new work or be awaited first. A paused program that is not resumed is discarded at the end of this turn.";
 /// Pause the main program for the user's new message; its outcome is the
 /// reply the message then follows, and the main AI decides what runs next.
-pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window, step: usize) -> Result<()> {
+/// With a blocker, the outcome ends the turn and tells the user what to do,
+/// and the program is kept for the next turn to resume.
+pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window, step: usize, blocker: Option<Value>) -> Result<()> {
     let console = printed(w);
-    let proposed = outcome(s, &console, Err(&json!({"code":PAUSED})))?;
+    let proposed = outcome(s, &console, Err(&json!({"code":PAUSED,"blocker":blocker})))?;
     let (required, fits) = delivery_capacity(s,w,&json!({"role":"assistant","content":proposed}));
     let capacity = if fits {None} else {
         Some(output_capacity_error(s,required,archive_program_output(s,w,&Value::Null).await?))
     };
-    record_end(s, w, "paused", json!({})).await?;
-    let stopped_at = super::paused_programs::pause_main(s, w).await?;
-    let paused = json!({"code":PAUSED,"stopped_at":stopped_at});
+    let ended = if blocker.is_some() { "needs_user" } else { "paused" };
+    record_end(s, w, ended, json!({"blocker":blocker})).await?;
+    let stopped_at = super::paused_programs::pause_main(s, w, blocker.is_some()).await?;
+    let paused = json!({"code":PAUSED,"stopped_at":stopped_at,"blocker":blocker});
     let shown = outcome(s, &[], Err(&paused))?;
-    let text = if let Some(error) = capacity {
+    let mut text = if let Some(error) = capacity {
         format!("{shown}\n输出没有交付；完整结果与读取引用：{error}")
     } else {outcome(s, &console, Err(&paused))?};
+    // How to resume is for the AI; the user's copy says only that it paused.
+    let hint = if blocker.is_some() { super::blockers::RESUME_HINT } else { INTERJECTION_RESUME_HINT };
+    text = format!("{text}\n{hint}");
     end_program(s, w, step, Value::Null, text, Some(shown)).await?;
-    // The turn goes on: the main AI may answer the message with a new program.
-    w.program_value = None;
+    if blocker.is_none() {
+        // The turn goes on: the main AI may answer the message with a new program.
+        w.program_value = None;
+    }
     save(s, w).await
 }
 async fn finish_probe(s: &Session<'_>, w: &mut Window, outcome: Result<Value, Value>) -> Result<Round> {
@@ -1188,6 +1365,17 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
     if w.module_probe {
         return finish_probe(s, w, Err(error)).await;
     }
+    // The main program of a turn the user stopped is cancelled where it
+    // stood and ends at the next turn's first step. That is the user's
+    // stop, not a bug: no error to show and no rewrite for the main AI,
+    // which goes on to the new message.
+    if error["code"] == "PROGRAM_CANCELLED" && w.program_task.is_none() {
+        stop_unfinished(s, w).await?;
+        w.program = None;
+        w.program_value = None;
+        save(s, w).await?;
+        return Ok(Round::Continue);
+    }
     let mut console = printed(w);
     let diagnostic = json!({"role":"user","name":"program_diagnostic",
         "content":json!({"error":error,"console":console}).to_string()});
@@ -1208,15 +1396,22 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
     // A question for the user is not a bug to fix, nor is a model
     // service that could not answer: both rise unchanged.
     let waiting = error["code"] == WAITING;
-    let rises = waiting || error["code"] == UNAVAILABLE;
+    // So is a blocker only the user can resolve: rewriting cannot fix it.
+    let blocked = agent_program::runtime::is_user_blocker(&error);
+    let rises = waiting || blocked || error["code"] == UNAVAILABLE;
     // Read before the program is dropped below.
     // The calls this program still runs end with it: whatever runs
     // next starts from the beginning (design guide §8).
     let stopped = stop_unfinished(s, w).await?;
     let module_version = w.program_task.as_ref().is_some_and(|task| task["module_version"].is_number());
-    if agent_program::runtime::is_resource_error(&error) && w.program_task.is_some() {
-        // Capacity describes this delivery/input, not necessarily a bug
-        // in the reusable implementation. Let its caller re-plan rather
+    // An exhausted instruction or time budget names the hot lines: the code
+    // is too slow, a bug its fixer or author can repair. Rising to the
+    // caller instead makes the main program start over and redo every call
+    // that already finished (2026-11-11: a hand-written UTF-8 counter).
+    let budget = matches!(error["code"].as_str(), Some("INSTRUCTION_BUDGET_EXHAUSTED" | "PROGRAM_TIME_BUDGET_EXHAUSTED"));
+    if agent_program::runtime::is_resource_error(&error) && w.program_task.is_some() && !budget {
+        // Output capacity describes this delivery/input, not necessarily a
+        // bug in the reusable implementation. Let its caller re-plan rather
         // than silently fixing the shared module and rerunning commands.
         return_value(s,w,step,json!({"$task_error":error})).await
     } else if !rises && super::modules::is_module(w) && module_version {
@@ -1260,7 +1455,7 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         // A question, or a program that keeps failing: its outcome ends
         // the turn, so the next message starts fresh instead of
         // resuming the failure.
-        let ended = if waiting { "question" } else if error["code"] == UNAVAILABLE { "unavailable" } else { "error" };
+        let ended = if waiting { "question" } else if blocked { "needs_user" } else if error["code"] == UNAVAILABLE { "unavailable" } else { "error" };
         record_end(s, w, ended, json!({"error":error})).await?;
         let (text, shown) = (outcome(s, &console, Err(&error))?, outcome(s, &[], Err(&error))?);
         end_program(s, w, step, Value::Null, text, Some(shown)).await
@@ -1332,7 +1527,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                         if let Some(methods) = probe_libraries(s, &definitions).get(name) {
                             (json!({"library":library,"methods":methods}), false)
                         } else {
-                            (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{library}' in this module scope")}), true)
+                            (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{library}' in this module scope{}", node_module_hint(name).map(|hint| format!("; {hint}")).unwrap_or_default())}), true)
                         }
                     } else {
                         link(s, &definitions, library)
@@ -1381,6 +1576,14 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                 record_end(s, w, "question", json!({"error":waiting})).await?;
                 let (text, shown) = (outcome(s, &printed(w), Err(&waiting))?, outcome(s, &[], Err(&waiting))?);
                 return end_program(s, w, step, Value::Null, text, Some(shown)).await;
+            }
+            // A step only the user can unblock is not delivered: the program
+            // pauses before it, and resuming runs it again. An author's probe
+            // is not the program: its result goes back to the author.
+            if done.is_error && w.resumed.is_none() && !w.module_probe && agent_program::runtime::is_user_blocker(&done.result) {
+                super::blockers::request_pause(s, &done.result).await?;
+                save(s, w).await?;
+                return Ok(Round::Continue);
             }
             // A resumed program's error rises as it was, so a question keeps its code.
             let (result, is_error) = match w.resumed.take() {
@@ -2254,6 +2457,155 @@ mod tests {
         assert_eq!(conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='module/fix' OR kind='tool/call'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     }
 
+    /// 2026-11-11: after a turn the user stopped, the next turn opened with
+    /// a red "program cancelled" error and a rewrite request to the AI.
+    #[tokio::test]
+    async fn a_program_the_user_stopped_ends_quietly_in_the_next_turn() {
+        let root=TestRoot::new();
+        let state=agent_service::tests::test_state(root.path(),"127.0.0.1:9".parse().unwrap());
+        let cancel=CancellationToken::new();
+        let s=execution_test_session(&state,&cancel);
+        agent_service::open_db(root.path()).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",[]).unwrap();
+        let mut w=Window::default();
+        install(&mut w,&json!({"source":"console.log('stopped');"})).unwrap();
+        w.program.as_mut().unwrap().cancel();
+        let messages=w.messages.len();
+        let error=json!({"code":"PROGRAM_CANCELLED","message":"program cancelled; scheduled callbacks were cleared"});
+        assert!(matches!(failed_program(&s,&mut w,1,error).await.unwrap(),Round::Continue));
+        assert!(w.program.is_none() && w.program_value.is_none());
+        assert_eq!(w.messages.len(), messages, "the main AI gets no diagnostic to rewrite");
+        let conn=agent_service::open_db(root.path()).unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind IN ('program/error','program/runtime_error')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    /// A turn with a main program stopped in its second-layer function; the
+    /// answer of each later main request is chosen by `next_turn`.
+    async fn stopped_then(root: &std::path::Path, next_turn: &'static str, next_answer: fn(&str) -> Option<String>)
+        -> (Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<Value>>>) {
+        const IMPLEMENT: &str = "```js\nasync function summarize(paths) {\n  return judge(paths);\n}\n/** @virtual */\nfunction judge(paths) {\n  // Decide which files to keep. Returns {summary:string}.\n}\n```";
+        let (implement, leaf) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mains = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let cancel = CancellationToken::new();
+        let (implements, leaves, log, stop) = (implement.clone(), leaf.clone(), mains.clone(), cancel.clone());
+        let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+            let answer = match role_of(&body).as_str() {
+                "main" => {
+                    log.lock().unwrap().push(body.clone());
+                    let messages = body["messages"].to_string();
+                    reply(next_answer(&messages).filter(|_| messages.contains("The user stopped the turn")).unwrap_or_else(|| TWO_LEVEL_MAIN.into()))
+                }
+                "implement" => { implements.fetch_add(1, Ordering::SeqCst); reply(IMPLEMENT.into()) }
+                _ => match leaves.fetch_add(1, Ordering::SeqCst) {
+                    // The user stops the turn while the function's AI works.
+                    0 => { stop.cancel(); find_call() }
+                    _ => reply(json!({"summary":"kept both"}).to_string()),
+                },
+            };
+            async move { Json(answer) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root, listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        agent_service::open_db(root).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
+        let _ = run_task(state.clone(), "task".into(), "fake".into(), "Summarize a and b".into(), 20, cancel, 1, false).await;
+        let conn = agent_service::open_db(root).unwrap();
+        assert!(!root.join("out.txt").exists(), "the stop cut the program off");
+        let kept: i64 = conn.query_row("SELECT count(*) FROM agent_task_nodes WHERE status IN ('paused','running','suspended') AND json_extract(data,'$.metadata.previous')=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 1, "the stopped program is kept for the next turn");
+        let lines = program_lines(&conn);
+        let shown = lines.iter().find(|line| line.contains("被你停止")).unwrap_or_else(|| panic!("the stop outcome was shown: {lines:?}"));
+        assert!(shown.contains("summarize") && !shown.contains("previous"), "the user's copy says where it stopped, not how to resume: {shown}");
+        run_task(state, "task".into(), "fake".into(), next_turn.into(), 20, CancellationToken::new(), 2, false).await.unwrap();
+        server.abort();
+        (implement, leaf, mains)
+    }
+
+    /// 2026-11-11: a stop cut a turn off after its research and write-back
+    /// were done, and the next turn's "continue" had to start over.
+    #[tokio::test]
+    async fn a_stopped_program_continues_where_it_stopped_when_the_user_says_so() {
+        let root = TestRoot::new();
+        let (implement, leaf, mains) = stopped_then(root.path(), "继续", |messages| Some(if messages.contains("\"program_result\"") {
+            "Done.".into()
+        } else {
+            "```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()
+        })).await;
+        assert_eq!(std::fs::read_to_string(root.path().join("out.txt")).unwrap(), "kept both");
+        assert_eq!(implement.load(Ordering::SeqCst), 1, "the module written before the stop is not written again");
+        assert_eq!(leaf.load(Ordering::SeqCst), 2, "only the function that was cut off works again");
+        let first = mains.lock().unwrap().iter().find(|body| body["messages"].to_string().contains("The user stopped the turn")).cloned().unwrap();
+        assert!(library_index(&first).contains("previous"), "the kept program is resumable: {}", library_index(&first));
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let left: i64 = conn.query_row("SELECT count(*) FROM agent_task_nodes WHERE status IN ('paused','running','suspended') AND json_extract(data,'$.metadata.previous')=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
+    }
+
+    /// The main AI decides with the user's next message: a different request
+    /// leaves the stopped program, and it is discarded with that turn.
+    #[tokio::test]
+    async fn a_stopped_program_not_continued_is_discarded_with_the_next_turn() {
+        let root = TestRoot::new();
+        let (_, leaf, _) = stopped_then(root.path(), "Something else", |_| Some("Sure, something else.".into())).await;
+        assert!(!root.path().join("out.txt").exists(), "none of its remaining steps ran");
+        assert_eq!(leaf.load(Ordering::SeqCst), 1);
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let (left, windows): (i64, i64) = conn.query_row("SELECT (SELECT count(*) FROM agent_task_nodes WHERE status IN ('paused','running','suspended') AND json_extract(data,'$.metadata.previous')=1), (SELECT count(*) FROM agent_runtime_windows WHERE scope<>'main')", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((left, windows), (0, 0), "the kept program and its saved state are gone");
+    }
+
+    /// 2026-11-11: io.read gave program code an AI's 60,000-character page;
+    /// every module author probed several times to learn to page a file.
+    #[tokio::test]
+    async fn program_code_reads_a_whole_file_in_one_call() {
+        let root=TestRoot::new();
+        let state=agent_service::tests::test_state(root.path(),"127.0.0.1:9".parse().unwrap());
+        let cancel=CancellationToken::new();
+        let s=execution_test_session(&state,&cancel);
+        agent_service::open_db(root.path()).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",[]).unwrap();
+        let workspace=crate::session_browser::task_workspace(root.path(),"task").unwrap();
+        let content="0123456789abcdefghi\n".repeat(10_000);
+        std::fs::write(workspace.join("table.md"),&content).unwrap();
+        let mut w=Window::default();
+        install(&mut w,&json!({"source":"const io = require('io');\nconst file = await io.read({path:'table.md'});\nconst [a, b] = await Promise.all([io.read({path:'table.md'}), io.read_lines({path:'table.md',start_line:1,end_line:10000})]);\nconsole.log([file.complete, file.content.length, file.next_start_line, a.content.length, b.complete, b.lines.length].join(' '));"})).unwrap();
+        for step in 1..20 {
+            if w.program.is_none() { break; }
+            next(&s,&mut w,step).await.unwrap();
+        }
+        let told=w.messages.last().unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(told.contains("true 200000  200000 true 10000"), "{told}");
+        // The same file read by an AI's own call is still an AI's page.
+        let definitions=super::super::tools(&s,&w);
+        let call=crate::model_stream::ToolCall{call_id:"own".into(),name:"read_file".into(),arguments:json!({"path":"table.md","max_chars":400000,"$program_read":true}).to_string()};
+        let own=super::super::execute_call(&s,&mut w,&definitions,"node",20,&call,1,None).await.unwrap();
+        assert_eq!((own.result["complete"].clone(),own.result["returned_chars"].clone()),(json!(false),json!(60000)),"{}",own.result);
+        // The contract an author reads says so for both read methods.
+        let chosen=agent_program::declarations::selected(&library_catalog(&s,&definitions),&json!({"methods":["io.read","io.read_lines"]})).unwrap();
+        let contract=agent_program::declarations::headers(&chosen,&definitions);
+        assert!(contract.matches("whole file").count()==2 && !contract.contains("max 60000"),"{contract}");
+    }
+
+    /// 2026-11-11: a hand-written UTF-8 counter exhausted the instruction
+    /// budget in the last module; rising to the caller made the main
+    /// program start over and redo all six finished research calls.
+    #[tokio::test]
+    async fn an_exhausted_budget_goes_back_to_the_author_instead_of_the_caller() {
+        let root=TestRoot::new();
+        let state=agent_service::tests::test_state(root.path(),"127.0.0.1:9".parse().unwrap());
+        let cancel=CancellationToken::new();
+        let s=execution_test_session(&state,&cancel);
+        agent_service::open_db(root.path()).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",[]).unwrap();
+        let mut w=Window::default();
+        install(&mut w,&json!({"source":"console.log('slow');"})).unwrap();
+        let _=w.program.as_mut().unwrap().next();
+        w.program_task=Some(json!({"role":"implement","name":"applyUpdates"}));
+        let error=json!({"code":"INSTRUCTION_BUDGET_EXHAUSTED","delivered":false,"limit":2000000,
+            "hot_lines":[{"function":"byteLength","instructions":898667,"line":107}]});
+        assert!(matches!(failed_program(&s,&mut w,1,error).await.unwrap(),Round::Rewrite));
+        assert!(w.program_value.is_none(), "nothing was returned to the caller");
+        let told=w.messages.last().unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(told.contains("FUNCTION_RUNTIME_ERROR") && told.contains("byteLength") && told.contains("hot_lines"), "{told}");
+    }
+
     #[tokio::test]
     async fn a_model_browses_a_library_before_reading_one_contract() {
         let root = TestRoot::new();
@@ -2347,6 +2699,42 @@ mod tests {
         let error = install_body(&mut leaf, &json!({"source":"function judge(){return again();}\n/** @virtual More AI work. */ function again(){}"})).unwrap_err();
         assert!(error.to_string().contains("VIRTUAL_LAYER_LIMIT"), "{error:#}");
         assert!(leaf.program.is_none());
+    }
+
+    /// The 2026-11-11 run: an author's probe written as a script was rejected
+    /// three times. Now it runs as the called function's body, with its
+    /// arguments, and its returned value comes back to the same author.
+    #[tokio::test]
+    async fn a_script_probe_runs_with_the_calls_arguments_and_returns_its_value() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("a.txt"), "alpha").unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = seen.clone();
+        run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" => reply("```js\nconsole.log((await measure(\"a.txt\")).size);\n/** @module Return {size:number}: the length of the file at path. */\nasync function measure(path) {}\n```".into()),
+            "implement" => {
+                let observation = body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "module_probe_result")
+                    .map(|m| serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap());
+                match observation {
+                    None => {
+                        let source = "const io = require(\"io\");\nconst page = await io.read({path});\nconsole.log(\"read \" + path);\nreturn page.content.length;";
+                        json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                            "tool_calls":[{"id":"probe","type":"function","function":{"name":"write_program","arguments":json!({"source":source,"probe":true}).to_string()}}]}}]})
+                    }
+                    Some(observation) => {
+                        log.lock().unwrap().push(observation);
+                        reply("```js\nconst io = require(\"io\");\nasync function measure(path) {\n  return {size: (await io.read({path})).content.length};\n}\n```".into())
+                    }
+                }
+            }
+            role => panic!("unexpected role {role}"),
+        }).await;
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["status"], "completed", "{}", seen[0]);
+        assert_eq!(seen[0]["result"], json!(5));
+        assert!(seen[0]["console"].as_str().unwrap().contains("read a.txt"));
     }
 
     #[tokio::test]
@@ -2793,6 +3181,212 @@ mod tests {
         assert_eq!((calls, results), (2, 2));
     }
 
+    /// The 2026-11-10 Grow run: web search failed with WEB_NOT_CONFIGURED in
+    /// every iteration of a loop whose code caught the error and went on. A
+    /// failure only the user can fix pauses the program even when caught.
+    #[tokio::test]
+    async fn a_repeating_failure_stops_the_program_even_when_its_code_catches_it() {
+        let root = TestRoot::new();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            match log.len() {
+                1 => reply("```js\nimport * as io from \"host:io\";\nfor (let i = 0; i < 6; i++) {\n  try { await io.read({path: \"missing.txt\"}); } catch (error) { console.log(\"caught \" + i); }\n}\nawait io.write({path: \"after.txt\", content: \"x\"});\n```".into()),
+                _ => reply("Worked around it.".into()),
+            }
+        }).await;
+        assert!(!root.path().join("after.txt").exists(), "nothing after the blocker ran");
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let reads: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='tool/call' AND json_extract(data,'$.name')='read_file'", [], |r| r.get(0)).unwrap();
+        assert_eq!(reads, 3, "the third identical failure is the last");
+        let ended: String = conn.query_row("SELECT json_extract(data,'$.ended') FROM agent_task_events WHERE kind='program/end' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(ended, "needs_user");
+        let answer: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert!(answer.contains("需要你处理") && answer.contains("需要你做的") && answer.contains("接着跑"), "{answer}");
+        assert_eq!(bodies.lock().unwrap().len(), 1, "the program's outcome ends the turn; no AI round tries to work around it");
+        let kept: i64 = conn.query_row("SELECT count(*) FROM agent_task_nodes WHERE status='paused' AND json_extract(data,'$.metadata.previous')=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 1, "the paused program outlives the turn, for the user to resume");
+    }
+
+    /// The 2026-11-11 run: after the user fixed what blocked a program,
+    /// "continue" started over and redid finished research. The paused
+    /// program resumes in the next turn from the blocked step, which runs again.
+    #[tokio::test]
+    async fn a_blocked_program_resumes_in_the_next_turn_from_the_blocked_step() {
+        let root = TestRoot::new();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            let messages = body["messages"].to_string();
+            let answer = if messages.contains("program_result") || messages.contains("程序已完成") && messages.contains("resumed") {
+                reply("Done.".into())
+            } else if messages.contains("I fixed it, continue") {
+                reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\nconsole.log(\"resumed\");\n```".into())
+            } else {
+                reply("```js\nimport * as io from \"host:io\";\nawait io.write({path: \"before.txt\", content: \"once\"});\nlet read = 0;\nfor (let i = 0; i < 4; i++) {\n  try { await io.read({path: \"missing.txt\"}); read++; } catch (error) { console.log(\"caught \" + i); }\n}\nawait io.write({path: \"after.txt\", content: String(read)});\n```".into())
+            };
+            async move { Json(answer) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
+        run_task(state.clone(), "task".into(), "fake".into(), "Read the file".into(), 20, CancellationToken::new(), 1, false).await.unwrap();
+        assert!(!root.path().join("after.txt").exists(), "the program paused at the third failure");
+        // The user resolves the blocker, then says to continue.
+        std::fs::write(root.path().join("missing.txt"), "here").unwrap();
+        std::fs::remove_file(root.path().join("before.txt")).unwrap();
+        run_task(state, "task".into(), "fake".into(), "I fixed it, continue".into(), 20, CancellationToken::new(), 2, false).await.unwrap();
+        server.abort();
+        // The blocked third read ran again and succeeded, as did the fourth;
+        // the steps before the blocker were not redone.
+        assert_eq!(std::fs::read_to_string(root.path().join("after.txt")).unwrap(), "2");
+        assert!(!root.path().join("before.txt").exists(), "finished steps are not replayed");
+        let reads: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='tool/call' AND json_extract(data,'$.name')='read_file'", [], |r| r.get(0)).unwrap();
+        assert_eq!(reads, 5, "three failures, the retried third and the fourth");
+        let ended: String = conn.query_row("SELECT json_extract(data,'$.ended') FROM agent_task_events WHERE kind='program/end' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(ended, "completed");
+        let left: i64 = conn.query_row("SELECT count(*) FROM agent_task_nodes WHERE status='paused'", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
+    }
+
+    /// After a blocker the main AI gets one reply to tell the user; calling
+    /// tools instead runs nothing and the host's report ends the turn.
+    #[tokio::test]
+    async fn the_main_ai_stops_after_a_blocker_and_further_calls_do_not_run() {
+        let root = TestRoot::new();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            let n = log.len();
+            let call = |id: String, name: &str, args: Value| json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                "tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]}}]});
+            match n {
+                1..=3 => call(format!("r{n}"), "read_file", json!({"path":"missing.txt"})),
+                4 => call("w".into(), "write_file", json!({"path":"workaround.txt","content":"guess"})),
+                _ => reply("unexpected".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 4, "the host ended the turn instead of asking again");
+        let told = bodies[3]["messages"].to_string();
+        assert!(told.contains("NEEDS_USER") && told.contains("REPEATED_FAILURE"), "{told}");
+        assert!(!root.path().join("workaround.txt").exists(), "a call after the blocker does not run");
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let (status, answer): (String, String) = conn.query_row("SELECT (SELECT status FROM agent_tasks), (SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.actor')='host' ORDER BY seq DESC LIMIT 1)", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(status, "completed");
+        assert!(answer.contains("read_file") && answer.contains("需要你做的"), "{answer}");
+    }
+
+    fn library_index(body: &Value) -> String {
+        body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "program_tool_headers")
+            .and_then(|m| m["content"].as_str()).unwrap_or("").to_owned()
+    }
+    /// A program paused for the user is kept through the next turn only: a
+    /// turn that does not resume it discards it at its end, as an
+    /// interjection's paused program is discarded with its own turn.
+    #[tokio::test]
+    async fn a_blocked_program_not_resumed_in_the_next_turn_is_discarded_with_it() {
+        let root = TestRoot::new();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+            log.lock().unwrap().push(body.clone());
+            let messages = body["messages"].to_string();
+            let answer = if messages.contains("Something else") {
+                reply("Sure, something else.".into())
+            } else {
+                reply("```js\nimport * as io from \"host:io\";\nfor (let i = 0; i < 4; i++) {\n  try { await io.read({path: \"missing.txt\"}); } catch (error) {}\n}\nawait io.write({path: \"after.txt\", content: \"x\"});\n```".into())
+            };
+            async move { Json(answer) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
+        let paused = |conn: &rusqlite::Connection| -> i64 {
+            conn.query_row("SELECT count(*) FROM agent_task_nodes WHERE status IN ('paused','running','suspended') AND json_extract(data,'$.metadata.previous')=1", [], |r| r.get(0)).unwrap()
+        };
+        run_task(state.clone(), "task".into(), "fake".into(), "Read the file".into(), 20, CancellationToken::new(), 1, false).await.unwrap();
+        assert_eq!(paused(&conn), 1, "kept for the next turn");
+        // The user sees what to do; only the main AI's copy says how to resume.
+        let shown: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.actor')='program' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert!(shown.contains("需要你做的") && !shown.contains("previous"), "{shown}");
+        std::fs::write(root.path().join("missing.txt"), "here").unwrap();
+        run_task(state.clone(), "task".into(), "fake".into(), "Something else".into(), 20, CancellationToken::new(), 2, false).await.unwrap();
+        {
+            let bodies = bodies.lock().unwrap();
+            let second = bodies.last().unwrap();
+            assert!(second["messages"].to_string().contains("await previous.resume()"), "the main AI's copy of the outcome says how to resume");
+            assert!(library_index(second).contains("previous"), "the kept program is resumable in the next turn: {}", library_index(second));
+        }
+        assert_eq!(paused(&conn), 0, "not resumed, it was discarded at the end of the turn");
+        let interrupted: i64 = conn.query_row("SELECT count(*) FROM agent_task_nodes WHERE status='interrupted' AND json_extract(data,'$.metadata.previous')=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(interrupted, 1);
+        let windows: i64 = conn.query_row("SELECT count(*) FROM agent_runtime_windows WHERE scope<>'main'", [], |r| r.get(0)).unwrap();
+        assert_eq!(windows, 0, "its saved state is gone");
+        assert!(!root.path().join("after.txt").exists(), "none of its remaining steps ran");
+        run_task(state, "task".into(), "fake".into(), "Something else again".into(), 20, CancellationToken::new(), 3, false).await.unwrap();
+        server.abort();
+        let bodies = bodies.lock().unwrap();
+        assert!(!library_index(bodies.last().unwrap()).contains("previous"), "nothing is left to resume");
+    }
+
+    /// A blocker inside a second-layer function pauses the whole program the
+    /// same way; resumed, the function's AI is told to make the call again.
+    #[tokio::test]
+    async fn a_function_blocked_by_a_tool_resumes_and_calls_it_again() {
+        const IMPLEMENT: &str = "```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  return await judge(paths);\n}\n/** @virtual */\nasync function judge(paths) {\n  // Read missing.txt with io and return {summary: its content}.\n}\n```";
+        let root = TestRoot::new();
+        let leaf_requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = leaf_requests.clone();
+        let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+            let messages = body["messages"].to_string();
+            let answer = match role_of(&body).as_str() {
+                "main" if messages.contains("program_result") => reply("Done.".into()),
+                "main" if messages.contains("I fixed it, continue") => reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()),
+                "main" => reply(TWO_LEVEL_MAIN.into()),
+                "implement" => reply(IMPLEMENT.into()),
+                _ => {
+                    log.lock().unwrap().push(messages.clone());
+                    if messages.contains("here-content") {
+                        reply(json!({"summary":"here-content"}).to_string())
+                    } else {
+                        let n = log.lock().unwrap().len();
+                        json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                            "tool_calls":[{"id":format!("read-{n}"),"type":"function","function":{"name":"read_file","arguments":json!({"path":"missing.txt"}).to_string()}}]}}]})
+                    }
+                }
+            };
+            async move { Json(answer) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
+        run_task(state.clone(), "task".into(), "fake".into(), "Summarize".into(), 20, CancellationToken::new(), 1, false).await.unwrap();
+        assert_eq!(leaf_requests.lock().unwrap().len(), 3, "the leaf is not asked again after the third failure");
+        let shown = program_lines(&conn).pop().unwrap();
+        assert!(shown.contains("需要你处理") && shown.contains("judge"), "{shown}");
+        std::fs::write(root.path().join("missing.txt"), "here-content").unwrap();
+        run_task(state, "task".into(), "fake".into(), "I fixed it, continue".into(), 20, CancellationToken::new(), 2, false).await.unwrap();
+        server.abort();
+        let requests = leaf_requests.lock().unwrap();
+        assert!(requests[3].contains("PAUSED_FOR_USER") && !requests[3].contains("STOP."), "resumed, the leaf is told to call again: {}", requests[3]);
+        assert_eq!(std::fs::read_to_string(root.path().join("out.txt")).unwrap(), "here-content", "the paused program finished as planned");
+        let modules: i64 = conn.query_row("SELECT count(*) FROM agent_modules", [], |r| r.get(0)).unwrap();
+        assert_eq!(modules, 1, "the module was not written again");
+    }
+
     /// The 2026-11-02 Qwen run: a write_program call cut off mid-string, with
     /// the service reporting an ordinary tool-call finish.
     #[tokio::test]
@@ -2886,6 +3480,102 @@ mod tests {
         assert!(bodies[2]["messages"].to_string().contains("REPLY_TRUNCATED"), "{}", bodies[2]["messages"]);
         assert!(!root.path().join("early.txt").exists(), "nothing in the cut-off reply ran");
         assert_eq!(std::fs::read_to_string(root.path().join("w.txt")).unwrap(), "4", "the AI called again and the program ran");
+    }
+
+    /// The 2026-11-11 run hit DeepSeek's prompt cache for 78.5% of its input.
+    /// Three host-made changes broke the shared prefix of consecutive
+    /// requests: an asset index re-listing material already in the request,
+    /// the shell check's timestamp, and the module list early in the prompt.
+    #[tokio::test]
+    async fn consecutive_requests_keep_their_prefix_for_the_prompt_cache() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("a.txt"), "alpha").unwrap();
+        {
+            let conn = agent_service::open_db(root.path()).unwrap();
+            super::super::modules::schema(&conn).unwrap();
+            conn.execute("INSERT INTO agent_modules VALUES ('task',1,'k1','shout','async function shout(word)','Return {text}.',1,'async function shout(word) { return {text: word}; }',0,1)", []).unwrap();
+        }
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            match log.len() {
+                1 => json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                    "tool_calls":[{"id":"read","type":"function","function":{"name":"read_file","arguments":json!({"path":"a.txt"}).to_string()}}]}}]}),
+                _ => reply("Done.".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        let messages = |n: usize| bodies[n]["messages"].as_array().unwrap().clone();
+        // The file just read is in the request: nothing needs pointing at.
+        assert!(!messages(1).iter().any(|m| m["name"] == "task_asset_index"), "{:?}", messages(1).last());
+        // Everything the first request sent is still the second one's prefix.
+        let (first, second) = (messages(0), messages(1));
+        assert_eq!(&second[..first.len()], &first[..], "the second request only appends");
+        for message in &first {
+            if message["name"] == "shell_environment" {
+                assert!(!message["content"].as_str().unwrap().contains("checked_at"), "{message}");
+            }
+        }
+        let systems = first.iter().take_while(|m| m["role"] == "system").count();
+        assert_eq!(first[systems - 1]["name"], "chat_modules", "the growing module list comes last among the system messages");
+    }
+
+    /// The 2026-11-11 run: a write_program call was cut off with 30104 of
+    /// 32768 output tokens spent reasoning. The notice says so, and asks for
+    /// less drafting rather than shorter code.
+    #[tokio::test]
+    async fn a_cut_off_notice_says_where_the_output_went() {
+        let root = TestRoot::new();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            let cut = |id: &str, reasoning: u64, total: u64| json!({"choices":[{"finish_reason":"length","message":{"role":"assistant","content":null,
+                "tool_calls":[{"id":id,"type":"function","function":{"name":"write_file","arguments":"{\"path\":\"a.txt\",\"content\":\"abc"}}]}}],
+                "usage":{"prompt_tokens":1000,"completion_tokens":total,"completion_tokens_details":{"reasoning_tokens":reasoning}}});
+            match log.len() {
+                1 => cut("first", 30104, 32768),
+                2 => cut("second", 1000, 32768),
+                _ => reply("Done.".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        let notice = |n: usize| bodies[n]["messages"].as_array().unwrap().iter().rev().find(|m| m["role"] == "tool").unwrap()["content"].as_str().unwrap().to_owned();
+        let first = notice(1);
+        assert!(first.contains("your reasoning used 30104 and the reply only 2664") && first.contains("not the code"), "{first}");
+        let second = notice(2);
+        assert!(second.contains("the reply itself used 31768") && second.contains("too long for one reply"), "{second}");
+    }
+
+    /// The 2026-11-11 DeepSeek run: a reply cut off while still reasoning
+    /// left an assistant message with neither text nor calls, and the
+    /// provider rejected the retry with HTTP 400.
+    #[tokio::test]
+    async fn a_reply_cut_off_while_reasoning_is_replayed_as_a_valid_message() {
+        let root = TestRoot::new();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            match log.len() {
+                1 => json!({"choices":[{"finish_reason":"length","message":{"role":"assistant","content":null,"reasoning_content":"thinking ".repeat(100)}}]}),
+                _ => reply("Done.".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        let messages = bodies[1]["messages"].as_array().unwrap();
+        for message in messages.iter().filter(|m| m["role"] == "assistant") {
+            let text = message["content"].as_str().is_some_and(|text| !text.is_empty());
+            let calls = message["tool_calls"].as_array().is_some_and(|calls| !calls.is_empty());
+            assert!(text || calls, "every assistant message has text or calls: {message}");
+        }
+        assert!(bodies[1]["messages"].to_string().contains("REPLY_TRUNCATED"));
     }
 
     #[tokio::test]
@@ -3393,8 +4083,13 @@ mod tests {
     async fn a_paused_program_not_resumed_is_discarded_with_the_turn() {
         let root = TestRoot::new();
         let path = root.path().to_owned();
+        let told = Arc::new(std::sync::Mutex::new(None::<String>));
+        let log = told.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" if body["messages"].to_string().contains("被你的新消息暂停") => reply("Stopped as you asked.".into()),
+            "main" if body["messages"].to_string().contains("被你的新消息暂停") => {
+                *log.lock().unwrap() = Some(body["messages"].to_string());
+                reply("Stopped as you asked.".into())
+            }
             "main" => reply(TWO_LEVEL_MAIN.into()),
             "implement" => reply(CATCHING_IMPLEMENT.into()),
             _ => {
@@ -3407,7 +4102,12 @@ mod tests {
         let conn = agent_service::open_db(root.path()).unwrap();
         let answer: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
         assert_eq!(answer, "Stopped as you asked.");
-        assert!(program_lines(&conn).iter().any(|line| line.starts_with(PAUSED_AT)));
+        let lines = program_lines(&conn);
+        let shown = lines.iter().find(|line| line.starts_with(PAUSED_AT)).expect("the pause outcome was shown");
+        // The user's copy says only that it paused; how to resume is for the AI.
+        assert!(shown.ends_with("程序的状态都保留着。") && !shown.contains("previous"), "{shown}");
+        let told = told.lock().unwrap().clone().unwrap();
+        assert!(told.contains("previous.resume()") && told.contains("host:previous/promises"), "the main AI's copy says how to resume");
         assert_eq!(paused_nodes(&conn), 0, "the paused frames were discarded");
         let discarded: i64 = conn.query_row("SELECT count(*) FROM agent_task_nodes WHERE task_id='task' AND status='interrupted'", [], |r| r.get(0)).unwrap();
         assert!(discarded >= 3, "the paused program, its function and its leaf: {discarded}");
@@ -3445,6 +4145,7 @@ mod tests {
         let leaf = Arc::new(AtomicUsize::new(0));
         let leaf_rounds = leaf.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
             "main" if body["messages"].to_string().matches("被你的新消息暂停").count() >= 2 =>
                 reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()),
             "main" if body["messages"].to_string().contains("被你的新消息暂停") => reply(RESUMING_MAIN.into()),
@@ -3631,10 +4332,17 @@ mod tests {
             let answer = match role_of(&body).as_str() {
                 "main" if messages.iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
                 "main" if requested("Improve the saved module") => {
-                    let source = format!("const parts = await Promise.all([shout('é'), shout('a')]);\nconsole.log(parts[0].text + parts[1].text);\n{SHOUT}");
+                    // The first attempt misquotes the comment; the error quotes the saved one.
+                    let declaration = if has("Saved declarations of shout") {
+                        assert!(has("comment differs") && has("word in capitals"), "the error names what differs and quotes the saved comment");
+                        SHOUT.to_owned()
+                    } else {
+                        SHOUT.replace("in capitals", "in CAPITALS")
+                    };
+                    let source = format!("const parts = await Promise.all([shout('é'), shout('a')]);\nconsole.log(parts[0].text + parts[1].text);\n{declaration}");
                     let version = if has("is now at version 1") { 1 } else { 2 };
                     json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
-                        "tool_calls":[{"id":format!("revise-{version}"),"type":"function","function":{"name":WRITE_PROGRAM,
+                        "tool_calls":[{"id":format!("revise-{version}-{}", declaration.len()),"type":"function","function":{"name":WRITE_PROGRAM,
                             "arguments":json!({"source":source,"revise_modules":{"shout":{"version":version,
                                 "reason":"Support non-ASCII letters and preserve ASCII results"}}}).to_string()}}]}}]})
                 }

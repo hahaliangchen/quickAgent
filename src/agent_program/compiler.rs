@@ -76,9 +76,25 @@ fn valid_library(spec: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 /// `host:` is a compatibility alias, independent of import/require syntax.
+/// A `node:` prefix is dropped too, so `require("node:fs")` gets the same
+/// guidance as `require("fs")` when it is linked.
 fn library_specifier(spec: &str) -> Option<&str> {
-    let spec = spec.strip_prefix("host:").unwrap_or(spec);
+    let spec = spec.strip_prefix("host:").or_else(|| spec.strip_prefix("node:")).unwrap_or(spec);
     valid_library(spec).then_some(spec)
+}
+/// Node built-in modules the runtime implements itself, and their functions:
+/// `require("path")` gives the same pure operations as the `path` global.
+fn node_builtin_module(spec: &str) -> Option<(&'static str, &'static [&'static str])> {
+    Some(match spec.strip_prefix("node:").unwrap_or(spec) {
+        "path" => ("path", &["join", "resolve", "relative", "basename", "normalize", "dirname", "extname"]),
+        "url" => ("url", &["parse"]),
+        "os" => ("os", &["homedir", "platform", "tmpdir"]),
+        // The npm packages flows reach for most; `yaml` and `js-yaml` spell
+        // the same two operations differently.
+        "yaml" => ("yaml", &["parse", "stringify"]),
+        "js-yaml" => ("yaml", &["load", "dump"]),
+        _ => return None,
+    })
 }
 /// The library a `require("ppt")` call names, without /promises.
 fn required_library(call: &ast::CallExpr) -> Option<String> {
@@ -87,6 +103,9 @@ fn required_library(call: &ast::CallExpr) -> Option<String> {
         return None;
     }
     let name = required_name(call)?;
+    if node_builtin_module(&name).is_some() {
+        return None;
+    }
     let spec = library_specifier(&name)?;
     Some(spec.strip_suffix("/promises").unwrap_or(spec).to_owned())
 }
@@ -146,6 +165,53 @@ pub fn required_libraries(source: &str) -> Vec<String> {
     let mut requires = Requires::default();
     module.visit_with(&mut requires);
     requires.libraries.into_iter().collect()
+}
+
+/// A module probe written as a script, the way one tries something out:
+/// top-level statements, perhaps with `await` or a final `return`, and no
+/// definition of the function the host calls. Its top-level code becomes the
+/// body of `async function entry(params)`, so `await` and `return` mean what
+/// they would in that function and the parameters hold this call's
+/// arguments. Imports move after the function, where they still hoist; the
+/// source keeps its line numbers. None when the source defines `entry`, has
+/// no top-level statements to run, or does not parse.
+pub fn probe_as_entry(source: &str, entry: &str, params: &[String]) -> Option<String> {
+    let map: Lrc<SourceMap> = Default::default();
+    let file = map.new_source_file(FileName::Custom("agent-program.js".into()).into(), source.to_owned());
+    let syntax = Syntax::Es(EsSyntax { allow_return_outside_function: true, ..Default::default() });
+    let mut parser = Parser::new_from(Lexer::new(syntax, Default::default(), StringInput::from(&*file), None));
+    let module = parser.parse_module().ok()?;
+    if !parser.take_errors().is_empty() {
+        return None;
+    }
+    let offset = |pos: swc_common::BytePos| (pos - file.start_pos).0 as usize;
+    let mut imports = Vec::new();
+    let mut runs = false;
+    for item in &module.body {
+        match item {
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => imports.push(offset(import.span.lo)..offset(import.span.hi)),
+            ast::ModuleItem::ModuleDecl(_) => return None,
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(function))) => {
+                if function.ident.sym == *entry {
+                    return None;
+                }
+            }
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Class(_)) | ast::Stmt::Empty(_)) => {}
+            ast::ModuleItem::Stmt(_) => runs = true,
+        }
+    }
+    if !runs {
+        return None;
+    }
+    let mut body = source.to_owned();
+    let mut moved = Vec::new();
+    for range in imports.iter().rev() {
+        moved.push(source[range.clone()].to_owned());
+        let blank: String = source[range.clone()].chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect();
+        body.replace_range(range.clone(), &blank);
+    }
+    moved.reverse();
+    Some(format!("async function {entry}({}) {{{body}\n}}\n{}", params.join(", "), moved.join("\n")))
 }
 
 /// Global built-in functions that can be used as values, as in `.filter(Boolean)`.
@@ -787,7 +853,7 @@ impl Compiler {
                     "Set" | "WeakSet"=>"；当前可用数组配合 includes 处理小集合，但不能替代全部集合语义",
                     _=>"",
                 };
-                return self.error(new.span,&format!("new {name}(...) 构造在流程运行时里尚不支持{alternative}"));
+                return self.error(new.span,&format!("new {name}(...) 构造在流程运行时里尚不支持{alternative}。{}", crate::agent_program::NOT_AVAILABLE_HINT));
             }
             E::This(_)=>Expr::Variable("\0this".into()),
             E::Class(node)=>return self.error(node.class.span,"class 表达式在流程运行时里尚不支持"),
@@ -1076,6 +1142,9 @@ impl Compiler {
                 } else if let Some(methods) = self.libraries.get(namespace) {
                     match methods.get(property) {
                         Some(tool) => Some(Expr::Native(format!("tool:{tool}"))),
+                        None if namespace == "process" && property == "env" => {
+                            return self.error(m.span, "read environment variables one at a time, as process.env.NAME or process.env[\"NAME\"]");
+                        }
                         None => {
                             return self.error(
                                 m.span,
@@ -1188,6 +1257,26 @@ impl Compiler {
             && !self.imports.contains_key(name)
             && !self.names.contains(name)
     }
+    /// The variable `process.env.NAME` or `process.env["NAME"]` reads, when
+    /// `process` is not one the source binds itself. The host's `process`
+    /// library has no `env` method, so Node's spelling is never ambiguous.
+    fn environment_variable(&self, m: &ast::MemberExpr) -> Option<String> {
+        let ast::Expr::Member(inner) = &*m.obj else { return None };
+        let (ast::Expr::Ident(process), ast::MemberProp::Ident(env)) = (&*inner.obj, &inner.prop) else { return None };
+        if process.sym != *"process" || env.sym != *"env" || self.resolve("process").is_some()
+            || self.imports.contains_key("process") || self.names.contains("process")
+        {
+            return None;
+        }
+        match &m.prop {
+            ast::MemberProp::Ident(name) => Some(name.sym.to_string()),
+            ast::MemberProp::Computed(c) => match &*c.expr {
+                ast::Expr::Lit(ast::Lit::Str(name)) => Some(name.value.to_string_lossy().into_owned()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
     /// Math.PI, Number.MAX_SAFE_INTEGER and the other static constants.
     fn constant_member(&self, m: &ast::MemberExpr) -> Option<Expr> {
         let ast::Expr::Ident(namespace) = &*m.obj else {
@@ -1241,7 +1330,7 @@ impl Compiler {
         };
         let Some((min, max)) = super::js_methods::builtin_arity(&name) else {
             return match &**callee {
-                ast::Expr::Member(_) => self.error(call.span, &format!("unsupported built-in {name}")),
+                ast::Expr::Member(_) => self.error(call.span, &format!("unsupported built-in {name}. {}", crate::agent_program::NOT_AVAILABLE_HINT)),
                 _ => Ok(None),
             };
         };
@@ -1516,6 +1605,14 @@ impl Compiler {
                 for expr in preceding { self.discard(expr)?; }
                 self.lower(last)
             }
+            // A TextEncoder is stateless: an object whose encode is the
+            // runtime's own UTF-8 encoder, as require("path") gives path.
+            ast::Expr::New(new) if matches!(&*new.callee, ast::Expr::Ident(i) if i.sym == *"TextEncoder") && self.global("TextEncoder") => {
+                Ok(Expr::Object(vec![
+                    ("encoding".into(), Expr::Value(json!("utf-8"))),
+                    ("encode".into(), Expr::Native("TextEncoder.encode".into())),
+                ]))
+            }
             // Spread constructors use the same durable invocation as aliases.
             ast::Expr::New(new) if new.args.as_deref().unwrap_or(&[]).iter().any(|a| a.spread.is_some()) => {
                 self.lower_construct(new)
@@ -1574,9 +1671,9 @@ impl Compiler {
                 let ast::Expr::Ident(i) = &*u.arg else { unreachable!() };
                 let kind = if self.names.contains(i.sym.as_ref()) {
                     "function"
-                } else if NATIVE_GLOBALS.contains(&i.sym.as_ref()) {
+                } else if NATIVE_GLOBALS.contains(&i.sym.as_ref()) || matches!(i.sym.as_ref(), "atob" | "btoa" | "TextEncoder") {
                     "function"
-                } else if matches!(i.sym.as_ref(), "Math" | "JSON" | "Reflect" | "Object" | "path" | "url") {
+                } else if matches!(i.sym.as_ref(), "Math" | "JSON" | "Reflect" | "Object" | "path" | "url" | "os") {
                     "object"
                 } else if i.sym == *"undefined" {
                     "undefined"
@@ -1867,6 +1964,11 @@ impl Compiler {
                     let Some(library) = required_name(call) else {
                         return self.error(call.span, "require takes one library name string, such as require(\"ppt\")");
                     };
+                    if let Some((module, functions)) = node_builtin_module(&library)
+                        && !self.libraries.contains_key(module)
+                    {
+                        return Ok(Expr::Object(functions.iter().map(|function| ((*function).to_owned(), Expr::Native(format!("{module}.{function}")))).collect()));
+                    }
                     let Some(specifier) = library_specifier(&library) else {
                         return self.error(
                             call.span,
@@ -1935,9 +2037,21 @@ impl Compiler {
                     return Ok(value);
                 }
                 if let ast::Callee::Expr(target) = &call.callee
+                    && let ast::Expr::Ident(function) = &**target
+                    && matches!(function.sym.as_ref(), "atob" | "btoa")
+                    && self.global(function.sym.as_ref())
+                {
+                    if call.args.len() != 1 || call.args[0].spread.is_some() {
+                        return self.error(call.span, &format!("{} takes one string argument", function.sym));
+                    }
+                    let value = self.lower(&call.args[0].expr)?;
+                    let value = self.snapshot(call.args[0].span(), value);
+                    return Ok(Expr::NodeBuiltin(function.sym.to_string(), vec![value]));
+                }
+                if let ast::Callee::Expr(target) = &call.callee
                     && let ast::Expr::Member(member) = &**target
                     && let ast::Expr::Ident(namespace) = &*member.obj
-                    && matches!(namespace.sym.as_ref(), "path" | "url")
+                    && matches!(namespace.sym.as_ref(), "path" | "url" | "os" | "Buffer")
                     && self.resolve(namespace.sym.as_ref()).is_none()
                     && !self.libraries.contains_key(namespace.sym.as_ref())
                 {
@@ -1948,9 +2062,10 @@ impl Compiler {
                     let (min, max) = super::builtins::arity(&name).ok_or_else(|| {
                         let p = self.at(call.span);
                         anyhow::anyhow!(
-                            "TS_PROGRAM {}:{}: unsupported built-in {name}",
+                            "TS_PROGRAM {}:{}: unsupported built-in {name}. {}",
                             p.line,
-                            p.column
+                            p.column,
+                            crate::agent_program::NOT_AVAILABLE_HINT
                         )
                     })?;
                     if !(min..=max).contains(&call.args.len())
@@ -2095,6 +2210,10 @@ impl Compiler {
                 Ok(array)
             }
             ast::Expr::Member(m) if self.constant_member(m).is_some() => Ok(self.constant_member(m).unwrap()),
+            ast::Expr::Member(m) if self.environment_variable(m).is_some() => {
+                let name = self.environment_variable(m).unwrap();
+                Ok(Expr::NodeBuiltin("process.env".into(), vec![Expr::Value(json!(name))]))
+            }
             ast::Expr::Member(m) if matches!(&*m.obj, ast::Expr::Ident(i) if i.sym == *"require") && self.global("require")
                 && matches!(&m.prop, ast::MemberProp::Ident(p) if p.sym == *"main") => Ok(Expr::Undefined),
             ast::Expr::Arrow(arrow) => Ok(Expr::Function(
@@ -2683,13 +2802,23 @@ fn compile_inner(
         Some(&comments),
     );
     let mut parser = Parser::new_from(lexer);
+    // Parser errors are named, not explained; the ones a flow meets get words.
+    let describe = |kind: String| -> String {
+        match kind.as_str() {
+            "ReturnNotAllowed" if refinement => format!(
+                "return is only allowed inside a function; the host calls {entry} itself with this call's arguments, so put this code inside {entry}"
+            ),
+            "ReturnNotAllowed" => "return is only allowed inside a function; a program ends after its last statement, so print what it found with console.log".to_owned(),
+            _ => kind,
+        }
+    };
     let module = parser.parse_module().map_err(|e| {
         let p = map.lookup_char_pos(e.span().lo);
-        anyhow::anyhow!("TS_PROGRAM {}:{}: {:?}", p.line, p.col.0 + 1, e.kind())
+        anyhow::anyhow!("TS_PROGRAM {}:{}: {}", p.line, p.col.0 + 1, describe(format!("{:?}", e.kind())))
     })?;
     if let Some(e) = parser.take_errors().first() {
         let p = map.lookup_char_pos(e.span().lo);
-        bail!("TS_PROGRAM {}:{}: {:?}", p.line, p.col.0 + 1, e.kind());
+        bail!("TS_PROGRAM {}:{}: {}", p.line, p.col.0 + 1, describe(format!("{:?}", e.kind())));
     }
     if !internal {
         struct Reserved(bool);
@@ -2866,7 +2995,7 @@ fn compile_inner(
         }
         if let Some(span) = found.0 {
             let p = map.lookup_char_pos(span.lo);
-            bail!("TS_PROGRAM {}:{}: await is not available at the top level of a module implementation; await inside its functions", p.line, p.col.0 + 1);
+            bail!("TS_PROGRAM {}:{}: the host calls {entry} itself with this call's arguments and the top level only declares, so put this await inside {entry}", p.line, p.col.0 + 1);
         }
     }
     // Without imports the host's libraries are in scope by name. A name the

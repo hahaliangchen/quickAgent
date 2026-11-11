@@ -17,6 +17,46 @@
       "port": 5174
     },
     {
+      "name": "grow-web-ui-on-running-desktop",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "AGENT_BACKEND=http://127.0.0.1:41203",
+        "npm",
+        "--prefix",
+        "frontend",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5175",
+        "--strictPort"
+      ],
+      "port": 5175
+    },
+    {
+      "name": "grow-web-backend",
+      "runtimeExecutable": "scripts/web-desktop-data.sh",
+      "runtimeArgs": ["serve"],
+      "port": 3201
+    },
+    {
+      "name": "grow-web",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "AGENT_BACKEND=http://127.0.0.1:3201",
+        "npm",
+        "--prefix",
+        "frontend",
+        "run",
+        "dev",
+        "--",
+        "--port",
+        "5176",
+        "--strictPort"
+      ],
+      "port": 5176
+    },
+    {
       "name": "agent-design-slides",
       "runtimeExecutable": "env",
       "runtimeArgs": [

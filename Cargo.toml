@@ -1,6 +1,6 @@
 [package]
 name = "codex-workspace-mcp"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 
 [features]
@@ -49,6 +49,7 @@ base64 = "0.22.1"
 sha2 = "0.10.9"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 jsonschema = { version = "0.60.2", default-features = false }
+htmd = "0.5.6"
 
 [dev-dependencies]
 tokio = { version = "1.52.3", features = ["test-util"] }

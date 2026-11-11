@@ -468,7 +468,7 @@ async fn dispatch(
 
 async fn dispatch_activated(
     workspace: &Arc<Workspace>,
-    request: JsonRpcRequest,
+    mut request: JsonRpcRequest,
     mut activation: Option<&mut SkillActivation>,
 ) -> anyhow::Result<Value> {
     if request.jsonrpc.as_deref() != Some("2.0") {
@@ -529,6 +529,10 @@ async fn dispatch_activated(
             Ok(json!({"tools":definitions}))
         }
         "tools/call" => {
+            // An MCP client is never program code: it gets an AI's pages.
+            if let Some(arguments) = request.params.get_mut("arguments") {
+                crate::source_read::unmark(arguments);
+            }
             let name = request.params["name"]
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("tool name required"))?;
@@ -1416,13 +1420,14 @@ pub fn tool_definitions() -> Value {
         let name = tool["name"].as_str().unwrap_or("");
         if crate::source_read::is_source_read(name) {
             tool["description"] = json!(format!(
-                "{} Source pages preserve original bytes and line delimiters; complete/next_start_line identify pagination. max_chars defaults to 24000, max 60000. Reads are bounded to 16 MiB; force_read bypasses snapshot caching.",
-                tool["description"].as_str().unwrap_or("")
+                "{} Source pages preserve original bytes and line delimiters; complete/next_start_line identify pagination. {} Reads are bounded to 16 MiB; force_read bypasses snapshot caching.",
+                tool["description"].as_str().unwrap_or(""),
+                crate::source_read::page_note(false)
             ));
             let props = tool["inputSchema"]["properties"].as_object_mut().unwrap();
             props.insert(
                 "max_chars".into(),
-                json!({"type":"integer","minimum":1000,"maximum":60000,"default":24000}),
+                json!({"type":"integer","minimum":1000,"maximum":crate::source_read::PAGE_CHARS,"default":24000}),
             );
             props.entry("start_line").or_insert(json!({"type":"integer","minimum":1,"description":"Optional page start within this file/definition. Use next_start_line to continue."}));
             props

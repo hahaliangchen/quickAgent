@@ -384,9 +384,14 @@ button.crumb:hover {
   /* Shared width axis for the transcript, dock cards, composer, and takeover
      cards. Main width controls publish the live body width and optional user
      preference; embedded occurrences override this adaptive axis below. */
+  /* Most of the available column, between 680px and 1200px, and never wider
+     than the column minus 24px margins on each side. */
   --dsh-chat-content-width: var(
     --dsh-chat-user-width,
-    clamp(680px, calc(var(--dsh-conversation-column-width, 0px) * 0.64), 920px)
+    min(
+      calc(var(--dsh-conversation-column-width, 728px) - 48px),
+      clamp(680px, calc(var(--dsh-conversation-column-width, 0px) * 0.86), 1200px)
+    )
   );
   --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
   --dsh-composer-side-clearance: 16px;
