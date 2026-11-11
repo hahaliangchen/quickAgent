@@ -357,6 +357,35 @@ fn compile(s: &Session<'_>, w: &Window, name: &str, source: &str) -> Result<()> 
     program_flow::validate_implementation(&program)
 }
 
+/// Link plugin-provided implementations to their exact main-program contracts.
+/// Validate the complete bundle before saving any module; normal tool/AI-layer
+/// permissions remain enforced when these implementations execute.
+pub(super) async fn provide(s: &Session<'_>, w: &Window, sources: &BTreeMap<String, String>) -> Result<()> {
+    let program = &w.program.as_ref().context("main program is not installed")?.program;
+    let mut validated = Vec::new();
+    for (name, source) in sources {
+        let declaration = program.functions.get(name).filter(|function| function.module_task)
+            .with_context(|| format!("provided module {name} has no main-program module declaration"))?;
+        let body = crate::agent_program::compile_body_with_scope(source, name, libraries(s, w), Default::default())?;
+        crate::agent_program::uncalled_functions(source, Some(name))?;
+        program_flow::validate_implementation(&body)?;
+        let implementation = body.functions.get(name).context("provided module entry missing")?;
+        ensure!(!implementation.virtual_task, "provided module {name} must contain executable code, not another declaration");
+        ensure!(implementation.params == declaration.params, "provided module {name} parameters do not match its declaration");
+        let arguments = vec![Value::Null; declaration.params.len()];
+        let task = program_flow::function_task(program, name, &arguments, &Default::default())?;
+        let contract = contract(&task)?;
+        let existing = latest(s.state.workspace.root(), s.task, &contract.key)?;
+        ensure!(existing.as_ref().is_none_or(|(_, saved)| saved == source),
+            "provided module {name} differs from this chat's saved contract; version the plugin declaration before replacing it");
+        validated.push((contract, source, existing.is_some()));
+    }
+    for (contract, source, exists) in validated {
+        if !exists { save(s, &contract, source, false, None).await?; }
+    }
+    Ok(())
+}
+
 /// Run this version of the module for the window's call, from its start.
 fn install(s: &Session<'_>, w: &mut Window, version: i64, source: &str) -> Result<()> {
     w.program = None;

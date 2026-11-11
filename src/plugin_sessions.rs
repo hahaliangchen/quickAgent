@@ -143,7 +143,7 @@ pub(crate) async fn handle(state: AgentServiceState, id: &str, args: Value) -> R
                 prompt.to_owned()
             };
             let input = serde_json::from_value(
-                json!({"prompt":prompt,"content":args["content"].as_array().cloned().unwrap_or_default(),"requestId":args["requestId"],"provider":args["provider"],"model":args["model"],"reasoning_effort":args["reasoning_effort"]}),
+                json!({"prompt":prompt,"content":args["content"].as_array().cloned().unwrap_or_default(),"requestId":args["requestId"],"provider":args["provider"],"model":args["model"],"reasoning_effort":args["reasoning_effort"],"program_resource":args["program_resource"]}),
             )?;
             agent_service::continue_task(State(state), Path(task), Json(input))
                 .await

@@ -496,8 +496,13 @@ impl Workspace {
         let mut seen_symbols = std::collections::HashSet::new();
         let mut index_used = false;
 
-        // 1. 优先尝试从 SQLite 符号索引库中查找精确匹配的符号定义
+        // 1. 优先尝试从 SQLite 符号索引库中查找精确匹配的符号定义（不因外部搜索在未索引目录创建状态库）
         if !request.regex
+            && workspace
+                .root
+                .join(".codex-workspace-mcp")
+                .join("codex_state.db")
+                .is_file()
             && let Ok(conn) = crate::database::init_db(&workspace.root)
         {
             let root_str = workspace.root.to_string_lossy().to_string();

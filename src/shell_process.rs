@@ -192,8 +192,12 @@ async fn execute_with_delivery(
             let state = state.clone();
             let workspace = crate::tools::Workspace::new(workspace.root())?;
             let (task, owner, args) = (task.to_owned(), owner.map(str::to_owned), args.clone());
+            let sandbox_ctx = crate::process_sandbox::current_tool_sandbox();
             let result = tokio::spawn(async move {
-                launch(&state,&workspace,&task,turn,owner.as_deref(),&args,&child_cancel,ban_execution).await
+                crate::process_sandbox::scope_optional_tool_sandbox(
+                    sandbox_ctx,
+                    launch(&state,&workspace,&task,turn,owner.as_deref(),&args,&child_cancel,ban_execution),
+                ).await
             }).await.context("shell startup task failed")??;
             result
         },
@@ -255,7 +259,13 @@ async fn launch(
     let cwd = cwd.canonicalize().context("shell workdir does not exist")?;
     ensure!(cwd.is_dir(), "shell workdir must be a directory");
     let boundary = boundary(state.permission_mode, ban);
-    ensure!(boundary == ExecutionBoundary::Host || cwd.starts_with(&root), "sandbox workdir is outside the workspace");
+    ensure!(
+        boundary == ExecutionBoundary::Host
+            || cwd.starts_with(&root)
+            || (boundary == ExecutionBoundary::Workspace
+                && crate::process_sandbox::is_extra_writable_dir(&cwd)),
+        "sandbox workdir is outside the workspace"
+    );
     let environment = crate::shell_environment::resolve()?;
     let tracking_workspace = crate::tools::Workspace::new(workspace.root())?;
     let id = format!("shell_{}", crate::agent_service::uuid_like());

@@ -128,6 +128,15 @@ fn tool_value(mut response: Value) -> Result<Value> {
 }
 struct Transport;
 impl crate::plugin_io::SessionIo for Transport {
+    fn program_resource<'a>(&'a self, state: &'a AgentServiceState, task: &'a str,
+        path: &'a str) -> futures::future::BoxFuture<'a, Result<Vec<u8>>> {
+        Box::pin(async move {
+            let (_, _, connection) = bound(state.workspace.root(), task)?
+                .context("Remote plugin login required")?;
+            let (_, bytes) = connection.asset("resource", &[("path", path.to_owned())]).await?;
+            Ok(bytes)
+        })
+    }
     fn authorize_page_tool<'a>(
         &'a self, state: &'a AgentServiceState, task: &'a str, tool: &'a str, args: &'a Value,
     ) -> futures::future::BoxFuture<'a, Result<Option<Value>>> {

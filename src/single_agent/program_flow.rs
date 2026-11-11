@@ -131,13 +131,21 @@ fn link(s: &Session<'_>, definitions: &[Value], spec: &str) -> (Value, bool) {
     if super::skill_scope::exists(s, name) {
         return (json!({"library":spec,"methods":{}}), false);
     }
-    (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{spec}'; {}", node_module_hint(name).unwrap_or("program_tool_headers lists the libraries"))}), true)
+    let mut names = library_catalog(s, definitions).into_keys().collect::<BTreeSet<_>>();
+    names.extend(skill_library_names(s).into_iter().map(|(_, library)| library));
+    (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{spec}'; {}{}", node_module_hint(name).map(|hint| format!("{hint}; ")).unwrap_or_default(), available_libraries(names))}), true)
+}
+/// A failed require names what can be required here, so a guessed or
+/// aliased name is corrected in one step instead of by trial.
+fn available_libraries(names: impl IntoIterator<Item = String>) -> String {
+    let names = names.into_iter().collect::<Vec<_>>();
+    if names.is_empty() { "no libraries can be required here".into() } else { format!("available libraries: {}", names.join(", ")) }
 }
 /// Where the work a Node built-in module would do is in this runtime, so a
 /// failed require says what to use instead of only what is missing.
 fn node_module_hint(name: &str) -> Option<&'static str> {
     Some(match name {
-        "fs" => "read, list, search and write files with require('io'); io.read and io.list accept absolute paths, including outside the workspace once allowed; in full access io.write and io.edit do too",
+        "fs" => "read, list, search and write files with require('io'); io.read, io.list, io.write and io.edit accept absolute paths, including in related directories outside the workspace once approved by the user",
         "child_process" => "run commands with require('process').exec_command inside a module implementation",
         "https" | "net" | "undici" => "fetch pages with require('web').fetch, or check a local service with require('http').probe",
         "crypto" | "zlib" | "buffer" | "stream" | "util" | "events" | "worker_threads" | "readline" | "v8" | "vm" => {
@@ -336,6 +344,7 @@ pub(super) fn write_program_tool(module: bool) -> Value {
         properties["probe"] = json!({"type":"boolean","description":"If true, run a small probe with the current arguments. Only read_file, read_file_lines, search_text, list_dir and workspace_info may execute: shell and writes are forbidden even if their libraries import successfully. Omit probe to save and run the reusable module with its normal permissions."});
         "Run a small read-only probe with probe:true, or submit the complete reusable module implementation. The implementation uses the contracted function signature; a probe may instead be a plain script, run as that function's body with its parameters bound to this call's arguments. A probe returns its actual result to this same author; the final implementation is saved and returns to the caller. Call it as the only call in its reply. Code in reply text is never run."
     } else {
+        properties["resource"] = json!({"type":"string","description":"For a plugin-owned fixed program, the skill: path of its version-1 program bundle manifest. Omit source: the host fetches, verifies and executes the plugin's exact main/module sources, without AI transcription. Available only in this plugin's own session."});
         properties["revise_modules"] = json!({"type":"object","description":"Optional compatible improvements to saved first-layer implementations, keyed by the top-level @virtual name. Keep the declaration identical. On its first call, the author revises that saved version and stores the new implementation.",
             "additionalProperties":{"type":"object","properties":{
                 "version":{"type":"integer","minimum":1,"description":"Current saved version from the module directory."},
@@ -343,7 +352,9 @@ pub(super) fn write_program_tool(module: bool) -> Value {
             },"required":["version","reason"],"additionalProperties":false}});
         "Hand over the program to run. The host writes source to a file in this chat's folder, compiles it, and when it compiles runs it once this reply ends; what the program logs with console.log and how it ended come back to you. Compile errors come back as this call's result, so call it again with the corrected program. Call it as the only call in its reply. Code in reply text is never run: write code there only to show it to the user."
     };
-    function(WRITE_PROGRAM, description, properties, json!(["source"]))
+    let mut tool = function(WRITE_PROGRAM, description, properties, if module { json!(["source"]) } else { json!([]) });
+    if !module { tool["function"]["parameters"]["oneOf"] = json!([{"required":["source"]},{"required":["resource"]}]); }
+    tool
 }
 pub(super) fn probe_read(name: &str) -> bool {
     matches!(name, "read_file" | "read_file_lines" | "search_text" | "list_dir" | "workspace_info")
@@ -1543,7 +1554,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                         if let Some(methods) = probe_libraries(s, &definitions).get(name) {
                             (json!({"library":library,"methods":methods}), false)
                         } else {
-                            (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{library}' in this module scope{}", node_module_hint(name).map(|hint| format!("; {hint}")).unwrap_or_default())}), true)
+                            (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{library}' in this module scope; {}{}", node_module_hint(name).map(|hint| format!("{hint}; ")).unwrap_or_default(), available_libraries(probe_libraries(s, &definitions).into_keys()))}), true)
                         }
                     } else {
                         link(s, &definitions, library)
@@ -2792,6 +2803,12 @@ mod tests {
         assert_eq!(seen[0]["status"], "completed", "{}", seen[0]);
         assert_eq!(seen[0]["result"], json!(5));
         assert!(seen[0]["console"].as_str().unwrap().contains("read a.txt"));
+    }
+
+    #[test]
+    fn a_failed_require_names_what_can_be_required() {
+        assert_eq!(available_libraries(["io".to_owned(), "ppt_master".to_owned()]), "available libraries: io, ppt_master");
+        assert_eq!(available_libraries(Vec::<String>::new()), "no libraries can be required here");
     }
 
     #[tokio::test]
@@ -4224,6 +4241,7 @@ mod tests {
         let heard = Arc::new(std::sync::Mutex::new(None::<String>));
         let log = heard.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" if std::fs::read_to_string(path.join("out.txt")).ok().as_deref() == Some("kept both") => reply("Done.".into()),
             "main" if body["messages"].to_string().contains("被你的新消息暂停") => {
                 *log.lock().unwrap() = Some(body["messages"].to_string());
                 reply(RESUMING_MAIN.into())
@@ -4249,7 +4267,8 @@ mod tests {
         let conn = agent_service::open_db(root.path()).unwrap();
         let lines = program_lines(&conn);
         assert!(lines.iter().any(|line| line.starts_with(PAUSED_AT)), "{lines:?}");
-        assert!(lines.last().unwrap().contains("已完成。"), "{lines:?}");
+        let ended: String = conn.query_row("SELECT json_extract(data,'$.ended') FROM agent_task_events WHERE kind='program/end' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(ended, "completed", "the resumed wrapper completed after both writes");
         assert_eq!(paused_nodes(&conn), 0, "nothing is left paused");
     }
 
@@ -4260,6 +4279,7 @@ mod tests {
         let root = TestRoot::new();
         let path = root.path().to_owned();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" if std::fs::read_to_string(path.join("out.txt")).ok().as_deref() == Some("kept both") => reply("Done.".into()),
             "main" if body["messages"].to_string().contains("被你的新消息暂停") => reply(WRITE_THEN_RESUME.into()),
             "main" => reply(DRAFTING_MAIN.into()),
             "implement" => reply(CATCHING_IMPLEMENT.into()),
@@ -4277,6 +4297,38 @@ mod tests {
         };
         let paused: i64 = conn.query_row("SELECT json_extract(data,'$.metadata.file_write_clock') FROM agent_task_nodes WHERE task_id='task' AND json_extract(data,'$.metadata.previous')=1", [], |r| r.get(0)).unwrap();
         assert!(version("out.txt") <= paused && paused < version("extra.txt"), "the paused program starts from the moment it paused: {paused}");
+    }
+
+    #[tokio::test]
+    async fn a_user_revision_replaces_pending_work_without_replaying_completed_writes() {
+        let root = TestRoot::new();
+        let path = root.path().to_owned();
+        let leaf = Arc::new(AtomicUsize::new(0));
+        let calls = leaf.clone();
+        run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" if path.join("revised.txt").exists() => reply("Updated as requested.".into()),
+            "main" if body["messages"].to_string().contains("Use the revised ending") => {
+                assert_eq!(std::fs::read_to_string(path.join("saved.txt")).unwrap(), "already saved");
+                // This new program replaces the old remainder rather than
+                // resuming its stale leaf or running its initial writes again.
+                reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"revised.txt\", content: \"new ending\"});\n```".into())
+            }
+            "main" => reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"saved.txt\", content: \"already saved\"});\nawait summarize([\"a.txt\"]);\nio.write({path: \"obsolete.txt\", content: \"old ending\"});\n/** @module */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}\n```".into()),
+            "implement" => reply(CATCHING_IMPLEMENT.into()),
+            _ => {
+                assert_eq!(calls.fetch_add(1, Ordering::SeqCst), 0, "the obsolete leaf must not resume");
+                crate::interjections::submit(&path, "task", "Use the revised ending").unwrap();
+                find_call()
+            }
+        }).await;
+        assert_eq!(leaf.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read_to_string(root.path().join("saved.txt")).unwrap(), "already saved");
+        assert_eq!(std::fs::read_to_string(root.path().join("revised.txt")).unwrap(), "new ending");
+        assert!(!root.path().join("obsolete.txt").exists());
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let writes: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='tool/call' AND json_extract(data,'$.name')='write_file' AND json_extract(json_extract(data,'$.arguments'),'$.path')='saved.txt'", [], |r| r.get(0)).unwrap();
+        assert_eq!(writes, 1, "the completed write is preserved, not replayed");
+        assert_eq!(paused_nodes(&conn), 0);
     }
 
     #[tokio::test]
@@ -4972,6 +5024,8 @@ mod tests {
         assert_eq!(links[0]["result"]["methods"], json!({"read_code_flow":"read_code_flow"}));
         assert_eq!(links[1]["library"], "absent");
         assert_eq!((links[1]["failed"].as_bool(), links[1]["result"]["code"].as_str()), (Some(true), Some("MODULE_NOT_FOUND")));
+        let missing = links[1]["result"]["message"].as_str().unwrap();
+        assert!(missing.contains("available libraries:") && missing.contains("flow"), "a failed require names what can be required instead: {missing}");
         let result: String = conn.query_row("SELECT r.data FROM agent_task_events c JOIN agent_task_events r ON r.task_id=c.task_id AND r.kind='tool/result'
             AND json_extract(r.data,'$.message.toolCallId')=json_extract(c.data,'$.callId') WHERE c.task_id='task' AND c.kind='tool/call' AND json_extract(c.data,'$.name')='read_code_flow'", [], |r| r.get(0)).unwrap();
         assert!(!result.contains("SKILL_NOT_ACTIVE") && serde_json::from_str::<Value>(&result).unwrap()["message"]["isError"] == false, "the method ran without loading the skill: {result}");

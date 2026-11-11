@@ -26,6 +26,7 @@ mod managed_files;
 pub(crate) mod modules;
 mod paused_programs;
 mod program_flow;
+mod program_bundle;
 mod skill_scope;
 mod task_frames;
 
@@ -1294,7 +1295,7 @@ async fn business_tool_inner(
         "permission_denied: {name}"
     );
     if crate::process_sandbox::ExecutionBoundary::for_mode(s.state.permission_mode)
-        == crate::process_sandbox::ExecutionBoundary::Workspace
+        != crate::process_sandbox::ExecutionBoundary::Host
         && s.state.tool_catalog.as_ref().is_some_and(|catalog| catalog.packages.is_command_tool(name))
     {
         anyhow::bail!("SANDBOX_UNSUPPORTED: package command tools cannot yet run under the workspace sandbox");
@@ -1330,16 +1331,89 @@ async fn business_tool_inner(
         };
         std::sync::Arc::new(crate::tools::Workspace::new(path)?)
     };
-    let outside = outside_read_paths(tool_workspace.root(), name, &args);
+    let mut extra_roots =
+        crate::tool_approvals::approved_writable_roots(s.state.workspace.root(), s.task)?;
+    let outside = outside_read_paths(tool_workspace.root(), &extra_roots, name, &args);
     if !outside.is_empty() && !matches!(s.state.permission_mode, crate::agent_service::PermissionMode::FullAccess) {
         crate::tool_approvals::wait_outside_read(s.state, s.task, s.model, s.delegate_id(), call_id, name, &args, &outside, s.cancel).await?;
     }
-    // Full access may edit a file outside the project (design guide §9).
-    let outside_edit = outside_edit(&tool_workspace, s.state.permission_mode, name, &args)?;
-    let (tool_workspace, args) = match outside_edit.clone() {
-        Some((workspace, args)) => (workspace, args),
-        None => (tool_workspace, args),
+    let outside_exec = outside_exec_or_index_paths(tool_workspace.root(), name, &args);
+    if !outside_exec.is_empty() {
+        ensure!(
+            !matches!(s.state.permission_mode, crate::agent_service::PermissionMode::ReadOnly)
+                && !s.ban_execution,
+            "OUTSIDE_WORKSPACE_DENIED: {name} cannot target paths outside the workspace ({}) in read-only mode",
+            outside_exec.join(", ")
+        );
+        if !matches!(s.state.permission_mode, crate::agent_service::PermissionMode::FullAccess) {
+            crate::tool_approvals::wait_outside_write(
+                s.state,
+                s.task,
+                s.model,
+                s.delegate_id(),
+                call_id,
+                name,
+                &args,
+                &outside_exec,
+                s.cancel,
+            )
+            .await?;
+            extra_roots =
+                crate::tool_approvals::approved_writable_roots(s.state.workspace.root(), s.task)?;
+            for raw in &outside_exec {
+                if let Ok(canon) = std::path::Path::new(raw).canonicalize()
+                    && crate::process_sandbox::is_allowed_extra_root(&canon)
+                    && !extra_roots.contains(&canon)
+                {
+                    extra_roots.push(canon);
+                }
+            }
+        }
+    }
+    // Cross-project file edits run with user approval (or directly in FullAccess).
+    let detected_edit = detect_outside_edit(&tool_workspace, name, &args)?;
+    let (tool_workspace, args, is_outside_edit) = if let Some(edit_target) = detected_edit {
+        ensure!(
+            !matches!(s.state.permission_mode, crate::agent_service::PermissionMode::ReadOnly)
+                && !s.ban_execution,
+            "OUTSIDE_WORKSPACE_EDIT: editing {} outside the project is not allowed in read-only mode",
+            edit_target.display_path
+        );
+        if !matches!(s.state.permission_mode, crate::agent_service::PermissionMode::FullAccess) {
+            let paths = [edit_target.display_path.clone()];
+            crate::tool_approvals::wait_outside_write(
+                s.state,
+                s.task,
+                s.model,
+                s.delegate_id(),
+                call_id,
+                name,
+                &args,
+                &paths,
+                s.cancel,
+            )
+            .await?;
+            extra_roots =
+                crate::tool_approvals::approved_writable_roots(s.state.workspace.root(), s.task)?;
+            if crate::process_sandbox::is_allowed_extra_root(&edit_target.work_root)
+                && !extra_roots.contains(&edit_target.work_root)
+            {
+                extra_roots.push(edit_target.work_root.clone());
+            }
+        }
+        let mut normalized = args.clone();
+        normalized["path"] = json!(edit_target.rel_path);
+        normalized["workspace_root"] = json!(edit_target.work_root.to_string_lossy());
+        (
+            std::sync::Arc::new(crate::tools::Workspace::new(&edit_target.work_root)?),
+            normalized,
+            true,
+        )
+    } else {
+        (tool_workspace, args, false)
     };
+    let sandbox_boundary = crate::shell_process::boundary(s.state.permission_mode, s.ban_execution);
+    crate::process_sandbox::scope_tool_sandbox(sandbox_boundary, extra_roots, async {
     if crate::shell_process::is_tool(name) {
         return crate::shell_process::execute_program(
             s.state, &tool_workspace, s.task, s.turn, s.task_node_id.as_deref(),
@@ -1404,6 +1478,7 @@ async fn business_tool_inner(
         None
     };
     let args = managed.as_ref().map(|p| p.args.clone()).unwrap_or(args);
+    let targets_external_project = is_outside_edit || !outside_exec.is_empty();
     // The main agent's edits are tracked in whichever project the task uses;
     // git delegates and plugin pages keep their own records.
     // An edit outside the project is not part of its turn record: undo and
@@ -1411,7 +1486,7 @@ async fn business_tool_inner(
     let result = if crate::workspace_changes::is_mutation(name)
         && s.delegate_id().is_none()
         && s.plugin.is_none()
-        && outside_edit.is_none()
+        && !targets_external_project
     {
         crate::workspace_changes::execute_tracked(
             s.state.clone(),
@@ -1540,6 +1615,7 @@ async fn business_tool_inner(
         }
     }
     result
+    }).await
 }
 
 /// What changed in the host since the previous turn started, said to the
@@ -1562,52 +1638,229 @@ fn environment_change_notice(previous: &Value, current: &Value) -> Option<String
     ))
 }
 
-/// A file edit outside the workspace, allowed in full access: the call runs
-/// with the file's own directory as its root, so hash checks, baselines and
-/// the write itself work as for project files. Credential and host state
-/// files stay closed. None when the edit is an ordinary project edit.
-fn outside_edit(workspace: &crate::tools::Workspace, mode: crate::agent_service::PermissionMode, name: &str, args: &Value)
-    -> Result<Option<(std::sync::Arc<crate::tools::Workspace>, Value)>> {
-    if !matches!(name, "write_file" | "edit_file" | "replace_range")
-        || args["workspace_root"].as_str().is_some_and(|root| !root.trim().is_empty())
-    {
-        return Ok(None);
-    }
-    let Some(raw) = args["path"].as_str().map(str::trim).filter(|raw| std::path::Path::new(raw).is_absolute()) else { return Ok(None) };
-    let path = std::path::Path::new(raw);
-    let (Some(parent), Some(file)) = (path.parent(), path.file_name()) else { return Ok(None) };
-    let Ok(parent) = parent.canonicalize() else { return Ok(None) };
-    let root = workspace.root().canonicalize().unwrap_or_else(|_| workspace.root().to_path_buf());
-    if parent.starts_with(&root) {
-        return Ok(None);
-    }
-    ensure!(matches!(mode, crate::agent_service::PermissionMode::FullAccess),
-        "OUTSIDE_WORKSPACE_EDIT: editing {raw} outside the project needs full access; ask the user to switch the permission mode or to make the change");
-    crate::database::check_source_access(&parent.join(file))?;
-    let mut args = args.clone();
-    args["path"] = json!(file.to_string_lossy());
-    args["workspace_root"] = json!(parent.to_string_lossy());
-    Ok(Some((std::sync::Arc::new(crate::tools::Workspace::new(&parent)?), args)))
+#[derive(Clone, Debug)]
+struct OutsideEditTarget {
+    display_path: String,
+    work_root: std::path::PathBuf,
+    rel_path: String,
 }
 
-/// Paths a file read would reach outside the workspace, after links resolve.
-/// Reading them needs the user's approval unless the mode is full access.
-fn outside_read_paths(workspace: &std::path::Path, name: &str, args: &Value) -> Vec<String> {
-    if !(matches!(name, "list_dir" | "search_text") || crate::source_read::is_source_read(name)) {
+fn detect_outside_edit(
+    workspace: &crate::tools::Workspace,
+    name: &str,
+    args: &Value,
+) -> Result<Option<OutsideEditTarget>> {
+    use std::path::{Component, Path, PathBuf};
+    if !matches!(name, "write_file" | "edit_file" | "replace_range") {
+        return Ok(None);
+    }
+    let Some(raw_path) = args["path"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let explicit_ws = args["workspace_root"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let root = workspace
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.root().to_path_buf());
+    let base = match explicit_ws {
+        Some(ws) => {
+            let ws_path = Path::new(ws);
+            if ws_path.is_absolute() {
+                ws_path.to_path_buf()
+            } else {
+                root.join(ws_path)
+            }
+        }
+        None => root.clone(),
+    };
+    let candidate = if Path::new(raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else {
+        base.join(raw_path)
+    };
+    // Reject parent-dir traversal in the raw external path before resolving ancestors.
+    for comp in Path::new(raw_path).components() {
+        if matches!(comp, Component::ParentDir) {
+            return Ok(None);
+        }
+    }
+    // Walk up non-existent subdirectories to find the deepest existing directory.
+    let mut cur = candidate.clone();
+    let mut tail = Vec::new();
+    while !cur.exists() {
+        ensure!(
+            std::fs::symlink_metadata(&cur).is_err(),
+            "refusing to write through a dangling symbolic link: {}",
+            cur.display()
+        );
+        let Some(name_part) = cur.file_name() else {
+            return Ok(None);
+        };
+        tail.push(name_part.to_os_string());
+        let Some(parent) = cur.parent() else {
+            return Ok(None);
+        };
+        cur = parent.to_path_buf();
+    }
+    let Ok(canon_cur) = cur.canonicalize() else {
+        return Ok(None);
+    };
+    let mut full_target = canon_cur.clone();
+    for part in tail.iter().rev() {
+        full_target.push(part);
+    }
+    if full_target.starts_with(&root) {
+        return Ok(None);
+    }
+    crate::database::check_source_access(&full_target)?;
+    let (work_root, rel_path) = if let Some(ws) = explicit_ws
+        && let Ok(canon_ws) = (if Path::new(ws).is_absolute() {
+            PathBuf::from(ws)
+        } else {
+            root.join(ws)
+        })
+        .canonicalize()
+        && canon_ws.is_dir()
+        && full_target.starts_with(&canon_ws)
+        && let Ok(rel) = full_target.strip_prefix(&canon_ws)
+        && !rel.as_os_str().is_empty()
+    {
+        (canon_ws, rel.to_string_lossy().replace('\\', "/"))
+    } else if canon_cur.is_dir() && !tail.is_empty() {
+        let rel = tail
+            .iter()
+            .rev()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .replace('\\', "/");
+        (canon_cur, rel)
+    } else {
+        let (Some(parent), Some(file)) = (full_target.parent(), full_target.file_name()) else {
+            return Ok(None);
+        };
+        (
+            parent.to_path_buf(),
+            file.to_string_lossy().replace('\\', "/"),
+        )
+    };
+    Ok(Some(OutsideEditTarget {
+        display_path: full_target.to_string_lossy().into_owned(),
+        work_root,
+        rel_path,
+    }))
+}
+
+fn outside_exec_or_index_paths(workspace: &std::path::Path, name: &str, args: &Value) -> Vec<String> {
+    let root = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut raw_candidates = Vec::new();
+    match name {
+        "exec_command" => {
+            if let Some(w) = args["workdir"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                raw_candidates.push(w);
+            }
+        }
+        "run_program" | "run_project_script" | "install_dependencies" => {
+            if let Some(p) = args["project_path"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                raw_candidates.push(p);
+            }
+        }
+        "sync_git"
+        | "code_index__index"
+        | "index_rust_workspace"
+        | "index_ts_workspace"
+        | "index_go_workspace"
+        | "index_python_workspace" => {
+            if let Some(w) = args["workspace_root"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                raw_candidates.push(w);
+            }
+        }
+        _ => {}
+    }
+    let mut found = Vec::new();
+    for raw in raw_candidates {
+        let p = std::path::Path::new(raw);
+        let full = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        };
+        let resolved = full.canonicalize().unwrap_or(full);
+        if !resolved.starts_with(&root) {
+            let s = resolved.to_string_lossy().into_owned();
+            if !found.contains(&s) {
+                found.push(s);
+            }
+        }
+    }
+    found
+}
+
+/// Paths a file/symbol/git/flow read would reach outside the workspace, after links resolve.
+/// Reading them needs the user's approval unless the mode is full access or already granted.
+fn outside_read_paths(
+    workspace: &std::path::Path,
+    extra_roots: &[std::path::PathBuf],
+    name: &str,
+    args: &Value,
+) -> Vec<String> {
+    let is_read = matches!(
+        name,
+        "list_dir"
+            | "search_text"
+            | "read_git"
+            | "read_code_flow"
+            | "workspace_info"
+            | "code_index__status"
+            | "code_index__list"
+            | "code_index__search"
+            | "code_index__read"
+            | "rust_index_status"
+            | "ts_index_status"
+            | "go_index_status"
+            | "python_index_status"
+            | "list_rust_symbols"
+            | "list_ts_symbols"
+            | "list_go_symbols"
+            | "list_python_symbols"
+            | "search_rust_symbols"
+            | "search_ts_symbols"
+            | "search_go_symbols"
+            | "search_python_symbols"
+    ) || crate::source_read::is_source_read(name);
+    if !is_read {
         return Vec::new();
     }
     let root = workspace.canonicalize().unwrap_or_else(|_| workspace.to_path_buf());
     let base = args["workspace_root"].as_str().filter(|raw| !raw.trim().is_empty()).map(|raw| std::path::PathBuf::from(raw.trim()));
-    let outside = |path: std::path::PathBuf| !path.canonicalize().unwrap_or(path).starts_with(&root);
+    let outside = |path: std::path::PathBuf| {
+        let resolved = path.canonicalize().unwrap_or(path);
+        !resolved.starts_with(&root)
+            && !extra_roots.iter().any(|extra| resolved.starts_with(extra))
+    };
     let mut found = Vec::new();
     if let Some(base) = &base && outside(base.clone()) {
         found.push(base.to_string_lossy().into_owned());
     }
-    for raw in args["path"].as_str().into_iter().chain(args["paths"].as_array().into_iter().flatten().filter_map(Value::as_str)) {
-        let path = std::path::Path::new(raw);
-        let full = if path.is_absolute() { path.to_path_buf() } else { base.clone().unwrap_or_else(|| root.clone()).join(path) };
-        if outside(full) && !found.iter().any(|known| known == raw) {
-            found.push(raw.to_owned());
+    if !matches!(name, "read_git" | "read_code_flow") {
+        for raw in args["path"].as_str().into_iter().chain(args["paths"].as_array().into_iter().flatten().filter_map(Value::as_str)) {
+            let path = std::path::Path::new(raw);
+            let full = if path.is_absolute() { path.to_path_buf() } else { base.clone().unwrap_or_else(|| root.clone()).join(path) };
+            if outside(full) && !found.iter().any(|known| known == raw) {
+                found.push(raw.to_owned());
+            }
         }
     }
     found
@@ -2572,15 +2825,25 @@ async fn submit_program(
     let root = s.state.workspace.root();
     let mut args: Value = serde_json::from_str(&call.arguments)?;
     let mut path = None;
-    let installed = (|| -> Result<Value> {
+    let mut bundle_origin = Value::Null;
+    let installed = async {
+        let bundle = program_bundle::load(s, &mut args, body).await?;
         let source = args["source"].as_str().context("write_program needs a source")?;
         if !body && args.get("probe").is_none() {
             let saved = host_folder::write_program(root, s.task, s.turn, source)?;
             args["source"] = json!(std::fs::read_to_string(root.join(&saved))?);
             path = Some(saved);
         }
-        program_flow::install_scoped(s, w, &args, body)
-    })();
+        let receipt = program_flow::install_scoped(s, w, &args, body)?;
+        if let Some(bundle) = bundle {
+            if let Err(error) = modules::provide(s, w, &bundle.modules).await {
+                w.program = None;
+                return Err(error);
+            }
+            bundle_origin = bundle.origin;
+        }
+        Ok::<_, anyhow::Error>(receipt)
+    }.await;
     let source = args["source"].as_str().unwrap_or("");
     let (result, is_error) = match installed {
         Ok(receipt) => {
@@ -2589,7 +2852,7 @@ async fn submit_program(
             let saved_flow = if !body && s.plugin.is_none() { Some(project_flows::save(s, w, source)?) } else { None };
             let event = if w.module_probe { "program/probe_start" } else { "program/start" };
             append(s, event, json!({"turn":s.turn,"receipt":receipt,"function":function,"source":source,
-                "path":path,"saved_flow":saved_flow}), false).await?;
+                "path":path,"saved_flow":saved_flow,"source_resource":bundle_origin}), false).await?;
             if body && !w.module_probe {
                 // New and revised module code is saved for later calls of its contract.
                 modules::authored(s, w, source).await?;
@@ -2662,8 +2925,8 @@ fn append_conflict_preview(output: &mut String, label: &str, preview: &Value, sa
     } else { output.push_str("\n\n内容无法作为 UTF-8 文本预览，请查看保存的文件。"); }
 }
 
-fn tool_result_failed(value: &Value) -> bool {
-    value["status"] == "failed"
+fn tool_result_failed(value: &Value, plugin_tool: bool) -> bool {
+    (plugin_tool && value["status"] == "failed")
         || value["error_code"] == "ASSET_CONFLICT"
         || value["host_denied"] == true
 }
@@ -2937,7 +3200,9 @@ async fn execute_call(
     // A successful transport can carry a failed business operation (notably a
     // page tool's {status:"failed",data:"..."}). Preserve its full envelope,
     // but deliver it as an error so VM callers cannot unwrap it as success.
-    let is_error = output.is_err() || output.as_ref().is_ok_and(tool_result_failed);
+    let plugin_tool = s.state.tool_catalog.as_ref()
+        .is_some_and(|catalog| catalog.packages.declares_tool(&call.name));
+    let is_error = output.is_err() || output.as_ref().is_ok_and(|value| tool_result_failed(value, plugin_tool));
     let mut result = output.unwrap_or_else(|error| {
             error.downcast_ref::<crate::shell_process::OutputCapacityError>()
                 .map(|error| error.0.clone()).unwrap_or_else(|| json!({"error":format!("{error:#}")}))
@@ -3033,6 +3298,13 @@ async fn settle_unanswered_calls(s: &Session<'_>, w: &mut Window) -> Result<()> 
 }
 
 pub(crate) async fn run_task(
+    state: AgentServiceState, task: String, model: String, prompt: String,
+    max_rounds: usize, cancel: CancellationToken, turn: usize, ban_execution: bool,
+) -> Result<()> {
+    run_task_with_resource(state, task, model, prompt, max_rounds, cancel, turn, ban_execution, None).await
+}
+
+pub(crate) async fn run_task_with_resource(
     state: AgentServiceState,
     task: String,
     model: String,
@@ -3041,6 +3313,7 @@ pub(crate) async fn run_task(
     cancel: CancellationToken,
     turn: usize,
     ban_execution: bool,
+    program_resource: Option<String>,
 ) -> Result<()> {
     let mut s = Session {
         agent_id: None,
@@ -3193,6 +3466,16 @@ pub(crate) async fn run_task(
     if task_frames::no_task(&s, &w) {
         task_frames::open_main_task(&s, &mut w, &prompt).await?;
     }
+    if let Some(resource) = program_resource {
+        ensure!(s.plugin.is_some() && w.program.is_none() && w.program_value.is_none(), "plugin program cannot replace a running program");
+        let call = crate::model_stream::ToolCall { call_id: format!("plugin-program-{}", agent_service::uuid_like()),
+            name: program_flow::WRITE_PROGRAM.into(), arguments: json!({"resource":resource}).to_string() };
+        let assistant = json!({"role":"assistant","content":null,"tool_calls":[{"id":call.call_id,"type":"function","function":{"name":call.name,"arguments":call.arguments}}]});
+        let event = append(&s, "assistant/message", json!({"actor":"host","turn":turn,"step":0,"message":assistant}), false).await?;
+        w.messages.push(sourced(assistant.clone(), &task, event));
+        submit_program(&s, &mut w, &assistant, &call, "plugin-program", 0).await?;
+        ensure!(w.program.is_some(), "plugin program could not be installed; see program diagnostic");
+    }
     let outcome = run_loop(&s, &mut w, max_rounds, true).await;
     // A turn the user stopped keeps its program for the next turn, where the
     // main AI decides whether to continue it (design guide §7.4). When it
@@ -3261,13 +3544,15 @@ mod tests {
     #[test]
     fn failed_plugin_envelopes_are_errors_even_when_the_transport_succeeded() {
         let failed = json!({"status":"failed","data":"Locked element changed: ppt/slides/slide4.xml#10"});
-        assert!(tool_result_failed(&failed));
+        assert!(tool_result_failed(&failed, true));
         assert_eq!(failed["data"], "Locked element changed: ppt/slides/slide4.xml#10");
+        // Reading an archived failure is a successful read, not a new failed operation.
+        assert!(!tool_result_failed(&failed, false));
         // Diagnostic warnings and asynchronous acceptance are not failures.
-        assert!(!tool_result_failed(&json!({"status":"succeeded","data":{"diagnostics":["FIXED_OCCLUSION"]}})));
-        assert!(!tool_result_failed(&json!({"status":"accepted","task_id":"pending"})));
-        assert!(tool_result_failed(&json!({"host_denied":true})));
-        assert!(tool_result_failed(&json!({"error_code":"ASSET_CONFLICT"})));
+        assert!(!tool_result_failed(&json!({"status":"succeeded","data":{"diagnostics":["FIXED_OCCLUSION"]}}), true));
+        assert!(!tool_result_failed(&json!({"status":"accepted","task_id":"pending"}), true));
+        assert!(tool_result_failed(&json!({"host_denied":true}), false));
+        assert!(tool_result_failed(&json!({"error_code":"ASSET_CONFLICT"}), false));
     }
     use super::*;
     use axum::{Json, Router, extract::State, routing::post};

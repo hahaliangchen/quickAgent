@@ -282,7 +282,11 @@ fn dsh_home() -> Option<std::path::PathBuf> {
 /// itself, so a model never needs their contents.
 pub(crate) fn secret_files() -> Vec<std::path::PathBuf> {
     let config = config_dir();
-    let mut files = vec![credentials_path(&config_path()), config.join(".env")];
+    let mut files = vec![
+        credentials_path(&config_path()),
+        config.join(".env"),
+        config.join("local_api_token"),
+    ];
     if let Some(home) = dsh_home() {
         files.extend([home.join(".credentials.yaml"), home.join(".env")]);
     }
@@ -2359,18 +2363,27 @@ pub async fn run(
         .with_state(state)
         .layer(CorsLayer::permissive());
 
+    let addr = listener.local_addr()?;
+    crate::process_sandbox::register_control_port(addr.port());
     let app = if std::env::args().any(|arg| arg == "--desktop-agent") {
         app.layer(axum::middleware::from_fn_with_state(
-            listener.local_addr()?.to_string(),
+            addr.to_string(),
             desktop_origin_guard,
         ))
     } else {
         app
     };
-    let addr = listener.local_addr()?;
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        addr,
+        crate::process_sandbox::local_http_guard,
+    ));
     info!(%addr, "Agent service starting");
 
-    let served = axum::serve(listener, app).await;
+    let served = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await;
     runtime.shutdown()?;
     served?;
     Ok(())

@@ -46,11 +46,11 @@ pub enum PermissionMode {
     ReadOnly,
     WorkspaceWrite,
     /// Edits proceed; execution waits for the user's approval (tool_approvals).
+    #[default]
     Ask,
     /// As Ask, but an AI reviewer decides first and hands only unclear
     /// operations to the user (approval_review).
     AutoReview,
-    #[default]
     FullAccess,
 }
 
@@ -275,6 +275,8 @@ pub async fn create_draft_task(
 
 #[derive(Debug, Deserialize)]
 pub struct ContinueTaskRequest {
+    #[serde(default)]
+    pub program_resource: Option<String>,
     #[serde(default)]
     pub prompt: String,
     #[serde(default)]
@@ -748,6 +750,7 @@ pub async fn create_task(
         cancel,
         1,
         false,
+        None,
     );
     (StatusCode::ACCEPTED, Json(json!({"task_id":task_id,"status":"running","events_url":format!("/agent/tasks/{task_id}/events")}))).into_response()
 }
@@ -869,6 +872,10 @@ pub async fn continue_task(
     let req_effort = request.reasoning_effort.clone();
     let req_fast = request.fast_mode;
     let req_permission = request.permission_mode;
+    let program_resource = request.program_resource.clone();
+    if program_resource.is_some() && crate::plugin_sessions::owner(state.workspace.root(), &task_id).ok().flatten().is_none() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"program resources require a plugin session"}))).into_response();
+    }
     let loaded = tokio::task::spawn_blocking(move || -> anyhow::Result<ResumeLoad> {
         let mut conn = open_db(&root)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1026,6 +1033,7 @@ pub async fn continue_task(
         cancel,
         turn,
         false,
+        program_resource,
     );
     (
         StatusCode::ACCEPTED,
@@ -1404,9 +1412,10 @@ fn spawn_supervised_task(
     cancel: CancellationToken,
     turn: usize,
     ban_run_command: bool,
+    program_resource: Option<String>,
 ) {
     tokio::spawn(async move {
-        let worker = tokio::spawn(crate::single_agent::run_task(
+        let worker = tokio::spawn(crate::single_agent::run_task_with_resource(
             state.clone(),
             task_id.clone(),
             model,
@@ -1415,6 +1424,7 @@ fn spawn_supervised_task(
             cancel,
             turn,
             ban_run_command,
+            program_resource,
         ));
         let failure = match worker.await {
             Ok(Ok(())) => None,
@@ -1760,7 +1770,7 @@ pub(crate) mod tests {
             model_map: HashMap::new(),
             reasoning_effort: None,
             fast_mode: false,
-            permission_mode: PermissionMode::default(),
+            permission_mode: PermissionMode::FullAccess,
 
             visual: Default::default(),
             visual_tool_settings: Default::default(),

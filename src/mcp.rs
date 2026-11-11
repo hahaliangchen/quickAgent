@@ -74,15 +74,25 @@ pub async fn handle_mcp_get(headers: HeaderMap) -> Response {
         .into_response()
 }
 fn valid_origin(headers: &HeaderMap) -> bool {
+    if headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
+    {
+        return false;
+    }
     let Some(origin) = headers.get("origin") else {
         return true;
     };
-    let Some(host) = headers.get("host").and_then(|value| value.to_str().ok()) else {
+    let Ok(origin) = origin.to_str() else {
         return false;
     };
-    origin.to_str().is_ok_and(|origin| {
-        origin == format!("http://{host}") || origin == format!("https://{host}")
-    })
+    if let Some(host) = headers.get("host").and_then(|value| value.to_str().ok())
+        && (origin == format!("http://{host}") || origin == format!("https://{host}"))
+    {
+        return true;
+    }
+    crate::process_sandbox::is_loopback_origin(origin)
 }
 pub fn notify_tools_changed() {
     for session in sessions().lock().unwrap().values() {

@@ -254,6 +254,8 @@ pub(super) fn prepare(root: &Path, task: &str, workspace: &Path, name: &str, mut
         Err(error) => return Err(error),
     };
     let object = args.as_object_mut().context("file arguments must be an object")?;
+    object.insert("workspace_root".into(), json!(work.clone()));
+    object.insert("path".into(), json!(rel.clone()));
     object.remove("expected_code_hash");
     if let Some(bytes) = &base {
         object.insert("expected_code_hash".into(), json!(crate::symbol_description::content_hash(bytes)));
@@ -993,16 +995,60 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         let path = config.to_string_lossy().into_owned();
         let edit = |old: &str, new: &str| json!({"path":path,"edits":[{"old_text":old,"new_text":new}]});
-        // Without full access the edit is refused and says why.
-        state.permission_mode = crate::agent_service::PermissionMode::Ask;
+        // ReadOnly always refuses external edits; Ask mode gates on user confirmation (including workspace_root overrides).
+        state.permission_mode = crate::agent_service::PermissionMode::ReadOnly;
         {
             let session = super::super::Session {
                 agent_id: None, task_node_id: None, plugin: None,
                 state: &state, task: "task", model: "fake", turn: 1, cancel: &cancel,
                 ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
             };
-            let refused = super::super::business_tool(&session, "node", "edit_file", edit("262144", "1048576"), "ask").await;
-            assert!(format!("{refused:?}").contains("OUTSIDE_WORKSPACE_EDIT"), "{refused:?}");
+            let refused = super::super::business_tool(&session, "node", "edit_file", edit("262144", "1048576"), "ro").await;
+            assert!(refused.is_err(), "{refused:?}");
+        }
+        state.permission_mode = crate::agent_service::PermissionMode::Ask;
+        {
+            let root_for_deny = root.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                let conn = crate::agent_service::open_db(&root_for_deny).unwrap();
+                let _ = conn.execute(
+                    "CREATE TABLE IF NOT EXISTS tool_approvals(task_id TEXT NOT NULL,call_id TEXT NOT NULL,decision TEXT NOT NULL,PRIMARY KEY(task_id,call_id))",
+                    [],
+                );
+                conn.execute("INSERT INTO tool_approvals VALUES ('task','ask-deny','deny')", []).unwrap();
+            });
+            let session = super::super::Session {
+                agent_id: None, task_node_id: None, plugin: None,
+                state: &state, task: "task", model: "fake", turn: 1, cancel: &cancel,
+                ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+            };
+            let confused = json!({
+                "workspace_root": outside.to_string_lossy(),
+                "path": "providers.yml",
+                "edits": [{"old_text": "262144", "new_text": "1048576"}]
+            });
+            let refused = super::super::business_tool(&session, "node", "edit_file", confused, "ask-deny").await;
+            assert!(format!("{refused:?}").contains("USER_DENIED"), "{refused:?}");
+            assert!(fs::read_to_string(&config)?.contains("262144"));
+
+            let root_for_allow = root.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                let conn = crate::agent_service::open_db(&root_for_allow).unwrap();
+                conn.execute("INSERT INTO tool_approvals VALUES ('task','ask-allow','once')", []).unwrap();
+            });
+            let new_sub = outside.join("nested/created.txt");
+            let allowed = super::super::business_tool(
+                &session,
+                "node",
+                "write_file",
+                json!({"path": new_sub.to_string_lossy(), "content": "cross-project ok"}),
+                "ask-allow",
+            )
+            .await?;
+            assert_eq!(allowed["changed"], true, "{allowed}");
+            assert_eq!(fs::read_to_string(&new_sub)?, "cross-project ok");
         }
         state.permission_mode = crate::agent_service::PermissionMode::FullAccess;
         let session = super::super::Session {

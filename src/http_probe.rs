@@ -144,6 +144,12 @@ async fn probe_url(
         kind: "invalid_url",
         message: "The URL does not specify a usable HTTP port.".to_owned(),
     })?;
+    if crate::process_sandbox::is_host_control_port(port) {
+        return Err(ProbeFailure {
+            kind: "control_port_blocked",
+            message: "Probing the host control service port is not allowed.".to_owned(),
+        });
+    }
 
     let mut builder = reqwest::Client::builder()
         .no_proxy()

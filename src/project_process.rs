@@ -636,6 +636,25 @@ fn project(root: &Path, raw: &str) -> Result<(PathBuf, String)> {
     let root = root
         .canonicalize()
         .context("workspace root is unavailable to process tools")?;
+    let trimmed = raw.trim();
+    let raw_path = Path::new(trimmed);
+    if raw_path.is_absolute()
+        && !raw_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        && crate::process_sandbox::allows_external_dir(&root, raw_path)
+    {
+        let path = raw_path
+            .canonicalize()
+            .context("project directory is unavailable to process tools")?;
+        ensure!(path.is_dir(), "project_path is not a directory");
+        if let Ok(rel) = path.strip_prefix(&root) {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            return Ok((path, if rel.is_empty() { ".".into() } else { rel }));
+        }
+        let display = path.to_string_lossy().replace('\\', "/");
+        return Ok((path, display));
+    }
     let checked = crate::file_edit::workspace_path(&root, raw)
         .context("project path failed workspace boundary validation")?;
     let path = checked

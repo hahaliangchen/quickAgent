@@ -411,7 +411,31 @@ fn resolve_project_path(root: &Path, raw: &str) -> Result<(PathBuf, String)> {
         !raw.trim().is_empty() && raw.len() <= 4096,
         "project_path must be a nonempty path of at most 4096 bytes"
     );
-    let resolved = crate::file_edit::workspace_path(root, raw.trim())?;
+    let trimmed = raw.trim();
+    let raw_path = Path::new(trimmed);
+    if raw_path.is_absolute()
+        && !raw_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        && crate::process_sandbox::allows_external_dir(root, raw_path)
+    {
+        let canonical = raw_path
+            .canonicalize()
+            .context("project_path must identify an existing directory")?;
+        ensure!(canonical.is_dir(), "project_path must identify an existing directory");
+        let root_canon = root.canonicalize()?;
+        if let Ok(rel) = canonical.strip_prefix(&root_canon) {
+            let rel = if rel.as_os_str().is_empty() {
+                ".".to_owned()
+            } else {
+                rel.to_string_lossy().replace('\\', "/")
+            };
+            return Ok((canonical, rel));
+        }
+        let display = canonical.to_string_lossy().replace('\\', "/");
+        return Ok((canonical, display));
+    }
+    let resolved = crate::file_edit::workspace_path(root, trimmed)?;
     ensure!(
         resolved.is_dir(),
         "project_path must identify an existing directory inside the workspace"

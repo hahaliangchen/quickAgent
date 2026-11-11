@@ -115,8 +115,17 @@ fn build_app(workspace: Arc<Workspace>) -> Router {
 
 async fn run_server(listener: TcpListener, workspace: Arc<Workspace>) -> anyhow::Result<()> {
     let addr = listener.local_addr()?;
+    process_sandbox::register_control_port(addr.port());
     info!(%addr, root = %workspace.root().display(), "starting HTTP server");
-    axum::serve(listener, build_app(workspace)).await?;
+    let app = build_app(workspace).layer(axum::middleware::from_fn_with_state(
+        addr,
+        process_sandbox::local_http_guard,
+    ));
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

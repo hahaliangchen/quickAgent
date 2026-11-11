@@ -434,7 +434,8 @@ pub async fn execute_scoped(
                 "needed":"No live connection or saved browser_connection was found in this conversation. Supply the original browser_connection to resume a page, or use browser_open if you intend to create one."}),
             );
         }
-        args["url"].as_str().context("url is required")?;
+        let url = args["url"].as_str().context("url is required")?;
+        crate::process_sandbox::check_not_host_control_url_async(url).await?;
         *guard = Some(launch(args["visible"] == true).await?);
     }
     let session = guard.as_mut().unwrap();
@@ -524,6 +525,17 @@ pub async fn execute_scoped(
         }
         "browser_upload" => upload(&session.ws, workspace.root(), args).await?,
         "browser_screenshot" => {
+            if let Some(url) = page_state(&session.ws)
+                .await
+                .ok()
+                .and_then(|s| s["url"].as_str().map(str::to_owned))
+                && let Err(error) =
+                    crate::process_sandbox::check_not_host_control_url_async(&url).await
+            {
+                drop(guard);
+                let _ = close_session(workspace.root(), context.task_id()).await;
+                return Err(error);
+            }
             return screenshot(
                 workspace.root(),
                 context,
@@ -535,6 +547,13 @@ pub async fn execute_scoped(
         _ => anyhow::bail!("unknown browser tool"),
     };
     let state = page_state(&session.ws).await?;
+    if let Some(url) = state["url"].as_str()
+        && let Err(error) = crate::process_sandbox::check_not_host_control_url_async(url).await
+    {
+        drop(guard);
+        let _ = close_session(workspace.root(), context.task_id()).await;
+        return Err(error);
+    }
     if !session.signature.is_null() && session.signature != state {
         session.epoch += 1;
     }
@@ -587,6 +606,7 @@ async fn open(ws: &str, url: &str) -> Result<Value> {
                 || url.starts_with("file:")),
         "url must be http(s) or file"
     );
+    crate::process_sandbox::check_not_host_control_url_async(url).await?;
     let mut cdp = connect_cdp(ws).await?;
     arm_diagnostics(&mut cdp).await?;
     cdp.call("Page.navigate", json!({"url":url})).await?;

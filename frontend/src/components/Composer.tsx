@@ -128,11 +128,11 @@ export function Composer({
   const [permissionMode, setPermissionMode] = useState<DshPermissionMode>(() => {
     try {
       const saved = localStorage.getItem('dsh_permission_mode')
-      if (saved === 'read_only' || saved === 'workspace_write' || saved === 'ask' || saved === 'auto_review' || saved === 'full_access') {
+      if (saved === 'read_only' || saved === 'workspace_write' || saved === 'ask' || saved === 'auto_review') {
         return saved
       }
     } catch {}
-    // New users start with commands needing approval; full access is an explicit choice.
+    // Never restore unsandboxed full_access across browser/app restarts; default safely to 'ask'.
     return 'ask'
   })
   const [permMenuOpen, setPermMenuOpen] = useState(false)
@@ -319,7 +319,11 @@ export function Composer({
     setPermissionMode(mode)
     setPermMenuOpen(false)
     try {
-      localStorage.setItem('dsh_permission_mode', mode)
+      if (mode === 'full_access') {
+        localStorage.removeItem('dsh_permission_mode')
+      } else {
+        localStorage.setItem('dsh_permission_mode', mode)
+      }
     } catch {}
   }
 

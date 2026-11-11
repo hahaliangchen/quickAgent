@@ -46,15 +46,45 @@ struct Output {
 }
 
 async fn run(root: &Path, args: &[&str], timeout: Duration) -> Result<Output> {
-    let child = Command::new("git")
-        .args(["-c", "core.quotepath=off", "-c", "color.ui=never"])
+    run_with_mode(root, args, timeout, false).await
+}
+
+async fn run_with_mode(
+    root: &Path,
+    args: &[&str],
+    timeout: Duration,
+    mutating: bool,
+) -> Result<Output> {
+    let sandbox_boundary = crate::process_sandbox::current_tool_sandbox().and_then(|ctx| {
+        (ctx.boundary != crate::process_sandbox::ExecutionBoundary::Host).then_some(if mutating {
+            ctx.boundary
+        } else {
+            crate::process_sandbox::ExecutionBoundary::ReadOnly
+        })
+    });
+    let mut command = match sandbox_boundary {
+        Some(boundary) => crate::process_sandbox::command("git", root, root, boundary)?,
+        None => Command::new("git"),
+    };
+    command.args([
+        "-c",
+        "core.quotepath=off",
+        "-c",
+        "color.ui=never",
+        "-c",
+        "core.fsmonitor=false",
+    ]);
+    if sandbox_boundary.is_some() {
+        command.args(["-c", "core.hooksPath=/dev/null"]);
+    }
+    let child = command
         .args(args)
         .current_dir(root)
         // Fail instead of waiting for a password nobody can type.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
         // Reads must not take index.lock away from a command the agent is running.
-        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_OPTIONAL_LOCKS", if mutating { "1" } else { "0" })
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -443,7 +473,7 @@ pub async fn sync(root: &Path, request: SyncRequest) -> Result<Value> {
         "push" => &["push"],
         other => bail!("未知的 action：{other}"),
     };
-    let output = run(root, args, Duration::from_secs(300)).await?;
+    let output = run_with_mode(root, args, Duration::from_secs(300), true).await?;
     let text = redact(output.stdout.trim());
     if output.code != 0 {
         let hint = if output.stderr.contains("terminal prompts disabled")
