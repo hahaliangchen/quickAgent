@@ -201,11 +201,56 @@ pub(super) struct SearchSelection {
     pub target: String,
     pub role: String,
     pub query: String,
+    /// The words the query was split into, lowercased; empty without a query.
+    pub terms: Vec<String>,
     pub turn: Option<i64>,
     pub limit: usize,
     pub max_chars: usize,
     pub offset: usize,
     pub project_offset: i64,
+}
+
+/// Words of a history query, the way a person types them into a search box:
+/// separated by spaces, `|` or commas, a "quoted phrase" kept whole, and a
+/// backslash before punctuation dropped (`model_round\(` is `model_round(`).
+/// Lowercased, without repeats, at most eight. Matching the whole query as one
+/// substring found nothing for "权限 保存" or `a|b` (2026-11-13).
+pub(super) fn query_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::<String>::new();
+    let mut push = |word: &str| {
+        let word = word.trim().to_lowercase();
+        if !word.is_empty() && !terms.contains(&word) && terms.len() < 8 {
+            terms.push(word);
+        }
+    };
+    let mut rest = query.trim();
+    while !rest.is_empty() {
+        if let Some(quoted) = rest.strip_prefix('"')
+            && let Some(end) = quoted.find('"')
+        {
+            push(&quoted[..end]);
+            rest = &quoted[end + 1..];
+            continue;
+        }
+        let end = rest
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace() || matches!(c, '|' | ',' | '，' | '、' | '"'))
+            .map_or(rest.len(), |(index, _)| index);
+        let mut word = String::new();
+        let mut chars = rest[..end].chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' && chars.peek().is_some_and(|next| !next.is_alphanumeric()) {
+                continue;
+            }
+            word.push(c);
+        }
+        push(&word);
+        rest = rest[end..].trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '|' | ',' | '，' | '、'));
+        if rest.starts_with('"') && !rest[1..].contains('"') {
+            rest = &rest[1..];
+        }
+    }
+    terms
 }
 
 pub(super) fn search_events(
@@ -233,6 +278,8 @@ pub(super) fn search_events(
         "invalid history role"
     );
     let query = args["query"].as_str().unwrap_or("").trim().to_lowercase();
+    let terms = query_terms(&query);
+    let query = if terms.is_empty() { String::new() } else { query };
     let node = args["node_id"].as_str().unwrap_or("");
     let turn = args["turn"].as_i64();
     let exact = args["event_seq"].as_i64();
@@ -259,10 +306,23 @@ pub(super) fn search_events(
         "Project search returns conversation references; use scope=conversation with task_id for exact events or before_seq."
     );
     let has_contexts:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_request_contexts')",[],|row|row.get(0))?;
-    let context_search = if has_contexts {
-        "OR (kind='debug/context_request' AND instr(lower(COALESCE((SELECT request_json FROM agent_request_contexts c WHERE c.task_id=history.task_id AND c.id=json_extract(history.data,'$.id')),'')),?3)>0)"
+    // A record scores one point per query word it contains. Words are bound
+    // after the fixed parameters, from ?19 on.
+    let score = if terms.is_empty() {
+        "0".to_owned()
     } else {
-        ""
+        (0..terms.len())
+            .map(|index| {
+                let n = 19 + index;
+                let context = if has_contexts {
+                    format!(" OR (kind='debug/context_request' AND instr(lower(COALESCE((SELECT request_json FROM agent_request_contexts c WHERE c.task_id=history.task_id AND c.id=json_extract(history.data,'$.id')),'')),?{n})>0)")
+                } else {
+                    String::new()
+                };
+                format!("(instr(lower(search_text),?{n})>0{context})")
+            })
+            .collect::<Vec<_>>()
+            .join("+")
     };
     if !project {
         let exists: bool = conn.query_row(
@@ -272,7 +332,12 @@ pub(super) fn search_events(
         )?;
         ensure!(exists, "Conversation not found in this workspace: {target}");
     }
-    let project_offset = args["project_offset"].as_i64().unwrap_or(0).max(0);
+    // Ranked matches page by position; project_offset is the older name.
+    let project_offset = args["match_offset"]
+        .as_i64()
+        .or_else(|| args["project_offset"].as_i64())
+        .unwrap_or(0)
+        .max(0);
     let base=format!("WITH RECURSIVE descendants(task_id,id) AS (
         SELECT task_id,node_id FROM agent_task_nodes WHERE node_id=?4 AND (?1 IS NULL OR task_id=?1)
         UNION SELECT n.task_id,n.node_id FROM agent_task_nodes n JOIN descendants d ON n.task_id=d.task_id AND n.parent_id=d.id
@@ -319,25 +384,35 @@ pub(super) fn search_events(
           AND (e.kind!='debug/context_request' OR ?6 IS NOT NULL OR ?12)
           AND (?14 IS NULL OR e.task_id!=?15 OR e.seq<?14)
           AND (?1 IS NOT NULL OR e.rowid<=?18)
-    ), filtered AS (SELECT * FROM history
+    ), scored AS (SELECT *, {score} AS score,
+            -- What was said and decided outranks the tool output that merely
+            -- contains the words (a file read that mentions a function).
+            CASE WHEN kind IN ('user/message','assistant/message','program/start') THEN 2
+                 WHEN kind='tool/call' THEN 1 ELSE 0 END AS weight
+        FROM history
+    ), filtered AS (SELECT * FROM scored history
       WHERE (?16 OR NOT history_read)
         AND (?1 IS NULL OR seq<=?17)
-        AND (?2='all' OR role=?2) AND (?3='' OR instr(lower(search_text),?3)>0 {context_search})
+        AND (?2='all' OR role=?2) AND (?3='' OR score>0)
         AND (?4='' OR node_id=?4 OR (?13 AND EXISTS(SELECT 1 FROM descendants d WHERE d.task_id=history.task_id AND d.id=history.node_id))
           OR EXISTS(SELECT 1 FROM agent_task_nodes n WHERE n.task_id=history.task_id AND n.node_id=?4 AND history.node_id=json_extract(n.data,'$.source.node_id') AND seq BETWEEN json_extract(n.data,'$.source.after_seq') AND json_extract(n.data,'$.source.through_seq')))
         AND (?5 IS NULL OR json_extract(data,'$.turn')=?5)
         AND (?6 IS NULL OR seq=?6) AND (?7 IS NULL OR seq<?7) AND (?10 IS NULL OR seq>?10)
         AND (?11 IS NULL OR json_extract(data,'$.identity.request_id') IS NULL OR json_extract(data,'$.identity.request_id')=?11)
     )");
+    // With a query, the best matches come first: most query words, then what
+    // was said over what a tool returned, then the newest. Without one,
+    // records stay in time order and page by before_seq.
+    let order = if terms.is_empty() { "seq DESC" } else { "score DESC,weight DESC,seq DESC" };
     let select = if project {
-        ", ranked AS (SELECT *, ROW_NUMBER() OVER(PARTITION BY task_id ORDER BY seq DESC) AS rank,
+        format!(", ranked AS (SELECT *, ROW_NUMBER() OVER(PARTITION BY task_id ORDER BY {order}) AS rank,
            COUNT(*) OVER(PARTITION BY task_id) AS matched_events FROM filtered)
          SELECT r.seq,r.timestamp,r.kind,r.data,r.role,r.node_id,r.task_id,t.prompt,t.status,r.matched_events
          FROM ranked r JOIN agent_tasks t ON t.id=r.task_id WHERE r.rank=1
-         ORDER BY r.timestamp DESC,r.task_id DESC LIMIT ?8 OFFSET ?9"
+         ORDER BY r.score DESC,r.timestamp DESC,r.task_id DESC LIMIT ?8 OFFSET ?9")
     } else {
-        " SELECT seq,timestamp,kind,data,role,node_id,task_id,NULL,NULL,NULL FROM filtered
-          ORDER BY seq DESC LIMIT ?8 OFFSET ?9"
+        format!(" SELECT seq,timestamp,kind,data,role,node_id,task_id,NULL,NULL,NULL FROM filtered
+          ORDER BY {order} LIMIT ?8 OFFSET ?9")
     };
     let number = |value: Option<i64>| value.map(SqlValue::Integer).unwrap_or(SqlValue::Null);
     let bindings = vec![
@@ -353,7 +428,7 @@ pub(super) fn search_events(
         number(exact),
         number(before),
         SqlValue::Integer((limit + 1) as i64),
-        SqlValue::Integer(if project { project_offset } else { 0 }),
+        SqlValue::Integer(if project || !terms.is_empty() { project_offset } else { 0 }),
         number(after),
         number(request),
         SqlValue::Integer(i64::from(args["include_context"] == true)),
@@ -364,6 +439,8 @@ pub(super) fn search_events(
         SqlValue::Integer(snapshot),
         SqlValue::Integer(project_cutoff),
     ];
+    let mut bindings = bindings;
+    bindings.extend(terms.iter().cloned().map(SqlValue::Text));
     let rows = query_events(conn, &format!("{base}{select}"), bindings, |row| {
         Ok((
             row.get(0)?,
@@ -384,6 +461,7 @@ pub(super) fn search_events(
         target: target.to_owned(),
         role: role.to_owned(),
         query,
+        terms,
         turn,
         limit,
         max_chars,

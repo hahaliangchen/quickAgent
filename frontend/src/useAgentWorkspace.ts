@@ -5,6 +5,7 @@ import { requestNotificationPermission, useTaskNotifications } from './useTaskNo
 import type { PermissionMode } from './api'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { acceptsPrompt, type AgentInfo, type SettingsData, type Task, type Project } from './api.ts'
+import { useChatPermissionMode } from './permissionMode.ts'
 import { useAgentApi } from './cordis/react.tsx'
 import { t } from './i18n.ts'
 import { useSession } from './useSession.ts'
@@ -148,6 +149,13 @@ export function useAgentWorkspace() {
 
   const session = useSession(taskId, refreshTasks)
   const task = session.task
+  // The open chat's own permission level, saved as soon as it is chosen.
+  const savePermissionMode = useCallback(async (id: string, mode: PermissionMode) => {
+    const updated = await api.updateTask(id, { permission_mode: mode })
+    session.reload()
+    return updated
+  }, [api, session.reload])
+  const { mode: permissionMode, select: selectPermissionMode } = useChatPermissionMode(task, savePermissionMode)
   const updateSession = useCallback(async (id: string, input: {title?: string; pinned?: boolean; archived?: boolean}) => {
     await api.updateSession(id, input)
     refreshTasks()
@@ -374,6 +382,7 @@ export function useAgentWorkspace() {
     info, settings, tasks, allTasks, taskId, task, parent, parentId, session,
     ready, isChild, running, heroPhase, composerNote,
     modelName, modelProviderId, reasoningEffort, fastMode,
+    permissionMode, selectPermissionMode,
     projects, workspaces, activeWorkspace, selectWorkspace, addWorkspace, removeWorkspace, renameWorkspace,
     sidebarMode, changeSidebarMode, updateSession, deleteSession,
     folderDialogOpen, openFolderDialog, closeFolderDialog,

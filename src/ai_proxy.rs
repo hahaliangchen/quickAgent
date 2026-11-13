@@ -99,10 +99,13 @@ fn declared_reasoning_efforts(metadata: &Value) -> Vec<String> {
     };
     crate::model_settings::canonical_efforts(&levels.keys().cloned().collect::<Vec<_>>())
 }
-/// The provider APIs the agent speaks: Chat Completions, and Responses as
-/// Codex uses it.
+/// The provider APIs the agent speaks: Chat Completions, Responses as Codex
+/// uses it, and the native Anthropic Messages protocol.
 fn agent_api(api_type: &str) -> bool {
-    matches!(api_type, "openai-completions" | "openai-responses")
+    matches!(
+        api_type,
+        "openai-completions" | "openai-responses" | "anthropic-messages"
+    )
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -170,6 +173,16 @@ pub(crate) fn apply_agent_config(
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
                     responses: provider.api_type == "openai-responses",
+                    messages: provider.api_type == "anthropic-messages",
+                    messages_capabilities: provider
+                        .model_metadata
+                        .iter()
+                        .filter_map(|(id, metadata)| {
+                            let capabilities =
+                                crate::anthropic_messages::Capabilities::from_metadata(metadata);
+                            capabilities.declared().then(|| (id.clone(), capabilities))
+                        })
+                        .collect(),
                     url: provider.url.clone(),
                     api_key: provider.api_key.clone(),
                     models: provider.model_map.clone(),
@@ -676,7 +689,7 @@ fn disk_revision(config_path: &Path) -> anyhow::Result<String> {
     Ok(format!("{:016x}", hasher.finish()))
 }
 
-fn web_provider(config: &AiProxyConfig) -> anyhow::Result<(&str, &ProviderConfig)> {
+fn web_provider_route(config: &AiProxyConfig) -> anyhow::Result<(&str, &ProviderConfig)> {
     let id = config.web_search_provider.as_deref()
         .context("WEB_NOT_CONFIGURED: choose a DeepSeek credential in Settings (设置) > 专用模型 > 联网搜索 > 搜索凭据")?;
     let provider = config.providers.get(id)
@@ -685,6 +698,11 @@ fn web_provider(config: &AiProxyConfig) -> anyhow::Result<(&str, &ProviderConfig
     anyhow::ensure!(url.scheme() == "https" && url.host_str() == Some("api.deepseek.com")
         && url.port_or_known_default() == Some(443) && url.username().is_empty() && url.password().is_none(),
         "WEB_PROVIDER_UNSUPPORTED: web search currently requires an official DeepSeek provider");
+    Ok((id, provider))
+}
+
+fn web_provider(config: &AiProxyConfig) -> anyhow::Result<(&str, &ProviderConfig)> {
+    let (id, provider) = web_provider_route(config)?;
     anyhow::ensure!(!provider.api_key.is_empty(), "WEB_NOT_CONFIGURED: add an API key to the selected DeepSeek provider");
     Ok((id, provider))
 }
@@ -1394,7 +1412,9 @@ fn save_settings(
         config.web_search_provider = nonempty(Some(provider));
     }
     if config.web_search_provider.is_some() {
-        web_provider(&config)?;
+        // Search credentials are needed when using web, not when saving an
+        // unrelated local model. Still reject an unsupported search endpoint.
+        web_provider_route(&config)?;
     }
     config.model_capabilities = model_capabilities;
     config.orchestrator_provider = nonempty(request.orchestrator_provider);
@@ -1689,7 +1709,9 @@ fn save_settings(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600))?;
+        if secret_path.exists() {
+            std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600))?;
+        }
     }
     if patch != original_patch {
         write_yaml_atomic(config_path, &patch)?;
@@ -2392,6 +2414,38 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyless_local_model_saves_with_unconfigured_search_and_without_credentials_file() {
+        let root = std::env::temp_dir().join(crate::visual_artifacts::new_id());
+        let path = root.join("providers.yml");
+        write_yaml_atomic(&path, &json!([
+            {"id":"llm-pi-ai","config":{"providers":{
+                "deepseek":{"baseURL":"https://api.deepseek.com/v1","api":"openai-completions","models":[{"id":"deepseek-flash"}]}
+            }}},
+            {"id":"agent-default-model","config":{"provider":"deepseek","model":"deepseek-flash"}}
+        ])).unwrap();
+        write_yaml_atomic(&generation_settings_path(&path), &json!({"web_search_provider":"deepseek"})).unwrap();
+        let view = settings_view(&load_config(&path).unwrap(), disk_revision(&path).unwrap());
+        let mut providers = view["providers"].as_array().unwrap().clone();
+        providers.push(json!({"id":"qwen-local","url":"http://127.0.0.1:12888/v1","api_type":"openai-completions","models":["customer-qwen3-vl-32b"]}));
+        let edit = json!({"revision":view["revision"],"providers":providers,
+            "web_search_provider":"deepseek","orchestrator_provider":"qwen-local","orchestrator_model":"customer-qwen3-vl-32b"});
+        save_settings(&path, serde_json::from_value(edit).unwrap()).unwrap().unwrap();
+        let saved = load_config(&path).unwrap();
+        assert_eq!(saved.orchestrator_provider.as_deref(), Some("qwen-local"));
+        assert!(saved.providers["qwen-local"].api_key.is_empty());
+        assert!(saved.providers["qwen-local"].api_key_ref.is_none());
+        assert!(!credentials_path(&path).exists(), "no dummy key or credentials file is required");
+        assert!(web_search_credentials(&path).unwrap_err().to_string().contains("WEB_NOT_CONFIGURED"));
+        // Search stays unavailable until configured, but further model edits still save.
+        let view = settings_view(&saved, disk_revision(&path).unwrap());
+        let edit = json!({"revision":view["revision"],"providers":view["providers"],
+            "web_search_provider":"", "orchestrator_provider":"qwen-local","orchestrator_model":"customer-qwen3-vl-32b"});
+        save_settings(&path, serde_json::from_value(edit).unwrap()).unwrap().unwrap();
+        assert!(load_config(&path).unwrap().web_search_provider.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn web_search_credentials_are_explicit_independent_and_preserved_by_other_settings_edits() {

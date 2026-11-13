@@ -22,12 +22,19 @@ def main():
     report=json.loads((output/'verification.json').read_text())
     manifest=json.loads((output/'manifest.json').read_text())
     assert report['passed'] and report['ui']['browser_login'] and report['render']['chinese_png']
+    assert report['quickagent_admin_auth'] and report['unicom_templates_removed'] and report['ui']['quickagent_settings_saved']
+    assert report['quickagent_cross_origin_blocked'] and report['ui']['quickagent_draft_preserved']
+    assert report['upgrade_template_cleanup']
+    assert report['real_qwen_configured'] and report['real_qwen_called']
+    assert report['initial_models_empty'] and report['all_test_models_deleted']
+    assert report['models_empty_after_restart'] and report['database_models_empty'] and report['factory_models_empty']
+    assert report.get('template_static_examples_removed'), 'Static example PPTX audit required'
     for tag,expected in report['images'].items():
         current=json.loads(subprocess.check_output(['docker','image','inspect','--platform','linux/arm64',tag]))[0]
         assert current['Id']==expected and current['Architecture']=='arm64', 'Images changed after verification: '+tag
         assert manifest['release_images'][tag]['id']==expected
     recipe=Path(__file__).resolve().parent
-    manifest['verification_recipe_sha256']={name:sha(recipe/name) for name in ['smoke.py','ui-smoke.cjs','renderer-smoke.mts']}
+    manifest['verification_recipe_sha256']={name:sha(recipe/name) for name in ['smoke.py','ui-smoke.cjs','renderer-smoke.mts','real_model_smoke.py']}
     manifest['finalization_recipe_sha256']=sha(Path(__file__).resolve())
     (output/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+'\n')
     forbidden=[p for p in output.rglob('*') if p.name=='.env' or p.name=='state' or p.name=='credentials.yaml']

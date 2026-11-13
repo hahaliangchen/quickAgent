@@ -7,7 +7,6 @@ x-app-environment: &app-environment
   CUSTOMER_ADMIN_PASSWORD: ${CUSTOMER_ADMIN_PASSWORD:?Run deploy.sh init to generate .env}
   REDIS_ADDR: redis:6379
   REDIS_PASSWORD: ${REDIS_PASSWORD:?Run deploy.sh init to generate .env}
-  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
   PPT_RENDER_URL: http://renderer:8787
 
 services:
@@ -45,7 +44,7 @@ services:
       retries: 20
 
   renderer:
-    image: quickagent-customer-ppt-renderer-arm64:20261111
+    image: quickagent-customer-ppt-renderer-arm64:20261113-latest-empty
     pull_policy: never
     platform: linux/arm64
     init: true
@@ -60,7 +59,7 @@ services:
       retries: 20
 
   init:
-    image: quickagent-customer-ppt-arm64:20261111
+    image: quickagent-customer-ppt-arm64:20261113-latest-empty
     pull_policy: never
     platform: linux/arm64
     profiles: ["setup"]
@@ -72,20 +71,22 @@ services:
       redis: {condition: service_healthy}
 
   app:
-    image: quickagent-customer-ppt-arm64:20261111
+    image: quickagent-customer-ppt-arm64:20261113-latest-empty
     pull_policy: never
     platform: linux/arm64
     init: true
     restart: unless-stopped
     environment: *app-environment
-    ports: ["${PPT_BIND:-0.0.0.0}:${PPT_PORT:-8899}:8899"]
+    ports:
+      - "${PPT_BIND:-0.0.0.0}:${PPT_PORT:-8899}:8899"
+      - "${QUICKAGENT_BIND:-0.0.0.0}:${QUICKAGENT_PORT:-3001}:3002"
     volumes: ["./state:/state"]
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
       renderer: {condition: service_healthy}
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8899/prod-api/health/filing-worker',timeout=3)"]
+      test: ["CMD", "python", "/opt/customer/bin/entrypoint.py", "healthcheck"]
       interval: 10s
       timeout: 10s
       retries: 30

@@ -31,6 +31,7 @@ use crate::ts_index::{
 
 const DEFAULT_MAX_READ_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MAX_MATCHES: usize = 100;
+const MAX_CONTEXT_LINES: usize = 20;
 const DEFAULT_MAX_DEPTH: usize = 1;
 const DEFAULT_WRITE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SEARCH_FILE_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
@@ -196,36 +197,105 @@ pub struct LineContent {
     pub text: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct SearchTextRequest {
     #[serde(default)]
     pub workspace_root: Option<String>,
     pub query: String,
+    /// None: matched as a regular expression when it is written as one
+    /// (`a|b`, `name\(`, `^fn`, `.*`), otherwise literally.
     #[serde(default)]
-    pub regex: bool,
+    pub regex: Option<bool>,
     #[serde(default = "default_dot")]
     pub path: String,
     #[serde(default)]
     pub paths: Vec<String>,
     #[serde(default)]
     pub case_sensitive: bool,
+    /// None: files that .gitignore or .ignore excludes are skipped, as rg
+    /// does, unless the path searched is itself one of them.
     #[serde(default)]
-    pub respect_gitignore: bool,
-    #[serde(default = "default_max_matches")]
+    pub respect_gitignore: Option<bool>,
+    #[serde(default = "default_max_matches", alias = "limit", alias = "head_limit")]
     pub max_matches: usize,
+    /// What comes back: matching lines (`content`), the files that match
+    /// (`files`), or each file's count of matching lines (`count`).
+    #[serde(default)]
+    pub output_mode: SearchOutput,
+    /// Only files whose path matches one of these globs, as in `rg -g`:
+    /// `*.rs` matches at any depth, `src/**/*.ts` from the workspace root,
+    /// and a leading `!` excludes.
+    #[serde(default, alias = "globs", deserialize_with = "one_or_many")]
+    pub glob: Vec<String>,
+    /// Lines before and after each match, in content mode.
+    #[serde(default, alias = "context")]
+    pub context_lines: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchOutput {
+    #[default]
+    Content,
+    #[serde(alias = "files_with_matches", alias = "files_only")]
+    Files,
+    Count,
+}
+
+fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany { One(String), Many(Vec<String>) }
+    Ok(match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(OneOrMany::One(one)) => vec![one],
+        Some(OneOrMany::Many(many)) => many,
+    })
+}
+
+/// A query nobody asked to treat as a regular expression is treated as one
+/// when it is written as one and compiles: an alternation, an escape, an
+/// anchor or `.*`. 2026-11-13: of 25 searches, 3 written as `a|b|c` or
+/// `model_round\(` without regex:true matched literally, found nothing, and
+/// the AI turned to grep in a shell. A pattern that matches the empty
+/// string (`a || b` read as regex) stays literal, as does `arr[0]`.
+fn written_as_regex(query: &str) -> bool {
+    let marked = query.contains('|')
+        || query.contains('\\')
+        || query.contains(".*")
+        || query.contains(".+")
+        || query.contains("(?")
+        || query.starts_with('^')
+        || (query.ends_with('$') && !query.ends_with("\\$"));
+    marked && regex::Regex::new(query).is_ok_and(|re| !re.is_match(""))
 }
 
 #[derive(Debug, Serialize)]
 pub struct SearchTextResponse {
     pub query: String,
     pub match_mode: &'static str,
+    pub output_mode: SearchOutput,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<&'static str>,
     pub index_used: bool,
     pub index_matches: usize,
     pub text_scan_used: bool,
     pub matches: Vec<TextMatch>,
+    /// Files mode: the matching files, in walk order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
+    /// Count mode: matching lines per file, and their total.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counts: Option<Vec<FileCount>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<usize>,
     pub truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileCount {
+    pub path: String,
+    pub count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -237,6 +307,12 @@ pub struct TextMatch {
     /// The whole line's length in characters, given when `text` is an excerpt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_chars: Option<usize>,
+    /// With context_lines: the lines just before and after, nearest last
+    /// and first, each cut like `text` when long.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub before: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -475,9 +551,11 @@ impl Workspace {
     }
 
     pub fn search_text(&self, request: SearchTextRequest) -> Result<SearchTextResponse> {
+        let explicit = request.regex;
+        let regex = explicit.unwrap_or_else(|| written_as_regex(&request.query));
         // Compile once, before opening the index or walking files. Escaping
         // preserves literal defaults and gives Unicode-safe match offsets.
-        let pattern = if request.regex {
+        let pattern = if regex {
             request.query.clone()
         } else {
             regex::escape(&request.query)
@@ -490,14 +568,26 @@ impl Workspace {
         let workspace = self.with_root(request.workspace_root.as_deref())?;
         let roots = workspace.resolve_search_roots(&request)?;
         let root_filters = workspace.search_root_filters(&roots)?;
+        let globs = search_globs(&workspace.root, &request.glob)?;
         let max_matches = request.max_matches.max(1);
+        let scan = ScanOptions {
+            mode: request.output_mode,
+            respect_gitignore: true,
+            limit: max_matches,
+            context_lines: request.context_lines.min(MAX_CONTEXT_LINES),
+            globs,
+        };
         let mut matches = Vec::new();
         let mut truncated = false;
         let mut seen_symbols = std::collections::HashSet::new();
         let mut index_used = false;
 
         // 1. 优先尝试从 SQLite 符号索引库中查找精确匹配的符号定义（不因外部搜索在未索引目录创建状态库）
-        if !request.regex
+        // Only for plain line results: the index knows no globs, files or counts.
+        if !regex
+            && scan.mode == SearchOutput::Content
+            && scan.globs.is_none()
+            && scan.context_lines == 0
             && workspace
                 .root
                 .join(".codex-workspace-mcp")
@@ -537,30 +627,34 @@ impl Workspace {
 
         // 2. 如果置顶的符号匹配项未把配额占满，继续进行常规全文 Walk 扫描匹配
         let mut text_scan_used = false;
+        let mut skipped_ignored = false;
+        let mut files = Vec::new();
+        let mut counts = Vec::new();
         if !truncated {
             text_scan_used = true;
             let mut handles = Vec::new();
             for root in roots {
                 let workspace_root = workspace.root.clone();
                 let matcher = matcher.clone();
-                let respect_gitignore = request.respect_gitignore;
+                let mut scan = scan.clone();
+                // Searching everything by default walked tens of thousands of
+                // ignored experiment and build files (2026-11-13: one search
+                // of this project took 39.8 s; scoped to src it took 0.2 s).
+                // A path the caller names inside an ignored folder is what
+                // they asked for, so it is searched in full.
+                scan.respect_gitignore = request.respect_gitignore.unwrap_or_else(|| !ignored_target(&workspace_root, &root));
+                skipped_ignored |= scan.respect_gitignore;
                 handles.push(std::thread::spawn(move || {
-                    scan_text_root(
-                        workspace_root,
-                        root,
-                        matcher,
-                        respect_gitignore,
-                        max_matches,
-                    )
+                    scan_text_root(workspace_root, root, matcher, &scan)
                 }));
             }
 
             'outer: for handle in handles {
-                let Ok((root_matches, root_truncated)) = handle.join() else {
+                let Ok(found) = handle.join() else {
                     continue;
                 };
-                truncated |= root_truncated;
-                for item in root_matches {
+                truncated |= found.truncated;
+                for item in found.matches {
                     let line_key = (item.path.clone(), item.line);
                     if seen_symbols.contains(&line_key) {
                         continue;
@@ -571,23 +665,43 @@ impl Workspace {
                     }
                     matches.push(item);
                 }
+                for item in found.counts {
+                    if counts.len() >= max_matches {
+                        truncated = true;
+                        break 'outer;
+                    }
+                    files.push(item.path.clone());
+                    counts.push(item);
+                }
             }
         }
 
+        let mut hints = Vec::new();
+        if explicit.is_none() && regex {
+            hints.push("regex was not given and the query is written as a regular expression, so it was matched as one. Pass regex:false to match the text literally.");
+        } else if !regex && request.query.contains('|') {
+            hints.push("Literal mode treats '|' as an ordinary character. For alternatives such as A|B, set regex=true; a zero literal match does not establish that A or B is absent.");
+        }
+        if skipped_ignored && matches.is_empty() && files.is_empty() && counts.is_empty() {
+            hints.push("Files that .gitignore or .ignore excludes were not searched. Pass respect_gitignore:false to search them too.");
+        }
+        let (files, total, counts) = match scan.mode {
+            SearchOutput::Content => (None, None, None),
+            SearchOutput::Files => (Some(files), None, None),
+            SearchOutput::Count => (None, Some(counts.iter().map(|c| c.count).sum()), Some(counts)),
+        };
         Ok(SearchTextResponse {
-            match_mode: if request.regex { "regex" } else { "literal" },
-            hints: if !request.regex && request.query.contains('|') {
-                vec![
-                    "Literal mode treats '|' as an ordinary character. For alternatives such as A|B, set regex=true; a zero literal match does not establish that A or B is absent.",
-                ]
-            } else {
-                Vec::new()
-            },
+            match_mode: if regex { "regex" } else { "literal" },
+            output_mode: scan.mode,
+            hints,
             query: request.query,
             index_used,
             index_matches,
             text_scan_used,
             matches,
+            files,
+            counts,
+            total,
             truncated,
         })
     }
@@ -1271,23 +1385,70 @@ fn map_memory_error(error: memory::MemoryError) -> ToolError {
     ))
 }
 
+#[derive(Clone)]
+struct ScanOptions {
+    mode: SearchOutput,
+    respect_gitignore: bool,
+    /// Matches in content mode, files otherwise.
+    limit: usize,
+    context_lines: usize,
+    globs: Option<ignore::overrides::Override>,
+}
+
+#[derive(Default)]
+struct ScanFound {
+    matches: Vec<TextMatch>,
+    /// Files and counts modes: every matching file with its matching lines.
+    counts: Vec<FileCount>,
+    truncated: bool,
+}
+
+/// Globs as `rg -g` reads them, rooted at the workspace so `src/**/*.ts`
+/// means the same from any search path.
+fn search_globs(root: &Path, globs: &[String]) -> Result<Option<ignore::overrides::Override>> {
+    if globs.iter().all(|glob| glob.trim().is_empty()) {
+        return Ok(None);
+    }
+    let mut builder = ignore::overrides::OverrideBuilder::new(root);
+    for glob in globs.iter().map(|glob| glob.trim()).filter(|glob| !glob.is_empty()) {
+        builder
+            .add(glob)
+            .map_err(|error| ToolError::InvalidSearchPattern(format!("glob {glob}: {error}")))?;
+    }
+    Ok(Some(builder.build().map_err(|error| ToolError::InvalidSearchPattern(error.to_string()))?))
+}
+
+/// Whether a path being searched is itself excluded by the workspace's
+/// top-level .gitignore or .ignore, alone or through a parent folder.
+fn ignored_target(workspace_root: &Path, target: &Path) -> bool {
+    if target == workspace_root || !target.starts_with(workspace_root) {
+        return false;
+    }
+    let mut rules = ignore::gitignore::GitignoreBuilder::new(workspace_root);
+    for name in [".gitignore", ".ignore"] {
+        let file = workspace_root.join(name);
+        if file.is_file() {
+            rules.add(file);
+        }
+    }
+    rules.build().is_ok_and(|rules| rules.matched_path_or_any_parents(target, target.is_dir()).is_ignore())
+}
+
 fn scan_text_root(
     workspace_root: PathBuf,
     root: PathBuf,
     matcher: regex::Regex,
-    respect_gitignore: bool,
-    max_matches: usize,
-) -> (Vec<TextMatch>, bool) {
-    let mut matches = Vec::new();
-    let mut truncated = false;
+    scan: &ScanOptions,
+) -> ScanFound {
+    let mut found = ScanFound::default();
 
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
-        .ignore(respect_gitignore)
-        .git_ignore(respect_gitignore)
-        .git_exclude(respect_gitignore)
-        .parents(respect_gitignore)
+        .ignore(scan.respect_gitignore)
+        .git_ignore(scan.respect_gitignore)
+        .git_exclude(scan.respect_gitignore)
+        .parents(scan.respect_gitignore)
         .filter_entry(|entry| {
             entry
                 .file_name()
@@ -1305,6 +1466,11 @@ fn scan_text_root(
             continue;
         }
         let path = entry.path();
+        if let Some(globs) = &scan.globs
+            && !globs.matched(path, false).is_whitelist()
+        {
+            continue;
+        }
         if crate::database::check_source_access(path).is_err() {
             continue;
         }
@@ -1318,34 +1484,54 @@ fn scan_text_root(
             Ok(content) => content,
             Err(_) => continue,
         };
+        // Paths use `/` on every platform, like list_dir and the
+        // symbol index matches this list is merged with.
+        let rel_path = path
+            .strip_prefix(&workspace_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
 
-        for (line_index, line) in content.lines().enumerate() {
-            if let Some(found) = matcher.find(line) {
-                if matches.len() >= max_matches {
-                    truncated = true;
+        if scan.mode != SearchOutput::Content {
+            let count = match scan.mode {
+                SearchOutput::Files => usize::from(content.lines().any(|line| matcher.is_match(line))),
+                _ => content.lines().filter(|line| matcher.is_match(line)).count(),
+            };
+            if count > 0 {
+                if found.counts.len() >= scan.limit {
+                    found.truncated = true;
+                    break;
+                }
+                found.counts.push(FileCount { path: rel_path, count });
+            }
+            continue;
+        }
+        let lines = content.lines().collect::<Vec<_>>();
+        for (line_index, line) in lines.iter().enumerate() {
+            if let Some(found_at) = matcher.find(line) {
+                if found.matches.len() >= scan.limit {
+                    found.truncated = true;
                     break 'outer;
                 }
-                // Paths use `/` on every platform, like list_dir and the
-                // symbol index matches this list is merged with.
-                let rel_path = path
-                    .strip_prefix(&workspace_root)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                let column = line[..found.start()].chars().count() + 1;
+                let column = line[..found_at.start()].chars().count() + 1;
                 let (text, line_chars) = match_excerpt(line, column - 1);
-                matches.push(TextMatch {
-                    path: rel_path,
+                let near = |range: std::ops::Range<usize>| {
+                    lines[range].iter().map(|line| match_excerpt(line, 0).0).collect::<Vec<_>>()
+                };
+                found.matches.push(TextMatch {
+                    path: rel_path.clone(),
                     line: line_index + 1,
                     column,
                     text,
                     line_chars,
+                    before: near(line_index.saturating_sub(scan.context_lines)..line_index),
+                    after: near(line_index + 1..(line_index + 1 + scan.context_lines).min(lines.len())),
                 });
             }
         }
     }
 
-    (matches, truncated)
+    found
 }
 
 /// A matched line as it is returned: whole when short, otherwise the part
@@ -1406,6 +1592,8 @@ fn query_indexed_symbol_table(
             column: 1,
             text: format!("[Symbol Definition ({} {})] {}", lang, kind, signature),
             line_chars: None,
+            before: Vec::new(),
+            after: Vec::new(),
         });
         seen_symbols.insert((file_path, start_line));
     }
@@ -1489,7 +1677,7 @@ mod tests {
         };
         assert!(locked(), "fixture must hold an externally visible SQLite write lock");
         fs::write(root.join("source.rs"), "fn expected_source() {}\n").unwrap();
-        let (matches, _) = scan_text_root(root.clone(), root.clone(), regex::Regex::new("expected_source").unwrap(), false, 100);
+        let matches = scan_text_root(root.clone(), root.clone(), regex::Regex::new("expected_source").unwrap(), &plain_scan()).matches;
         assert_eq!(matches.len(), 1);
         let still_locked = locked();
         if !still_locked {
@@ -1518,7 +1706,7 @@ mod tests {
             assert!(matches!(read, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied));
             assert!(crate::file_edit::workspace_path(&root, path.to_str().unwrap()).is_err());
             assert!(crate::file_edit::snapshot(&path).is_err());
-            let (matches, _) = scan_text_root(root.clone(), path, regex::Regex::new("reserved").unwrap(), false, 100);
+            let matches = scan_text_root(root.clone(), path, regex::Regex::new("reserved").unwrap(), &plain_scan()).matches;
             assert!(matches.is_empty(), "explicit file searches must not bypass the guard");
         }
         let programs = state.join("chats/example");
@@ -1526,7 +1714,7 @@ mod tests {
         let program = programs.join("turn-1.js");
         fs::write(&program, "console.log('saved program');\n").unwrap();
         assert!(crate::source_read::read(&program, 1024).is_ok());
-        let (matches, _) = scan_text_root(root.clone(), root.clone(), regex::Regex::new("saved program").unwrap(), false, 100);
+        let matches = scan_text_root(root.clone(), root.clone(), regex::Regex::new("saved program").unwrap(), &plain_scan()).matches;
         assert_eq!(matches.len(), 1);
         #[cfg(unix)] {
             let alias = root.join("state-alias.txt");
@@ -1616,6 +1804,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    fn plain_scan() -> ScanOptions {
+        ScanOptions { mode: SearchOutput::Content, respect_gitignore: false, limit: 100, context_lines: 0, globs: None }
+    }
+
     #[test]
     fn search_finds_text() {
         let root = temp_workspace("search");
@@ -1627,10 +1819,11 @@ mod tests {
                 query: "beta".to_string(),
                 path: ".".to_string(),
                 paths: Vec::new(),
-                regex: false,
+                regex: Some(false),
                 case_sensitive: false,
-                respect_gitignore: false,
+                respect_gitignore: Some(false),
                 max_matches: 10,
+                ..Default::default()
             })
             .unwrap();
         assert_eq!(result.matches.len(), 1);
@@ -1656,10 +1849,11 @@ mod tests {
                 query: "needle".to_string(),
                 path: ".".to_string(),
                 paths: vec!["one".to_string(), "two".to_string()],
-                regex: false,
+                regex: Some(false),
                 case_sensitive: false,
-                respect_gitignore: false,
+                respect_gitignore: Some(false),
                 max_matches: 10,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1682,10 +1876,11 @@ mod tests {
                 query: "needle".to_string(),
                 path: "one two".to_string(),
                 paths: Vec::new(),
-                regex: false,
+                regex: Some(false),
                 case_sensitive: false,
-                respect_gitignore: false,
+                respect_gitignore: Some(false),
                 max_matches: 10,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1694,7 +1889,7 @@ mod tests {
     }
 
     #[test]
-    fn search_includes_gitignored_files_by_default() {
+    fn search_includes_ignored_files_when_asked() {
         let root = temp_workspace("search_gitignored_default");
         fs::create_dir_all(root.join("logs")).unwrap();
         fs::write(root.join(".ignore"), "logs/\n").unwrap();
@@ -1707,10 +1902,11 @@ mod tests {
                 query: "needle".to_string(),
                 path: ".".to_string(),
                 paths: Vec::new(),
-                regex: false,
+                regex: Some(false),
                 case_sensitive: false,
-                respect_gitignore: false,
+                respect_gitignore: Some(false),
                 max_matches: 10,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1732,14 +1928,46 @@ mod tests {
                 query: "needle".to_string(),
                 path: ".".to_string(),
                 paths: Vec::new(),
-                regex: false,
+                regex: Some(false),
                 case_sensitive: false,
-                respect_gitignore: true,
+                respect_gitignore: Some(true),
                 max_matches: 10,
+                ..Default::default()
             })
             .unwrap();
 
         assert_eq!(result.matches.len(), 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 2026-11-13: the first search of a turn walked every ignored folder of
+    /// the project and took 39.8 s. Left to its default a search now skips
+    /// what is ignored and says so when it finds nothing.
+    #[test]
+    fn search_skips_ignored_files_unless_asked_or_pointed_at_them() {
+        let root = temp_workspace("search_ignored_default");
+        fs::create_dir_all(root.join("logs").join("old")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join(".ignore"), "logs/\n*.tmp\n").unwrap();
+        fs::write(root.join("logs").join("old").join("run.log"), "needle in an ignored log\n").unwrap();
+        fs::write(root.join("src").join("scratch.tmp"), "needle in an ignored file\n").unwrap();
+        fs::write(root.join("src").join("kept.txt"), "needle kept\n").unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+        use serde_json::json;
+        let search = |args: serde_json::Value| {
+            let found = workspace.search_text(serde_json::from_value(args).unwrap()).unwrap();
+            let mut paths = found.matches.iter().map(|m| m.path.clone()).collect::<Vec<_>>();
+            paths.sort();
+            (paths, found.hints.iter().any(|hint| hint.contains("respect_gitignore:false")))
+        };
+        assert_eq!(search(json!({"query":"needle"})), (vec!["src/kept.txt".to_string()], false));
+        assert_eq!(search(json!({"query":"needle","respect_gitignore":false})).0, ["logs/old/run.log", "src/kept.txt", "src/scratch.tmp"]);
+        // Naming an ignored folder, or one inside it, searches it.
+        assert_eq!(search(json!({"query":"needle","path":"logs"})).0, ["logs/old/run.log"]);
+        assert_eq!(search(json!({"query":"needle","path":"logs/old"})).0, ["logs/old/run.log"]);
+        // Nothing found while ignored files were left out: the result says so.
+        assert_eq!(search(json!({"query":"ignored log"})), (Vec::<String>::new(), true));
+        assert_eq!(search(json!({"query":"ignored log","respect_gitignore":false})).1, false);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1759,15 +1987,67 @@ mod tests {
                 query: "needle".to_string(),
                 path: ".".to_string(),
                 paths: Vec::new(),
-                regex: false,
+                regex: Some(false),
                 case_sensitive: false,
-                respect_gitignore: false,
+                respect_gitignore: Some(false),
                 max_matches: 10,
+                ..Default::default()
             })
             .unwrap();
 
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].path, "nested/deeper/file.txt");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 2026-11-13: `a|b|c` and `model_round\(` sent without regex:true found
+    /// nothing, and the AI fell back to grep in a shell; `limit` was dropped
+    /// silently. A query written as a regex is now matched as one, the AI
+    /// can ask for files, counts, globs and context the way rg gives them.
+    #[test]
+    fn search_reads_like_grep() {
+        let root = temp_workspace("search_grep");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("a.rs"), "fn alpha() {}\nmodel_round(1);\nlet beta = 2;\nlet x = a || b;\n").unwrap();
+        fs::write(root.join("src").join("b.ts"), "alpha\nbeta\nbeta\n").unwrap();
+        fs::write(root.join("notes.md"), "arr[0] alpha\n").unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+        let search = |args: serde_json::Value| {
+            workspace.search_text(serde_json::from_value(args).unwrap()).unwrap()
+        };
+
+        let either = search(serde_json::json!({"query":"alpha|beta"}));
+        assert_eq!((either.match_mode, either.matches.len()), ("regex", 6));
+        assert!(!either.hints.is_empty(), "the AI is told it was read as a regex");
+        let call = search(serde_json::json!({"query":"model_round\\("}));
+        assert_eq!((call.match_mode, call.matches.len()), ("regex", 1));
+        let forced = search(serde_json::json!({"query":"alpha|beta","regex":false}));
+        assert_eq!((forced.match_mode, forced.matches.len()), ("literal", 0));
+        // Code that only looks like a pattern stays literal.
+        let or = search(serde_json::json!({"query":"a || b"}));
+        assert_eq!((or.match_mode, or.matches.len()), ("literal", 1));
+        let index = search(serde_json::json!({"query":"arr[0]"}));
+        assert_eq!((index.match_mode, index.matches.len()), ("literal", 1));
+
+        let limited = search(serde_json::json!({"query":"beta","limit":1}));
+        assert_eq!((limited.matches.len(), limited.truncated), (1, true));
+
+        let files = search(serde_json::json!({"query":"beta","output_mode":"files_with_matches"}));
+        let mut listed = files.files.clone().unwrap();
+        listed.sort();
+        assert_eq!(listed, ["src/a.rs", "src/b.ts"]);
+        assert!(files.matches.is_empty());
+        let counted = search(serde_json::json!({"query":"beta","output_mode":"count","glob":"*.ts"}));
+        let counts = counted.counts.as_ref().unwrap();
+        assert_eq!((counts.len(), counts[0].path.as_str(), counts[0].count, counted.total), (1, "src/b.ts", 2, Some(2)));
+        let rooted = search(serde_json::json!({"query":"alpha","glob":["src/**","!*.ts"]}));
+        assert_eq!(rooted.matches.iter().map(|m| m.path.as_str()).collect::<Vec<_>>(), ["src/a.rs"]);
+
+        let around = search(serde_json::json!({"query":"model_round","context":1}));
+        let hit = &around.matches[0];
+        assert_eq!((hit.before.as_slice(), hit.after.as_slice()), (&["fn alpha() {}".to_owned()][..], &["let beta = 2;".to_owned()][..]));
+        let value = serde_json::to_value(&search(serde_json::json!({"query":"alpha","path":"notes.md"}))).unwrap();
+        assert!(value["matches"][0].get("before").is_none() && value.get("files").is_none(), "{value}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1786,10 +2066,11 @@ mod tests {
                 query: "needle".to_string(),
                 path: ".".to_string(),
                 paths: Vec::new(),
-                regex: false,
+                regex: Some(false),
                 case_sensitive: false,
-                respect_gitignore: false,
+                respect_gitignore: Some(false),
                 max_matches: 10,
+                ..Default::default()
             })
             .unwrap();
 

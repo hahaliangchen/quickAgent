@@ -47,7 +47,13 @@ pub(super) fn read(conn: &Connection, task: &str, args: &Value, snapshot: i64) -
             params![target,snapshot,id], |r| r.get(0))?;
         ensure!(exists, "Task node not found in this history snapshot: {id}");
     }
-    let limit = args["limit"].as_u64().unwrap_or(10).clamp(1, 12) as usize;
+    // A page holds a whole turn of ordinary length: at 12 entries a page, a
+    // turn of 89 calls took 8 reads to list (2026-11-13).
+    let project = conn
+        .query_row("SELECT workspace FROM agent_session_meta WHERE task_id=?1", [target], |r| r.get::<_, String>(0))
+        .map(|path| path.trim_end_matches('/').to_owned())
+        .unwrap_or_default();
+    let limit = args["limit"].as_u64().unwrap_or(120).clamp(1, 200) as usize;
     let after = args["after_seq"].as_i64().unwrap_or(-1);
     let level = if node.is_some() {
         "node"
@@ -114,7 +120,13 @@ pub(super) fn read(conn: &Connection, task: &str, args: &Value, snapshot: i64) -
             AND ((r.kind='tool/result' AND json_extract(r.data,'$.message.toolCallId')=json_extract(e.data,'$.callId'))
               OR (r.kind='tool/async_result' AND COALESCE(json_extract(r.data,'$.original_call_id'),json_extract(r.data,'$.meta.result.original_call_id'))=json_extract(e.data,'$.callId')))
             AND NOT EXISTS (SELECT 1 FROM agent_task_events later WHERE later.task_id=e.task_id AND later.kind='tool/call' AND later.seq>e.seq AND later.seq<r.seq AND json_extract(later.data,'$.callId')=json_extract(e.data,'$.callId'))
-          ORDER BY r.kind='tool/async_result' DESC,r.seq LIMIT 1) END
+          ORDER BY r.kind='tool/async_result' DESC,r.seq LIMIT 1) END,
+        CASE WHEN kind='tool/call' AND json_valid(json_extract(data,'$.arguments'))
+          AND json_type(json_extract(data,'$.arguments'))='object'
+          THEN (SELECT json_group_object(key,substr(value,1,160)) FROM
+              (SELECT key,value FROM json_each(json_extract(data,'$.arguments')) WHERE type='text'
+                AND key IN ('path','query','cmd','workdir','glob','name','url','output_mode','asset_id') LIMIT 6))
+          ELSE '{}' END
       FROM source e WHERE task_id=?1 AND seq<=?2 AND seq>?3 AND (
         (?4='root' AND kind='user/message' AND NOT EXISTS (
             SELECT 1 FROM agent_task_events prior WHERE prior.task_id=e.task_id AND prior.kind='user/message'
@@ -155,6 +167,7 @@ pub(super) fn read(conn: &Connection, task: &str, args: &Value, snapshot: i64) -
                     r.get::<_, String>(9)?,
                     r.get::<_, Option<i64>>(10)?,
                     r.get::<_, Option<String>>(11)?,
+                    r.get::<_, String>(12)?,
                 ))
             },
         )?
@@ -174,6 +187,7 @@ pub(super) fn read(conn: &Connection, task: &str, args: &Value, snapshot: i64) -
         numeric_args,
         result_seq,
         outcome,
+        named_args,
     ) in rows.into_iter().take(limit)
     {
         let (entry_kind, label) = match kind.as_str() {
@@ -208,14 +222,39 @@ pub(super) fn read(conn: &Connection, task: &str, args: &Value, snapshot: i64) -
             entry["inferred_from_activity"] = json!(true);
         }
         if entry_kind == "tool" {
-            let numbers = serde_json::from_str::<Value>(&numeric_args)?;
-            if numbers.as_object().is_some_and(|object| !object.is_empty()) {
-                entry["numeric_arguments"] = numbers;
+            // A call reads like a line of the work's script: what was called
+            // and with which file, search or command. Without these an entry
+            // read "read_file_lines 100-175" with no file, and the next turn
+            // searched again for what the last one had found (2026-11-13).
+            // File contents and edits stay out; so does the reference object
+            // every entry used to repeat, now given once for the page.
+            let mut arguments = serde_json::from_str::<Value>(&named_args)?;
+            // Paths and commands are shown from the chat's project, not with
+            // its absolute folder repeated in every entry.
+            if let Some(named) = arguments.as_object_mut().filter(|_| !project.is_empty()) {
+                for value in named.values_mut() {
+                    if let Some(text) = value.as_str() {
+                        let short = text.replace(&format!("cd {project} && "), "").replace(&format!("{project}/"), "");
+                        *value = json!(short);
+                    }
+                }
             }
-            entry["outcome"] = json!(outcome.as_deref().unwrap_or("pending"));
+            if let (Some(arguments), Some(numbers)) = (arguments.as_object_mut(), serde_json::from_str::<Value>(&numeric_args)?.as_object()) {
+                arguments.extend(numbers.clone());
+            }
+            let mut call = json!({"kind":"tool","label":label,"seq":seq});
+            if arguments.as_object().is_some_and(|object| !object.is_empty()) {
+                call["arguments"] = arguments;
+            }
+            match outcome.as_deref() {
+                Some("returned") => {}
+                other => call["outcome"] = json!(other.unwrap_or("pending")),
+            }
             if let Some(result_seq) = result_seq {
-                entry["result_reference"] = json!({"scope":"conversation","task_id":target,"event_seq":result_seq,"snapshot_seq":snapshot});
+                call["result_seq"] = json!(result_seq);
             }
+            entries.push(call);
+            continue;
         }
         if entry_kind == "turn" && event_turn > 0 {
             entry["expand"] = json!({"view":"index","scope":"conversation","task_id":target,"turn":event_turn,"snapshot_seq":snapshot});
@@ -243,7 +282,8 @@ pub(super) fn read(conn: &Connection, task: &str, args: &Value, snapshot: i64) -
     Ok(
         json!({"view":"index","scope":"conversation","task_id":target,"snapshot_seq":snapshot,"level":level,
         "entries":entries,"has_more":has_more,"next_page":next_page,
-        "note":"Directory from recorded events, not an AI summary. Follow expand to navigate and read_reference with records view for evidence. History reads are excluded. Keep snapshot_seq when navigating."}),
+        "reference":{"scope":"conversation","task_id":target,"snapshot_seq":snapshot},
+        "note":"Directory from recorded events, not an AI summary. A tool entry is the call itself: its name and its file, search or command; outcome appears only when it did not return normally. To read a call or its result, use view=records with reference plus event_seq set to the entry's seq or result_seq. Follow expand to navigate and read_reference for other entries. History reads are excluded. Keep snapshot_seq when navigating."}),
     )
 }
 

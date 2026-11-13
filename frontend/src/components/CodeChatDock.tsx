@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type DragEvent } from 'react'
 import clsx from 'clsx'
 import type { CatalogModel, PermissionMode } from '../api.ts'
+import { resolvePermissionMode } from '../permissionMode.ts'
 import { AttachmentRail, useAttachmentDraft } from './Attachments.tsx'
 import { WORKSPACE_PATH_TYPE } from '../codeChat.ts'
 import { useAgentApi, useCordis } from '../cordis/react.tsx'
@@ -16,13 +17,6 @@ const taskKey = (workspace: string) => `code_chat_task:${workspace}`
 function rememberedTask(workspace: string): string | undefined {
   try { return localStorage.getItem(taskKey(workspace)) ?? undefined } catch { return undefined }
 }
-function permissionMode(): PermissionMode {
-  try {
-    const saved = localStorage.getItem('dsh_permission_mode')
-    if (saved === 'read_only' || saved === 'workspace_write' || saved === 'ask' || saved === 'auto_review' || saved === 'full_access') return saved
-  } catch {}
-  return 'ask'
-}
 const WIDTH_KEY = 'code_chat_width'
 function savedWidth(): number {
   try { const saved = Number(localStorage.getItem(WIDTH_KEY)); if (saved) return Math.min(720, Math.max(320, saved)) } catch {}
@@ -34,6 +28,14 @@ const modelKey = (model: Pick<CatalogModel, 'provider' | 'id'>) => `${model.prov
 function savedModel(): string { try { return localStorage.getItem(MODEL_KEY) ?? '' } catch { return '' } }
 const mention = (path: string) => path.includes(' ') ? `@"${path}"` : `@${path}`
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1) || path
+/** The main composer's names, so both places label a level the same way. */
+const PERMISSION_LABELS: Readonly<Record<PermissionMode, string>> = {
+  read_only: '仅可查看',
+  workspace_write: '工作区内修改',
+  ask: '执行前询问',
+  auto_review: '自动审批',
+  full_access: '完全权限',
+}
 
 /** Chat docked beside a page, VS Code style: asks about the file in view and files dropped on it. */
 export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
@@ -81,6 +83,8 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
   useEffect(() => { if (open) input.current?.focus() }, [open])
 
   const running = session.task?.status === 'running' || session.task?.status === 'cancelling'
+  // This chat keeps its own level, the same one the main input shows and saves.
+  const permissionMode = resolvePermissionMode(session.task?.permission_mode)
   const current = context.current && context.current !== skipped && !context.tags.includes(context.current) ? context.current : undefined
   const tags = current ? [current, ...context.tags] : context.tags
 
@@ -106,7 +110,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
       for (const item of attachments.items) content.push({ type: 'file', receiptId: (await api.upload(id, item.file, new AbortController().signal, () => {})).receiptId })
       const picked = models.find(m => modelKey(m) === model)
       await api.prompt(id, prompt, {
-        permission_mode: permissionMode(), requestId: randomId(), content,
+        permission_mode: permissionMode, requestId: randomId(), content,
         ...(picked ? { provider: picked.provider, model: picked.id } : {}),
       })
       setDraft(''); chat.clear(); setSkipped(undefined); attachments.clear()
@@ -193,6 +197,9 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
               {models.map(m => <option key={modelKey(m)} value={modelKey(m)}>{m.name || m.id}</option>)}
             </select>
           </label>}
+          <span className={css.permission} title="这个对话的权限级别，和主输入框里的是同一个；在主窗口的输入框里修改">
+            <Icon name={permissionMode === 'full_access' ? 'alert' : 'ok'} size={14} />{PERMISSION_LABELS[permissionMode]}
+          </span>
           <span className={css.grow} />
           {running
             ? <button type="button" className={css.stop} onClick={() => { if (taskId) void api.cancel(taskId).then(session.reload, () => {}) }}><Icon name="stop" size={14} />停止</button>

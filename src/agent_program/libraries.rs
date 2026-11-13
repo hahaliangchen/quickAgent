@@ -275,6 +275,8 @@ pub fn control(name: &str) -> bool {
             | "find_library_methods"
             | "ask_user"
             | "write_program"
+            // The main AI's own look at the project; programs use process.
+            | "run_readonly_command"
     )
 }
 pub fn public_name(libraries: &Libraries, target: &str) -> Option<String> {

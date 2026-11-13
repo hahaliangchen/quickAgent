@@ -4,7 +4,7 @@
 //! The accumulator is transport-only: it never emits events or applies tool
 //! calls. Worker and Organizer each consume its deltas through their own
 //! output channels and act only on the completed message.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -12,6 +12,20 @@ use serde_json::{Value, json};
 /// Where an assistant message keeps the reasoning items a Responses provider
 /// returned with it, so the next request can hand them back.
 pub const REASONING_ITEMS: &str = "_reasoning_items";
+
+/// Thinking text with the provider signature a Messages route replays. It is
+/// transport replay data, never part of the conversation the model reads.
+pub const THINKING_BLOCKS: &str = "_thinking_blocks";
+
+/// The event kinds of an Anthropic Messages stream that carry the answer.
+const MESSAGES_EVENTS: [&str; 6] = [
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "message_delta",
+    "message_stop",
+];
 
 /// The text of a Chat Completions content value: a string, the text parts of
 /// an array, or the JSON of anything else.
@@ -141,6 +155,15 @@ pub fn prefix_system_messages(messages: Vec<Value>) -> Vec<Value> {
     conversation
 }
 
+/// The Chat Completions finish reason a Messages stop reason corresponds to.
+fn messages_finish(reason: &str) -> &'static str {
+    match reason {
+        "tool_use" => "tool_calls",
+        "max_tokens" => "length",
+        _ => "stop",
+    }
+}
+
 #[derive(Debug)]
 pub struct StreamError {
     pub code: &'static str,
@@ -216,6 +239,42 @@ struct PartialTool {
     arguments: String,
 }
 
+/// What one block of a Messages stream carries, so a delta knows its kind.
+#[derive(Clone, Copy, PartialEq)]
+enum BlockKind {
+    Text,
+    Thinking,
+    ToolUse,
+    Other,
+}
+
+/// Cumulative Messages usage; the provider reports cached input apart from the
+/// prompt it read, so both are kept.
+#[derive(Clone, Copy, Default)]
+struct CacheUsage {
+    input: u64,
+    output: u64,
+    read: u64,
+    written: u64,
+}
+
+impl CacheUsage {
+    /// The same usage in Chat Completions shape. A prompt is what the provider
+    /// read: the uncached input plus what it took from or wrote to its cache.
+    fn value(&self) -> Value {
+        json!({
+            "input_tokens": self.input,
+            "output_tokens": self.output,
+            "cache_read_input_tokens": self.read,
+            "cache_creation_input_tokens": self.written,
+            "prompt_tokens": self.input + self.read + self.written,
+            "completion_tokens": self.output,
+            "total_tokens": self.input + self.output + self.read + self.written,
+            "prompt_tokens_details": {"cached_tokens": self.read},
+        })
+    }
+}
+
 pub struct Completed {
     pub message: Value,
     pub stats: Value,
@@ -240,6 +299,14 @@ pub struct ChatStream {
     items: Vec<Value>,
     /// Text of completed Responses message items, used when no delta carried it.
     item_text: String,
+    /// Kind of each Messages content block, by block index.
+    blocks: BTreeMap<usize, BlockKind>,
+    /// Thinking text and signature per Messages block, replayed on the next request.
+    thinking: BTreeMap<usize, (String, String)>,
+    /// Tool blocks whose input arrives as `input_json_delta` fragments.
+    streamed_input: BTreeSet<usize>,
+    /// Cumulative Messages usage, including the cached input it reports.
+    cache: CacheUsage,
     usage: Value,
     finish_reason: Value,
     received_done: bool,
@@ -269,6 +336,10 @@ impl ChatStream {
             tools: BTreeMap::new(),
             items: Vec::new(),
             item_text: String::new(),
+            blocks: BTreeMap::new(),
+            thinking: BTreeMap::new(),
+            streamed_input: BTreeSet::new(),
+            cache: CacheUsage::default(),
             usage: Value::Null,
             finish_reason: Value::Null,
             received_done: false,
@@ -429,6 +500,9 @@ impl ChatStream {
             if kind == "error" {
                 let message = event["message"].as_str().map(str::to_owned).unwrap_or_else(|| event.to_string());
                 return fail("UPSTREAM_ERROR", message);
+            }
+            if MESSAGES_EVENTS.contains(&kind) {
+                return self.messages_event(kind, &event, delta);
             }
             if kind.starts_with("response.") {
                 return self.response_event(kind, &event, delta);
@@ -646,6 +720,141 @@ impl ChatStream {
         }
     }
 
+    /// One event of an Anthropic Messages stream. The answer arrives as content
+    /// blocks: text, thinking with the signature that replays it, and tool input
+    /// fragments, with usage reported at the start and as it grows.
+    fn messages_event(&mut self, kind: &str, event: &Value, delta: &mut Delta) -> anyhow::Result<()> {
+        let block = event["index"].as_u64().unwrap_or(0) as usize;
+        let mut model_delta = false;
+        match kind {
+            "message_start" => {
+                if let Some(usage) = event["message"].get("usage").filter(|usage| !usage.is_null()) {
+                    self.absorb_usage(usage)?;
+                }
+            }
+            "content_block_start" => {
+                let native = &event["content_block"];
+                let kind = match native["type"].as_str() {
+                    Some("text") => BlockKind::Text,
+                    Some("thinking" | "redacted_thinking") => BlockKind::Thinking,
+                    Some("tool_use") => BlockKind::ToolUse,
+                    _ => BlockKind::Other,
+                };
+                self.blocks.insert(block, kind);
+                match kind {
+                    BlockKind::Text => {
+                        if let Some(piece) = native["text"].as_str().filter(|piece| !piece.is_empty()) {
+                            self.text.push_str(piece);
+                            delta.text.push_str(piece);
+                            model_delta = true;
+                        }
+                    }
+                    BlockKind::Thinking => {
+                        if let Some(signature) = native["signature"].as_str().filter(|signature| !signature.is_empty()) {
+                            self.thinking.entry(block).or_default().1.push_str(signature);
+                        }
+                    }
+                    BlockKind::ToolUse => {
+                        let limit = self.limits.max_tool_argument_bytes;
+                        let tool = self.tools.entry(block).or_default();
+                        tool.id = native["id"].as_str().unwrap_or_default().to_owned();
+                        tool.name = native["name"].as_str().unwrap_or_default().to_owned();
+                        // A non-streaming provider sends the whole input here.
+                        if let Some(input) = native.get("input").filter(|input| input.as_object().is_some_and(|object| !object.is_empty())) {
+                            tool.arguments = input.to_string();
+                            if tool.arguments.len() > limit {
+                                return fail("ARGUMENTS_TOO_LARGE", format!("tool call arguments exceeded {limit} bytes"));
+                            }
+                        }
+                        self.tool_delta(delta);
+                        model_delta = true;
+                    }
+                    BlockKind::Other => {}
+                }
+            }
+            "content_block_delta" => {
+                let piece = &event["delta"];
+                match piece["type"].as_str() {
+                    Some("text_delta") => {
+                        if let Some(text) = piece["text"].as_str().filter(|text| !text.is_empty()) {
+                            self.text.push_str(text);
+                            delta.text.push_str(text);
+                            model_delta = true;
+                        }
+                    }
+                    Some("thinking_delta") => {
+                        if let Some(text) = piece["thinking"].as_str().filter(|text| !text.is_empty()) {
+                            self.reasoning_chars += text.chars().count();
+                            if self.limits.retain_reasoning {
+                                self.reasoning.push_str(text);
+                                self.thinking.entry(block).or_default().0.push_str(text);
+                            }
+                            delta.reasoning.push_str(text);
+                            model_delta = true;
+                        }
+                    }
+                    Some("signature_delta") => {
+                        if let Some(signature) = piece["signature"].as_str().filter(|signature| !signature.is_empty()) {
+                            self.thinking.entry(block).or_default().1.push_str(signature);
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        if let Some(fragment) = piece["partial_json"].as_str().filter(|fragment| !fragment.is_empty()) {
+                            let limit = self.limits.max_tool_argument_bytes;
+                            if self.streamed_input.insert(block) {
+                                // Fragments are the whole input, not a continuation of a start block.
+                                self.tools.entry(block).or_default().arguments.clear();
+                            }
+                            let tool = self.tools.entry(block).or_default();
+                            tool.arguments.push_str(fragment);
+                            if tool.arguments.len() > limit {
+                                return fail("ARGUMENTS_TOO_LARGE", format!("tool call arguments exceeded {limit} bytes"));
+                            }
+                            self.tool_delta(delta);
+                            model_delta = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "message_delta" => {
+                if let Some(reason) = event["delta"]["stop_reason"].as_str() {
+                    self.finish_reason = json!(messages_finish(reason));
+                }
+                if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
+                    self.absorb_usage(usage)?;
+                }
+            }
+            "message_stop" => self.received_done = true,
+            _ => {}
+        }
+        if model_delta && self.first_delta_ms.is_none() {
+            self.first_delta_ms = Some(self.elapsed_ms());
+        }
+        Ok(())
+    }
+
+    /// Messages reports cumulative usage: the prompt and its cache reads at the
+    /// start, output tokens as the answer grows. Both stay cumulative here.
+    fn absorb_usage(&mut self, usage: &Value) -> anyhow::Result<()> {
+        for (key, slot) in [
+            ("input_tokens", &mut self.cache.input),
+            ("output_tokens", &mut self.cache.output),
+            ("cache_read_input_tokens", &mut self.cache.read),
+            ("cache_creation_input_tokens", &mut self.cache.written),
+        ] {
+            match usage.get(key) {
+                None | Some(Value::Null) => {}
+                Some(value) => match value.as_u64() {
+                    Some(value) => *slot = value,
+                    None => return fail("MESSAGES_USAGE", format!("Messages usage has an invalid {key}")),
+                },
+            }
+        }
+        self.usage = self.cache.value();
+        Ok(())
+    }
+
     /// The assistant message assembled so far, in Chat Completions form; a
     /// Responses provider's reasoning items ride along under REASONING_ITEMS.
     fn message(&self) -> Value {
@@ -687,6 +896,22 @@ impl ChatStream {
         }
         if !self.items.is_empty() {
             message[REASONING_ITEMS] = json!(self.items);
+        }
+        // Thinking with its signature goes back on the next request, in order.
+        let thinking = self
+            .thinking
+            .values()
+            .filter(|(text, _)| !text.is_empty())
+            .map(|(text, signature)| {
+                let mut block = json!({"thinking":text});
+                if !signature.is_empty() {
+                    block["signature"] = json!(signature);
+                }
+                block
+            })
+            .collect::<Vec<_>>();
+        if !thinking.is_empty() {
+            message[THINKING_BLOCKS] = json!(thinking);
         }
         message
     }

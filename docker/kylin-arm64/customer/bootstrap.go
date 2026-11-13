@@ -66,17 +66,11 @@ func initialize() error {
         }
         if err := tx.Unscoped().Where("1=1").Delete(&model.SysAIModel{}).Error; err != nil { return err }
         if err := tx.Unscoped().Where("1=1").Delete(&model.SysAIProvider{}).Error; err != nil { return err }
-        provider := model.SysAIProvider{Name:"deepseek", Label:"DeepSeek", BaseUrl:"https://api.deepseek.com/v1", Enabled:true}
-        if err := tx.Create(&provider).Error; err != nil { return err }
-        models := []model.SysAIModel{
-            {ProviderID:provider.ID,Name:"deepseek-flash",Label:"DeepSeek Flash",Enabled:true,IsDefault:true},
-            {ProviderID:provider.ID,Name:"deepseek-v4-pro",Label:"DeepSeek V4 Pro",Enabled:true},
-        }
-        return tx.Create(&models).Error
+        return nil
     }); err != nil { return err }
     if err := os.MkdirAll(filepath.Dir(marker),0700); err != nil { return err }
-    data,_ := json.MarshalIndent(map[string]any{"menus":[]string{"create-ppt","ppt-history"},"provider":"deepseek","admin":"admin"},"","  ")
+    data,_ := json.MarshalIndent(map[string]any{"menus":[]string{"create-ppt","ppt-history"},"providers":[]string{},"models":[]string{},"admin":"admin"},"","  ")
     if err := os.WriteFile(marker,append(data,'\n'),0600); err != nil { return err }
-    fmt.Println("Customer database initialized; two PPT menus and non-personal DeepSeek models only.")
+    fmt.Println("Customer database initialized; two PPT menus, no model providers or models.")
     return nil
 }

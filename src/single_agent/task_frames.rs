@@ -571,141 +571,194 @@ pub(super) async fn finish(
     Ok(resumed)
 }
 
-fn clip(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_owned();
-    }
-    format!("{}…", text.chars().take(limit).collect::<String>())
-}
+/// How much of the earlier chat a new turn carries, in characters. Older
+/// turns beyond it leave the window whole; their files stay listed.
+/// A placeholder value, to be set from real chats.
+const CHAT_CHARS: usize = 40_000;
+/// How much of the latest turn's files a new turn carries in full.
+const LATEST_FILES_CHARS: usize = 24_000;
+/// Longer than this, one file keeps its head and tail.
+const FILE_CHARS: usize = 12_000;
 
-/// Stored content may be a plain string or the JSON text of content parts.
-fn plain_text(raw: &str) -> String {
-    if raw.trim_start().starts_with('[')
-        && let Ok(Value::Array(parts)) = serde_json::from_str::<Value>(raw)
-        && parts.iter().all(|part| part["type"].is_string())
-    {
-        return parts
-            .iter()
-            .filter_map(|part| part["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-    raw.to_owned()
-}
+/// A message the host builds for a new turn from the earlier chat.
+pub(super) const CHAT_HISTORY: &str = "chat_history";
+pub(super) const CHAT_FILES: &str = "chat_files";
 
-/// One memory per completed main task, including tasks resumed across turns.
-/// Turns without a task remain question/answer memories. Details stay in history.
-pub(super) fn memory_index(
-    conn: &rusqlite::Connection,
-    task: &str,
-    turn: usize,
-) -> Result<Option<Value>> {
-    let tasks = tree::children(conn, task, tree::ROOT)?
-        .into_iter()
-        .filter(|node| {
-            node.kind == "task"
-                && !tree::is_temp(node)
-                && node.metadata["turn"]
-                    .as_u64()
-                    .is_some_and(|started| started < turn as u64)
-        })
-        .collect::<Vec<_>>();
-    let task_turns = tasks
-        .iter()
-        .filter_map(|node| node.metadata["turn"].as_i64())
-        .collect::<BTreeSet<_>>();
-    let task_ranges = tasks
-        .iter()
-        .filter_map(|node| {
-            node.first_seq
-                .map(|start| (start, node.returned_seq.unwrap_or(i64::MAX)))
-        })
-        .collect::<BTreeMap<_, _>>();
+/// What a new turn knows of the earlier ones (docs/agent-design-guide.md §4):
+/// the chat itself, the user's words and the replies the user saw, as they
+/// were; and the chat folder as a code project, its program files and call
+/// records listed by turn, the latest turn's files in full. The work's own
+/// tool exchanges and outputs stay in the files and the history.
+pub(super) fn chat_context(conn: &rusqlite::Connection, task: &str, turn: usize) -> Result<Vec<Value>> {
+    let turn = turn as i64;
+    // Each turn's words: what the user said, and the last reply the main AI
+    // gave without calling anything.
     let rows = conn
-        .prepare("SELECT seq,kind,json_extract(data,'$.turn'),json_extract(data,'$.message.content'),json_type(data,'$.message.tool_calls') FROM agent_task_events WHERE task_id=?1 AND kind IN ('user/message','assistant/message') AND json_extract(data,'$.turn')<?2 ORDER BY seq")?
-        .query_map(params![task, turn as i64], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?)))?
+        .prepare(&format!(
+            "SELECT e.seq,e.kind,json_extract(e.data,'$.turn'),json_extract(e.data,'$.message.content'),
+                    json_type(e.data,'$.message.tool_calls')='array' AND json_array_length(e.data,'$.message.tool_calls')>0
+             FROM agent_task_events e
+             LEFT JOIN agent_task_nodes n ON n.task_id=e.task_id AND n.node_id=COALESCE(e.node_id,json_extract(e.data,'$.task_node_id'))
+             WHERE e.task_id=?1 AND e.kind IN ('user/message','assistant/message') AND json_extract(e.data,'$.turn')<?2
+               AND (COALESCE(e.node_id,json_extract(e.data,'$.task_node_id')) IS NULL OR n.node_id='{root}' OR n.parent_id='{root}')
+             ORDER BY e.seq",
+            root = tree::ROOT
+        ))?
+        .query_map(params![task, turn], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<bool>>(4)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut turns = BTreeMap::<i64, (i64, Value)>::new();
-    let mut task_owned_turns = task_turns;
-    for (seq, kind, number, content, calls) in rows {
-        let (Some(number), Some(content)) = (number, content) else {
-            continue;
-        };
-        if task_ranges
-            .range(..=seq)
-            .next_back()
-            .is_some_and(|(_, end)| seq <= *end)
-        {
-            task_owned_turns.insert(number);
-        }
-        let text = plain_text(&content);
-        if text.trim().is_empty() {
+    let mut turns = BTreeMap::<i64, (Vec<String>, Option<String>)>::new();
+    for (_, kind, number, content, calls) in rows {
+        let (Some(number), Some(content)) = (number, content) else { continue };
+        let text = crate::session_history::stored_text(&content).trim().to_owned();
+        if text.is_empty() {
             continue;
         }
-        let (last_seq, entry) = turns
-            .entry(number)
-            .or_insert_with(|| (seq, json!({"kind":"qa","turn":number})));
+        let entry = turns.entry(number).or_default();
         if kind == "user/message" {
-            if entry.get("request").is_none() {
-                entry["request"] = json!(clip(text.trim(), 160));
-            }
-        } else if calls.as_deref() != Some("array") {
-            entry["answer"] = json!(text.trim().chars().take(200).collect::<String>());
-            *last_seq = seq;
+            entry.0.push(text);
+        } else if calls != Some(true) {
+            entry.1 = Some(text);
         }
     }
-    let mut entries = Vec::new();
-    for node in tasks.iter().filter(|node| node.status == "done") {
-        let (Some(number), Some(seq), Some(summary)) = (
-            node.metadata["turn"].as_i64(),
-            node.returned_seq,
-            node.result
-                .as_ref()
-                .and_then(|result| result["result"].as_str()),
-        ) else {
-            continue;
-        };
-        let mut entry = json!({"kind":"task","turn":number,
-            "task":{"node_id":node.node_id,"goal":clip(&node.goal,160),"status":node.status},
-            // A task's answer is its program's outcome: keep enough of it to go on from.
-            "answer":summary.trim().chars().take(600).collect::<String>()});
-        if let Some((_, original)) = turns.get(&number) {
-            entry["request"] = original["request"].clone();
+    // A turn whose answer was a program's outcome has it on its task.
+    for node in tree::children(conn, task, tree::ROOT)? {
+        let (Some(returned), Some(result)) = (node.returned_seq, node.result.as_ref().and_then(|r| r["result"].as_str())) else { continue };
+        let number: Option<i64> = conn
+            .query_row("SELECT json_extract(data,'$.turn') FROM agent_task_events WHERE task_id=?1 AND seq<=?2 AND json_type(data,'$.turn')='integer' ORDER BY seq DESC LIMIT 1",
+                params![task, returned], |r| r.get(0))
+            .optional()?
+            .flatten();
+        if let Some(entry) = number.filter(|number| *number < turn).and_then(|number| turns.get_mut(&number))
+            && entry.1.is_none()
+            && !result.trim().is_empty()
+        {
+            entry.1 = Some(result.trim().to_owned());
         }
-        entries.push((seq, entry));
     }
-    entries.extend(
-        turns
-            .into_iter()
-            .filter(|(number, (_, entry))| {
-                !task_owned_turns.contains(number)
-                    && entry.get("request").is_some()
-                    && entry.get("answer").is_some()
-            })
-            .map(|(_, entry)| entry),
-    );
-    entries.sort_by_key(|(seq, _)| *seq);
-    if entries.is_empty() {
+    // From the first turn on, the chat accumulates; the turn that would take
+    // it past CHAT_CHARS starts it again, and everything before leaves whole,
+    // never summarized. Until the next restart the chat begins at the same
+    // turn, so a provider's prompt cache keeps it: dropping the oldest turn
+    // each time would change its beginning every turn (2026-11-13 review).
+    // The restart keeps that turn, the one the next request most likely
+    // refers to. Computed afresh each turn, the same after a rewind.
+    let mut kept = Vec::new();
+    let mut used = 0;
+    for (number, (asked, reply)) in &turns {
+        let size = asked.iter().map(|text| text.chars().count()).sum::<usize>() + reply.as_ref().map_or(0, |text| text.chars().count());
+        if !kept.is_empty() && used + size > CHAT_CHARS {
+            kept.clear();
+            used = 0;
+        }
+        used += size;
+        kept.push((*number, asked, reply));
+    }
+    let left_out = turns.len() - kept.len();
+    let mut messages = Vec::new();
+    for (_, asked, reply) in &kept {
+        for text in *asked {
+            messages.push(json!({"role":"user","name":CHAT_HISTORY,"content":text}));
+        }
+        if let Some(reply) = reply {
+            messages.push(json!({"role":"assistant","content":reply}));
+        }
+    }
+    if let Some(files) = chat_files(conn, task, turn, left_out)? {
+        messages.push(json!({"role":"user","name":CHAT_FILES,"content":files,"_frame_input":true}));
+    }
+    Ok(messages)
+}
+
+/// The chat folder as a project: its files by turn, then the latest turn's
+/// files in full.
+fn chat_files(conn: &rusqlite::Connection, task: &str, turn: i64, left_out: usize) -> Result<Option<String>> {
+    use crate::session_history::turn_record;
+    let programs = conn
+        .prepare("SELECT seq,json_extract(data,'$.path'),json_extract(data,'$.turn'),json_extract(data,'$.source') FROM agent_task_events
+            WHERE task_id=?1 AND kind='program/start' AND json_extract(data,'$.function') IS NULL
+              AND json_type(data,'$.path')='text' AND json_type(data,'$.source')='text' AND json_extract(data,'$.turn')<?2 ORDER BY seq")?
+        .query_map(params![task, turn], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, String>(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut files = Vec::<(i64, i64, String, String, Option<String>)>::new();
+    for (seq, path, number, source) in programs {
+        let file = path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned();
+        let ended: Option<String> = conn
+            .query_row("SELECT json_extract(data,'$.ended') FROM agent_task_events WHERE task_id=?1 AND kind='program/end'
+                AND json_extract(data,'$.program')=?2 AND seq>?3 ORDER BY seq LIMIT 1", params![task, file, seq], |r| r.get(0))
+            .optional()?
+            .flatten();
+        let note = format!("主程序，{} 行，{}", source.lines().count(), ended.as_deref().unwrap_or("没有结束"));
+        files.push((number, seq, file, note, Some(source)));
+    }
+    for record in turn_record::records(conn, task, None)? {
+        if record.turn < turn {
+            files.push((record.turn, record.first_seq, record.file, format!("直接调用记录，{} 次调用", record.calls), None));
+        }
+    }
+    if files.is_empty() {
         return Ok(None);
     }
-    let omitted = entries.len().saturating_sub(30);
-    let entries = entries
-        .into_iter()
-        .skip(omitted)
-        .map(|(_, entry)| entry)
-        .collect::<Vec<_>>();
-    Ok(Some(
-        json!({"host_status":true,"not_a_user_request":true,"entries":entries,"entries_omitted":omitted,
-        "instruction":"Index of completed main tasks and task-free questions, oldest completion first. Each task has one entry with its goal, final summary and node_id even if it spanned multiple turns. Function calls are included in their main task, not separate entries. Working context and programs are not loaded here. Read details with read_session_history using the task node_id and include_descendants=true, or turn for a question/answer entry. Use programs:true,directory:'.' with the turn to browse flow files, or directory:'modules' to list reusable module versions available by that turn. Open a listed path with program; add output:true to read a main flow's recorded output."}),
-    ))
+    files.sort_by_key(|(number, seq, ..)| (*number, *seq));
+    let width = files.iter().map(|(_, _, file, ..)| file.chars().count()).max().unwrap_or(0);
+    // Where names are not sent (the Messages wire) this joins the user's
+    // next words, so it says itself whose it is.
+    let mut text = String::from(
+        "【宿主提供的材料，不是用户的话】\n这个聊天的文件夹，就是一个代码项目：每段主程序是一个文件；没写程序时主 AI 直接调用的方法，宿主按顺序记成 .calls.js，每行是一次调用，行尾注释是结果。模块在 modules/ 下，契约见 chat_modules。打开文件：read_session_history({programs:true, program:\"<文件名>\"})，可加 start_line、end_line；主程序加 output:true 读它当时的输出。\n",
+    );
+    if left_out > 0 {
+        text.push_str(&format!("最早 {left_out} 轮的对话不在上面，它们的文件仍列在这里。\n"));
+    }
+    let mut current = None;
+    for (number, _, file, note, _) in &files {
+        if current != Some(*number) {
+            text.push_str(&format!("\n第 {number} 轮\n"));
+            current = Some(*number);
+        }
+        text.push_str(&format!("  {file:<width$}  {note}\n"));
+    }
+    let latest = files.last().map(|(number, ..)| *number).unwrap_or(0);
+    text.push_str(&format!("\n第 {latest} 轮的文件全文：\n"));
+    let mut room = LATEST_FILES_CHARS;
+    for (number, _, file, _, source) in files.iter().filter(|(number, ..)| *number == latest) {
+        let source = match source {
+            Some(source) => source.clone(),
+            None => turn_record::render(conn, task, *number, None)?.unwrap_or_default(),
+        };
+        let chars = source.chars().collect::<Vec<_>>();
+        let limit = FILE_CHARS.min(room);
+        let shown = if chars.len() <= limit {
+            source.clone()
+        } else if file.ends_with(turn_record::CALLS) {
+            // A record keeps what changed things before what looked around.
+            turn_record::condense(&source, limit)
+        } else {
+            let half = limit / 2;
+            format!(
+                "{}\n/* … 中间 {} 字没放进来，用 start_line、end_line 打开 … */\n{}",
+                chars[..half].iter().collect::<String>(),
+                chars.len() - 2 * half,
+                chars[chars.len() - half..].iter().collect::<String>()
+            )
+        };
+        room = room.saturating_sub(shown.chars().count());
+        text.push_str(&format!("\n==== {file} ====\n{}\n", shown.trim_end()));
+        if room == 0 {
+            break;
+        }
+    }
+    text.push_str("【宿主材料结束】");
+    Ok(Some(text))
 }
 
 /// Each user request at the conversation level starts a clean main context:
-/// the memory index of earlier turns plus the skills still loaded. Earlier working records stay in history.
+/// the earlier chat and the chat's files (`chat_context`) plus the skills
+/// still loaded. Earlier working records stay in the files and history.
 pub(super) async fn fresh_main_window(
     s: &Session<'_>,
     previous: Option<&Window>,
-    memory: Option<Value>,
+    earlier: Vec<Value>,
 ) -> Result<Window> {
     let mut window = Window {
         task_node_id: Some(tree::ROOT.into()),
@@ -714,9 +767,7 @@ pub(super) async fn fresh_main_window(
     window
         .messages
         .push(json!({"role":"system","content":MAIN_PROMPT}));
-    if let Some(index) = memory {
-        window.messages.push(json!({"role":"user","name":"conversation_memory","content":index.to_string(),"_frame_input":true}));
-    }
+    window.messages.extend(earlier);
     let Some(previous) = previous else {
         return Ok(window);
     };
@@ -1026,49 +1077,20 @@ mod tests {
                     answer(&"计划已完成".repeat(50))
                 }
                 3 => {
-                    let memory = body["messages"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|m| m["name"] == "conversation_memory")
-                        .unwrap();
-                    let index: Value =
-                        serde_json::from_str(memory["content"].as_str().unwrap()).unwrap();
-                    let entries = index["entries"].as_array().unwrap();
-                    assert_eq!(
-                        entries.len(),
-                        1,
-                        "a resumed task has one memory, not one per turn"
-                    );
-                    assert_eq!(entries[0]["request"], "Draft a plan");
-                    assert_eq!(entries[0]["task"]["goal"], "Draft a plan", "the user's request is the main task");
-                    assert_eq!(entries[0]["task"]["status"], "done");
-                    assert_eq!(
-                        entries[0]["answer"],
-                        "计划已完成".repeat(50),
-                        "the final summary is kept up to 600 characters"
-                    );
-                    assert!(!entries.iter().any(|entry| entry["request"] == "continue"));
+                    // The earlier chat comes as it was said: both messages of
+                    // the resumed task and the reply the user saw.
+                    let messages = body["messages"].as_array().unwrap();
+                    assert!(!messages.iter().any(|m| m["name"] == "conversation_memory"));
+                    let chat = messages.iter().filter(|m| m["name"] == CHAT_HISTORY || m["role"] == "assistant")
+                        .map(|m| (m["role"].as_str().unwrap(), m["content"].as_str().unwrap().to_owned())).collect::<Vec<_>>();
+                    assert_eq!(chat, [("user", "Draft a plan".to_owned()), ("user", "continue".to_owned()), ("assistant", "计划已完成".repeat(50))]);
+                    assert_eq!(messages.last().unwrap()["content"], "A separate question");
                     answer(&"问答摘要".repeat(60))
                 }
                 4 => {
-                    let memory = body["messages"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|m| m["name"] == "conversation_memory")
-                        .unwrap();
-                    let index: Value =
-                        serde_json::from_str(memory["content"].as_str().unwrap()).unwrap();
-                    let entries = index["entries"].as_array().unwrap();
-                    assert_eq!(entries.len(), 2, "each request keeps its own memory");
-                    assert_eq!(entries[0]["kind"], "task");
-                    // Every request is a main task, a question included.
-                    assert_eq!(entries[1]["kind"], "task");
-                    assert_eq!(entries[1]["turn"], 3);
-                    assert_eq!(entries[1]["request"], "A separate question");
-                    assert_eq!(entries[1]["task"]["goal"], "A separate question");
-                    assert_eq!(entries[1]["answer"], "问答摘要".repeat(60));
+                    let chat = body["messages"].as_array().unwrap().iter().filter(|m| m["name"] == CHAT_HISTORY || m["role"] == "assistant")
+                        .map(|m| m["content"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+                    assert_eq!(chat[3..], ["A separate question".to_owned(), "问答摘要".repeat(60)], "each turn keeps its own words");
                     answer("Done")
                 }
                 _ => panic!("unexpected request {n}"),
@@ -1145,50 +1167,63 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 5);
     }
 
+    /// Not a check: prints what the next turn of a real chat would be given.
+    /// GROW_ROOT=<folder holding a copy of .codex-workspace-mcp/codex_state.db> GROW_TASK=<id> GROW_TURN=<n>
     #[tokio::test]
-    async fn memory_keeps_the_latest_thirty_completed_entries() {
+    #[ignore]
+    async fn print_chat_context_of_a_real_chat() {
+        let (Ok(root), Ok(task), Ok(turn)) = (std::env::var("GROW_ROOT"), std::env::var("GROW_TASK"), std::env::var("GROW_TURN")) else { return };
+        let root = std::path::PathBuf::from(root);
+        let conn = rusqlite::Connection::open(root.join(".codex-workspace-mcp/codex_state.db")).unwrap();
+        for message in chat_context(&conn, &task, turn.parse().unwrap()).unwrap() {
+            println!("---- {} {}\n{}", message["role"].as_str().unwrap(), message["name"].as_str().unwrap_or(""), message["content"].as_str().unwrap());
+        }
+    }
+
+    /// "按你说的 2 和 4 做" only works when the earlier words are there as
+    /// they were said. The latest turns that fit come whole; older ones leave
+    /// whole, never summarized.
+    #[tokio::test]
+    async fn a_new_turn_has_the_chat_as_it_was_said() {
         let h = Harness::new().await;
         let mut conn = agent_service::open_db(&h.root).unwrap();
         let tx = conn.transaction().unwrap();
-        for turn in 1..=32 {
-            agent_service::append_event_tx(
-                &tx,
-                "t",
-                "user/message",
-                &json!({"turn":turn,
-                "message":{"role":"user","content":format!("Question {turn}")}}),
-                None,
-            )
-            .unwrap();
-            agent_service::append_event_tx(
-                &tx,
-                "t",
-                "assistant/message",
-                &json!({"turn":turn,
-                "message":{"role":"assistant","content":format!("Answer {turn}")}}),
-                None,
-            )
-            .unwrap();
+        let long = "长".repeat(CHAT_CHARS / 2);
+        for turn in 1..=4 {
+            let said = if turn == 1 { long.clone() } else { format!("Question {turn}") };
+            agent_service::append_event_tx(&tx, "t", "user/message", &json!({"turn":turn,"message":{"role":"user","content":said}}), None).unwrap();
+            agent_service::append_event_tx(&tx, "t", "assistant/message", &json!({"turn":turn,"message":{"role":"assistant","content":"looking","tool_calls":[{"id":"c","type":"function","function":{"name":"list_dir","arguments":"{}"}}]}}), None).unwrap();
+            let reply = if turn == 2 { long.clone() } else { format!("1. first\n2. second\n{turn}. answer") };
+            agent_service::append_event_tx(&tx, "t", "assistant/message", &json!({"turn":turn,"message":{"role":"assistant","content":reply}}), None).unwrap();
         }
-        // A question without a final answer is not a completed memory.
-        agent_service::append_event_tx(
-            &tx,
-            "t",
-            "user/message",
-            &json!({"turn":33,
-            "message":{"role":"user","content":"Unanswered"}}),
-            None,
-        )
-        .unwrap();
+        agent_service::append_event_tx(&tx, "t", "user/message", &json!({"turn":5,"message":{"role":"user","content":[{"type":"text","text":"按你说的 2 和 4 做"}]}}), None).unwrap();
         tx.commit().unwrap();
-        let memory = memory_index(&conn, "t", 34).unwrap().unwrap();
-        let entries = memory["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 30);
-        assert_eq!(memory["entries_omitted"], 2);
-        assert_eq!(entries[0]["turn"], 3);
-        assert_eq!(entries[29]["turn"], 32);
-        assert!(entries.iter().all(|entry| entry["kind"] == "qa"));
+        let messages = chat_context(&conn, "t", 5).unwrap();
+        let chat = messages.iter().map(|m| (m["role"].as_str().unwrap(), m["content"].as_str().unwrap().to_owned())).collect::<Vec<_>>();
+        // Turn 1 no longer fits beside turn 2's long reply: it leaves whole.
+        assert_eq!(chat, [
+            ("user", "Question 2".to_owned()), ("assistant", long.clone()),
+            ("user", "Question 3".to_owned()), ("assistant", "1. first\n2. second\n3. answer".to_owned()),
+            ("user", "Question 4".to_owned()), ("assistant", "1. first\n2. second\n4. answer".to_owned()),
+        ], "words between calls are work, not chat; the current turn is not earlier chat");
+        assert!(messages.iter().all(|m| !is_user_original(m)), "earlier words are not this turn's request");
+        assert!(messages.iter().all(|m| m.as_object().unwrap().keys().all(|key| !key.starts_with('_'))), "nothing private rides along");
+        // The chat restarted at turn 2 and keeps starting there while later
+        // turns fit: its beginning, and the provider's cache, stay put.
+        let tx = conn.transaction().unwrap();
+        agent_service::append_event_tx(&tx, "t", "assistant/message", &json!({"turn":5,"message":{"role":"assistant","content":"Done 2 and 4."}}), None).unwrap();
+        tx.commit().unwrap();
+        let next = chat_context(&conn, "t", 6).unwrap();
+        assert_eq!(next[..6], messages[..6], "the same beginning a turn later");
+        assert_eq!(next[7]["content"], "Done 2 and 4.");
+        // A turn that takes it past the limit starts it again from itself.
+        let tx = conn.transaction().unwrap();
+        agent_service::append_event_tx(&tx, "t", "user/message", &json!({"turn":6,"message":{"role":"user","content":long.clone()}}), None).unwrap();
+        agent_service::append_event_tx(&tx, "t", "assistant/message", &json!({"turn":6,"message":{"role":"assistant","content":"ok"}}), None).unwrap();
+        tx.commit().unwrap();
+        let restarted = chat_context(&conn, "t", 7).unwrap();
+        assert_eq!(restarted.iter().map(|m| m["content"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), [long.clone(), "ok".to_owned()]);
+        // A chat with no files has no file listing.
+        assert!(!messages.iter().any(|m| m["name"] == CHAT_FILES));
     }
-
-
 }

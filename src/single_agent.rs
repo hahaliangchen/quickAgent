@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 mod blockers;
 #[cfg(test)]
 mod documented_examples;
+mod external_changes;
 mod function_scope;
 mod host_folder;
 mod project_flows;
@@ -136,6 +137,10 @@ impl Session<'_> {
     }
     fn prompt(&self) -> &'static str { main_prompt() }
 }
+/// Production loops have no step cap: a turn ends when the AI answers or
+/// the user stops it. Tests pass small bounds of their own.
+pub(crate) const NO_ROUND_LIMIT: usize = usize::MAX;
+
 enum LoopResult {
     Answer,
     Limit,
@@ -251,12 +256,22 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     if program_flow::role(w) == program_flow::Role::Main && s.plugin.is_none() {
         definitions.push(program_flow::find_main_tool());
         definitions.extend(project_flows::tools());
+        if read_only_shell(s) {
+            definitions.push(crate::shell_process::read_only_definition());
+        }
     }
     #[cfg(test)]
     if documented_examples::repository_review_naive(s) {
         definitions.retain(|tool| tool["function"]["name"] != "write_program");
     }
     definitions
+}
+
+/// The main AI of a code session runs read-only commands itself where the
+/// read-only sandbox exists (design guide §4). Fixed for the window, as its
+/// whole tool list is (§11 item 32).
+fn read_only_shell(s: &Session<'_>) -> bool {
+    s.plugin.is_none() && !s.ban_execution && code_shell_context(s) && crate::shell_process::read_only_available()
 }
 
 fn code_shell_context(s: &Session<'_>) -> bool {
@@ -677,6 +692,11 @@ fn asset_index(s: &Session<'_>, messages: &[Value]) -> Option<Value> {
 }
 fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value {
     let mut wire = messages.to_vec();
+    // A Messages route records the tools a scope activates in the conversation;
+    // another route declares its tools outright and never shows those entries.
+    if !records_activations(s) {
+        wire.retain(|message| message.get(crate::anthropic_messages::ADDED_TOOLS).is_none());
+    }
     // Restored frames must use the current host contract, not a retired prompt
     // saved before an upgrade. Keep all task inputs and plugin material intact.
     let role = program_flow::request_role(messages);
@@ -705,12 +725,16 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
             .ok().and_then(|path| crate::tools::Workspace::new(path).ok());
         let workspace = project.as_ref().unwrap_or(&s.state.workspace)
             .workspace_info(crate::tools::WorkspaceInfoRequest { workspace_root:None }).ok();
+        let (access, own) = if role == "main" && read_only_shell(s) {
+            ("main_ai_read_only_commands_and_module_code",
+                " You run read-only commands, builds and tests yourself with run_readonly_command; commands that change project files or need the network belong in module code.")
+        } else { ("module_deterministic_code_only", "") };
         wire.insert(1.min(wire.len()), json!({"role":"system","name":"shell_environment",
             "content":json!({"shell":shell,"workspace":workspace,
-                "access":"module_deterministic_code_only",
+                "access":access,
                 "memory":{"ai_input_limit_tokens":s.input_budget,"program_shell_output_limit_bytes":crate::shell_process::PROGRAM_OUTPUT_LIMIT,
                     "boundary":"Command output stays in code until logged with console.log or passed to a virtual helper."},
-                "usage":if cfg!(windows) { "Use PowerShell 7 with Windows paths. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." } else { "Use Bash. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." }}).to_string()}));
+                "usage":format!("{}{own}", if cfg!(windows) { "Use PowerShell 7 with Windows paths. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." } else { "Use Bash. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." })}).to_string()}));
         }
         let environment = crate::agent_program::ENVIRONMENT;
         #[cfg(test)]
@@ -806,9 +830,14 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
             object.remove(modules::ANNOUNCED);
             object.remove(INDEXED);
             object.remove(skill_scope::DELIVERED);
+            object.remove(external_changes::ANNOUNCED);
             // Reasoning items are replayed on the Responses wire only.
             if !responses_wire(s) {
                 object.remove(crate::model_stream::REASONING_ITEMS);
+            }
+            // Thinking signatures are replayed on the Messages wire only.
+            if !messages_wire(s) {
+                object.remove(crate::model_stream::THINKING_BLOCKS);
             }
         }
     }
@@ -898,7 +927,11 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     for definition in &mut published {
         if let Some(function) = definition["function"].as_object_mut() { function.remove("outputSchema"); }
     }
-    let mut body = json!({"model":s.model,"stream":true,"messages":wire,"tools":published,"parallel_tool_calls":false});
+    // Several calls in one reply run in the order given, each result next to
+    // its call; tools that change the context must still come alone
+    // (execute_call). 2026-11-13: with this off, one task's main AI spent
+    // 63 model requests on 82 reads and searches.
+    let mut body = json!({"model":s.model,"stream":true,"messages":wire,"tools":published,"parallel_tool_calls":true});
     if let Some(error) = plugin_error {
         body["_host_plugin_instruction_error"] = json!(error);
     }
@@ -916,6 +949,47 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
 /// The session's provider speaks the Responses API.
 fn responses_wire(s: &Session<'_>) -> bool {
     s.state.provider_routes.get(&s.state.provider_name).is_some_and(|route| route.responses)
+}
+/// The session's provider speaks the native Anthropic Messages API.
+fn messages_wire(s: &Session<'_>) -> bool {
+    s.state.provider_routes.get(&s.state.provider_name).is_some_and(|route| route.messages)
+}
+/// A Messages route whose model declares `tool_update` gets one catalog for
+/// every function scope: the full tool catalog stays on the wire, and the tools
+/// a scope first needs enter the conversation as a host message that every
+/// later request keeps where the history holds it. A model without the
+/// declaration keeps publishing just the scope's tools.
+fn announce_scope_tools(s: &Session<'_>, w: &mut Window, body: &mut Value) {
+    if !records_activations(s) {
+        return;
+    }
+    let active = body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    body[crate::anthropic_messages::CATALOG] = json!(available_tools(s, w));
+    // What the conversation already activated, read from the messages still in
+    // it: a tool grouped with tools announced before needs no second block, and
+    // one whose activation left with folded history is announced again.
+    let announced = crate::anthropic_messages::activated_tools(&w.messages);
+    let added = active.difference(&announced).cloned().collect::<Vec<_>>();
+    if added.is_empty() {
+        return;
+    }
+    let message = crate::anthropic_messages::tools_added(added);
+    w.messages.push(message.clone());
+    if let Some(messages) = body["messages"].as_array_mut() {
+        messages.push(message);
+    }
+}
+/// Whether the session's route activates tools inside the conversation.
+fn records_activations(s: &Session<'_>) -> bool {
+    s.state
+        .provider_routes
+        .get(&s.state.provider_name)
+        .is_some_and(|route| route.messages && route.messages_capabilities(s.model).tool_update)
 }
 fn host_message(mut message: Value) -> Value {
     message["role"] = json!("user");
@@ -944,6 +1018,7 @@ async fn model_round(
         modules::announce(s.state.workspace.root(), s.task, &mut w.messages);
     }
     skill_scope::announce(s, &mut w.messages);
+    external_changes::announce(s, &mut w.messages).await;
     if let Some(index) = asset_index(s, &w.messages) {
         w.messages.push(index);
     }
@@ -994,6 +1069,10 @@ async fn model_round(
         .as_array_mut()
         .unwrap()
         .retain(|m| !(m["role"] == "user" && m["content"].as_array().is_some_and(Vec::is_empty)));
+    // A Messages route that declares `tool_update` keeps one fixed catalog and
+    // announces this function scope's tools in the conversation; every other
+    // route publishes just the scope's own tools.
+    announce_scope_tools(s, w, &mut body);
     ensure!(
         w.input_tokens(s, &body) <= s.input_budget,
         "INPUT_OVER_CAPACITY: context remains saved; no request sent. Read large material in explicit pages, or hand it to a child task that returns only the needed result."
@@ -1009,12 +1088,14 @@ async fn model_round(
         w.input_tokens(s, &body)
     ));
     // A provider that speaks the Responses API gets the same request in that
-    // form; the record and the log keep what was actually sent.
+    // form, and a Messages provider gets it as Messages blocks; the record and
+    // the log keep what was actually sent.
     let responses = responses_wire(s);
     if responses {
         body = crate::model_stream::responses_request(&body);
+    } else if messages_wire(s) {
+        body = crate::anthropic_messages::wire_body(s.state, s.model, &body);
     }
-    let endpoint = if responses { "responses" } else { "chat/completions" };
     // A request belongs to the function frame it runs in.
     let frame = w
         .task_node_id
@@ -1045,21 +1126,13 @@ async fn model_round(
         diagnostics.sending();
         let response = {
             let pending = async {
-                let response = s
-                    .state
-                    .model_client
-                    .post(format!(
-                        "{}/{endpoint}",
-                        s.state.provider_url.trim_end_matches('/')
-                    ))
-                    .bearer_auth(&s.state.api_key)
+                let response = crate::anthropic_messages::send(s.state, s.task, &s.scope, &body)
                     .header("x-codex-visual-dispatch", "task-owned")
                     .header("x-client-request-id", node.as_str())
                     .header(
                         "x-agent-affinity",
                         crate::model_transport::affinity(s.task, &s.scope),
                     )
-                    .json(&body)
                     .send()
                     .await?;
                 diagnostics.headers(&response);
@@ -1218,6 +1291,7 @@ fn compact_cut_off_context(message: &mut Value) {
     if let Some(object) = message.as_object_mut() {
         object.remove("reasoning_content");
         object.remove(crate::model_stream::REASONING_ITEMS);
+        object.remove(crate::model_stream::THINKING_BLOCKS);
         if let Some(text) = object.get("content").and_then(Value::as_str) {
             let mut chars = text.chars();
             let excerpt: String = chars.by_ref().take(EXCERPT_CHARS).collect();
@@ -1454,7 +1528,7 @@ async fn business_tool_inner(
     let managed = if matches!(name, "write_file" | "edit_file" | "replace_range") {
         let prepared = managed_files::prepare(s.state.workspace.root(), s.task, tool_workspace.root(), name, args.clone())?;
         if prepared.conflict()? {
-            return prepared.preserve(s.state.workspace.root());
+            return prepared.preserve(s.state.workspace.root(), s.task);
         }
         if name == "write_file" && let Some(owner) = &parallel_owner {
             let conn = agent_service::open_db(s.state.workspace.root())?;
@@ -1598,11 +1672,11 @@ async fn business_tool_inner(
                     }
                     Ok(value)
                 } else {
-                    prepared.preserve(s.state.workspace.root())
+                    prepared.preserve(s.state.workspace.root(), s.task)
                 }
             }
             Err(error) if format!("{error:#}").contains("write_conflict:") || prepared.conflict()? => {
-                prepared.preserve(s.state.workspace.root())
+                prepared.preserve(s.state.workspace.root(), s.task)
             }
             Err(error) => Err(error),
         };
@@ -2181,7 +2255,7 @@ fn spawn_call(children: &mut tokio::task::JoinSet<Result<()>>, s: &Session<'_>, 
             plugin, state: &state, task: &task, model: &model, turn, cancel: &cancel,
             ban_execution, scope, parent: None, input_budget: budget };
         let mut child = child;
-        match Box::pin(run_loop(&session, &mut child, 64, false)).await {
+        match Box::pin(run_loop(&session, &mut child, NO_ROUND_LIMIT, false)).await {
             Ok(LoopResult::Answer | LoopResult::Paused | LoopResult::Stopped) => Ok(()),
             // The user stopped the turn: the call's frames stay as they are,
             // for the next turn to resume or discard (design guide §7.4).
@@ -2642,11 +2716,9 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                 image_messages.push(image);
             }
             save(s, w).await?;
-            stop_on_conflict(s, &result).await?;
         }
         // Keep all native results adjacent to their assistant call message.
-        // Image inputs follow the complete exchange, even if a provider returns
-        // multiple calls despite parallel_tool_calls=false.
+        // Image inputs follow the complete exchange of several calls.
         w.messages.extend(image_messages);
         save(s, w).await?;
         if let Some(ids) = released_assets {
@@ -2830,7 +2902,20 @@ async fn submit_program(
         let bundle = program_bundle::load(s, &mut args, body).await?;
         let source = args["source"].as_str().context("write_program needs a source")?;
         if !body && args.get("probe").is_none() {
-            let saved = host_folder::write_program(root, s.task, s.turn, source)?;
+            // Named like a code file: the AI's name for it, or the opening
+            // words of what the user asked.
+            use crate::session_history::turn_record::{request_stem, stem};
+            let name = args["name"].as_str().and_then(|name| stem(name, 60))
+                .or_else(|| request_stem(
+                    &w.messages
+                        .iter()
+                        .rev()
+                        .find(|m| task_frames::is_user_original(m) && m.get("name").is_none())
+                        .map(|m| crate::session_history::message_text(&m["content"]))
+                        .unwrap_or_default(),
+                ))
+                .unwrap_or_else(|| "program".into());
+            let saved = host_folder::write_program(root, s.task, &name, source)?;
             args["source"] = json!(std::fs::read_to_string(root.join(&saved))?);
             path = Some(saved);
         }
@@ -2870,6 +2955,11 @@ async fn submit_program(
         Err(error) => {
             let diagnostic = program_flow::source_error("program", &args, &error);
             append(s, "program/source_invalid", json!({"diagnostic":diagnostic,"path":path}), false).await?;
+            // What never ran is not a file of the chat: its name is free for
+            // the corrected program. The source stays in the call's record.
+            if let Some(saved) = &path {
+                let _ = std::fs::remove_file(root.join(saved));
+            }
             (diagnostic, true)
         }
     };
@@ -2882,49 +2972,6 @@ async fn submit_program(
 
 /// A file changed outside the Agent while a write was pending: tell the user
 /// where the candidate was kept and stop, without merging or retrying.
-async fn stop_on_conflict(s: &Session<'_>, result: &Value) -> Result<()> {
-    if result["error_code"] == "ASSET_CONFLICT" {
-        let message = if let Some(copy) = result["candidate_path"].as_str() {
-            let saved = if result["candidate"] == "request" { "这次的修改请求" } else { "待写副本" };
-            let reason = if result["reason"] == "shared_interval" { "文件在共享 shell 执行区间内发生变化，实际作者未知" }
-                else if result["reason"] == "parallel" { "另一个函数在该函数开始工作后修改了文件" } else { "文件与任务记录的版本不同" };
-            let mut text = format!("文件 **{}** 存在写入冲突：{}。当前文件未覆盖。{}保存在 `{}`。", result["path"].as_str().unwrap_or(""), reason, saved, copy);
-            // Only the task's record gives a common base; the host does not
-            // keep what each function read.
-            if result["base_known"] == true {
-                if result["base_exists"] != true { text.push_str("\n\n基准版本：文件不存在。"); }
-                else { append_conflict_preview(&mut text, "任务记录的基准", &result["base_preview"], result["base_path"].as_str()); }
-            }
-            if result["current_exists"] != true { text.push_str("\n\n当前版本：文件不存在。"); }
-            else { append_conflict_preview(&mut text, "当前文件", &result["current_preview"], result["current_path"].as_str()); }
-            append_conflict_preview(&mut text, if result["candidate"] == "request" { "待处理的修改请求" } else { "待写内容" }, &result["candidate_preview"], Some(copy));
-            text.push_str("\n\n请比较后决定如何处理；系统不会自动合并或重试。");
-            text
-        } else {
-            format!("文件 {} 在读取期间发生变化，未进行编辑。请决定如何处理；系统不会自动重试。", result["path"].as_str().unwrap_or(""))
-        };
-        append(s, "assistant/message", json!({"actor":"host","turn":s.turn,"message":{"role":"assistant","content":message}}), true).await?;
-        // The message above carries the details; the turn's error only names it.
-        anyhow::bail!("ASSET_CONFLICT: 文件 {} 写入冲突，未覆盖，详情见上方说明", result["path"].as_str().unwrap_or(""));
-    }
-    Ok(())
-}
-
-fn append_conflict_preview(output: &mut String, label: &str, preview: &Value, saved: Option<&str>) {
-    output.push_str(&format!("\n\n**{label}**"));
-    if let Some(path) = saved { output.push_str(&format!("（已保存：`{path}`）")); }
-    if let Some(text) = preview["text"].as_str() {
-        let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-        let fence = "`".repeat((longest + 1).max(3));
-        // Fence it in the file's language so the chat highlights it.
-        let lang = saved.and_then(|path| std::path::Path::new(path).extension()).and_then(|ext| ext.to_str())
-            .map(|ext| match ext { "rs" => "rust", "yml" => "yaml", "md" => "markdown", "py" => "python", "sh" => "bash", other => other })
-            .unwrap_or("text");
-        output.push_str(&format!("\n\n{fence}{lang}\n{text}\n{fence}"));
-        if preview["truncated"] == true { output.push_str("\n（预览已截断，完整内容见保存的文件。）"); }
-    } else { output.push_str("\n\n内容无法作为 UTF-8 文本预览，请查看保存的文件。"); }
-}
-
 fn tool_result_failed(value: &Value, plugin_tool: bool) -> bool {
     (plugin_tool && value["status"] == "failed")
         || value["error_code"] == "ASSET_CONFLICT"
@@ -3057,6 +3104,13 @@ async fn execute_call(
                 Ok(json!(results))
             },
             name if name == program_flow::FIND => program_flow::find(s, w, &args),
+            crate::shell_process::READ_ONLY => {
+                ensure!(at.is_none() && program_flow::role(w) == program_flow::Role::Main && read_only_shell(s),
+                    "TOOL_UNAVAILABLE: {}; only the main AI calls it directly. Program code runs commands in a module with process.exec_command", call.name);
+                material_source = Some((call.name.clone(), args.clone()));
+                let project = crate::tools::Workspace::new(crate::session_browser::task_workspace(s.state.workspace.root(), s.task)?)?;
+                crate::shell_process::run_read_only(&project, &args, s.cancel).await
+            },
             "list_project_flows" => project_flows::list(s),
             "read_project_flow" => project_flows::read(s, &args),
             name if name == paused_programs::RESUME => match w.resumed.clone().context("the paused program was not resumed")? {
@@ -3330,6 +3384,7 @@ pub(crate) async fn run_task_with_resource(
         input_budget: crate::model_settings::input_budget(&state, &model),
     };
     let task_copy = task.clone();
+    let root_copy = state.workspace.root().to_path_buf();
     let (saved, previous, memory, active, scope) = db(state.workspace.root(), move |conn| {
         let main: Option<String> = conn
             .query_row(
@@ -3359,9 +3414,14 @@ pub(crate) async fn run_task_with_resource(
             .optional()?;
         let at_top = active.node_id == crate::function_frames::ROOT;
         let memory = if at_top {
-            task_frames::memory_index(&tx, &task_copy, turn)?
+            // The chat folder's files follow the records before a new turn
+            // lists them: call records written, rewound turns' files gone.
+            if let Ok(dir) = host_folder::chat_dir(&root_copy, &task_copy) {
+                crate::session_history::turn_record::sync(&tx, &task_copy, &dir)?;
+            }
+            task_frames::chat_context(&tx, &task_copy, turn)?
         } else {
-            None
+            Vec::new()
         };
         tx.commit()?;
         let saved = saved
@@ -3373,7 +3433,7 @@ pub(crate) async fn run_task_with_resource(
         }
         // An unfinished task (a stopped turn or a pending confirmation) continues in its own context.
         let saved = saved.context("active task frame missing; refusing to recreate it")?;
-        Ok((Some(saved), None, None, active.node_id, scope))
+        Ok((Some(saved), None, Vec::new(), active.node_id, scope))
     })
     .await?;
     s.scope = scope;
@@ -3381,7 +3441,8 @@ pub(crate) async fn run_task_with_resource(
         Some(saved) => saved,
         None => {
             let fresh = task_frames::fresh_main_window(&s, previous.as_ref(), memory).await?;
-            append(&s,"context/main_reset",json!({"turn":turn,"memory_index":fresh.messages.iter().any(|m|m["name"]=="conversation_memory"),
+            append(&s,"context/main_reset",json!({"turn":turn,"chat_files":fresh.messages.iter().any(|m|m["name"]==task_frames::CHAT_FILES),
+                "chat_history":fresh.messages.iter().filter(|m|m["name"]==task_frames::CHAT_HISTORY).count(),
                 "carried_skills":fresh.active_skills}),false).await?;
             fresh
         }
@@ -3427,7 +3488,7 @@ pub(crate) async fn run_task_with_resource(
         .and_then(|event| serde_json::from_str::<Value>(&event.raw).ok()))
     })
     .await?;
-    let start = json!({"turn":turn,"runtime":"single_agent","max_steps":max_rounds,"permission_mode":state.permission_mode,"host_version":env!("CARGO_PKG_VERSION")});
+    let start = json!({"turn":turn,"runtime":"single_agent","permission_mode":state.permission_mode,"host_version":env!("CARGO_PKG_VERSION")});
     let environment_notice = previous_start.as_ref().and_then(|previous| environment_change_notice(previous, &start));
     let environment_notice = match (environment_notice, unreadable) {
         (Some(changed), Some(dropped)) => Some(format!("{changed}\n{dropped}")),
@@ -3530,6 +3591,20 @@ pub(crate) async fn run_task_with_resource(
         false,
     )
     .await?;
+    // The turn's call record is a file of the chat as soon as the turn ends.
+    let root = state.workspace.root().to_path_buf();
+    let chat = task.clone();
+    let synced = tokio::task::spawn_blocking(move || -> Result<()> {
+        if let Some(dir) = host_folder::existing_chat_dir(&root, &chat).or_else(|| host_folder::chat_dir(&root, &chat).ok()) {
+            let conn = agent_service::open_db(&root)?;
+            crate::session_history::turn_record::sync(&conn, &chat, &dir)?;
+        }
+        Ok(())
+    })
+    .await;
+    if let Err(error) = synced.map_err(anyhow::Error::from).and_then(|result| result) {
+        tracing::warn!(%error, task = %task, "chat folder not synced at turn end");
+    }
     agent_service::finish(&state, &task, status).await?;
     if status == "cancelled" {
         return Ok(());
@@ -4555,6 +4630,8 @@ mod tests {
             agent_service::AgentProviderRoute {
                 prefix_system_messages: true,
                 responses: false,
+                messages: false,
+                messages_capabilities: Default::default(),
                 url: state.provider_url.clone(),
                 api_key: state.api_key.clone(),
                 models: Default::default(),

@@ -73,15 +73,16 @@ pub(super) fn existing_chat_dir(root: &Path, task: &str) -> Option<PathBuf> {
 }
 
 /// Write a main program the AI handed over with write_program: one file per
-/// program, numbered within its turn. Returns the path relative to the root.
-pub(super) fn write_program(root: &Path, task: &str, turn: usize, source: &str) -> Result<String> {
+/// program, named like a project's code file after what it does (`stem`),
+/// with -2, -3 when the name is taken. Returns the path relative to the root.
+pub(super) fn write_program(root: &Path, task: &str, stem: &str, source: &str) -> Result<String> {
     let dir = chat_dir(root, task)?;
     std::fs::create_dir_all(&dir)?;
-    let mut path = dir.join(format!("turn-{turn}.js"));
+    let mut path = dir.join(format!("{stem}.js"));
     let mut attempt = 1;
     while path.exists() {
         attempt += 1;
-        path = dir.join(format!("turn-{turn}-{attempt}.js"));
+        path = dir.join(format!("{stem}-{attempt}.js"));
     }
     std::fs::write(&path, source)?;
     Ok(path

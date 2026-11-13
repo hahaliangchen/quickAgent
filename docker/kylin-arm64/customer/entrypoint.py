@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import base64
 import json
 import os
 from pathlib import Path
@@ -10,11 +11,61 @@ import time
 import urllib.error
 import urllib.request
 
-import yaml
+from customer_templates import prune_unicom_templates
 
 APP = Path("/opt/customer")
 STATE = Path("/state")
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def gateway_request():
+    credentials = base64.b64encode(("admin:" + os.environ["CUSTOMER_ADMIN_PASSWORD"]).encode()).decode()
+    return urllib.request.Request("http://127.0.0.1:3002/agent/settings/data",
+                                  headers={"Authorization": "Basic " + credentials})
+
+
+def check_health():
+    for target in ["http://127.0.0.1:8899/prod-api/health/filing-worker",
+                   "http://127.0.0.1:3000/health", gateway_request()]:
+        with HTTP.open(target, timeout=3) as response:
+            if response.status != 200:
+                raise RuntimeError("Customer service is not ready")
+    return 0
+
+
+def upgrade_customer_defaults(profile):
+    policy_path = profile / "customer-policy.json"
+    generation_path = profile / "agent-generation.yml"
+    if not policy_path.is_file() or not generation_path.is_file():
+        return
+    policy = json.loads(policy_path.read_text())
+    if policy.get("customer_custom_models") or policy.get("provider") != "deepseek":
+        return
+    # Old releases wrote these exact factory defaults. Migrate them once;
+    # independently customized model choices and allowlists remain untouched.
+    import yaml
+    generation = yaml.safe_load(generation_path.read_text()) or {}
+    changed = False
+    builtin_models = {"deepseek-flash", "deepseek-v4-pro"}
+    allowed = generation.get("plugin_models", {}).get("ppt-master")
+    if isinstance(allowed, list) and len(allowed) == 2 and all(
+        isinstance(row, dict) and row.get("provider") == "deepseek" for row in allowed
+    ) and {row.get("model") for row in allowed} == builtin_models:
+        del generation["plugin_models"]["ppt-master"]
+        changed = True
+    if generation.get("visual_tool") == {"provider": "deepseek", "model": "deepseek-flash", "reasoning_effort": "high"}:
+        generation["visual_tool"] = {}
+        changed = True
+    if changed:
+        temporary = generation_path.with_name(generation_path.name + ".upgrade-tmp")
+        temporary.write_text(json.dumps(generation, ensure_ascii=False, indent=2) + "\n")
+        temporary.chmod(0o600)
+        temporary.replace(generation_path)
+    policy["customer_custom_models"] = True
+    temporary = policy_path.with_name(policy_path.name + ".upgrade-tmp")
+    temporary.write_text(json.dumps(policy, ensure_ascii=False, indent=2) + "\n")
+    temporary.chmod(0o600)
+    temporary.replace(policy_path)
 
 
 def write_config():
@@ -24,14 +75,16 @@ def write_config():
     resources = STATE / "server/resource"
     if not resources.exists():
         shutil.copytree(APP / "server/resource", resources)
+    removed = prune_unicom_templates(resources / "ai_skills/ppt-master")
+    if removed:
+        print("Removed bundled Unicom templates: " + ", ".join(removed), flush=True)
     profile = STATE / "agent-config"
     if not profile.exists():
         shutil.copytree(APP / "config/agent", profile)
         profile.chmod(0o700)
-    patches = yaml.safe_load((profile / "providers.yml").read_text())
-    providers = next(p["config"]["providers"] for p in patches if p.get("id") == "llm-pi-ai")
-    if set(providers) != {"deepseek"} or {m["id"] for m in providers["deepseek"]["models"]} != {"deepseek-flash", "deepseek-v4-pro"}:
-        raise RuntimeError("Customer profile must contain only the non-personal deepseek provider and its two allowed models")
+    # The bundled profile is sanitized during assembly. Persisted profiles belong
+    # to the customer; let the Agent validate and load their selected providers.
+    upgrade_customer_defaults(profile)
     config = {
         "system": {"db-type":"mysql", "oss-type":"local", "addr":8899, "router-prefix":"/prod-api", "web-root":str(APP / "server/web"),
                    "enable-api-rbac":True, "use-redis":True, "use-mongo":False, "use-multipoint":False, "disable-auto-migrate":False,
@@ -43,9 +96,9 @@ def write_config():
         "zap": {"level":"info", "format":"console", "director":str(STATE / "logs"), "encode-level":"LowercaseLevelEncoder", "stacktrace-key":"stacktrace", "log-in-console":True, "retention-day":7},
         "local": {"path":"uploads/file", "store-path":"uploads/file"},
         "captcha": {"key-long":6, "img-width":240, "img-height":80, "open-captcha":100, "open-captcha-timeout":3600},
-        "agent": {"ai-provider":"deepseek", "skill-resource-dir":"resource/ai_skills", "project-output-dir":"projects", "session-ttl":"72h", "session-key-prefix":"ppt-customer:", "max-consecutive-failures":3, "max-history-string-len":16384},
-        "deepseek": {"api-key":os.getenv("DEEPSEEK_API_KEY",""), "model":"deepseek-flash", "base-url":"https://api.deepseek.com/v1"},
-        "workbench": {"data-file":str(STATE / "server/workbench-data.json"), "model-provider":"deepseek", "llm-model":"deepseek-flash", "llm-base-url":"https://api.deepseek.com/v1", "llm-api-key":os.getenv("DEEPSEEK_API_KEY",""), "enable-heuristic-fallback":False},
+        "agent": {"ai-provider":"", "skill-resource-dir":"resource/ai_skills", "project-output-dir":"projects", "session-ttl":"72h", "session-key-prefix":"ppt-customer:", "max-consecutive-failures":3, "max-history-string-len":16384},
+        "deepseek": {"api-key":"", "model":"", "base-url":""},
+        "workbench": {"data-file":str(STATE / "server/workbench-data.json"), "model-provider":"", "llm-model":"", "llm-base-url":"", "llm-api-key":"", "enable-heuristic-fallback":False},
         "yalongjiang": {"enabled":False, "native-login-enabled":True},
     }
     config_path = STATE / "server-config.yaml"
@@ -71,10 +124,12 @@ def wait_ready(url, processes, timeout=180):
         except (OSError, urllib.error.URLError):
             pass
         time.sleep(.5)
-    raise RuntimeError("Service readiness timed out: " + url)
+    raise RuntimeError("Service readiness timed out: " + (url.full_url if isinstance(url, urllib.request.Request) else url))
 
 
 def main():
+    if sys.argv[1:] == ["healthcheck"]:
+        return check_health()
     write_config()
     if sys.argv[1:] == ["init"]:
         os.chdir(STATE / "server")
@@ -98,7 +153,9 @@ def main():
         children.append(subprocess.Popen([str(APP / "bin/quickagent")], cwd=STATE / "workspace", start_new_session=True))
         wait_ready("http://127.0.0.1:3000/health", children)
         wait_ready("http://127.0.0.1:3001/agent/", children)
-        print("Customer PPT and QuickAgent are ready on port 8899", flush=True)
+        children.append(subprocess.Popen([str(APP / "bin/customer-gateway")], start_new_session=True))
+        wait_ready(gateway_request(), children)
+        print("Customer PPT is ready on 8899; authenticated QuickAgent gateway on 3002", flush=True)
         while not stopping:
             for child in children:
                 code = child.poll()

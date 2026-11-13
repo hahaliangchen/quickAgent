@@ -6,6 +6,7 @@ from datetime import datetime
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -100,8 +101,18 @@ def build(work, only=None):
     for directory in ["app/bin", "app/server/resource"]:
         (stage / directory).mkdir(parents=True, exist_ok=True)
     native = work / "native-tools"
+    # Master keeps the full product navigation. The isolated customer build
+    # retains its existing PPT-only entry without changing the source worktree.
+    create_ppt = source / "view/src/view/createPpt/index.tsx"
+    text = create_ppt.read_text()
+    text = re.sub(r"(?m)^ {28}<button(?:(?!</button>).)*onClick=\{\(\) => navigate\('/library'\)\}(?:(?!</button>).)*</button>\n", "", text, flags=re.S)
+    create_ppt.write_text(text)
     destination = source / "server/cmd/customer-init/main.go"
     shutil.copy2(Path(__file__).with_name("bootstrap.go"), destination)
+    gateway = source / "server/cmd/customer-gateway"
+    gateway.mkdir(parents=True, exist_ok=True)
+    for origin, target in [("gateway.go", "main.go"), ("gateway_test.go", "main_test.go")]:
+        shutil.copy2(Path(__file__).with_name(origin), gateway / target)
     shutil.copy2(Path(__file__).with_name("native-deps.cjs"), work / "native-deps.cjs")
     name = "quickagent-customer-cc-" + work.name[-12:].lower()
     # Native Rust drives the exact Kylin ARM64 compiler/linker. All temporary
@@ -144,6 +155,8 @@ cd "$BUILD_ROOT/source/server"
 mkdir -p "$BUILD_ROOT/stage/app/bin"
 go build -mod=readonly -buildvcs=false -trimpath -ldflags='-s -w' -o "$BUILD_ROOT/stage/app/bin/ai-ppt-server" .
 go build -mod=readonly -buildvcs=false -trimpath -ldflags='-s -w' -o "$BUILD_ROOT/stage/app/bin/customer-init" ./cmd/customer-init
+go test -mod=readonly ./cmd/customer-gateway
+go build -mod=readonly -buildvcs=false -trimpath -ldflags='-s -w' -o "$BUILD_ROOT/stage/app/bin/customer-gateway" ./cmd/customer-gateway
 '''
         run(["docker", "run", "--rm", "--platform", "linux/arm64", "--network", "host",
              "-e", "HTTP_PROXY", "-e", "HTTPS_PROXY", "-e", "ALL_PROXY", "-e", "BUILD_ROOT=" + str(work),
@@ -210,8 +223,8 @@ if __name__ == "__main__":
         sources = {}
         for key, directory, branch in [
             ("agent", ROOT, None),
-            ("server", ROOT.parent / "ai-ppt-server", "codex/ppt-remote-svg"),
-            ("view", ROOT.parent / "ai-ppt-view", "codex/ppt-host-agent"),
+            ("server", ROOT.parent / "ai-ppt-server", None),
+            ("view", ROOT.parent / "ai-ppt-view", None),
             ("engine", Path.home() / "project/pptx-editor-engine", None),
         ]:
             sources[key] = snapshot(directory, work / "source" / key, branch)

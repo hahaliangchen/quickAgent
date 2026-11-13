@@ -1,61 +1,26 @@
 #!/usr/bin/env python3
-"""Export a separate DeepSeek-only customer profile; never copy credentials."""
+"""Export sanitized customer defaults; never copy development credentials."""
 import argparse
-import copy
 import json
 from pathlib import Path
-from urllib.parse import urlsplit
-
-import yaml
-
-PROVIDER = "deepseek"
-MODEL_FIELDS = {"id", "name", "contextWindow", "maxTokens", "input", "output", "reasoningEfforts"}
-CAPABILITY_FIELDS = {"tool_calling", "reasoning_efforts", "default_effort", "fast_mode", "image_input"}
-
 
 def project_profile(patches, generation):
-    config = next((p.get("config", {}) for p in patches if p.get("id") == "llm-pi-ai"), {})
-    provider = config.get("providers", {}).get(PROVIDER)
-    if not isinstance(provider, dict):
-        raise ValueError("缺少非自用提供商 deepseek；不会使用 deepseek-self 替代")
-    url = urlsplit(provider.get("baseURL", ""))
-    if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
-        raise ValueError("DeepSeek 地址必须是无内嵌凭据、查询参数的 HTTPS URL")
-    models = [{k: copy.deepcopy(v) for k, v in m.items() if k in MODEL_FIELDS}
-              for m in provider.get("models", []) if isinstance(m, dict) and m.get("id")]
-    if not models:
-        raise ValueError("deepseek 没有已配置的模型")
-    ids = {model["id"] for model in models}
-    default = "deepseek-flash" if "deepseek-flash" in ids else models[0]["id"]
-    clean_provider = {
-        "api": provider.get("api", "openai-completions"), "baseURL": provider["baseURL"],
-        "displayName": "DeepSeek", "apiKeyEnv": "DEEPSEEK_API_KEY", "models": models,
-    }
-    clean_patches = [
-        {"id": "llm-pi-ai", "config": {"providers": {PROVIDER: clean_provider}}},
-        {"id": "agent-default-model", "config": {"provider": PROVIDER, "model": default, "reasoningEffort": "high"}},
-    ]
-    capabilities = {
-        model: {k: copy.deepcopy(v) for k, v in item.items() if k in CAPABILITY_FIELDS}
-        for model, item in generation.get("model_capabilities", {}).get(PROVIDER, {}).items()
-        if model in ids and isinstance(item, dict)
-    }
+    # A customer config is deliberately independent of every development route.
+    clean_patches = [{"id": "llm-pi-ai", "config": {"providers": {}}}]
     clean_generation = {
-        "reasoning_effort": "high", "fast_mode": False,
-        "visual_tool": {"provider": PROVIDER, "model": default, "reasoning_effort": "high"},
-        "delegate_agent": {}, "web_search_provider": PROVIDER,
-        "model_capabilities": {PROVIDER: capabilities},
-        "plugin_models": {"ppt-master": [{"provider": PROVIDER, "model": model["id"]} for model in models]},
-        "plugin_generation": {"ppt-master": {"reasoning_effort": "high", "visual_reasoning_effort": "high"}},
+        "reasoning_effort": None, "fast_mode": False,
+        "visual_tool": {},
+        "delegate_agent": {}, "web_search_provider": None,
+        "model_capabilities": {},
+        "plugin_models": {},
+        "plugin_generation": {},
     }
     return clean_patches, clean_generation
 
 
 def write_profile(source, output):
-    patches = yaml.safe_load((source / "providers.yml").read_text())
-    generation_path = source / "agent-generation.yml"
-    generation = yaml.safe_load(generation_path.read_text()) if generation_path.is_file() else {}
-    providers, generation = project_profile(patches, generation or {})
+    # Keep the source argument for CLI compatibility; read no personal config.
+    providers, generation = project_profile([], {})
     # Validate before creating the directory; existing customer settings must not
     # be silently overwritten, especially after a customer has filled in a key.
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -65,10 +30,9 @@ def write_profile(source, output):
         "skill-packages.json": {"remotes": {"ppt-master": {
             "url": "http://127.0.0.1:8899/prod-api/aiPpt/plugin", "token": ""}},
             "enabled": {"ppt-master": True}},
-        "customer-policy.json": {"provider": PROVIDER,
-            "models": [m["model"] for m in generation["plugin_models"]["ppt-master"]],
+        "customer-policy.json": {"providers": [], "models": [],
+            "customer_custom_models": True,
             "menu_paths": ["/create-ppt", "/ppt-history"], "frontend_build_env": {"PPT_CUSTOMER_EDITION": "1"},
-            "server_branch": "codex/ppt-remote-svg", "view_branch": "codex/ppt-host-agent",
             "credentials_included": False},
     }
     for name, value in files.items():
@@ -76,8 +40,9 @@ def write_profile(source, output):
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
         path.chmod(0o600)
     (output / "README-客户配置.txt").write_text(
-        "仅保留非自用 deepseek 提供商及其模型，已清理其他提供商、默认路由和插件模型引用。\n"
-        "本目录不含 API 密钥；请在目标环境设置 DEEPSEEK_API_KEY。\n"
+        "本目录不含提供商、模型、默认路由、插件模型引用或 API 密钥；由客户自行配置。\n"
+        "支持在设置页添加客户自部署模型：填写 OpenAI 兼容地址和实际模型 ID，免鉴权服务的 API 密钥留空。\n"
+        "联网搜索默认未启用，视觉和协作模型跟随主模型，PPT 插件默认可使用所有已登记模型。\n"
         "将 GROW_CONFIG_DIR 指向本目录，使用 AI PPT tools/start-ppt.py 启动以隔离旧配置迁移。\n"
         "前端客户构建必须设置 PPT_CUSTOMER_EDITION=1，菜单仅保留创建 PPT 和历史会话。\n"
         "后端仅当端口/前缀为 8899、/prod-api 时可直接使用插件地址，否则按部署值修改 skill-packages.json。\n"
@@ -91,4 +56,4 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     policy = write_profile(args.source.resolve(), args.output.resolve())
-    print("客户配置已生成；仅保留 %s: %s（不含密钥）" % (PROVIDER, ", ".join(policy["models"])))
+    print("客户配置已生成：提供商、模型和凭据全部为空。")

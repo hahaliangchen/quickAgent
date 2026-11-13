@@ -231,6 +231,8 @@ mod tests {
             crate::agent_service::AgentProviderRoute {
                 prefix_system_messages: false,
                 responses: false,
+                messages: false,
+                messages_capabilities: Default::default(),
                 url: "http://alternate.example/v1".into(),
                 api_key: "fixture-key".into(),
                 models: [("alias".into(), "mapped-model".into())]
@@ -340,6 +342,8 @@ mod tests {
             crate::agent_service::AgentProviderRoute {
                 prefix_system_messages: false,
                 responses: false,
+                messages: false,
+                messages_capabilities: Default::default(),
                 url: "https://api.deepseek.com/v1".into(),
                 api_key: "fixture-key".into(),
                 models: [("deepseek-flash".into(), "deepseek-flash".into())]

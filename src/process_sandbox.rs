@@ -183,6 +183,47 @@ pub fn command_with_roots(
     cwd: &Path,
     boundary: ExecutionBoundary,
 ) -> Result<Command> {
+    build(program, root, extra_writable_roots, cwd, boundary, false)
+}
+
+/// Set in every command the host sandboxes, so programs inside can tell.
+pub const SANDBOX_MARKER: &str = "GROW_SANDBOXED";
+
+/// Whether this process runs inside the host's command sandbox, where a
+/// nested sandbox (bwrap, Chrome's own) cannot create its namespaces.
+pub fn inside_sandbox() -> bool {
+    std::env::var_os(SANDBOX_MARKER).is_some()
+}
+
+/// The main AI's own commands: the whole filesystem read-only, credentials
+/// masked and no network, so a command cannot change the project's files or
+/// anything elsewhere. `outputs` are the project's build-output folders (what
+/// git ignores), writable so builds and tests can run; `/tmp` is private and
+/// discarded. There is no unsandboxed fallback.
+pub fn read_only_offline_command(program: impl AsRef<OsStr>, root: &Path, cwd: &Path, outputs: &[PathBuf]) -> Result<Command> {
+    build_with_outputs(program, root, &[], cwd, ExecutionBoundary::ReadOnly, true, outputs)
+}
+
+fn build(
+    program: impl AsRef<OsStr>,
+    root: &Path,
+    extra_writable_roots: &[PathBuf],
+    cwd: &Path,
+    boundary: ExecutionBoundary,
+    offline: bool,
+) -> Result<Command> {
+    build_with_outputs(program, root, extra_writable_roots, cwd, boundary, offline, &[])
+}
+
+fn build_with_outputs(
+    program: impl AsRef<OsStr>,
+    root: &Path,
+    extra_writable_roots: &[PathBuf],
+    cwd: &Path,
+    boundary: ExecutionBoundary,
+    offline: bool,
+    outputs: &[PathBuf],
+) -> Result<Command> {
     if boundary == ExecutionBoundary::Host {
         return Ok(Command::new(program));
     }
@@ -222,6 +263,30 @@ pub fn command_with_roots(
         "--die-with-parent",
     ]);
     let mut bound_roots = vec![root.clone()];
+    if offline {
+        cmd.arg("--unshare-net");
+        // A private /tmp for compilers and test runs; a workspace that lives
+        // under /tmp is mounted again, still read-only.
+        cmd.args(["--tmpfs", "/tmp"]);
+        if let Ok(relative) = root.strip_prefix("/tmp") {
+            let mut parent = PathBuf::from("/tmp");
+            for component in relative.parent().into_iter().flat_map(Path::components) {
+                parent.push(component.as_os_str());
+                cmd.arg("--dir").arg(&parent);
+            }
+            cmd.arg("--ro-bind").arg(&root).arg(&root);
+        }
+        for output in outputs {
+            if let Ok(output) = output.canonicalize()
+                && output.is_dir()
+                && output.starts_with(&root)
+                && output != root
+            {
+                cmd.arg("--bind").arg(&output).arg(&output);
+                bound_roots.push(output);
+            }
+        }
+    }
     if boundary == ExecutionBoundary::Workspace {
         // Keep a private writable /tmp without hiding workspaces nested under /tmp.
         cmd.args(["--tmpfs", "/tmp"]);
@@ -240,7 +305,10 @@ pub fn command_with_roots(
     // mount cannot expose host credentials again.
     let dir_masks = secret_dir_masks(&bound_roots, boundary);
     for dir in &dir_masks {
-        cmd.arg("--tmpfs").arg(dir).arg("--remount-ro").arg(dir);
+        cmd.arg("--tmpfs").arg(dir);
+        if !is_browser_profile(dir) {
+            cmd.arg("--remount-ro").arg(dir);
+        }
     }
     for secret in secret_file_masks(&dir_masks, &bound_roots, boundary) {
         cmd.arg("--ro-bind").arg("/dev/null").arg(secret);
@@ -253,6 +321,7 @@ pub fn command_with_roots(
             cmd.env_remove(&key);
         }
     }
+    cmd.env(SANDBOX_MARKER, "1");
     cmd.env("TMPDIR", "/tmp")
         .env("TMP", "/tmp")
         .env("TEMP", "/tmp");
@@ -324,7 +393,21 @@ fn visible_in_sandbox(path: &Path, bound_roots: &[PathBuf], boundary: ExecutionB
     true
 }
 
-/// Sensitive `$HOME` credential directories replaced with empty read-only tmpfs.
+/// A browser's own folder under `$HOME`. It is hidden like the other
+/// credential folders, but its empty stand-in stays writable: Chrome's crash
+/// reporter must create its database there, and where it could not Chrome
+/// died at startup (2026-11-13: every browser test run in the sandbox ended
+/// in SIGTRAP after `chrome_crashpad_handler: --database is required`). What
+/// is written lands in the sandbox's own tmpfs and is discarded with it.
+const BROWSER_PROFILES: [&str; 3] = [".mozilla", ".config/google-chrome", ".config/chromium"];
+fn is_browser_profile(dir: &Path) -> bool {
+    home_dir().is_some_and(|home| {
+        BROWSER_PROFILES.iter().any(|rel| home.join(rel).canonicalize().is_ok_and(|profile| profile == dir))
+    })
+}
+
+/// Sensitive `$HOME` credential directories replaced with an empty tmpfs,
+/// read-only except for browser profiles.
 fn secret_dir_masks(bound_roots: &[PathBuf], boundary: ExecutionBoundary) -> Vec<PathBuf> {
     let Some(home) = home_dir() else {
         return Vec::new();
@@ -443,6 +526,12 @@ pub fn check_secret_reference(command: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether a sandbox runner is installed at all; a kernel that refuses its
+/// namespaces still fails the command with SANDBOX_UNAVAILABLE.
+pub fn bwrap_installed() -> bool {
+    cfg!(target_os = "linux") && find_bwrap(Path::new("/nonexistent-workspace"), &[]).is_some()
 }
 
 fn find_bwrap(root: &Path, extras: &[PathBuf]) -> Option<PathBuf> {
@@ -1038,6 +1127,39 @@ mod tests {
         }
     }
 
+    /// 2026-11-13: Chrome started inside the read-only sandbox died with
+    /// SIGTRAP, because its profile folder was replaced by an empty folder it
+    /// could not write its crash database into.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_browser_profile_is_hidden_but_its_stand_in_can_be_written() {
+        let work = std::env::temp_dir().join(format!("grow-browser-mask-{}", crate::agent_service::uuid_like()));
+        std::fs::create_dir_all(&work).unwrap();
+        let work = work.canonicalize().unwrap();
+        let profile = home_dir().and_then(|home| {
+            BROWSER_PROFILES.iter().find_map(|rel| home.join(rel).canonicalize().ok().filter(|dir| dir.is_dir()))
+        });
+        let (Some(profile), true) = (profile, find_bwrap(&work, &[]).is_some() && !inside_sandbox()) else {
+            eprintln!("skipped: needs bwrap outside a sandbox and an existing browser profile folder");
+            std::fs::remove_dir_all(work).unwrap();
+            return;
+        };
+        assert!(is_browser_profile(&profile) && !is_browser_profile(&work));
+        let marker = format!("grow-mask-probe-{}", crate::agent_service::uuid_like());
+        let output = read_only_offline_command("/bin/sh", &work, &work, &[])
+            .unwrap()
+            .args(["-c", r#"test -z "$(ls -A "$1")" && mkdir "$1/$2" && test -d "$1/$2""#, "sh"])
+            .arg(&profile)
+            .arg(&marker)
+            .output()
+            .await
+            .unwrap();
+        let leaked = profile.join(&marker).exists();
+        std::fs::remove_dir_all(work).unwrap();
+        assert!(output.status.success(), "the stand-in is empty and writable: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(!leaked, "what the command wrote stayed inside the sandbox");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn readonly_keeps_root_readonly_and_preserves_process_isolation() {
@@ -1065,12 +1187,10 @@ mod tests {
         let bound = vec![root.clone()];
         let dir_masks = secret_dir_masks(&bound, ExecutionBoundary::ReadOnly);
         for dir in &dir_masks {
-            expected.extend([
-                OsStr::new("--tmpfs"),
-                dir.as_os_str(),
-                OsStr::new("--remount-ro"),
-                dir.as_os_str(),
-            ]);
+            expected.extend([OsStr::new("--tmpfs"), dir.as_os_str()]);
+            if !is_browser_profile(dir) {
+                expected.extend([OsStr::new("--remount-ro"), dir.as_os_str()]);
+            }
         }
         let file_masks = secret_file_masks(&dir_masks, &bound, ExecutionBoundary::ReadOnly);
         for mask in &file_masks {

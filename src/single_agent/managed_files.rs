@@ -196,6 +196,68 @@ pub(super) fn refresh_baselines(root: &Path, task: &str) -> Result<Vec<String>> 
     Ok(moved)
 }
 
+/// A managed file that no longer matches the task's record while a turn runs:
+/// someone outside the task (the user, another agent, a program) changed it.
+pub(super) struct OutsideChange {
+    pub path: String,
+    pub current_hash: String,
+    pub change: Value,
+}
+
+/// The task's files that changed outside it since it last read or wrote
+/// them. Nothing is moved: the AI is told, and the next edit of such a file
+/// hands it the change to decide on (`Prepared::preserve`).
+pub(super) fn outside_changes(root: &Path, task: &str) -> Result<Vec<OutsideChange>> {
+    let rows: Vec<(String, String, bool, Option<Vec<u8>>)> = connection(root)?
+        .prepare("SELECT workspace,path,exists_at_baseline,bytes FROM agent_file_baselines WHERE task_id=?1")?
+        .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut changes = Vec::new();
+    for (workspace, path, exists, bytes) in rows {
+        if exists && bytes.is_none() {
+            continue;
+        }
+        let Ok(current) = crate::file_edit::snapshot(&Path::new(&workspace).join(&path)) else { continue };
+        if current != bytes {
+            changes.push(OutsideChange {
+                current_hash: current.as_deref().map(crate::symbol_description::content_hash).unwrap_or_else(|| "deleted".into()),
+                change: change_summary(bytes.as_deref(), current.as_deref()),
+                path,
+            });
+        }
+    }
+    Ok(changes)
+}
+
+/// What changed between two versions of a file, small enough to show an AI:
+/// the changed line range and its text before and after, cut when long.
+pub(super) fn change_summary(before: Option<&[u8]>, after: Option<&[u8]>) -> Value {
+    const SHOWN: usize = 2000;
+    let cut = |text: &str| -> Value {
+        let mut chars = text.chars();
+        let shown: String = chars.by_ref().take(SHOWN).collect();
+        if chars.next().is_some() { json!({"text":shown,"truncated":true}) } else { json!(shown) }
+    };
+    let (before, after) = match (before, after) {
+        (None, None) => return json!({"kind":"unchanged"}),
+        (None, Some(_)) => return json!({"kind":"created"}),
+        (Some(_), None) => return json!({"kind":"deleted"}),
+        (Some(before), Some(after)) => (before, after),
+    };
+    let (Ok(before), Ok(after)) = (std::str::from_utf8(before), std::str::from_utf8(after)) else {
+        return json!({"kind":"modified","binary":true});
+    };
+    let old: Vec<&str> = before.split_inclusive('\n').collect();
+    let new: Vec<&str> = after.split_inclusive('\n').collect();
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..].iter().rev().zip(new[prefix..].iter().rev()).take_while(|(a, b)| a == b).count();
+    let removed = &old[prefix..old.len() - suffix];
+    let added = &new[prefix..new.len() - suffix];
+    json!({"kind":"modified","first_line":prefix + 1,
+        "lines_before":removed.len(),"lines_after":added.len(),
+        "before":cut(&removed.concat()),"after":cut(&added.concat())})
+}
+
 /// Only save a read snapshot if it matches the actual version delivered by the tool.
 pub(super) fn observe(root: &Path, task: &str, workspace: &Path, args: &Value, result: &Value) -> Result<Option<Value>> {
     let Some(raw) = args["path"].as_str() else { return Ok(None); };
@@ -210,7 +272,7 @@ pub(super) fn observe(root: &Path, task: &str, workspace: &Path, args: &Value, r
     let current = crate::file_edit::snapshot(&path)?;
     if current.as_deref().map(crate::symbol_description::content_hash).as_deref() != Some(hash) {
         return Ok(Some(json!({"error_code":"ASSET_CONFLICT", "path":rel, "workspace":work,
-            "message":"The file changed while it was being read. No edit was made; ask the user how to proceed."})));
+            "message":"The file changed while it was being read, probably by someone else. No edit was made; read it again before editing it."})));
     }
     save(root, task, &work, &rel, current.as_deref(), false)?;
     Ok(None)
@@ -323,9 +385,9 @@ impl Prepared {
                 "owners":[],"writer":writer.owner,"attribution":"unknown","shared":true});
         }
         result["message"] = json!(if shared {
-            "The file changed during a shared shell interval; the actual author is unknown. The current file and proposed version were preserved. Ask the user how to proceed; do not merge or retry automatically."
+            "The file changed while several commands ran together, so who changed it is unknown. Nothing was overwritten. Look at the current file and decide: apply your change to it with edit or replace, or ask the user."
         } else {
-            "Another function changed this file after this function started; the current file and proposed version were preserved."
+            "Another function wrote this file after this function started, so writing the whole file would erase its change. Nothing was overwritten. Apply your change to the current content with edit or replace instead, or return and let the caller decide."
         });
         Ok(Some(result))
     }
@@ -335,8 +397,15 @@ impl Prepared {
     pub(super) fn conflict(&self) -> Result<bool> {
         Ok(crate::file_edit::snapshot(&self.target)?.as_deref() != self.base.as_deref())
     }
-    pub(super) fn preserve(&self, root: &Path) -> Result<Value> {
-        self.preserve_versions(root, Some(self.base.as_deref()), "external")
+    /// The file changed outside the task: nothing is overwritten and the turn
+    /// goes on. The AI gets what changed and decides; the task's record now
+    /// follows the file it was shown, so its next edit applies to that.
+    pub(super) fn preserve(&self, root: &Path, task: &str) -> Result<Value> {
+        let mut result = self.preserve_versions(root, Some(self.base.as_deref()), "external")?;
+        let current = crate::file_edit::snapshot(&self.target)?;
+        result["external_change"] = change_summary(self.base.as_deref(), current.as_deref());
+        save(root, task, &self.workspace, &self.relative, current.as_deref(), true)?;
+        Ok(result)
     }
     pub(super) fn preserve_versions(&self, root: &Path, base: Option<Option<&[u8]>>, reason: &str) -> Result<Value> {
         let dir = root.join(".codex-workspace-mcp").join("conflicts");
@@ -359,7 +428,7 @@ impl Prepared {
         } else { None };
         let preview = |bytes: Option<&[u8]>| -> Value {
             match bytes.and_then(|b| std::str::from_utf8(b).ok()) {
-                Some(text) => { let mut chars = text.chars(); let clipped: String = chars.by_ref().take(8000).collect(); json!({"text":clipped,"truncated":chars.next().is_some()}) },
+                Some(text) => { let mut chars = text.chars(); let clipped: String = chars.by_ref().take(2000).collect(); json!({"text":clipped,"truncated":chars.next().is_some()}) },
                 None => Value::Null,
             }
         };
@@ -368,7 +437,7 @@ impl Prepared {
             "reason":reason, "base_known":base.is_some(), "base_exists":base.flatten().is_some(), "base_path":base_path,
             "current_exists":current.is_some(), "current_path":current_path,
             "base_preview":preview(base.flatten()), "current_preview":preview(current.as_deref()), "candidate_preview":preview(Some(&self.proposed)),
-            "message":"The file changed outside this task. The current file and the proposed change are preserved; ask the user how to proceed. Do not merge or retry automatically."}))
+            "message":"This file changed outside this task since you last read or wrote it, perhaps by the user or another agent; external_change shows what changed. Your change was not applied and nothing was overwritten. Decide how to go on: apply your change to the current content (it is now the version your next edit works on), adapt it to what changed, or ask the user if the two changes contradict each other. Your proposed version is saved at candidate_path."}))
     }
     pub(super) fn committed(&self, root: &Path, task: &str) -> Result<bool> {
         crate::workspace_changes::invalidate_snapshot_cache(Path::new(&self.workspace));
@@ -462,7 +531,7 @@ mod tests {
             assert_eq!(result["writer_owner"], "@shared_shell:mixed-shell");
             assert_eq!(result["shell_interval"]["owners"], json!(["@main", "a", "b"]));
             assert_eq!(result["shell_interval"]["attribution"], "unknown");
-            assert!(result["message"].as_str().unwrap().contains("actual author is unknown"));
+            assert!(result["message"].as_str().unwrap().contains("who changed it is unknown"));
             assert!(!result["message"].as_str().unwrap().contains("Another function"));
             assert_eq!(fs::read_to_string(result["candidate_path"].as_str().unwrap())?, format!("from {owner}"));
         }
@@ -562,9 +631,7 @@ mod tests {
         assert_eq!(refused["current_preview"]["text"], "from A");
         assert_eq!(refused["candidate_preview"]["text"], "from B");
         assert_eq!(fs::read_to_string(refused["candidate_path"].as_str().unwrap())?, "from B");
-        assert!(super::super::stop_on_conflict(&b, &refused).await.is_err());
-        let shown: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.actor')='host' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))?;
-        assert!(shown.contains("另一个函数在该函数开始工作后修改了文件") && shown.contains("from A") && shown.contains("from B") && !shown.contains("基准"), "{shown}");
+        assert!(refused["message"].as_str().unwrap().contains("edit or replace"), "the function is told how to go on: {refused}");
         // The host does not record what a function read: reading again does not lift it.
         super::super::business_tool(&b, "node", "read_file", json!({"path":"document.txt"}), "read b again").await?;
         let again = super::super::business_tool(&b, "node", "write_file", write("from A and B"), "write b again").await?;
@@ -596,12 +663,55 @@ mod tests {
         fs::write(&path, "external\n")?;
         let prepared = prepare(&root, "task", &root, "edit_file", json!({"path":"document.txt","edits":[{"old_text":"original","new_text":"agent"}]}))?;
         assert!(prepared.conflict()?);
-        let saved = prepared.preserve(&root)?;
+        let saved = prepared.preserve(&root, "task")?;
         assert_eq!(fs::read_to_string(&path)?, "external\n");
         assert_eq!(fs::read_to_string(saved["candidate_path"].as_str().unwrap())?, "agent\n");
         assert_eq!(saved["error_code"], "ASSET_CONFLICT");
         assert_eq!(saved["candidate"], "file");
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_change_summary_shows_only_the_changed_lines() {
+        let summary = change_summary(Some(b"a\nb\nc\nd\n"), Some(b"a\nB\nB2\nd\n"));
+        assert_eq!(summary, json!({"kind":"modified","first_line":2,"lines_before":2,"lines_after":2,"before":"b\nc\n","after":"B\nB2\n"}));
+        assert_eq!(change_summary(None, Some(b"x")), json!({"kind":"created"}));
+        assert_eq!(change_summary(Some(b"x"), None), json!({"kind":"deleted"}));
+        let long = "y".repeat(5000);
+        assert_eq!(change_summary(Some(b"x"), Some(long.as_bytes()))["after"]["truncated"], true);
+    }
+
+    /// 2026-11-13: another agent edited a file the task was editing; the
+    /// task's next write failed and ended the whole turn. Now the AI is told
+    /// before its next request, once per version, and nothing stops.
+    #[tokio::test]
+    async fn the_ai_is_told_once_when_its_files_change_outside() -> Result<()> {
+        let root = root();
+        fs::write(root.join("document.txt"), "first\n")?;
+        let state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+        let conn = crate::agent_service::open_db(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", [])?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let session = session(&state, &cancel, None);
+        super::super::business_tool(&session, "node", "read_file", json!({"path":"document.txt"}), "read").await?;
+        let mut messages = Vec::new();
+        super::super::external_changes::announce(&session, &mut messages).await;
+        assert!(messages.is_empty(), "nothing changed yet");
+        fs::write(root.join("document.txt"), "first\nsecond\n")?;
+        super::super::external_changes::announce(&session, &mut messages).await;
+        assert_eq!(messages.len(), 1);
+        let note: Value = serde_json::from_str(messages[0]["content"].as_str().unwrap())?;
+        assert_eq!(note["files"][0]["path"], "document.txt");
+        assert_eq!(note["files"][0]["change"]["after"], "second\n");
+        super::super::external_changes::announce(&session, &mut messages).await;
+        assert_eq!(messages.len(), 1, "the same version is told once");
+        fs::write(root.join("document.txt"), "first\nthird\n")?;
+        super::super::external_changes::announce(&session, &mut messages).await;
+        assert_eq!(messages.len(), 2, "a newer version is told again");
+        drop(conn);
+        drop(state);
+        let _ = fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -674,7 +784,7 @@ mod tests {
         // The edit fits only the external version, never the task's baseline.
         let prepared = prepare(&root, "task", &root, "edit_file", json!({"path":"document.txt","edits":[{"old_text":"external","new_text":"agent"}]}))?;
         assert!(prepared.conflict()?);
-        let saved = prepared.preserve(&root)?;
+        let saved = prepared.preserve(&root, "task")?;
         assert_eq!(saved["error_code"], "ASSET_CONFLICT");
         assert_eq!(saved["candidate"], "request");
         assert_eq!(fs::read_to_string(&path)?, "external\n");
@@ -705,6 +815,14 @@ mod tests {
         assert_eq!(conflict["error_code"], "ASSET_CONFLICT");
         assert_eq!(fs::read_to_string(root.join("document.txt"))?, "external");
         assert_eq!(fs::read_to_string(conflict["candidate_path"].as_str().unwrap())?, "proposed");
+        // The AI is shown what changed and decides; the turn goes on, and its
+        // next edit works on the version it was shown.
+        assert_eq!(conflict["external_change"]["before"], "second", "{conflict}");
+        assert_eq!(conflict["external_change"]["after"], "external");
+        assert!(conflict["message"].as_str().unwrap().contains("Decide"), "{conflict}");
+        let adapted = super::super::business_tool(&session, "node", "edit_file", json!({"path":"document.txt","edits":[{"old_text":"external","new_text":"external + proposed"}]}), "edit again").await?;
+        assert_eq!(adapted["changed"], true, "{adapted}");
+        assert_eq!(fs::read_to_string(root.join("document.txt"))?, "external + proposed");
         drop(conn);
         drop(state);
         let _ = fs::remove_dir_all(root);

@@ -66,6 +66,8 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
           onSelectModel: workspace.selectModel,
           onSetGenerationOptions: workspace.setGenerationOptions,
           onOpenSettings: workspace.openSettings,
+          permissionMode: workspace.permissionMode,
+          onSelectPermissionMode: workspace.selectPermissionMode,
           onSubmit: workspace.submit,
           onStop: undefined,
         })}
@@ -253,6 +255,8 @@ export function ConversationPage({
                   onSelectModel: workspace.selectModel,
                   onSetGenerationOptions: workspace.setGenerationOptions,
                   onOpenSettings: workspace.openSettings,
+                  permissionMode: workspace.permissionMode,
+                  onSelectPermissionMode: workspace.selectPermissionMode,
                   onSubmit: submit,
                   onStop: stop,
                   onInterject: workspace.interject,

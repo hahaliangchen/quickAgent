@@ -617,6 +617,40 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
     : item))
 }
 
+/** Tools that run a command and can take minutes; module code polls them. */
+const COMMAND_TOOLS = new Set(['exec_command', 'write_stdin', 'run_program', 'run_project_script', 'install_dependencies', 'run_readonly_command'])
+export const isCommandTool = (name: string): boolean => COMMAND_TOOLS.has(name)
+
+/** When a command a call is waiting on started: a poll belongs to the command that opened its session. */
+function commandStart(steps: readonly ChatItem[], tool: ToolItem): number {
+  if (tool.name !== 'write_stdin') return tool.time
+  let session: unknown
+  try { session = (JSON.parse(tool.arguments) as { session_id?: unknown }).session_id } catch { return tool.time }
+  for (const step of steps) {
+    if (step.kind !== 'tool' || step.name !== 'exec_command' || step.result === undefined) continue
+    try {
+      if ((JSON.parse(step.result.text) as { session_id?: unknown }).session_id === session) return step.time
+    } catch { /* not JSON: not this session */ }
+  }
+  return tool.time
+}
+
+/**
+ * What a running call is doing, by its latest step. A module whose code waits
+ * for a command is not an AI at work: 2026-11-13, a cargo test that ran for
+ * minutes showed as "AI 处理中" and looked stuck.
+ */
+export function runningCallState(call: CallItem, now: number): string {
+  const last = call.steps[call.steps.length - 1]
+  if (last?.kind === 'tool' && last.result === undefined) {
+    return COMMAND_TOOLS.has(last.name)
+      ? `等待命令 · 已运行 ${formatDuration(Math.max(0, now - commandStart(call.steps, last)))}`
+      : '等待工具'
+  }
+  if (last?.kind === 'assistant' || !call.module) return 'AI 处理中'
+  return '运行中'
+}
+
 /** Formats a millisecond duration into a human-friendly Chinese string (e.g. "28秒", "1分15秒", "1小时2分"). */
 export function formatDuration(ms: number | undefined): string {
   if (ms === undefined || ms < 0 || isNaN(ms)) return ''

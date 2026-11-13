@@ -1,4 +1,4 @@
-import { Fragment, memo, useMemo, type ReactNode } from 'react'
+import { Fragment, memo, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   DisclosureRow, IconCodeOutlineRegular, IconSparkleRegular, IconThinkOutlineRegular, MarkdownText,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -7,7 +7,7 @@ import toolCss from '../dsh/tool/ToolRow.module.css'
 import { markdownLabels } from '../dsh/markdown-labels.ts'
 import { t } from '../i18n.ts'
 import {
-  PROGRAM_FENCE, contractSummary, processEntries, reasoningHeadline,
+  PROGRAM_FENCE, contractSummary, processEntries, reasoningHeadline, runningCallState,
   type AssistantItem, type CallItem, type ChatItem, type ProgramItem, type ToolItem,
 } from '../model.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
@@ -38,7 +38,7 @@ export function liveActivity(items: readonly ChatItem[]): string {
     if (item.kind === 'call') {
       if (!ACTIVE.has(item.status)) return ''
       const inner = liveActivity(item.steps)
-      return inner === '' ? `${item.name} · AI 处理中` : `${item.name} · ${inner}`
+      return inner === '' ? `${item.name} · ${runningCallState(item, Date.now())}` : `${item.name} · ${inner}`
     }
     if (item.kind === 'tool') {
       const label = toolLabel(item.name, item.arguments)
@@ -157,6 +157,18 @@ const ProgramReply = memo(function ProgramReply({ reply }: { reply: AssistantIte
   )
 })
 
+/** The time, ticking once a second while `on`, for live durations. */
+function useClock(on: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!on) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [on])
+  return now
+}
+
 const CALL_STATES: Record<string, string> = {
   pending: 'AI 处理中', running: 'AI 处理中', suspended: '等待内部调用', paused: '已暂停',
   done: '完成', failed: '失败', interrupted: '已中断', cancelled: '已取消',
@@ -178,7 +190,9 @@ const Call = memo(function Call({ call, closed, onOpenTask, renderItem }: {
 }) {
   const { expanded, toggle } = useDisclosure()
   const active = ACTIVE.has(call.status) && !closed
-  const state = active || !ACTIVE.has(call.status) ? CALL_STATES[call.status] ?? call.status : '已停止'
+  const clock = useClock(active)
+  const state = active && call.status !== 'suspended' ? runningCallState(call, clock)
+    : active || !ACTIVE.has(call.status) ? CALL_STATES[call.status] ?? call.status : '已停止'
   const now = active ? liveActivity(call.steps) : ''
   const detail = active ? now : call.error ?? contractSummary(call.description)
   const failed = call.status === 'failed'

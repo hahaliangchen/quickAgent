@@ -88,6 +88,8 @@ export function Composer({
   onStop,
   onInterject,
   contextUsage,
+  permissionMode,
+  onSelectPermissionMode,
 }: {
   variant: 'hero' | 'composer'
   disabled: boolean
@@ -107,6 +109,10 @@ export function Composer({
   onSelectModel?: ((providerId: string, modelId: string) => Promise<void>) | undefined
   onSetGenerationOptions?: ((reasoningEffort: string, fastMode: boolean) => Promise<void>) | undefined
   onOpenSettings?: ((tab?: SettingsTab) => void) | undefined
+  /** The open chat's own permission level; a new chat starts from the default. */
+  permissionMode: DshPermissionMode
+  /** Choosing a level saves it for this chat at once. */
+  onSelectPermissionMode: (mode: DshPermissionMode) => void
   onSubmit: (text: string, permissionMode: DshPermissionMode, attachment?: AttachmentSubmission) => Promise<boolean>
   onStop: (() => void) | undefined
   /** Deliver text into the running turn; rejects with NOT_RUNNING once it has ended. */
@@ -125,16 +131,6 @@ export function Composer({
   const [submitting, setSubmitting] = useState(false)
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false)
   const workspaceAnchorRef = useRef<HTMLButtonElement>(null)
-  const [permissionMode, setPermissionMode] = useState<DshPermissionMode>(() => {
-    try {
-      const saved = localStorage.getItem('dsh_permission_mode')
-      if (saved === 'read_only' || saved === 'workspace_write' || saved === 'ask' || saved === 'auto_review') {
-        return saved
-      }
-    } catch {}
-    // Never restore unsandboxed full_access across browser/app restarts; default safely to 'ask'.
-    return 'ask'
-  })
   const [permMenuOpen, setPermMenuOpen] = useState(false)
   const [permMenuPos, setPermMenuPos] = useState<{ top?: number; bottom?: number; left: number }>({ left: 16 })
   const permTriggerRef = useRef<HTMLButtonElement>(null)
@@ -316,15 +312,9 @@ export function Composer({
   }
 
   const selectPermissionMode = (mode: DshPermissionMode) => {
-    setPermissionMode(mode)
     setPermMenuOpen(false)
-    try {
-      if (mode === 'full_access') {
-        localStorage.removeItem('dsh_permission_mode')
-      } else {
-        localStorage.setItem('dsh_permission_mode', mode)
-      }
-    } catch {}
+    // Saved for this chat straight away, not when the next message is sent.
+    onSelectPermissionMode(mode)
   }
 
   const handleSelectPermission = (mode: DshPermissionMode) => {

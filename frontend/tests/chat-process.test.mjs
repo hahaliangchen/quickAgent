@@ -4,7 +4,7 @@ import test from 'node:test'
 import ts from 'typescript'
 const source = await readFile(new URL('../src/model.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
-const { chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+const { chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
 
 let seq = 0
 const event = (type, data) => ({ seq: ++seq, time: 1000 + seq, type, data: { turn: 1, ...data } })
@@ -270,4 +270,18 @@ test('the headline of a reasoning summary is its latest thought', () => {
   seq = 0
   const [item] = chatItems([reply('main', 1, null, '**Defining virtual translator****Checking file access contracts**')])
   assert.equal(item.reasoning, '**Defining virtual translator**\n\n**Checking file access contracts**')
+})
+
+test('a running call names what it waits on: a command with its elapsed time, code, or an AI', () => {
+  const tool = (name, args, time, result) => ({ kind: 'tool', key: name + time, callId: name + time, name, arguments: JSON.stringify(args), time,
+    result: result === undefined ? undefined : { text: JSON.stringify(result), isError: false, durationMs: undefined, childTaskId: undefined, time } })
+  const call = (steps, module = true) => ({ kind: 'call', key: 'c', callId: 'c', name: 'shell', description: '', module, status: 'running', time: 0, steps })
+  const started = tool('exec_command', { cmd: 'cargo test' }, 10_000, { session_id: 's1', running: true })
+  const polling = tool('write_stdin', { session_id: 's1', chars: '' }, 40_000)
+  assert.equal(runningCallState(call([started, polling]), 140_000), '等待命令 · 已运行 2分10秒', 'timed from the command, not the latest poll')
+  assert.equal(runningCallState(call([tool('exec_command', { cmd: 'ls' }, 5_000)]), 8_000), '等待命令 · 已运行 3秒')
+  assert.equal(runningCallState(call([tool('read_file', { path: 'a' }, 5_000)]), 8_000), '等待工具')
+  assert.equal(runningCallState(call([started]), 20_000), '运行中', 'module code between steps')
+  assert.equal(runningCallState(call([started], false), 20_000), 'AI 处理中', 'a virtual helper thinks between tools')
+  assert.equal(runningCallState(call([]), 0), '运行中')
 })

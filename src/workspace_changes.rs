@@ -344,8 +344,17 @@ fn capture(root: &Path, name: &str, args: &Value) -> Result<Snapshot> {
         let cached = cached.filter(|cached| cached.root == root);
         let mut next = CachedSnapshot { root: root.clone(), files: BTreeMap::new() };
         let mut walker = ignore::WalkBuilder::new(&root);
+        // Hidden files are tracked; what git ignores is not. Ignored folders
+        // hold experiment output and dependencies by the thousand, and one
+        // such project went past the file limit below, so no shell change in
+        // it was recorded at all (2026-11-13: 39,588 files, 38,617 of them
+        // under two ignored folders).
         walker
             .standard_filters(false)
+            .git_ignore(true)
+            .git_exclude(true)
+            .git_global(true)
+            .parents(true)
             .follow_links(false)
             .filter_entry(|entry| {
                 !matches!(
@@ -1695,4 +1704,25 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         Ok(())
     }
+    /// 2026-11-13: a project whose ignored `scratch/` and `runs/` folders held
+    /// 38,617 of its 39,588 files exceeded the snapshot's file limit, so every
+    /// shell command reported that its changes could not be recorded.
+    #[test]
+    fn a_shell_snapshot_leaves_out_what_git_ignores() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("grow-snapshot-ignore-{}", crate::agent_service::uuid_like()));
+        fs::create_dir_all(root.join("scratch"))?;
+        fs::write(root.join(".gitignore"), "/scratch/\n*.log\n")?;
+        for relative in ["kept.txt", ".env", "scratch/output.txt", "build.log"] {
+            fs::write(root.join(relative), b"x")?;
+        }
+        let names = |root: &Path| -> Result<Vec<String>> { Ok(capture(root, "run_program", &json!({}))?.into_keys().collect()) };
+        // Outside a repository there is nothing git ignores.
+        assert_eq!(names(&root)?, [".env", ".gitignore", "build.log", "kept.txt", "scratch/output.txt"]);
+        fs::create_dir_all(root.join(".git"))?;
+        invalidate_snapshot_cache(&root);
+        assert_eq!(names(&root)?, [".env", ".gitignore", "kept.txt"], "hidden files stay tracked; ignored ones are left out");
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
 }

@@ -308,7 +308,7 @@ async fn review_5_visual_async_association_uses_wrong_path() {
     let directory = read(&root, "a", &json!({"view":"index","turn":1}))
         .await
         .unwrap();
-    assert_eq!(directory["entries"][0]["result_reference"]["event_seq"], 3);
+    assert_eq!(directory["entries"][0]["result_seq"], 3);
     assert!(
         r["records"][0]["tool_result"]["content"]
             .as_str()

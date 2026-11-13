@@ -134,12 +134,10 @@ pub async fn probe(
         "http_status":null,"response_body":null,"error":null});
     let started = Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(60), async {
-        let response = client
-            .post(format!(
-                "{}/chat/completions",
-                route.url.trim_end_matches('/')
-            ))
-            .bearer_auth(&route.api_key)
+        let response = crate::model_transport::with_bearer(
+            client.post(format!("{}/chat/completions", route.url.trim_end_matches('/'))),
+            &route.api_key,
+        )
             .json(&body)
             .send()
             .await
@@ -206,9 +204,15 @@ mod tests {
         use axum::{Json, extract::State, routing::post};
         async fn reply(
             State(mode): State<u8>,
+            headers: axum::http::HeaderMap,
             Json(body): Json<Value>,
         ) -> axum::response::Response {
             use axum::response::IntoResponse;
+            if mode == 0 {
+                assert!(!headers.contains_key("authorization"), "keyless vision must omit Authorization");
+            } else {
+                assert_eq!(headers["authorization"], "Bearer secret");
+            }
             let url = body["messages"][0]["content"][1]["image_url"]["url"]
                 .as_str()
                 .unwrap();
@@ -278,7 +282,7 @@ mod tests {
                 provider: "fixture".into(),
                 model: "m".into(),
                 url: format!("http://{addr}"),
-                api_key: "secret".into(),
+                api_key: if mode == 0 { String::new() } else { "secret".into() },
             };
             let report = probe(&reqwest::Client::new(), &route).await.unwrap();
             assert_eq!(

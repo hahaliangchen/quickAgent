@@ -250,6 +250,8 @@ async fn distill(state: &AgentServiceState, task: &str, steps: String) -> Result
     let body = json!({"model":model,"stream":true,"max_tokens":8192,"messages":[
         {"role":"system","content":DISTILL_PROMPT},
         {"role":"user","content":steps}]});
+    // A Messages route gets the same request as its own blocks.
+    let body = crate::anthropic_messages::wire_body(state, model, &body);
     let request_id = crate::agent_service::uuid_like();
     let log = crate::model_transport::ModelRequestLog::new(
         state.workspace.root(),
@@ -260,15 +262,8 @@ async fn distill(state: &AgentServiceState, task: &str, steps: String) -> Result
     );
     log.sending();
     let pending = async {
-        let response = state
-            .model_client
-            .post(format!(
-                "{}/chat/completions",
-                state.provider_url.trim_end_matches('/')
-            ))
-            .bearer_auth(&state.api_key)
+        let response = crate::anthropic_messages::send(state, task, "", &body)
             .header("x-client-request-id", request_id.as_str())
-            .json(&body)
             .send()
             .await?;
         log.headers(&response);

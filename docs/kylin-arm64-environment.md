@@ -94,7 +94,7 @@ docker save -o quickagent-ai-ppt-arm64-env.tar \
 
 ## 客户模型配置
 
-客户包只保留非自用的 `deepseek` 提供商及其 `deepseek-flash`、`deepseek-v4-pro`；不保留 `deepseek-self` 或其他提供商。导出脚本读取模型元数据，重新生成默认模型、视觉模型和 PPT 插件允许列表，不读取凭据文件，也不覆盖本机开发配置：
+客户包的初始提供商、模型、默认路由和凭据全部为空，数据库也不预置模型。部署后由客户自行配置；启动和重启不要求已有模型或 DeepSeek key。联网搜索默认未启用，视觉模型跟随主模型，PPT 默认可使用客户后来登记的模型。导出脚本不读取开发机模型配置或凭据，也不覆盖本机开发配置：
 
 ```bash
 # Python 需有 PyYAML；麒麟工具镜像内已提供。
@@ -103,17 +103,21 @@ python3 scripts/prepare-ppt-customer-profile.py \
   --output target/kylin-arm64/customer-profile
 ```
 
-输出目录必须尚不存在，避免覆盖客户后来填入的配置。YAML 配置文件使用 YAML 兼容的 JSON 形式保存。交付时只复制这个新目录作为 Agent 配置，并将 `GROW_CONFIG_DIR` 指向它；在目标环境设置 `DEEPSEEK_API_KEY`。不要把开发机整个 `~/.config/grow`、凭据、会话或缓存打入客户包。
+输出目录必须尚不存在，避免覆盖客户后来填入的配置。YAML 配置文件使用 YAML 兼容的 JSON 形式保存。交付时只复制这个新目录作为 Agent 配置，并将 `GROW_CONFIG_DIR` 指向它。使用 DeepSeek 时才需要 `DEEPSEEK_API_KEY`；自部署 OpenAI 兼容服务只需地址和实际模型 ID，未启用鉴权时 key 留空。模型发现、聊天和图片探测都不会发送空的 Authorization 请求头。不要把开发机整个 `~/.config/grow`、凭据、会话或缓存打入客户包。
 
-`customer-policy.json` 记录保留模型、菜单路径、分支和前端构建开关；`credentials.yaml` 只有空结构。AI PPT 的启动器会隔离旧 DSH profile 迁移。前后端端口和路由前缀不是默认 8899、`/prod-api` 时，还需按部署配置调整导出目录里的 `skill-packages.json` 插件地址。
+旧版客户配置升级时，只对带有出厂 `customer-policy.json` 且未迁移的目录处理一次：完全匹配出厂 DeepSeek 两模型的 PPT 允许列表改为不限制；完全匹配出厂的 DeepSeek 视觉路由改为跟随主模型。定制过的允许列表、视觉路由及其他设置保留；联网搜索选择也保留，但其缺少 key 不再阻塞模型配置保存。联网搜索本身仍需独立的有效 DeepSeek 凭据。
+
+`customer-policy.json` 的提供商和模型列表为空，仅保留菜单路径和客户构建策略；`credentials.yaml` 只有空结构。AI PPT 的启动器会隔离旧 DSH profile 迁移。前后端端口和路由前缀不是默认 8899、`/prod-api` 时，还需按部署配置调整导出目录里的 `skill-packages.json` 插件地址。
 
 ## 客户离线部署包
 
 完整构建入口为 `bash scripts/build-kylin-arm64-customer.sh`。先准备上述两个 SDK 镜像；当前构建驱动面向 Linux x86_64 开发机，使用本机 Rust 1.98.1 交叉编译并由麒麟 ARM64 容器内的 GCC 链接，验证 glibc 需求不超过 2.28。Go 以 ARMv8.0、CGO 关闭构建；前端和原生 Node 依赖在 ARM64 SDK 中安装，PPT 引擎的浏览器和 Node 两份 WASM 均重新生成。锁文件遗漏的平台可选依赖按锁定的精确版本补齐，并记录 npm 完整性值。
 
-脚本先对当前三个项目和 PPT 引擎取隔离快照，校验 AI PPT 后端为 `codex/ppt-remote-svg`、前端为 `codex/ppt-host-agent`，不切换原工作区分支。快照包含未提交的当前代码，排除开发配置、凭据、SQL 备份、运行数据和宿主 node_modules。提交、分支、快照摘要及打包脚本摘要均写入 manifest。
+脚本先对当前三个项目和 PPT 引擎取最新工作区的隔离快照，不切换分支。当前功能已合入 master，构建不再要求旧功能分支；客户版在隔离源码中去掉素材库入口。快照包含未提交的当前代码，排除开发配置、凭据、SQL 备份、运行数据和宿主 node_modules。提交、分支、快照摘要及打包脚本摘要均写入 manifest。
 
-部署由 Kylin glibc 2.28 应用容器、独立 Chromium 渲染容器、MySQL 8 和 Redis 7 组成。仅发布客户 Web 端口 8899。初始化器只接受空库，使用内置表结构生成新数据，再保留两个 PPT 菜单、一个管理员和非自用 `deepseek` 的 `deepseek-flash` / `deepseek-v4-pro`；补齐所选功能分支新增的插件 RPC 权限。客户密钥及随机密码在目标机初始化时填写或生成，构建包不包含开发凭据。
+部署由 Kylin glibc 2.28 应用容器、独立 Chromium 渲染容器、MySQL 8 和 Redis 7 组成。发布客户 Web 端口 8899，以及 QuickAgent 管理入口 `http://服务器地址:3001/agent/`（设置页 `/agent/settings`）。后者通过容器 3002 上的 `customer-gateway` 校验 Basic Auth，再转发到仅监听回环地址 3001 的 Agent；用户名 `admin`，密码始终为 `.env` 的 `CUSTOMER_ADMIN_PASSWORD`，不随 PPT 页面内的密码修改而变化。`QUICKAGENT_PORT`、`QUICKAGENT_BIND` 可调整宿主映射。健康检查同时覆盖 PPT、MCP 和网关认证后的设置 API。初始化器只接受空库，使用内置表结构生成新数据，再保留两个 PPT 菜单、一个管理员和非自用 `deepseek` 的 `deepseek-flash` / `deepseek-v4-pro`；补齐所选功能分支新增的插件 RPC 权限。客户密钥及随机密码在目标机初始化时填写或生成，构建包不包含开发凭据。
+
+组装镜像和启动旧数据目录时都会清理联通品牌内置 PPTX、布局文件及目录索引；客户静态 Web 目录不携带示例 PDF/PPTX。设置窗口只在打开时加载配置，展开提供商和切换页签保留草稿；保存及图片探测期间暂停编辑，关闭后迟到的加载或保存响应不再写入下一次打开的窗口。
 
 构建入口会在隔离 Compose 项目里执行真实登录、菜单/模型目录检查、插件认证、会话创建、中文 HTML→PPTX→PNG 渲染和浏览器页面验证。x86 QEMU 的 Redis 测试单独关闭持久化并覆盖受模拟地址影响的 COW 探针；交付的原生 ARM64 Compose 保留 Redis 原有检查。验证成功后才导出四个 ARM64 镜像，重新加载验证归档，并生成 SHA256SUMS、tar.gz 和外部校验文件。未持有客户有效 DeepSeek 密钥，因此验证不向模型 API 发起生成请求；目标物理 Halberd 服务器仍需现场验收。
 

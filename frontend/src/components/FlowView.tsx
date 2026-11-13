@@ -6,7 +6,7 @@ import type { FrameDetail, FrameSummary } from '../api.ts'
 import { useAgentApi } from '../cordis/react.tsx'
 import { chatItems } from '../model.ts'
 import { layoutFrameTree } from '../frameLayout.ts'
-import { FRAME_STATES, FrameNode, frameActivity, frameDuration, type FrameNodeData } from './FrameNode.tsx'
+import { FRAME_STATES, FrameNode, frameActivity, frameDuration, frameState, type FrameNodeData } from './FrameNode.tsx'
 import { ProcessList } from './ProcessList.tsx'
 import { RequestContextPanel } from './RequestContextPanel.tsx'
 import styles from './FlowView.module.css'
@@ -260,7 +260,7 @@ function FrameDrawer({ taskId, frame, now, debug, version, onClose }: {
       </div>
       <div className={styles.drawerBody}>
         <p className={styles.meta}>
-          {[FRAME_STATES[frame.status] ?? frame.status, frameDuration(frame, now), frame.turn === null ? '' : `第 ${frame.turn} 轮`,
+          {[frameState(frame), frameDuration(frame, now), frame.turn === null ? '' : `第 ${frame.turn} 轮`,
             frame.call_site ? `第 ${frame.call_site.line} 行调用` : '', frame.concurrent && frame.kind !== 'request' ? '并发调用' : ''].filter(Boolean).join(' · ')}
         </p>
         {live !== '' && <p className={styles.live}>正在：{live}</p>}

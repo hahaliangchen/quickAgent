@@ -344,6 +344,7 @@ pub(super) fn write_program_tool(module: bool) -> Value {
         properties["probe"] = json!({"type":"boolean","description":"If true, run a small probe with the current arguments. Only read_file, read_file_lines, search_text, list_dir and workspace_info may execute: shell and writes are forbidden even if their libraries import successfully. Omit probe to save and run the reusable module with its normal permissions."});
         "Run a small read-only probe with probe:true, or submit the complete reusable module implementation. The implementation uses the contracted function signature; a probe may instead be a plain script, run as that function's body with its parameters bound to this call's arguments. A probe returns its actual result to this same author; the final implementation is saved and returns to the caller. Call it as the only call in its reply. Code in reply text is never run."
     } else {
+        properties["name"] = json!({"type":"string","maxLength":80,"description":"The program's file name, as you would name a code file in a project: a few English words in kebab-case saying what it does, e.g. save-permission-per-chat. The host adds .js, and -2 when the name is taken."});
         properties["resource"] = json!({"type":"string","description":"For a plugin-owned fixed program, the skill: path of its version-1 program bundle manifest. Omit source: the host fetches, verifies and executes the plugin's exact main/module sources, without AI transcription. Available only in this plugin's own session."});
         properties["revise_modules"] = json!({"type":"object","description":"Optional compatible improvements to saved first-layer implementations, keyed by the top-level @virtual name. Keep the declaration identical. On its first call, the author revises that saved version and stores the new implementation.",
             "additionalProperties":{"type":"object","properties":{
@@ -410,7 +411,8 @@ pub(super) fn js_marker(message: &Value) -> bool {
 /// script is its return value: the turn's request, what the user added since
 /// and the script stay; the exchanges that led to the script leave the
 /// context and stay in the record. Skills it read stay loaded, as they are
-/// carried across turns.
+/// carried across turns, and so do the skill instructions and module updates
+/// the host delivered.
 pub(super) fn end_familiarization(w: &mut Window, reply: &Value, source: &str) {
     let Some(start) = w.messages.iter().rposition(|m| super::task_frames::is_user_original(m) && m.get("name").is_none()) else {
         return;
@@ -425,6 +427,16 @@ pub(super) fn end_familiarization(w: &mut Window, reply: &Value, source: &str) {
         } else if matches!(message["name"].as_str(), Some("program_result" | "program_record")) {
             // What this turn's finished programs produced is fact, not getting
             // to know the task: the work and the answer go on from it.
+            w.messages.push(message);
+        } else if message.get(super::skill_scope::DELIVERED).is_some()
+            || message["name"] == super::modules::UPDATE
+            || message.get(crate::anthropic_messages::ADDED_TOOLS).is_some()
+        {
+            // What the host delivered stays delivered. Dropped, a skill's
+            // instructions and the turn's new modules were sent again in
+            // full after every program start, and never from the cache. A
+            // recorded tool activation is protocol state: the deferred
+            // declarations it activates must stay where it was made.
             w.messages.push(message);
         } else if message["name"] == "program_diagnostic" {
             // A failed version leaves one line: which program, where, what.
@@ -791,8 +803,8 @@ fn install_with(
         }
     }
     ensure!(
-        args.as_object().is_some_and(|args| args.keys().all(|key| matches!(key.as_str(), "source" | "revise_modules"))),
-        "write_program accepts source and optional revise_modules; put program data in the code or read it with the imported tools"
+        args.as_object().is_some_and(|args| args.keys().all(|key| matches!(key.as_str(), "source" | "name" | "revise_modules"))),
+        "write_program accepts source, an optional file name and optional revise_modules; put program data in the code or read it with the imported tools"
     );
     let revisions = match args.get("revise_modules") {
         Some(requests) => super::modules::revisions(session.context("module revisions need a session")?, &program, requests)?,
@@ -1594,7 +1606,6 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
             }
             let definitions = super::tools(s, w);
             let done = super::execute_call(s, w, &definitions, &node, step, &call, 1, Some(&at)).await?;
-            super::stop_on_conflict(s, &done.result).await?;
             if done.result["host_denied"] == true && done.result["code"] == WAITING && w.program_task.is_none() {
                 // A plugin's explicit user-confirmation boundary stops the
                 // main program even if its JavaScript would catch errors.
@@ -2352,7 +2363,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
         state.provider_routes.insert(state.provider_name.clone(), agent_service::AgentProviderRoute {
-            prefix_system_messages: false, responses: false, url: state.provider_url.clone(), api_key: state.api_key.clone(),
+            prefix_system_messages: false, responses: false, messages: false,
+            messages_capabilities: Default::default(),
+            url: state.provider_url.clone(), api_key: state.api_key.clone(),
             models: Default::default(), max_output_tokens: Default::default(),
             context_windows: [("fake".to_owned(), 64_000)].into_iter().collect(),
         });
@@ -2964,7 +2977,7 @@ mod tests {
                         .filter(|message| message["name"] == "program_result").collect();
                     assert_eq!(results.len(), 2);
                     assert!(results[0]["content"].as_str().unwrap().contains("discovered: alpha"));
-                    assert!(results[1]["content"].as_str().unwrap().contains("turn-1-2.js"));
+                    assert!(results[1]["content"].as_str().unwrap().contains("summarize-a-and-b-2.js"));
                     reply("Done after both programs.".into())
                 }
                 _ => panic!("unexpected additional request"),
@@ -2977,6 +2990,35 @@ mod tests {
         assert_eq!(count, 2);
         let answer: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
         assert_eq!(answer, "Done after both programs.");
+    }
+
+    /// The chat folder reads like a code project: a program named by the AI
+    /// like a code file, and the turn's direct calls beside it as code.
+    #[tokio::test]
+    async fn a_named_program_and_the_turns_calls_are_files_of_the_chat() {
+        let root = TestRoot::new();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        run_scripted(root.path(), move |_| {
+            let call = |name: &str, arguments: Value, words: Value| json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":words,
+                "tool_calls":[{"id":format!("c-{name}"),"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]}}]});
+            match count.fetch_add(1, Ordering::SeqCst) {
+                0 => call("list_dir", json!({"path":"."}), json!("Looking first.")),
+                1 => call(WRITE_PROGRAM, json!({"name":"Save Both Files.js","source":"import * as io from \"host:io\";\nio.write({path: \"out.txt\", content: \"x\"});"}), Value::Null),
+                _ => reply("Saved.".into()),
+            }
+        }).await;
+        let dir = super::super::host_folder::chat_dir(root.path(), "task").unwrap();
+        assert!(dir.join("save-both-files.js").exists(), "the AI's name, as a file name");
+        assert!(dir.join("save-both-files.calls.js").exists(), "the turn's record is written when the turn ends");
+        std::fs::write(dir.join("rewound-away.js"), "// no record holds this").unwrap();
+        let conn = agent_service::open_db(root.path()).unwrap();
+        crate::session_history::turn_record::sync(&conn, "task", &dir).unwrap();
+        assert!(!dir.join("rewound-away.js").exists(), "a file no record holds goes");
+        let record = std::fs::read_to_string(dir.join("save-both-files.calls.js")).unwrap();
+        assert!(record.contains("// Looking first.\nio.list({path: \".\"});  // → "), "{record}");
+        assert!(record.contains("// 运行程序 save-both-files.js → completed"), "{record}");
+        assert!(!record.contains("write_program"), "{record}");
     }
 
     #[tokio::test]
@@ -3076,11 +3118,11 @@ mod tests {
         }).await;
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         let read = crate::session_history::read(root.path(), "task", &json!({
-            "programs":true, "directory":".", "program":"turn-1.js", "output":true, "max_chars":256
+            "programs":true, "directory":".", "program":"summarize-a-and-b.js", "output":true, "max_chars":256
         })).await.unwrap();
         assert!(read["output"].as_str().unwrap().starts_with("FIRST_LINE\n"));
         let next = crate::session_history::read(root.path(), "task", &json!({
-            "programs":true, "directory":".", "program":"turn-1.js", "output":true, "char_offset":read["next_char_offset"]
+            "programs":true, "directory":".", "program":"summarize-a-and-b.js", "output":true, "char_offset":read["next_char_offset"]
         })).await.unwrap();
         assert!(next["output"].as_str().unwrap().ends_with("END_OF_PAGE"));
     }
@@ -3237,15 +3279,15 @@ mod tests {
         let folder = project[0].file_name().unwrap().to_string_lossy().into_owned();
         assert!(folder.starts_with(&format!("{name}-")), "the folder is named after the project: {folder}");
         let chat = project[0].join("chats/task");
-        // Each hand-over is its own file, the one that did not compile included.
-        assert_eq!(std::fs::read_to_string(chat.join("turn-1.js")).unwrap(), "const broken = ;");
-        assert!(std::fs::read_to_string(chat.join("turn-1-2.js")).unwrap().contains("z.txt"));
+        // What did not compile never ran: its file goes and the corrected
+        // program takes the name.
+        assert!(std::fs::read_to_string(chat.join("summarize-a-and-b.js")).unwrap().contains("z.txt"));
         assert_eq!(std::fs::read_to_string(root.path().join("z.txt")).unwrap(), "3");
         let second = bodies.lock().unwrap()[1]["messages"].to_string();
         assert!(second.contains("PROGRAM_SOURCE_INVALID"), "the compile error is the call's result: {second}");
         let conn = agent_service::open_db(root.path()).unwrap();
         let path: String = conn.query_row("SELECT json_extract(data,'$.path') FROM agent_task_events WHERE kind='program/start'", [], |r| r.get(0)).unwrap();
-        assert!(path.ends_with("/chats/task/turn-1-2.js") && root.path().join(&path).exists(), "{path}");
+        assert!(path.ends_with("/chats/task/summarize-a-and-b.js") && root.path().join(&path).exists(), "{path}");
         // The hand-over is recorded as a call and its result, like any tool.
         let (calls, results): (i64, i64) = conn.query_row(
             "SELECT (SELECT count(*) FROM agent_task_events WHERE kind='tool/call' AND json_extract(data,'$.name')='write_program'),
@@ -3657,6 +3699,244 @@ mod tests {
         assert_eq!(updates(&third).len(), 1, "a module is announced once");
     }
 
+    /// Two function scopes on a `tool_update` Messages route declare one and the
+    /// same tool catalog and activate only their own tools in the conversation;
+    /// a tool added mid-conversation is announced, not redeclared.
+    #[test]
+    fn differing_scopes_share_one_tool_catalog_and_activate_only_their_own() {
+        let messages_route = |capabilities: Option<(&str, &str)>| {
+            let mut route = agent_service::AgentProviderRoute {
+                prefix_system_messages: false,
+                responses: false,
+                messages: true,
+                messages_capabilities: Default::default(),
+                url: "https://api.deepseek.com/anthropic".into(),
+                api_key: "fixture-key".into(),
+                models: [("fake".to_owned(), "deepseek-v4-pro".to_owned())].into_iter().collect(),
+                max_output_tokens: Default::default(),
+                context_windows: Default::default(),
+            };
+            if let Some((model, capability)) = capabilities {
+                route.models = [(model.to_owned(), model.to_owned())].into_iter().collect();
+                route.messages_capabilities = [(
+                    model.to_owned(),
+                    crate::anthropic_messages::Capabilities { tool_update: capability == "addition-only", system_prompt_update: true },
+                )]
+                .into_iter()
+                .collect();
+            }
+            route
+        };
+        let root = TestRoot::new();
+        let mut state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        state.provider_name = "deepseek".into();
+        state.provider_url = "https://api.deepseek.com/anthropic".into();
+        state.provider_routes.insert("deepseek".into(), messages_route(Some(("fake", "addition-only"))));
+        let cancel = CancellationToken::new();
+        let s = execution_test_session(&state, &cancel);
+        let scope = |tools: &[&str]| json!({"model":"fake","stream":true,"max_tokens":1024,
+            "messages":[{"role":"system","content":"You are the main AI."},{"role":"user","content":"Do it"}],
+            "tools":tools.iter().map(|name| json!({"type":"function","function":{"name":name,
+                "description":format!("{name} description"),"parameters":{"type":"object","properties":{}}}}))
+                .collect::<Vec<_>>()});
+        let additions = |wire: &Value| {
+            wire["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "system")
+                .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
+                .filter(|block| block["type"] == "tool_addition")
+                .map(|block| block["tool"]["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let wire = |body: &Value| crate::anthropic_messages::wire_body(&state, "fake", body);
+        let mut reading = Window::default();
+        let mut reading_body = scope(&["read_file"]);
+        super::super::announce_scope_tools(&s, &mut reading, &mut reading_body);
+        let mut writing = Window::default();
+        let mut writing_body = scope(&["write_file"]);
+        super::super::announce_scope_tools(&s, &mut writing, &mut writing_body);
+        // The catalog is the whole available set, the same for both scopes.
+        assert_eq!(reading_body[crate::anthropic_messages::CATALOG], writing_body[crate::anthropic_messages::CATALOG]);
+        let catalog = reading_body[crate::anthropic_messages::CATALOG].as_array().unwrap().len();
+        assert!(catalog > 1, "the catalog is not the scope");
+        let (reading_wire, writing_wire) = (wire(&reading_body), wire(&writing_body));
+        assert_eq!(reading_wire["tools"].as_array().unwrap().len(), catalog);
+        // Each scope declares the tools it starts with ready to call and the
+        // rest of the catalog deferred: DeepSeek refuses a request whose tools
+        // are all deferred (2026-11-13, real endpoint), and DSH declares a
+        // session's starting tools the same way.
+        let ready = |wire: &Value| wire["tools"].as_array().unwrap().iter()
+            .filter(|tool| tool["defer_loading"] != true)
+            .map(|tool| tool["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(ready(&reading_wire), ["read_file"]);
+        assert_eq!(ready(&writing_wire), ["write_file"]);
+        assert!(additions(&reading_wire).is_empty() && additions(&writing_wire).is_empty(), "a starting tool needs no addition");
+        // A tool the conversation adds later reaches it as an addition.
+        reading_body["tools"] = scope(&["read_file", "write_file"])["tools"].clone();
+        super::super::announce_scope_tools(&s, &mut reading, &mut reading_body);
+        assert_eq!(reading_body[crate::anthropic_messages::CATALOG], writing_body[crate::anthropic_messages::CATALOG], "activating more tools never changes the catalog");
+        assert!(additions(&wire(&reading_body)).contains(&"write_file".to_owned()), "the newly activated tool is announced");
+        // A model that declares no extension keeps the plain protocol.
+        for capabilities in [Some(("deepseek-v4-pro", "leading-only")), None] {
+            let mut plain = state.clone();
+            plain.provider_routes.insert("deepseek".into(), messages_route(capabilities));
+            let plain_session = execution_test_session(&plain, &cancel);
+            let mut w = Window::default();
+            let mut body = scope(&["read_file"]);
+            super::super::announce_scope_tools(&plain_session, &mut w, &mut body);
+            assert!(body.get(crate::anthropic_messages::CATALOG).is_none());
+            let wire = crate::anthropic_messages::wire_body(&plain, "fake", &body);
+            assert_eq!(wire["tools"].as_array().unwrap().len(), 1, "only the scope's tools");
+            assert!(wire["tools"][0].get("defer_loading").is_none());
+            assert!(additions(&wire).is_empty());
+        }
+    }
+    /// One window, three requests, and a tool that enters in the middle: every
+    /// request opens with the messages the one before it sent, declares the
+    /// same tools, and adds the new tool once, before the reply that calls it.
+    #[test]
+    fn one_window_activates_a_tool_once_before_its_first_use() {
+        let root = TestRoot::new();
+        let mut state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        state.provider_name = "deepseek".into();
+        state.provider_url = "https://api.deepseek.com/anthropic".into();
+        state.provider_routes.insert("deepseek".into(), agent_service::AgentProviderRoute {
+            prefix_system_messages: false,
+            responses: false,
+            messages: true,
+            messages_capabilities: [(
+                "fake".to_owned(),
+                crate::anthropic_messages::Capabilities { tool_update: true, system_prompt_update: true },
+            )]
+            .into_iter()
+            .collect(),
+            url: state.provider_url.clone(),
+            api_key: "fixture-key".into(),
+            models: [("fake".to_owned(), "fake".to_owned())].into_iter().collect(),
+            max_output_tokens: Default::default(),
+            context_windows: Default::default(),
+        });
+        let cancel = CancellationToken::new();
+        let s = execution_test_session(&state, &cancel);
+        let mut w = Window { messages: vec![
+            json!({"role":"system","content":"You are the main AI."}),
+            json!({"role":"user","content":"Do it"}),
+        ], ..Default::default() };
+        // The request one step sends: the conversation the window holds by then,
+        // its scope's tools, and whatever that scope has to activate.
+        let request = |w: &mut Window, tools: &[&str]| {
+            let mut body = json!({"model":"fake","stream":true,"max_tokens":1024,
+                "messages":w.messages.clone(),
+                "tools":tools.iter().map(|name| json!({"type":"function","function":{"name":name,
+                    "description":format!("{name} description"),"parameters":{"type":"object","properties":{}}}}))
+                    .collect::<Vec<_>>()});
+            super::super::announce_scope_tools(&s, w, &mut body);
+            crate::anthropic_messages::wire_body(&state, "fake", &body)
+        };
+        let first = request(&mut w, &["read_file"]);
+        // The reply reads the file, and its result answers that call.
+        w.messages.push(json!({"role":"assistant","content":null,"tool_calls":[
+            {"id":"c1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}));
+        w.messages.push(json!({"role":"tool","tool_call_id":"c1","content":"alpha"}));
+        let second = request(&mut w, &["read_file"]);
+        // This step needs another tool, so the window activates it now.
+        let both = ["read_file", "write_file"];
+        let third = request(&mut w, &both);
+        // The reply that calls the newly activated tool answers the next request.
+        w.messages.push(json!({"role":"assistant","content":null,"tool_calls":[
+            {"id":"c2","type":"function","function":{"name":"write_file","arguments":"{}"}}]}));
+        w.messages.push(json!({"role":"tool","tool_call_id":"c2","content":"written"}));
+        let fourth = request(&mut w, &both);
+        let sent = |wire: &Value| wire["messages"].as_array().unwrap().clone();
+        // Every request carries what the one before it sent, unchanged.
+        for (earlier, later, label) in [
+            (sent(&first), sent(&second), "the second"),
+            (sent(&second), sent(&third), "the third"),
+            (sent(&third), sent(&fourth), "the fourth"),
+        ] {
+            assert_eq!(&later[..earlier.len()], &earlier[..], "{label} request only appends");
+        }
+        // The declarations are the same bytes every time.
+        for wire in [&second, &third, &fourth] {
+            assert_eq!(wire["tools"], first["tools"], "the declared catalog never changes");
+        }
+        // One activation per tool, and the new one only where it entered.
+        let additions = |wire: &Value, name: &str| {
+            wire["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "system")
+                .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
+                .filter(|block| block["type"] == "tool_addition" && block["tool"]["name"] == name)
+                .count()
+        };
+        // read_file is a starting tool, declared ready; write_file comes later.
+        for wire in [&first, &second] {
+            assert_eq!((additions(wire, "read_file"), additions(wire, "write_file")), (0, 0));
+        }
+        assert_eq!((additions(&third, "read_file"), additions(&third, "write_file")), (0, 1));
+        assert_eq!((additions(&fourth, "read_file"), additions(&fourth, "write_file")), (0, 1), "a tool is added once");
+        // The addition sits where it entered: after the result that led to it,
+        // and before the reply that first calls the tool.
+        let messages = fourth["messages"].as_array().unwrap();
+        let names = |message: &Value, kind: &str| -> Vec<String> {
+            message["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| block["type"] == kind)
+                .filter_map(|block| {
+                    block["name"]
+                        .as_str()
+                        .or_else(|| block["tool"]["name"].as_str())
+                        .map(str::to_owned)
+                })
+                .collect()
+        };
+        let addition = messages
+            .iter()
+            .position(|m| m["role"] == "system" && names(m, "tool_addition").iter().any(|n| n == "write_file"))
+            .unwrap();
+        let first_use = messages
+            .iter()
+            .position(|m| m["role"] == "assistant" && names(m, "tool_use").iter().any(|n| n == "write_file"))
+            .unwrap();
+        assert!(addition < first_use, "the tool is added before the reply that calls it");
+        // It follows the last turn the model answered, which is the tool result.
+        let answered = messages[..addition]
+            .iter()
+            .rposition(|m| m["role"] == "user")
+            .unwrap();
+        assert!(answered < addition, "the addition follows the turn it entered after");
+    }
+    /// A turn with several programs: each start cleared the exchanges before
+    /// it, the delivered skill instructions and module updates with them, and
+    /// the next request sent them again in full.
+    #[test]
+    fn what_the_host_delivered_stays_when_a_program_starts() {
+        let source = "console.log(1);";
+        let script = json!({"role":"assistant","content":null,"tool_calls":[{"id":"program","type":"function",
+            "function":{"name":WRITE_PROGRAM,"arguments":json!({"source":source}).to_string()}}]});
+        let host = |name: &str, marker: &str| json!({"role":"user","name":name,"content":"{}",marker:{"k":1}});
+        let mut w = Window { messages: vec![
+            json!({"role":"system","content":MAIN_PROMPT}),
+            json!({"role":"user","content":"Do it"}),
+            json!({"role":"assistant","content":null,"tool_calls":[{"id":"read","type":"function","function":{"name":"read_file","arguments":"{}"}}]}),
+            json!({"role":"tool","tool_call_id":"read","content":"alpha"}),
+            host("skill_instructions", super::super::skill_scope::DELIVERED),
+            host(super::super::modules::UPDATE, super::super::modules::ANNOUNCED),
+            json!({"role":"user","name":"task_asset_index","content":"{}"}),
+            script.clone(),
+        ], ..Default::default() };
+        end_familiarization(&mut w, &script, source);
+        let kept = w.messages.iter().map(|m| m["name"].as_str().unwrap_or(m["role"].as_str().unwrap())).collect::<Vec<_>>();
+        assert_eq!(kept, ["system", "user", "skill_instructions", "chat_modules_update", "assistant"], "the reads that led to the program leave; what the host delivered stays");
+        assert_eq!(w.messages.last(), Some(&script));
+    }
+
     /// The same run: the index of saved material outside the request was
     /// rebuilt as each request's last message, about 1,200 tokens the cache
     /// never held on 57% of requests. It now says only what is new, once.
@@ -3738,6 +4018,85 @@ mod tests {
         assert_eq!(&messages(2)[..messages(1).len()], &messages(1)[..]);
         let refused = messages(2).last().unwrap()["content"].as_str().unwrap().to_owned();
         assert!(refused.contains("TOOL_UNAVAILABLE") && refused.contains("program code"), "a found method is for programs: {refused}");
+    }
+
+    /// Independent reads go in one reply: the request allows several calls,
+    /// they run in the order given, and the next request has every result
+    /// right after the reply that asked for them.
+    #[tokio::test]
+    async fn several_calls_in_one_reply_all_come_back_in_order() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("a.txt"), "first-file\n").unwrap();
+        std::fs::write(root.path().join("b.txt"), "second needle\n").unwrap();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            match log.len() {
+                1 => json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[
+                    {"id":"search","type":"function","function":{"name":"search_text","arguments":json!({"query":"needle","output_mode":"files"}).to_string()}},
+                    {"id":"read","type":"function","function":{"name":"read_file","arguments":json!({"path":"a.txt"}).to_string()}}]}}]}),
+                _ => reply("Done.".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "one request for both calls");
+        assert_eq!(bodies[0]["parallel_tool_calls"], true);
+        let messages = bodies[1]["messages"].as_array().unwrap();
+        let at = messages.iter().position(|m| m["tool_calls"].as_array().is_some_and(|calls| calls.len() == 2)).unwrap();
+        assert_eq!((messages[at + 1]["tool_call_id"].as_str(), messages[at + 2]["tool_call_id"].as_str()), (Some("search"), Some("read")));
+        assert!(messages[at + 1]["content"].as_str().unwrap().contains("b.txt"), "{}", messages[at + 1]);
+        assert!(messages[at + 2]["content"].as_str().unwrap().contains("first-file"), "{}", messages[at + 2]);
+    }
+
+    /// 2026-11-13: for 33 read-only commands (git status, wc -l, grep | head)
+    /// the main AI wrote 14 programs and a module that only ran a command.
+    /// It now runs them itself, in a read-only sandbox without network; its
+    /// tool list stays the same, and module authors and leaves never get it.
+    #[tokio::test]
+    async fn the_main_ai_runs_read_only_commands_itself() {
+        if !crate::shell_process::read_only_available() {
+            eprintln!("skipped: no read-only sandbox shell here");
+            return;
+        }
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("seed.txt"), "seed-content\n").unwrap();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            let call = |id: &str, args: Value| json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                "tool_calls":[{"id":id,"type":"function","function":{"name":crate::shell_process::READ_ONLY,"arguments":args.to_string()}}]}}]});
+            match log.len() {
+                1 => call("look", json!({"cmd":"cat seed.txt; printf x > made.txt || echo write-refused"})),
+                _ => reply("Done.".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        assert!(tool_names(&bodies[0]).contains(&crate::shell_process::READ_ONLY.to_owned()));
+        assert_eq!(bodies[1]["tools"], bodies[0]["tools"], "a command changes no tool");
+        let result = bodies[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().to_owned();
+        if result.contains("SANDBOX_UNAVAILABLE") {
+            eprintln!("skipped: bwrap cannot run here: {result}");
+            return;
+        }
+        assert!(result.contains("seed-content") && result.contains("write-refused"), "{result}");
+        assert!(!root.path().join("made.txt").exists(), "nothing was written");
+        let environment = bodies[0]["messages"].as_array().unwrap().iter()
+            .find(|m| m["name"] == "shell_environment").unwrap()["content"].as_str().unwrap().to_owned();
+        assert!(environment.contains("run_readonly_command"), "{environment}");
+
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let s = Session { agent_id: None, task_node_id: None, plugin: None, state: &state, task: "task", model: "fake", turn: 1,
+            cancel: &cancel, ban_execution: false, scope: "main".into(), parent: None, input_budget: INPUT_BUDGET };
+        let leaf = Window { program_task: Some(json!({"role":"leaf","leaf_tools":[]})), ..Default::default() };
+        let author = Window { program_task: Some(json!({"role":"implement"})), ..Default::default() };
+        for w in [&leaf, &author] {
+            assert!(!tools(&s, w).iter().any(|t| t["function"]["name"] == crate::shell_process::READ_ONLY));
+        }
     }
 
     /// The 2026-11-11 run: a write_program call was cut off with 30104 of
@@ -4022,7 +4381,10 @@ mod tests {
                     match messages.iter().rev().find(|m| m["role"] == "tool") {
                         None => {
                             let text = body.to_string();
-                            assert!(!text.contains("texts.push(io.read") && !text.contains("await summarize("), "no earlier code sits in the new turn's context");
+                            // The orchestration the last task ran comes along as its
+                            // memory; the module's implementation does not.
+                            assert!(text.contains("await summarize("), "the earlier main program is in the new turn's memory: {text}");
+                            assert!(!text.contains("texts.push(io.read"), "no earlier implementation sits in the new turn's context");
                             let listed = messages.iter().find(|m| m["name"] == "chat_modules").expect("the chat's modules are listed");
                             assert!(listed["content"].as_str().unwrap().contains("/** @virtual */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}"), "{listed}");
                             assert!(tool_names(&body).contains(&"read_session_history".to_owned()), "the main AI reads history itself");
@@ -4052,7 +4414,7 @@ mod tests {
         let entries = read_back["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 2, "{read_back}");
         assert_eq!(entries[0], json!({"kind":"directory","path":"modules"}));
-        assert_eq!(entries[1]["path"], "turn-1.js");
+        assert_eq!(entries[1]["path"], "summarize-a-and-b.js", "named from the request when the AI gave no name");
         assert_eq!(entries[1]["ended"], "completed");
         assert!(entries.iter().all(|entry| entry.get("source").is_none() && entry.get("output").is_none()));
         let root_path = root.path();
@@ -4070,7 +4432,7 @@ mod tests {
             "programs":true,"turn":1,"program":module["path"],"version":1,"start_line":8,"end_line":8
         })).await;
         assert_eq!(source["source"], "function judge(texts) {\n");
-        let output = history(json!({"programs":true,"directory":".","program":"turn-1.js","output":true})).await;
+        let output = history(json!({"programs":true,"directory":".","program":"summarize-a-and-b.js","output":true})).await;
         assert_eq!(output["ended"], "completed");
         assert!(output.get("source").is_none());
 
@@ -4090,13 +4452,24 @@ mod tests {
         let first = history(json!({"programs":true,"directory":".","limit":1})).await;
         let next = history(json!({"programs":true,"directory":".","limit":1,
             "directory_offset":first["next_directory_offset"]})).await;
-        assert_eq!(next["entries"][0]["path"], "turn-1.js");
-        assert!(next["next_directory_offset"].is_null());
+        assert_eq!(next["entries"][0]["path"], "summarize-a-and-b.js");
+        // The second turn read history directly: its record is a file too.
+        let last = history(json!({"programs":true,"directory":".","limit":1,"directory_offset":next["next_directory_offset"]})).await;
+        assert_eq!(last["entries"][0], json!({"kind":"file","path":"what-did-the-last-program-do.calls.js","turn":2,"record":"direct_calls","calls":1}));
+        assert!(last["next_directory_offset"].is_null());
+        let record = history(json!({"programs":true,"program":"what-did-the-last-program-do.calls.js"})).await;
+        assert!(record["source"].as_str().unwrap().contains("session.read_session_history({directory: \".\", programs: true, turn: 1});  // → "), "{record}");
+        // Turn 1's program called a module: that call is in the program, not a record.
+        assert!(history(json!({"programs":true,"directory":".","turn":1})).await["entries"].as_array().unwrap().iter().all(|entry| entry["record"].is_null()));
     }
 
+    /// The earlier chat a new turn's request carries, as [role, words] pairs.
     fn memory_of(body: &Value) -> Option<Value> {
-        body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "conversation_memory")
-            .map(|m| serde_json::from_str(m["content"].as_str().unwrap()).unwrap())
+        let messages = body["messages"].as_array().unwrap();
+        let current = messages.iter().rposition(|m| m["role"] == "user" && m.get("name").is_none())?;
+        Some(json!(messages[..current].iter()
+            .filter(|m| m["name"] == super::super::task_frames::CHAT_HISTORY || (m["role"] == "assistant" && m["tool_calls"].is_null()))
+            .map(|m| json!([m["role"], m["content"]])).collect::<Vec<_>>()))
     }
 
     #[tokio::test]
@@ -4121,9 +4494,8 @@ mod tests {
         run_task(state.clone(), "task".into(), "fake".into(), "Write two files".into(), 10, CancellationToken::new(), 1, false).await.unwrap();
         run_task(state, "task".into(), "fake".into(), "And now?".into(), 10, CancellationToken::new(), 2, false).await.unwrap();
         server.abort();
-        let memory = memory.lock().unwrap().clone().expect("the next turn has the conversation memory");
-        let entry = memory["entries"].as_array().unwrap().iter().find(|e| e["kind"] == "task").unwrap().clone();
-        assert_eq!(entry["answer"], "程序已完成。\n写入：one.txt、two.txt", "{memory}");
+        let chat = memory.lock().unwrap().clone().expect("the next turn has the earlier chat");
+        assert_eq!(chat, json!([["user", "Write two files"], ["assistant", "程序已完成。\n写入：one.txt、two.txt"]]));
     }
 
     #[tokio::test]
@@ -4152,9 +4524,9 @@ mod tests {
         run_task(state, "task".into(), "fake".into(), "What happened?".into(), 10, CancellationToken::new(), 2, false).await.unwrap();
         server.abort();
         assert_eq!(main.load(Ordering::SeqCst), 4, "the first program and three rewrites");
-        let memory = memory.lock().unwrap().clone().expect("the next turn reached the model instead of re-running the failure");
-        let entry = memory["entries"].as_array().unwrap().iter().find(|e| e["kind"] == "task").unwrap().clone();
-        assert_eq!(entry["answer"], "第 4 段程序（turn-1-4.js）在第 3 行出错停止：boom\n之后的步骤没有执行。\n写入：done.txt", "{memory}");
+        let chat = memory.lock().unwrap().clone().expect("the next turn reached the model instead of re-running the failure");
+        assert_eq!(chat, json!([["user", "Do it"], ["assistant", "第 4 段程序（do-it-4.js）在第 3 行出错停止：boom\n之后的步骤没有执行。\n写入：done.txt"]]),
+            "the outcome the user saw is the earlier turn's reply");
         assert_eq!(conn.query_row("SELECT status FROM agent_tasks WHERE id='task'", [], |r| r.get::<_, String>(0)).unwrap(), "completed");
     }
 
@@ -4191,7 +4563,7 @@ mod tests {
         conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
         run_task(state.clone(), "task".into(), "fake".into(), "Summarize a and b".into(), 20, CancellationToken::new(), 1, false).await.unwrap();
         let shown: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.actor')='program' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(shown, "第 1 段程序（turn-1.js）停在 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 2 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。");
+        assert_eq!(shown, "第 1 段程序（summarize-a-and-b.js）停在 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 2 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。");
         assert!(!root.path().join("out.txt").exists(), "nothing after the question ran");
         run_task(state, "task".into(), "fake".into(), "Yes, keep both".into(), 10, CancellationToken::new(), 2, false).await.unwrap();
         server.abort();
@@ -4210,11 +4582,11 @@ mod tests {
         }).await;
         let conn = agent_service::open_db(root.path()).unwrap();
         let shown: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.actor')='program' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(shown, "第 1 段程序（turn-1.js）停在 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 3 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。", "the catch-all let the question through");
+        assert_eq!(shown, "第 1 段程序（summarize-a-and-b.js）停在 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 3 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。", "the catch-all let the question through");
         assert!(!root.path().join("out.txt").exists(), "the fallback did not run");
     }
 
-    const PAUSED_AT: &str = "第 1 段程序（turn-1.js）被你的新消息暂停，停在 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 3 行 judge([\"a.txt\",\"b.txt\"])（AI 处理中），这一步还没完成。";
+    const PAUSED_AT: &str = "第 1 段程序（summarize-a-and-b.js）被你的新消息暂停，停在 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 3 行 judge([\"a.txt\",\"b.txt\"])（AI 处理中），这一步还没完成。";
     const RESUMING_MAIN: &str = "```js\nimport * as io from \"host:io\";\nimport * as previous from \"host:previous/promises\";\nconst old = previous.resume();\nio.write({path: \"extra.txt\", content: \"extra\"});\nawait old;\n```";
     const CATCHING_IMPLEMENT: &str = "```js\nasync function summarize(paths) {\n  try {\n    return judge(paths);\n  } catch (error) {\n    return {summary: \"fallback\"};\n  }\n}\n/** @virtual */\nfunction judge(paths) {\n  // Decide which files to keep. Returns {summary:string}.\n}\n```";
     fn has_tool_result(body: &Value) -> bool {
@@ -4383,7 +4755,7 @@ mod tests {
         }).await;
         let conn = agent_service::open_db(root.path()).unwrap();
         let lines = program_lines(&conn);
-        assert!(lines.iter().any(|line| line.starts_with("第 1 段程序（turn-1.js）被你的新消息暂停，停在 第 2 行 judge(\"a.txt\") → 第 2 行 decide(\"a.txt\")（AI 处理中）、第 2 行 judge(\"b.txt\") → 第 2 行 decide(\"b.txt\")（AI 处理中），这一步还没完成。")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("第 1 段程序（summarize-a-and-b.js）被你的新消息暂停，停在 第 2 行 judge(\"a.txt\") → 第 2 行 decide(\"a.txt\")（AI 处理中）、第 2 行 judge(\"b.txt\") → 第 2 行 decide(\"b.txt\")（AI 处理中），这一步还没完成。")), "{lines:?}");
         let concurrent: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE data LIKE '%parallel_call_id%'", [], |r| r.get(0)).unwrap();
         assert!(concurrent > 0, "the calls ran concurrently");
         assert_eq!(std::fs::read_to_string(root.path().join("out.txt")).unwrap(), r#"[{"keep":true},{"keep":true}]"#, "{lines:?}");
@@ -4415,7 +4787,7 @@ mod tests {
         let conn = agent_service::open_db(root.path()).unwrap();
         let lines = program_lines(&conn);
         assert_eq!(lines.iter().filter(|line| line.contains("被你的新消息暂停")).count(), 2, "{lines:?}");
-        assert!(lines.iter().any(|line| line.starts_with("第 2 段程序（turn-1-2.js）被你的新消息暂停，停在 第 3 行 previous.resume() → 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 3 行 judge([\"a.txt\",\"b.txt\"])（AI 处理中），这一步还没完成。")), "the second pause is in the new program: {lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("第 2 段程序（summarize-a-and-b-2.js）被你的新消息暂停，停在 第 3 行 previous.resume() → 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 3 行 judge([\"a.txt\",\"b.txt\"])（AI 处理中），这一步还没完成。")), "the second pause is in the new program: {lines:?}");
         assert_eq!(paused_nodes(&conn), 0);
     }
 
@@ -4438,7 +4810,7 @@ mod tests {
         }).await;
         let conn = agent_service::open_db(root.path()).unwrap();
         let lines = program_lines(&conn);
-        assert_eq!(lines.last().unwrap(), "第 2 段程序（turn-1-2.js）停在 第 2 行 previous.resume() → 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 2 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。", "{lines:?}");
+        assert_eq!(lines.last().unwrap(), "第 2 段程序（summarize-a-and-b-2.js）停在 第 2 行 previous.resume() → 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 2 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。", "{lines:?}");
         assert!(!root.path().join("out.txt").exists());
         assert_eq!(paused_nodes(&conn), 0);
     }
@@ -4495,7 +4867,7 @@ mod tests {
         }).await;
         let conn = agent_service::open_db(root.path()).unwrap();
         let lines = program_lines(&conn);
-        assert_eq!(lines.last().unwrap(), "第 1 段程序（turn-1.js）停在 第 2 行 judge(\"a.txt\") → 第 2 行 decide(\"a.txt\")，等你回答：Keep a.txt?\n之后的步骤没有执行。", "{lines:?}");
+        assert_eq!(lines.last().unwrap(), "第 1 段程序（summarize-a-and-b.js）停在 第 2 行 judge(\"a.txt\") → 第 2 行 decide(\"a.txt\")，等你回答：Keep a.txt?\n之后的步骤没有执行。", "{lines:?}");
         assert!(!root.path().join("out.txt").exists());
     }
 
@@ -4803,7 +5175,8 @@ mod tests {
         let mut state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
         state.provider_name = "sub2api".into();
         state.provider_routes.insert(state.provider_name.clone(), agent_service::AgentProviderRoute {
-            prefix_system_messages: false, responses: true, url: state.provider_url.clone(), api_key: state.api_key.clone(),
+            prefix_system_messages: false, responses: true, messages: false, messages_capabilities: Default::default(),
+            url: state.provider_url.clone(), api_key: state.api_key.clone(),
             models: Default::default(), max_output_tokens: Default::default(), context_windows: Default::default(),
         });
         state.reasoning_effort = Some("none".into());

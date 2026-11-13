@@ -27,8 +27,6 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-const DEFAULT_MAX_STEPS: usize = 100;
-const MAX_STEP_LIMIT: usize = 100;
 pub(crate) fn model_request_slots() -> Arc<tokio::sync::Semaphore> {
     let limit = std::env::var("CODEX_AGENT_MODEL_CONCURRENCY")
         .ok()
@@ -40,7 +38,7 @@ pub(crate) fn model_request_slots() -> Arc<tokio::sync::Semaphore> {
 // Acceptance may include history, code and image reads before its return.
 // Use the same production window as an Organizer decision, not the former
 // short summary-only window. A deadline never implies a business defect.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
     ReadOnly,
@@ -55,6 +53,31 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
+    /// The value stored with a chat and sent on the wire.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::WorkspaceWrite => "workspace_write",
+            Self::Ask => "ask",
+            Self::AutoReview => "auto_review",
+            Self::FullAccess => "full_access",
+        }
+    }
+
+    /// A value this build does not know reads as no choice at all, so callers
+    /// fall back to asking first instead of granting more access.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        [
+            Self::ReadOnly,
+            Self::WorkspaceWrite,
+            Self::Ask,
+            Self::AutoReview,
+            Self::FullAccess,
+        ]
+        .into_iter()
+        .find(|mode| mode.as_str() == value)
+    }
+
     pub(crate) fn allows(self, name: &str) -> bool {
         match name {
             "exec_command" | "write_stdin" | "kill_session" => true,
@@ -84,6 +107,12 @@ pub struct AgentProviderRoute {
     /// The provider speaks the Responses API (`api: openai-responses`), as
     /// Codex does; requests then replay the model's reasoning items.
     pub responses: bool,
+    /// The provider speaks the Messages API (`api: anthropic-messages`);
+    /// requests are projected onto that wire and its cache extensions.
+    pub messages: bool,
+    /// The Messages extensions each upstream model declares in its catalog
+    /// entry (`api_capabilities.anthropic_messages`).
+    pub messages_capabilities: HashMap<String, crate::anthropic_messages::Capabilities>,
     pub url: String,
     pub api_key: String,
     pub models: HashMap<String, String>,
@@ -91,6 +120,19 @@ pub struct AgentProviderRoute {
     pub max_output_tokens: HashMap<String, usize>,
     /// Total input/output limits declared by the model catalog (`contextWindow`).
     pub context_windows: HashMap<String, usize>,
+}
+
+impl AgentProviderRoute {
+    /// The extensions the requested model declares; an undeclared model keeps
+    /// the plain protocol, so no extension field is ever sent for it.
+    pub fn messages_capabilities(&self, model: &str) -> crate::anthropic_messages::Capabilities {
+        let upstream = self.models.get(model).map(String::as_str).unwrap_or(model);
+        self.messages_capabilities
+            .get(upstream)
+            .or_else(|| self.messages_capabilities.get(model))
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone)]
@@ -202,8 +244,6 @@ pub struct CreateTaskRequest {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
-    pub max_steps: Option<usize>,
-    #[serde(default)]
     pub permission_mode: PermissionMode,
 }
 
@@ -284,8 +324,6 @@ pub struct ContinueTaskRequest {
     #[serde(default, rename = "requestId")]
     pub request_id: Option<String>,
     #[serde(default)]
-    pub max_steps: Option<usize>,
-    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
@@ -307,6 +345,9 @@ pub struct UpdateTaskRequest {
     pub reasoning_effort: Option<Option<String>>,
     #[serde(default)]
     pub fast_mode: Option<bool>,
+    /// This chat's permission level; choosing it saves it at once, before any prompt.
+    #[serde(default)]
+    pub permission_mode: Option<PermissionMode>,
 }
 
 enum ResumeLoad {
@@ -411,6 +452,9 @@ pub(crate) fn open_db(root: &std::path::Path) -> anyhow::Result<rusqlite::Connec
         "ALTER TABLE agent_tasks ADD COLUMN fast_mode INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    // A chat's permission level is kept with its model and thinking level, so the
+    // desktop app and the browser read the same one. Older chats have none.
+    let _ = conn.execute("ALTER TABLE agent_tasks ADD COLUMN permission_mode TEXT", []);
     let has_high_water: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_tasks') WHERE name='event_high_water')",
         [], |row| row.get(0),
@@ -430,6 +474,41 @@ pub(crate) fn open_db(root: &std::path::Path) -> anyhow::Result<rusqlite::Connec
     }
     crate::session_browser::schema(&conn, root)?;
     Ok(conn)
+}
+
+/// The level a chat runs at: the one it stored, and otherwise asking first.
+/// A chat saved before levels were stored therefore asks first, never full
+/// access, and an unreadable value can only reduce access.
+pub(crate) fn permission_mode_for(
+    conn: &rusqlite::Connection,
+    task_id: &str,
+) -> anyhow::Result<PermissionMode> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT permission_mode FROM agent_tasks WHERE id=?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(stored
+        .as_deref()
+        .and_then(PermissionMode::parse)
+        .unwrap_or_default())
+}
+
+/// Remember a chat's level. `updated_at` is left alone: choosing a level is not
+/// activity, so it must not reorder the sidebar or retitle the chat.
+pub(crate) fn save_permission_mode(
+    conn: &rusqlite::Connection,
+    task_id: &str,
+    mode: PermissionMode,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE agent_tasks SET permission_mode=?2 WHERE id=?1",
+        rusqlite::params![task_id, mode.as_str()],
+    )?;
+    Ok(())
 }
 
 pub async fn recover_orphaned_tasks(workspace_root: &std::path::Path) -> anyhow::Result<()> {
@@ -736,17 +815,12 @@ pub async fn create_task(
     );
     let runner_state = state.clone();
     let runner_id = task_id.clone();
-    let max_steps = request
-        .max_steps
-        .unwrap_or(DEFAULT_MAX_STEPS)
-        .clamp(1, MAX_STEP_LIMIT);
     spawn_supervised_task(
         runner_state,
         runner_id,
         run_id,
         model,
         prompt,
-        max_steps,
         cancel,
         1,
         false,
@@ -885,11 +959,11 @@ pub async fn continue_task(
                 Err(e)=>return Ok(ResumeLoad::InvalidAttachment(e.to_string())),
             }
         }
-        let task: Option<(String, String, Option<String>, Option<String>, Option<String>, i64)> = tx.query_row(
-            "SELECT model,status,parent_task_id,provider_name,reasoning_effort,fast_mode FROM agent_tasks WHERE id=?1", [&read_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        let task: Option<(String, String, Option<String>, Option<String>, Option<String>, i64, Option<String>)> = tx.query_row(
+            "SELECT model,status,parent_task_id,provider_name,reasoning_effort,fast_mode,permission_mode FROM agent_tasks WHERE id=?1", [&read_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
         ).optional()?;
-        let Some((model, status, parent_id, saved_provider, saved_effort, saved_fast_mode)) = task else { return Ok(ResumeLoad::NotFound); };
+        let Some((model, status, parent_id, saved_provider, saved_effort, saved_fast_mode, saved_permission)) = task else { return Ok(ResumeLoad::NotFound); };
         if parent_id.is_some() { return Ok(ResumeLoad::ChildTask); }
         if !matches!(status.as_str(), "draft" | "completed" | "failed" | "cancelled" | "max_steps" | "interrupted") {
             return Ok(ResumeLoad::Busy);
@@ -904,11 +978,11 @@ pub async fn continue_task(
         // importing legacy records without requiring legacy native tool pairs.
         let last_event_turn = events.iter().filter_map(|(_,data)|data["turn"].as_u64()).max().unwrap_or(0) as usize;
         let turn = crate::attachments::next_turn(&tx, &read_id, last_event_turn)?;
-        let permission_mode = req_permission.unwrap_or_else(|| events.iter().rev()
-            .find(|(kind, _)| kind == "turn/start")
-            .and_then(|(_, data)| data.get("permission_mode"))
-            .and_then(|mode| serde_json::from_value(mode.clone()).ok())
-            .unwrap_or_default());
+        // This chat's own level, chosen in the composer or sent with this message.
+        // A chat that never stored one asks first.
+        let permission_mode = req_permission
+            .or_else(|| saved_permission.as_deref().and_then(PermissionMode::parse))
+            .unwrap_or_default();
         let (model, provider_name, reasoning_effort, fast_mode) = if status == "draft" {
             let m = req_model.unwrap_or(default_model);
             let p = req_provider.or(saved_provider).unwrap_or(default_provider);
@@ -929,8 +1003,8 @@ pub async fn continue_task(
             return Ok(ResumeLoad::InvalidAttachment(e.to_string()));
         }
         let changed = tx.execute(
-            "UPDATE agent_tasks SET model=?2,status='running',updated_at=?3,prompt=CASE WHEN prompt='' THEN ?5 ELSE prompt END,provider_name=?6,reasoning_effort=?7,fast_mode=?8 WHERE id=?1 AND status=?4",
-            params![read_id, model, now(), status, title, provider_name, reasoning_effort, fast_mode],
+            "UPDATE agent_tasks SET model=?2,status='running',updated_at=?3,prompt=CASE WHEN prompt='' THEN ?5 ELSE prompt END,provider_name=?6,reasoning_effort=?7,fast_mode=?8,permission_mode=?9 WHERE id=?1 AND status=?4",
+            params![read_id, model, now(), status, title, provider_name, reasoning_effort, fast_mode, permission_mode.as_str()],
         )?;
         if changed == 0 { return Ok(ResumeLoad::Busy); }
         tx.commit()?;
@@ -1019,17 +1093,12 @@ pub async fn continue_task(
     );
     let runner_state = state.clone();
     let runner_id = task_id.clone();
-    let max_steps = request
-        .max_steps
-        .unwrap_or(DEFAULT_MAX_STEPS)
-        .clamp(1, MAX_STEP_LIMIT);
     spawn_supervised_task(
         runner_state,
         runner_id,
         run_id,
         model,
         prompt,
-        max_steps,
         cancel,
         turn,
         false,
@@ -1195,8 +1264,19 @@ pub async fn update_task(
             |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional()?;
         let Some((status, _)) = exists else { return Ok(None); };
+        // The level belongs to the chat, not to a turn: it is saved even while one
+        // runs, so switching it mid-turn is remembered.
+        if let Some(mode) = request.permission_mode {
+            save_permission_mode(&conn, &task_id, mode)?;
+        }
         if status == "running" || status == "cancelling" {
-            anyhow::bail!("task is currently running");
+            let changes_generation = request.model.is_some()
+                || request.provider.is_some()
+                || request.reasoning_effort.is_some()
+                || request.fast_mode.is_some();
+            if changes_generation {
+                anyhow::bail!("task is currently running");
+            }
         }
         if let Some(ref model) = request.model {
             conn.execute("UPDATE agent_tasks SET model=?2, updated_at=?3 WHERE id=?1", params![&task_id, model, now()])?;
@@ -1408,7 +1488,6 @@ fn spawn_supervised_task(
     run_id: String,
     model: String,
     prompt: String,
-    max_steps: usize,
     cancel: CancellationToken,
     turn: usize,
     ban_run_command: bool,
@@ -1420,7 +1499,8 @@ fn spawn_supervised_task(
             task_id.clone(),
             model,
             prompt,
-            max_steps,
+            // A turn runs until the AI answers or the user stops it.
+            crate::single_agent::NO_ROUND_LIMIT,
             cancel,
             turn,
             ban_run_command,
@@ -1589,11 +1669,17 @@ fn local_output_schema(name: &str) -> Option<Value> {
                 "path":{"type":"string","description":"Workspace-relative path, usable as a read path"},
                 "kind":{"enum":["file","directory","symlink","other"]},
                 "size_bytes":{"type":["integer","null"]}}}}}}),
-        "search_text" => json!({"type":"object","required":["query","matches","truncated"],"properties":{
+        "search_text" => json!({"type":"object","required":["query","match_mode","output_mode","matches","truncated"],"properties":{
             "query":{"type":"string"},
-            "matches":{"type":"array","items":{"type":"object","required":["path","line","column","text"],"properties":{
-                "path":{"type":"string"},"line":{"type":"integer"},"column":{"type":"integer"},"text":{"type":"string"}}}},
-            "truncated":{"type":"boolean","description":"true when more matches exist than were returned"}}}),
+            "match_mode":{"enum":["literal","regex"]},
+            "output_mode":{"enum":["content","files","count"]},
+            "matches":{"type":"array","description":"Content mode: matching lines. Empty in files and count modes.","items":{"type":"object","required":["path","line","column","text"],"properties":{
+                "path":{"type":"string"},"line":{"type":"integer"},"column":{"type":"integer"},"text":{"type":"string"},
+                "before":{"type":"array","items":{"type":"string"}},"after":{"type":"array","items":{"type":"string"}}}}},
+            "files":{"type":"array","items":{"type":"string"},"description":"Files mode: matching files."},
+            "counts":{"type":"array","items":{"type":"object","required":["path","count"],"properties":{"path":{"type":"string"},"count":{"type":"integer"}}},"description":"Count mode: matching lines per file."},
+            "total":{"type":"integer","description":"Count mode: matching lines in all listed files."},
+            "truncated":{"type":"boolean","description":"true when more matches (content) or files (files, count) exist than were returned"}}}),
         "write_file" | "edit_file" => written(json!({"created":{"type":"boolean"}})),
         "replace_range" => written(json!({"start_line":{"type":"integer"},"end_line":{"type":"integer"}})),
         _ => return None,
@@ -2000,5 +2086,71 @@ mod output_contract_tests {
         let read = declarations.lines().find(|line| line.contains("function read(")).unwrap();
         assert!(read.contains("next_start_line") && !read.ends_with("): unknown;"), "{read}");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_chat_keeps_its_own_permission_level_and_older_chats_ask_first() {
+        let root = std::env::temp_dir().join(format!("agent-permission-level-{}", uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = open_db(&root).unwrap();
+        // Chats saved before the level was stored have no value at all.
+        conn.execute_batch("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('older','','m','completed',0,0),('first','','m','draft',0,0),('second','','m','draft',0,0);").unwrap();
+        assert_eq!(
+            permission_mode_for(&conn, "older").unwrap(),
+            PermissionMode::Ask,
+            "an older chat asks first, never full access"
+        );
+
+        // Choosing a level saves it for that chat alone.
+        save_permission_mode(&conn, "first", PermissionMode::FullAccess).unwrap();
+        save_permission_mode(&conn, "second", PermissionMode::ReadOnly).unwrap();
+        assert_eq!(
+            permission_mode_for(&conn, "first").unwrap(),
+            PermissionMode::FullAccess
+        );
+        assert_eq!(
+            permission_mode_for(&conn, "second").unwrap(),
+            PermissionMode::ReadOnly
+        );
+        assert_eq!(
+            permission_mode_for(&conn, "older").unwrap(),
+            PermissionMode::Ask,
+            "another chat's choice must not leak into this one"
+        );
+
+        // The sidebar, the task and a prompt read the value stored with the chat.
+        let task = crate::session_browser::decorate(&conn, &root, json!({"task_id":"first"})).unwrap();
+        assert_eq!(task["permission_mode"], "full_access");
+        let older = crate::session_browser::decorate(&conn, &root, json!({"task_id":"older"})).unwrap();
+        assert_eq!(older["permission_mode"], "ask");
+
+        // Switching replaces the same chat's choice rather than adding another.
+        save_permission_mode(&conn, "first", PermissionMode::AutoReview).unwrap();
+        assert_eq!(
+            permission_mode_for(&conn, "first").unwrap(),
+            PermissionMode::AutoReview
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM agent_tasks", [], |r| r.get::<_, i64>(0)).unwrap(),
+            3
+        );
+
+        // A value another build wrote can only lower access: it reads as asking first.
+        conn.execute("UPDATE agent_tasks SET permission_mode='time_travel' WHERE id IN ('second','older')", []).unwrap();
+        assert_eq!(
+            permission_mode_for(&conn, "second").unwrap(),
+            PermissionMode::Ask
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_task_update_carries_the_permission_level_it_is_given() {
+        let request: UpdateTaskRequest =
+            serde_json::from_value(json!({"permission_mode":"workspace_write"})).unwrap();
+        assert_eq!(request.permission_mode, Some(PermissionMode::WorkspaceWrite));
+        // Model-only updates leave the chat's level untouched.
+        let model_only: UpdateTaskRequest = serde_json::from_value(json!({"model":"m"})).unwrap();
+        assert_eq!(model_only.permission_mode, None);
     }
 }

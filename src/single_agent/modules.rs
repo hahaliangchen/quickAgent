@@ -254,7 +254,8 @@ pub(super) fn announce(root: &Path, task: &str, messages: &mut Vec<Value>) {
 }
 
 /// Make the chat folder hold the latest surviving version of each module,
-/// as after a rewind dropped later versions.
+/// as after a rewind dropped later versions, and only the program files and
+/// call records the surviving turns have.
 pub(crate) fn rebuild(root: &Path, task: &str) -> Result<()> {
     if let Some(dir) = host_folder::existing_chat_dir(root, task).map(|dir| dir.join("modules"))
         && dir.exists()
@@ -264,6 +265,9 @@ pub(crate) fn rebuild(root: &Path, task: &str) -> Result<()> {
     let conn = agent_service::open_db(root)?;
     for (key, name, _, _, _, source) in latest_all(&conn, task)? {
         write_file(root, task, &name, &key, &source)?;
+    }
+    if let Some(dir) = host_folder::existing_chat_dir(root, task) {
+        crate::session_history::turn_record::sync(&conn, task, &dir)?;
     }
     Ok(())
 }

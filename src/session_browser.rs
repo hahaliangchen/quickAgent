@@ -76,6 +76,8 @@ pub fn decorate(conn: &Connection, root: &FsPath, mut task: Value) -> Result<Val
         .optional()?;
     let (title, pinned, archived, workspace, kind) = meta.unwrap_or_default();
     let awaiting = crate::tool_approvals::awaiting(conn, id);
+    // Each chat carries its own level; one saved before levels were stored asks first.
+    let permission_mode = crate::agent_service::permission_mode_for(conn, id)?;
     let chat = plugin.is_some() || kind == "chat";
     task["kind"] = json!(if chat { "chat" } else { "code" });
     task["title"] = json!(title);
@@ -88,6 +90,8 @@ pub fn decorate(conn: &Connection, root: &FsPath, mut task: Value) -> Result<Val
     };
     task["plugin_id"] = json!(plugin);
     task["awaiting_approval"] = json!(awaiting);
+    // Each chat carries its own level; one saved before levels were stored asks first.
+    task["permission_mode"] = json!(permission_mode.as_str());
     Ok(task)
 }
 
@@ -430,7 +434,7 @@ mod tests {
     fn db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE agent_tasks(id TEXT PRIMARY KEY,status TEXT,parent_task_id TEXT);
+            "CREATE TABLE agent_tasks(id TEXT PRIMARY KEY,status TEXT,parent_task_id TEXT,permission_mode TEXT);
             CREATE TABLE plugin_sessions(task_id TEXT PRIMARY KEY,plugin_id TEXT);
             CREATE TABLE agent_task_events(task_id TEXT,seq INTEGER);
             CREATE TABLE agent_runtime_windows(task_id TEXT,scope TEXT,state TEXT);
@@ -454,14 +458,14 @@ mod tests {
         assert_eq!(conn.query_row("SELECT count(*) FROM agent_projects", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
 
         let used = db();
-        used.execute("INSERT INTO agent_tasks VALUES ('old','completed',NULL)", []).unwrap();
+        used.execute("INSERT INTO agent_tasks(id,status,parent_task_id) VALUES ('old','completed',NULL)", []).unwrap();
         schema_with_default_project(&used, root, false).unwrap();
         assert_eq!(used.query_row("SELECT count(*) FROM agent_projects", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
     #[test]
     fn deletes_descendants_and_legacy_records_without_touching_other_sessions() {
         let mut conn = db();
-        conn.execute_batch("INSERT INTO agent_tasks VALUES ('root','completed',NULL),('child','completed','root'),('grandchild','failed','child'),('other','draft',NULL);
+        conn.execute_batch("INSERT INTO agent_tasks(id,status,parent_task_id) VALUES ('root','completed',NULL),('child','completed','root'),('grandchild','failed','child'),('other','draft',NULL);
             INSERT INTO plugin_sessions VALUES ('root','ppt-master');
             INSERT INTO agent_runtime_windows VALUES ('child','main','{}'),('other','main','{}');
             INSERT INTO agent_task_events VALUES ('root',1),('grandchild',1),('other',1);
@@ -508,7 +512,7 @@ mod tests {
     #[test]
     fn active_descendant_rejects_deletion_atomically() {
         let mut conn = db();
-        conn.execute_batch("INSERT INTO agent_tasks VALUES ('root','completed',NULL),('child','running','root'); INSERT INTO agent_task_events VALUES ('root',1);").unwrap();
+        conn.execute_batch("INSERT INTO agent_tasks(id,status,parent_task_id) VALUES ('root','completed',NULL),('child','running','root'); INSERT INTO agent_task_events VALUES ('root',1);").unwrap();
         assert!(delete(&mut conn, "root").is_err());
         assert_eq!(
             conn.query_row("SELECT count(*) FROM agent_tasks", [], |r| r
@@ -527,7 +531,7 @@ mod tests {
     fn removing_the_default_project_is_durable_and_does_not_delete_sessions() {
         let conn = db();
         conn.execute_batch(
-            "INSERT INTO agent_tasks VALUES ('root','completed',NULL); DELETE FROM agent_projects;",
+            "INSERT INTO agent_tasks(id,status,parent_task_id) VALUES ('root','completed',NULL); DELETE FROM agent_projects;",
         )
         .unwrap();
         schema(&conn, FsPath::new("/projects/current")).unwrap();

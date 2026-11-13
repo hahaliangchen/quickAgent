@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import {
@@ -151,25 +151,8 @@ export function SettingsModal({
   const [expandedPlugins, setExpandedPlugins] = useState<Record<string, boolean>>({})
   const [shellStatus, setShellStatus] = useState<ShellStatus | null>(null)
   const [detectingShell, setDetectingShell] = useState(false)
+  const opening = useRef(0)
   const windowsShell = shellStatus?.platform.os === 'windows'
-
-  const loadSettings = useCallback(() => {
-    setStatusMsg(null)
-    api.getSettings().then(
-      (data) => {
-        setShellStatus(data.shell_environment ?? null)
-        const next = toDraft(data)
-        setDraft(next)
-        setBaseline(JSON.stringify(next))
-        if (next.providers.length === 1 && openProviderId === null) {
-          setOpenProviderId(next.providers[0]?._draftId ?? null)
-        }
-      },
-      (err: unknown) => {
-        setStatusMsg({ text: err instanceof Error ? err.message : String(err), error: true })
-      },
-    )
-  }, [openProviderId])
 
   const loadPlugins = useCallback(() => {
     void api.skillPackages().then(data=>setPackages(data.packages)).catch(()=>{})
@@ -183,10 +166,34 @@ export function SettingsModal({
 
   useEffect(() => {
     if (!open) return
+    opening.current += 1
+    let cancelled = false
+    setSaving(false)
+    setProbingImage(null)
     setThemeModeState(getThemeMode())
-    loadSettings()
+    setStatusMsg(null)
+    setDraft(null)
+    setBaseline(null)
+    // Load once per opening. Disclosure changes must never replace unsaved edits.
+    api.getSettings().then(
+      (data) => {
+        if (cancelled) return
+        setShellStatus(data.shell_environment ?? null)
+        const next = toDraft(data)
+        setDraft(next)
+        setBaseline(JSON.stringify(next))
+        setOpenProviderId(current => next.providers.some(p => p._draftId === current)
+          ? current
+          : next.providers.length === 1 ? next.providers[0]!._draftId : null)
+      },
+      (err: unknown) => {
+        if (cancelled) return
+        setStatusMsg({ text: err instanceof Error ? err.message : String(err), error: true })
+      },
+    )
     loadPlugins()
-  }, [open, loadSettings, loadPlugins])
+    return () => { cancelled = true; opening.current += 1 }
+  }, [open, loadPlugins])
 
   useEffect(() => {
     if (!open) return
@@ -225,6 +232,7 @@ export function SettingsModal({
 
   const handleSave = async () => {
     if (draft === null || saving) return
+    const currentOpening = opening.current
     setSaving(true)
     setStatusMsg(null)
     try {
@@ -263,6 +271,7 @@ export function SettingsModal({
         reasoning_effort: selectedCapability?.reasoning_efforts.includes(draft.reasoning_effort) ? draft.reasoning_effort : '',
         fast_mode: Boolean(selectedCapability?.fast_mode && draft.fast_mode),
       })
+      if (opening.current !== currentOpening) return
       const savedDraft = toDraft(saved)
       setShellStatus(saved.shell_environment ?? null)
       setDraft(savedDraft)
@@ -271,20 +280,23 @@ export function SettingsModal({
       onSaved()
       return saved
     } catch (err) {
+      if (opening.current !== currentOpening) return
       setStatusMsg({ text: err instanceof Error ? err.message : String(err), error: true })
     } finally {
-      setSaving(false)
+      if (opening.current === currentOpening) setSaving(false)
     }
   }
 
   const handleProbeImage = async (provider: DraftProvider, model: string) => {
     if (probingImage || saving) return
+    const currentOpening = opening.current
     setProbingImage(`${provider._draftId}:${model}`)
     try {
       const saved = await handleSave()
       if (!saved) return
       setStatusMsg({ text: '正在验证图片输入…', error: false })
       const result = await api.probeImage({ revision: saved.revision, provider: provider.id.trim(), model })
+      if (opening.current !== currentOpening) return
       const verified = result.settings.providers.find(p => p.id === provider.id.trim())?.model_capabilities[model]
       if (!verified) throw new Error('验证返回缺少模型能力记录')
       setDraft(current => {
@@ -302,8 +314,9 @@ export function SettingsModal({
         : `图片能力仍未确认：${String(result.probe.error ?? '模型未正确识别测试图片')}`, error: capability !== 'supported' })
       onSaved()
     } catch (err) {
+      if (opening.current !== currentOpening) return
       setStatusMsg({ text: err instanceof Error ? err.message : String(err), error: true })
-    } finally { setProbingImage(null) }
+    } finally { if (opening.current === currentOpening) setProbingImage(null) }
   }
 
   const handleAddProvider = () => {
@@ -431,7 +444,7 @@ export function SettingsModal({
             </div>
           </header>
 
-          <div className={rootCss.options}>
+          <fieldset className={rootCss.options} disabled={saving || probingImage !== null} style={{ border: 0, margin: 0, minWidth: 0 }} aria-label="设置内容">
             {statusMsg !== null && (
               <p className={statusMsg.error ? modelsCss.error : modelsCss.savedNotice} style={{ marginBottom: 12 }}>
                 {statusMsg.text}
@@ -669,7 +682,7 @@ export function SettingsModal({
                           <div className={appearanceCss.row}>
                             <span
                               className={clsx(appearanceCss.status, configured ? appearanceCss.statusOn : appearanceCss.statusOff)}
-                              title={configured ? '密钥已配置' : '未配置密钥'}
+                              title={configured ? '密钥已配置' : '未配置密钥（免鉴权服务可留空）'}
                             />
                             <div className={appearanceCss.rowText}>
                               <span className={appearanceCss.rowTitle}>
@@ -762,7 +775,8 @@ export function SettingsModal({
                               </div>
                               <div className={appearanceCss.row}>
                                 <div className={appearanceCss.rowText}>
-                                  <span className={appearanceCss.rowTitle}>API 密钥</span>
+                                  <span className={appearanceCss.rowTitle}>API 密钥（可选）</span>
+                                  <span className={appearanceCss.rowHint}>自部署服务未启用鉴权时可留空。</span>
                                   {provider.has_api_key && !provider.clear_api_key && (
                                     <button
                                       type="button"
@@ -783,7 +797,7 @@ export function SettingsModal({
                                         ? '保存后将清除已存密钥'
                                         : provider.has_api_key
                                           ? '已配置（留空保持不变）'
-                                          : 'sk-...'
+                                          : '免鉴权服务可留空'
                                     }
                                     value={provider.api_key}
                                     onChange={(e) => {
@@ -992,6 +1006,10 @@ export function SettingsModal({
                     </div>
                   </div>
                 </div>
+                {draft.web_search_provider && !draft.providers.some(p => p.id === draft.web_search_provider
+                  && !p.clear_api_key && (p.api_key.trim() !== '' || p.has_api_key)) && (
+                  <p className={appearanceCss.footnote}>尚未配置联网搜索密钥，搜索服务暂不可用；不影响保存和使用自部署模型。</p>
+                )}
                 <div className={modelsCss.pageHead}>
                   <h2 className={modelsCss.title}>专用模型</h2>
                   <p className={modelsCss.intro}>视觉分析和协作子 Agent 可以单独选模型，复用目录中的提供商和能力配置。留空跟随主 Agent，任务参数单独保存。</p>
@@ -1147,7 +1165,7 @@ export function SettingsModal({
                 </div>
               </div>
             )}
-          </div>
+          </fieldset>
         </div>
       </div>
     </div>,

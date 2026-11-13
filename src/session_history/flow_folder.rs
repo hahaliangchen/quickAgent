@@ -99,6 +99,16 @@ pub(super) fn read(
     {
         return modules(conn, task, turn, boundary, wanted.as_deref(), args);
     }
+    let records = super::turn_record::records(conn, task, boundary)?;
+    if let Some(wanted) = wanted.as_deref().filter(|wanted| wanted.ends_with(super::turn_record::CALLS)) {
+        ensure!(args["output"] != true, "a call record has no output of its own: the result of each call is on its line");
+        let record = records
+            .iter()
+            .find(|record| record.file == wanted)
+            .with_context(|| format!("no call record {wanted}; list directory '.' first"))?;
+        let source = super::turn_record::render(conn, task, record.turn, boundary)?.unwrap_or_default();
+        return source_page(&source, args, json!({"program":record.file,"turn":record.turn,"record":"direct_calls"}));
+    }
 
     let mut stmt = conn.prepare(MAIN_FILES)?;
     let rows = stmt.query_map(params![task, turn, boundary], |row| {
@@ -166,12 +176,22 @@ pub(super) fn read(
             ))
         })?
         .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
-    let entries = files.into_iter().map(|(seq, path, turn, size)| {
-        let end = ends.get(&path).filter(|(end_seq, _, _)| *end_seq > seq);
-        json!({"kind":"file","path":path,"turn":turn,"code_chars":size,
-            "ended":end.and_then(|(_, status, _)| status.as_deref()),
-            "output_lines":end.and_then(|(_, _, lines)| *lines)})
-    });
+    // Each turn's call record sits before the programs it ran.
+    let mut entries = files
+        .into_iter()
+        .map(|(seq, path, turn, size)| {
+            let end = ends.get(&path).filter(|(end_seq, _, _)| *end_seq > seq);
+            (turn.unwrap_or(0), seq, json!({"kind":"file","path":path,"turn":turn,"program":"main","code_chars":size,
+                "ended":end.and_then(|(_, status, _)| status.as_deref()),
+                "output_lines":end.and_then(|(_, _, lines)| *lines)}))
+        })
+        .chain(records.into_iter().filter(|record| turn.is_none_or(|turn| turn == record.turn)).map(|record| {
+            (record.turn, record.first_seq, json!({"kind":"file","path":record.file,"turn":record.turn,
+                "record":"direct_calls","calls":record.calls}))
+        }))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(turn, seq, _)| (*turn, *seq));
+    let entries = entries.into_iter().map(|(_, _, entry)| entry);
     Ok(directory_page(
         ".",
         std::iter::once(json!({"kind":"directory","path":"modules"})).chain(entries),

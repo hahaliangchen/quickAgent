@@ -4,6 +4,25 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::Path;
 mod index;
+pub(crate) mod turn_record;
+
+/// Stored content as read back from the database: plain text, or the JSON
+/// text of content parts.
+pub(crate) fn stored_text(raw: &str) -> String {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(parts @ Value::Array(_)) if raw.trim_start().starts_with('[') => message_text(&parts),
+        _ => raw.to_owned(),
+    }
+}
+
+/// The words of a message's content: a string, or the text of its parts.
+pub(crate) fn message_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => stored_text(text),
+        Value::Array(parts) => parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    }
+}
 #[cfg(test)]
 mod regression_tests;
 mod flow_folder;
@@ -103,13 +122,13 @@ fn image_message(message: &Value) -> Option<Value> {
 
 pub fn tool() -> Value {
     json!({"type":"function","function":{"name":"read_session_history",
-    "description":"Read saved conversation history only when current inputs lack needed information. Set view=index for a compact, expandable table of contents: open a turn, then a task node, and follow read_reference for original evidence. Reads in the current user turn share a fixed snapshot; keep snapshot_seq while navigating or paging. To inspect work done after that snapshot, explicitly start a new snapshot. History-reading calls and results are excluded even by exact event_seq unless explicitly auditing them. Default scope=conversation reads the current conversation or a returned task_id. scope=project searches workspace conversations. Historical records do not prove current resource availability.",
+    "description":"Read saved conversation history only when current inputs lack needed information. Set view=index for a compact, expandable table of contents: open a turn, then a task node, whose tool calls are listed with their file, search or command; read a call or its result by its seq with view=records. Reads in the current user turn share a fixed snapshot; keep snapshot_seq while navigating or paging. To inspect work done after that snapshot, explicitly start a new snapshot. History-reading calls and results are excluded even by exact event_seq unless explicitly auditing them. Default scope=conversation reads the current conversation or a returned task_id. scope=project searches workspace conversations. Historical records do not prove current resource availability.",
     "parameters":{"type":"object","properties":{
         "scope":{"type":"string","enum":["conversation","project"]},
         "view":{"type":"string","enum":["records","index"],"description":"index shows an expandable table of contents for a conversation; records reads actual historical entries."},
         "task_id":{"type":"string","description":"Conversation returned by project search; defaults to the current conversation. Only conversations saved in this workspace can be read."},
-        "project_offset":{"type":"integer","minimum":0,"description":"Offset for project search; use the returned next_search."},
-        "query":{"type":"string","maxLength":1000},
+        "match_offset":{"type":"integer","minimum":0,"description":"Position in the ranked matches of a query search; use the returned next_search."},
+        "query":{"type":"string","maxLength":1000,"description":"Words separated by spaces, | or commas; \"quote a phrase\" to match it whole. A record matches if it contains any word; the ones containing the most words come first, then messages and programs before tool calls before tool output, then the newest. Chinese words need spaces between them."},
         "role":{"type":"string","minLength":1,"maxLength":64,"description":"Saved actor name, e.g. agent, worker, tool or visual_tool; default all. Historical actor names remain searchable."},
         "node_id":{"type":"string"},"turn":{"type":"integer","minimum":1},
         "include_descendants":{"type":"boolean","default":false,"description":"Include events owned by descendants of node_id. Split nodes also expose their explicit source interval."},
@@ -302,8 +321,9 @@ fn read_saved(
         return index::read(conn, task, args, snapshot);
     }
     if args["programs"] == true {
+        // A named file opens that file, as in a project.
         if args["directory"].is_string()
-            || args["program"].as_str().is_some_and(flow_folder::is_module_path)
+            || args["program"].is_string()
             || args["start_line"].is_number() || args["end_line"].is_number()
         {
             let snapshot_tx = conn.unchecked_transaction()?;
@@ -317,6 +337,7 @@ fn read_saved(
         target,
         role,
         query,
+        terms,
         turn,
         limit,
         max_chars,
@@ -324,6 +345,7 @@ fn read_saved(
         project_offset,
     } = store::search_events(conn, task, args, boundary, snapshot, project_cutoff)?;
     let scope = if project { "project" } else { "conversation" };
+    let ranked = !terms.is_empty();
     let more = rows.len() > limit;
     let mut records = Vec::new();
     let mut remaining = max_chars;
@@ -401,15 +423,18 @@ fn read_saved(
         } else {
             payload.to_string()
         };
-        let record_offset = if args["char_offset"].is_null() && !query.is_empty() {
-            text.to_lowercase()
-                .find(&query)
-                .map(|index| {
-                    text.to_lowercase()[..index]
-                        .chars()
-                        .count()
-                        .saturating_sub(120)
-                })
+        // The excerpt opens just before the first query word it contains.
+        let lowered = text.to_lowercase();
+        let found = terms
+            .iter()
+            .filter_map(|term| lowered.find(term.as_str()).map(|index| (term, index)))
+            .collect::<Vec<_>>();
+        let record_offset = if args["char_offset"].is_null() {
+            found
+                .iter()
+                .map(|(_, index)| *index)
+                .min()
+                .map(|index| lowered[..index].chars().count().saturating_sub(120))
                 .unwrap_or(offset)
         } else {
             offset
@@ -430,6 +455,9 @@ fn read_saved(
             "next_char_offset":if next<total{Some(next)}else{None},
             "read_reference":{"scope":"conversation","task_id":record_task,"event_seq":seq,"snapshot_seq":reference_snapshot,"include_event":args["include_event"]==true,"audit_history_reads":args["audit_history_reads"]==true},
             "next_read":if next<total{json!({"task_id":record_task,"event_seq":seq,"snapshot_seq":reference_snapshot,"char_offset":next,"include_event":args["include_event"]==true,"audit_history_reads":args["audit_history_reads"]==true})}else{Value::Null}});
+        if terms.len() > 1 {
+            record["matched_terms"] = json!(found.iter().map(|(term, _)| term).collect::<Vec<_>>());
+        }
         record["source"]["history_reference"]["snapshot_seq"] = reference_snapshot.clone();
         record["source"]["history_reference"]["audit_history_reads"] =
             json!(args["audit_history_reads"] == true);
@@ -469,27 +497,38 @@ fn read_saved(
         }
         records.push(record);
     }
-    let next_before = if more && !project {
+    // Ranked matches come best first and page by position; plain browsing
+    // stays chronological and pages by before_seq.
+    let next_before = if more && !project && !ranked {
         records.last().and_then(|record| record["seq"].as_i64())
     } else {
         None
     };
-    if !project {
+    if !project && !ranked {
         records.reverse();
     }
     let next_search = if project && more {
         json!({"scope":"project","query":args["query"],"role":role,"node_id":args["node_id"],"turn":turn,
-                "project_offset":project_offset+limit as i64,"snapshot_id":project_cutoff,"limit":limit,"max_chars":max_chars,"include_event":args["include_event"]==true,"include_context":args["include_context"]==true})
+                "match_offset":project_offset+limit as i64,"snapshot_id":project_cutoff,"limit":limit,"max_chars":max_chars,"include_event":args["include_event"]==true,"include_context":args["include_context"]==true})
+    } else if ranked && more {
+        json!({"scope":"conversation","task_id":target,"query":args["query"],"role":role,"node_id":args["node_id"],"turn":turn,
+                "before_seq":args["before_seq"],"after_seq":args["after_seq"],"request_id":args["request_id"],
+                "match_offset":project_offset+limit as i64,"snapshot_seq":snapshot,"limit":limit,"max_chars":max_chars,"include_event":args["include_event"]==true,"include_context":args["include_context"]==true})
     } else {
         Value::Null
     };
-    let no_match = (records.is_empty() && !query.is_empty()).then(|| format!(
-        "No saved {scope} record before this request matches \"{query}\". History reads are not searched, and history only holds past events: it cannot show current state. To get current data, call the tool that reads it instead of searching history again."
-    ));
+    let no_match = (records.is_empty() && !query.is_empty()).then(|| {
+        // Chinese has no spaces: a long run of it is one word to this search.
+        let long_cjk = terms.iter().any(|term| term.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count() > 4);
+        format!(
+            "No saved {scope} record before this request contains any of {terms:?}.{} History reads are not searched, and history only holds past events: it cannot show current state. To get current data, call the tool that reads it instead of searching history again.",
+            if long_cjk { " Separate Chinese words with spaces; a long phrase only matches where it appears exactly." } else { "" }
+        )
+    });
     Ok(
-        json!({"records":records,"has_more":more,"next_before_seq":next_before,"snapshot_seq":if project {None} else {Some(snapshot)},"next_search":next_search,"no_match":no_match,
+        json!({"records":records,"order":if ranked {"best_match"} else {"time"},"query_terms":if ranked {json!(terms)} else {Value::Null},"has_more":more,"next_before_seq":next_before,"snapshot_seq":if project {None} else {Some(snapshot)},"next_search":next_search,"no_match":no_match,
         "scope":scope,"task_id":if project{None}else{Some(target)},"snapshot_id":if project {Some(project_cutoff)} else {None},
-        "history_note":"Conversation records are chronological and bounded by snapshot_seq; keep it for further pages or exact reads. History-reading calls and results are excluded unless audit_history_reads is explicitly requested. A new user message or explicit new_snapshot starts a new browsing session. Saved history does not prove current resource availability. Project search and pagination keep a fixed event cutoff.",
+        "history_note":"With a query, records come best match first; without one, conversation records are chronological. Both are bounded by snapshot_seq; keep it for further pages or exact reads. History-reading calls and results are excluded unless audit_history_reads is explicitly requested. A new user message or explicit new_snapshot starts a new browsing session. Saved history does not prove current resource availability. Project search and pagination keep a fixed event cutoff.",
         "returned_chars":max_chars-remaining,"max_chars":max_chars}),
     )
 }
@@ -630,6 +669,74 @@ mod tests {
         assert_eq!(search("get_design", "h2").await["records"], json!([]));
         drop(conn);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_history_query_reads_like_a_search_box() {
+        use store::query_terms;
+        assert_eq!(query_terms("权限 保存"), ["权限", "保存"]);
+        assert_eq!(query_terms("Permission|level, Save"), ["permission", "level", "save"]);
+        assert_eq!(query_terms("model_round\\( \\d"), ["model_round(", "\\d"]);
+        assert_eq!(query_terms("\"chat level\" chat"), ["chat level", "chat"]);
+        assert_eq!(query_terms("\"open quote"), ["open", "quote"]);
+        assert_eq!(query_terms(" | "), Vec::<String>::new());
+    }
+
+    /// 2026-11-13: the whole query was one literal substring and matches came
+    /// newest first, so "权限 保存" found nothing and a function name returned
+    /// the latest file reads that happened to contain it.
+    #[tokio::test]
+    async fn history_search_matches_words_and_ranks_what_was_said_first() {
+        let root = std::env::temp_dir().join(format!("history-rank-{}", crate::agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::agent_service::open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','p','test','running',1,1)",[]).unwrap();
+        let message = |role: &str, text: &str| json!({"actor":"agent","turn":1,"message":{"role":role,"content":text}});
+        let read_call = |call: &str, path: &str| json!({"actor":"agent","turn":1,"callId":call,"name":"read_file","arguments":json!({"path":path}).to_string()});
+        let output = |call: &str, text: &str| json!({"actor":"agent","turn":1,"message":{"role":"tool","toolCallId":call,"content":text},"meta":{"result":{"content":text}}});
+        let events = [
+            (1, "user/message", message("user", "按聊天保存权限级别")),
+            (2, "assistant/message", message("assistant", "The permission level is stored per chat in agent_tasks.")),
+            (3, "tool/call", read_call("c1", "src/model_round.rs")),
+            (4, "tool/result", output("c1", "fn model_round() { let permission = 1; }")),
+            (5, "tool/call", read_call("c2", "src/other.rs")),
+            (6, "tool/result", output("c2", "// permission checks call model_round( here")),
+        ];
+        for (seq, kind, data) in &events {
+            conn.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('t',?1,1,?2,?3)",
+                rusqlite::params![seq, kind, data.to_string()]).unwrap();
+        }
+        let search = |args: Value| {
+            let root = root.clone();
+            async move { read(&root, "t", &args).await.unwrap() }
+        };
+        let seqs = |result: &Value| result["records"].as_array().unwrap().iter().map(|r| r["seq"].as_i64().unwrap()).collect::<Vec<_>>();
+
+        // Words apart in the query still find the message that has both.
+        let chinese = search(json!({"query":"权限 保存"})).await;
+        assert_eq!(seqs(&chinese), [1]);
+        assert_eq!(chinese["records"][0]["matched_terms"], json!(["权限", "保存"]));
+        assert!(search(json!({"query":"权限级别保存"})).await["no_match"].as_str().unwrap().contains("spaces"));
+
+        // Most words first; at equal words, what was said beats a newer tool output.
+        let ranked = search(json!({"query":"permission|level","limit":3})).await;
+        assert_eq!(ranked["order"], "best_match");
+        assert_eq!(seqs(&ranked), [2, 6, 4]);
+        // The excerpt opens at the first word it contains.
+        assert!(ranked["records"][0]["content"].as_str().unwrap().starts_with("The permission"));
+
+        // A regex-style escape is the character it escapes; ranked pages go by position.
+        let first = search(json!({"query":"model_round\\(","limit":1})).await;
+        assert_eq!(seqs(&first), [6]);
+        let next = search(first["next_search"].clone()).await;
+        assert_eq!(seqs(&next), [4]);
+        assert_eq!(next["next_search"], Value::Null);
+
+        // Browsing without a query stays chronological.
+        let browse = search(json!({"limit":3})).await;
+        assert_eq!(browse["order"], "time");
+        assert_eq!(seqs(&browse), [4, 5, 6]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -857,7 +964,7 @@ mod tests {
         insert(
             4,
             "tool/call",
-            json!({"turn":1,"task_node_id":"main","name":"read_file","callId":"c1","arguments":"{\"path\":\"private.txt\",\"page\":4}"}),
+            json!({"turn":1,"task_node_id":"main","name":"read_file","callId":"c1","arguments":"{\"path\":\"private.txt\",\"page\":4,\"content\":\"PRIVATE LONG SOURCE\"}"}),
         );
         insert(
             5,
@@ -911,13 +1018,14 @@ mod tests {
         let page = read(&root, "t", &open).await.unwrap();
         assert_eq!(page["entries"][0]["kind"], "program");
         assert_eq!(page["entries"][1]["label"], "read_file");
-        assert_eq!(page["entries"][1]["numeric_arguments"]["page"], 4);
-        assert_eq!(page["entries"][1]["outcome"], "error");
-        assert_eq!(page["entries"][1]["result_reference"]["event_seq"], 5);
+        // The entry is the call: which file it read and where, without the
+        // file's text, and where its result is.
+        assert_eq!(page["entries"][1], json!({"kind":"tool","label":"read_file","seq":4,
+            "arguments":{"path":"private.txt","page":4},"outcome":"error","result_seq":5}));
         assert!(page["has_more"] == true && !page.to_string().contains("PRIVATE LONG SOURCE"));
-        let evidence = read(&root, "t", &page["entries"][1]["read_reference"])
-            .await
-            .unwrap();
+        let mut call = page["reference"].clone();
+        call["event_seq"] = page["entries"][1]["seq"].clone();
+        let evidence = read(&root, "t", &call).await.unwrap();
         assert_eq!(evidence["records"][0]["seq"], 4);
         assert!(
             evidence["records"][0]["tool_result"]["content"]

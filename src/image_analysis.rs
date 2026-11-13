@@ -160,6 +160,8 @@ pub async fn execute(
     if state.fast_mode {
         body["service_tier"] = json!("fast");
     }
+    // A Messages route gets the same request as its own blocks.
+    let body = crate::anthropic_messages::wire_body(state, model, &body);
     ensure!(
         crate::context_window::estimate(&body) <= input_budget,
         "image analysis input exceeds configured context window"
@@ -189,16 +191,9 @@ pub async fn execute(
     diagnostics.sending();
     let mut raw_response = Value::Null;
     let pending = async {
-        let response = state
-            .model_client
-            .post(format!(
-                "{}/chat/completions",
-                state.provider_url.trim_end_matches('/')
-            ))
-            .bearer_auth(&state.api_key)
+        let response = crate::anthropic_messages::send(state, context.task_id(), "", &body)
             .header("x-codex-visual-dispatch", "task-owned")
             .header("x-client-request-id", node.as_str())
-            .json(&body)
             .send()
             .await?;
         diagnostics.headers(&response);

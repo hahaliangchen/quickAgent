@@ -240,7 +240,7 @@ pub(super) async fn resume(s: &Session<'_>, w: &Window) -> Result<Option<(Value,
     resumed.spawn(async move {
         let session = Session { agent_id, task_node_id: frame.task_node_id.clone(), plugin, state: &state, task: &task,
             model: &model, turn, cancel: &cancel, ban_execution, scope: start_scope, parent, input_budget };
-        let result = run_loop(&session, &mut frame, 80, false).await;
+        let result = run_loop(&session, &mut frame, super::NO_ROUND_LIMIT, false).await;
         (result, frame)
     });
     let (result, frame) = resumed.join_next().await.context("resumed program task missing")?.context("resumed program task failed")?;

@@ -18,7 +18,7 @@ class CustomerProfileTests(unittest.TestCase):
             "another": {"baseURL": "https://another.invalid", "models": [{"id": "another-model"}]},
         }}}, {"id": "agent-default-model", "config": {"provider": "deepseek-self", "model": "private-model"}}]
 
-    def test_only_non_personal_models_and_references_survive(self):
+    def test_all_models_providers_and_model_references_are_removed(self):
         source = self.fixture()
         before = json.dumps(source)
         generation = {"visual_tool": {"provider": "another", "model": "another-model"},
@@ -27,17 +27,22 @@ class CustomerProfileTests(unittest.TestCase):
                       "model_capabilities": {"deepseek": {"deepseek-flash": {"tool_calling": True, "image_probe": {"raw": "do-not-copy"}}}}}
         providers, settings = module.project_profile(source, generation)
         encoded = json.dumps([providers, settings])
-        for value in ["deepseek-self", "private-model", "another-model", "personal-key", "do-not-copy", "private.invalid"]:
+        for value in ["deepseek", "private-model", "another-model", "personal-key", "do-not-copy", "private.invalid"]:
             self.assertNotIn(value, encoded)
-        self.assertEqual(set(providers[0]["config"]["providers"]), {"deepseek"})
-        self.assertEqual(settings["visual_tool"]["provider"], "deepseek")
+        self.assertEqual(providers, [{"id":"llm-pi-ai","config":{"providers":{}}}])
+        self.assertEqual(settings["visual_tool"], {})
+        self.assertIsNone(settings["web_search_provider"])
+        self.assertEqual(settings["plugin_models"], {})
+        self.assertEqual(settings["model_capabilities"], {})
+        self.assertEqual(settings["plugin_generation"], {})
+        self.assertIsNone(settings["reasoning_effort"])
         self.assertEqual(json.dumps(source), before)
 
-    def test_no_fallback_to_personal_account(self):
+    def test_an_empty_source_is_valid_without_any_fallback(self):
         source = self.fixture()
         del source[0]["config"]["providers"]["deepseek"]
-        with self.assertRaises(ValueError):
-            module.project_profile(source, {})
+        self.assertEqual(module.project_profile(source, {})[0][0]["config"]["providers"], {})
+        self.assertEqual(module.project_profile([], {})[0][0]["config"]["providers"], {})
 
     def test_export_does_not_read_credentials_or_overwrite_existing_profile(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -49,6 +54,8 @@ class CustomerProfileTests(unittest.TestCase):
             output = root / "customer"
             module.write_profile(source, output)
             self.assertEqual(json.loads((output / "credentials.yaml").read_text())["records"], {})
+            self.assertTrue(json.loads((output / "customer-policy.json").read_text())["customer_custom_models"])
+            self.assertEqual(json.loads((output / "customer-policy.json").read_text())["models"], [])
             with self.assertRaises(FileExistsError):
                 module.write_profile(source, output)
 

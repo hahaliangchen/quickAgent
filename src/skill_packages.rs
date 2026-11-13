@@ -1027,8 +1027,10 @@ mod tests {
     #[test]
     fn skill_plugin_origin_is_explicit_and_native_contributions_use_the_common_protocol() {
         // Being downloaded inside this repository never makes a package builtin.
+        // Under the build-output folder: the host's read-only command sandbox
+        // lets tests write there, and nowhere else in the repository.
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join(".codex-workspace-mcp")
+            .join("target")
             .join(format!(
                 "plugin-protocol-{}",
                 crate::agent_service::uuid_like()

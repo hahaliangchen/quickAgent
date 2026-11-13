@@ -1156,7 +1156,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "search_text",
-            "description": "Search workspace text. Literal matching is the default; set regex=true for patterns such as A|B, anchors, or character classes. Patterns match each line; invalid expressions return an error. Search directly for literals, UI strings, config keys, error messages, log lines, imports, and syntax patterns. Symbol tools are useful for definitions and relationships; text searches do not require trying a symbol tool first. By default this searches the real filesystem view, including gitignored files. Use `path` for one file/directory, or `paths` as an array for multiple files/directories; do not put multiple paths in one space-separated string. Each match has path (with / separators), line, column and text; a line longer than 400 characters comes back as an excerpt around the match, with line_chars giving the whole line's length.",
+            "description": "Search workspace text line by line, like ripgrep. A query written as a regular expression (A|B, name\\(, ^fn, foo.*bar) is matched as one; other text is matched literally; set regex explicitly to force either. output_mode picks what comes back: content (default) gives each matching line with path (with / separators), line, column and text, plus before/after lines with context_lines; files lists only the matching files; count gives matching lines per file and their total. Start with files or count for broad searches, then read the lines you need. glob limits the files searched, as rg -g does: \"*.rs\" at any depth, \"src/**/*.ts\" from the workspace root, \"!*.lock\" to exclude. max_matches (alias limit) caps matching lines in content mode and files otherwise; truncated says more exist. Search directly for literals, UI strings, config keys, error messages, log lines, imports, and syntax patterns; symbol tools are useful for definitions and relationships, and text searches do not require trying a symbol tool first. By default files that .gitignore or .ignore excludes are skipped, as rg does; a path you name inside an ignored folder is searched in full, and respect_gitignore:false searches everything. Use `path` for one file/directory, or `paths` as an array for multiple files/directories; do not put multiple paths in one space-separated string. A line longer than 400 characters comes back as an excerpt around the match, with line_chars giving the whole line's length.",
             "inputSchema": {
                 "type": "object",
                 "required": ["query"],
@@ -1166,7 +1166,7 @@ pub fn tool_definitions() -> Value {
                         "description": "Optional absolute project directory to use for this call. Defaults to the server startup directory."
                     },
                     "query": { "type": "string" },
-                    "regex": { "type": "boolean", "default": false, "description": "Enable regular expressions explicitly. Use regex=true for alternatives such as loadPptx|loadVirtualDocument. Literal mode does not interpret | as OR. Regex matching is per line; invalid expressions return an error." },
+                    "regex": { "type": "boolean", "description": "Omit to let the query decide: written as a regular expression (alternation |, a backslash escape, ^ or $ anchors, .* or .+), it is matched as one, otherwise literally. true forces a regular expression, false literal text. Matching is per line; an invalid expression returns an error." },
                     "path": {
                         "type": "string",
                         "default": ".",
@@ -1180,10 +1180,13 @@ pub fn tool_definitions() -> Value {
                     "case_sensitive": { "type": "boolean", "default": false },
                     "respect_gitignore": {
                         "type": "boolean",
-                        "default": false,
-                        "description": "When true, skip files ignored by .gitignore/.ignore. Defaults to false so logs and generated files remain searchable."
+                        "default": true,
+                        "description": "Skip files ignored by .gitignore/.ignore. Pass false to search logs, build output and other ignored files too."
                     },
-                    "max_matches": { "type": "integer", "default": 100 }
+                    "max_matches": { "type": "integer", "default": 100, "minimum": 1, "description": "Matching lines in content mode, files in files and count modes. limit is accepted as an alias." },
+                    "output_mode": { "type": "string", "enum": ["content", "files", "count"], "default": "content", "description": "content: matching lines. files: only the paths of matching files. count: matching lines per file, with their total." },
+                    "glob": { "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Search only files matching these globs, as rg -g: \"*.rs\" matches at any depth, \"src/**/*.ts\" from the workspace root, a leading ! excludes." },
+                    "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 0, "description": "In content mode, lines before and after each match, returned as before and after." }
                 }
             }
         },
@@ -1595,7 +1598,8 @@ mod native_tool_tests {
         };
         let started = first.call(&workspace, "exec_command", json!({
             "cmd":read_command,
-            "yield_time_ms":0
+            "yield_time_ms":0,
+            "stdin":true
         })).await;
         let id = started["session_id"].as_str().unwrap();
         assert_eq!(started["running"], true);
@@ -1684,7 +1688,7 @@ mod native_tool_tests {
         } else {
             "printf 'ready\\n'; sleep 120"
         };
-        let mut started = session.call(&workspace, "exec_command", json!({"cmd":cmd,"yield_time_ms":100})).await;
+        let mut started = session.call(&workspace, "exec_command", json!({"cmd":cmd,"yield_time_ms":100,"stdin":true})).await;
         let id = started["session_id"].as_str().unwrap().to_owned();
         let mut stdout = started["stdout"].as_str().unwrap().to_owned();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {

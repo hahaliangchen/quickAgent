@@ -43,6 +43,9 @@ pub(super) fn release_finished(window: &mut Window) {
     window.messages.retain(|m| {
         (m["role"] == "system" && m.get("name").is_none())
             || task_frames::is_user_original(m)
+            // The tools this conversation activated stay activated, and stay
+            // where they were announced.
+            || m.get(crate::anthropic_messages::ADDED_TOOLS).is_some()
             || m["_pinned"] == true
     });
     if let Some(answer) = answer {

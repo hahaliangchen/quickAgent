@@ -4,6 +4,7 @@ mod agent_program;
 mod agent_service;
 mod agent_web;
 mod ai_proxy;
+mod anthropic_messages;
 mod attachments;
 mod browser_control;
 mod builtin_plugins;

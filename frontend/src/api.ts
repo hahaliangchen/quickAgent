@@ -93,6 +93,8 @@ export interface Task {
   readonly provider_name?: string | null
   readonly reasoning_effort?: string | null
   readonly fast_mode?: boolean
+  /** This chat's permission level, stored with its model and thinking level. */
+  readonly permission_mode?: PermissionMode | null
   readonly status: TaskStatus
   readonly created_at: number
   readonly updated_at: number
@@ -482,7 +484,7 @@ export const api = {
   updateSession: (id: string, payload: {title?: string; pinned?: boolean; archived?: boolean}) => patch(`/agent/sessions/${encodeURIComponent(id)}`, payload),
   deleteSession: (id: string) => request<{deleted: string[]}>(`/agent/sessions/${encodeURIComponent(id)}`, {method: 'DELETE'}),
   getTask: (id: string) => request<Task>(task(id)),
-  updateTask: (id: string, payload: { model?: string | undefined; provider?: string | undefined; reasoning_effort?: string | null | undefined; fast_mode?: boolean | undefined }) =>
+  updateTask: (id: string, payload: { model?: string | undefined; provider?: string | undefined; reasoning_effort?: string | null | undefined; fast_mode?: boolean | undefined; permission_mode?: PermissionMode | undefined }) =>
     patch<Task>(task(id), payload),
   events: async (id: string) => (await request<{ events: AgentEvent[] }>(`${task(id)}/events`)).events,
   contextDebug: (id: string) => request<{ enabled: boolean }>(`${task(id)}/context-debug`, { cache: 'no-store' }),

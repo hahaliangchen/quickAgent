@@ -185,6 +185,7 @@ pub fn is_material_tool(name: &str) -> bool {
             | "browser_diagnostics"
             | "run_program"
             | "exec_command"
+            | "run_readonly_command"
             | "write_stdin"
             | "run_project_script"
             | "get_project_process"

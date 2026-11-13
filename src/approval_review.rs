@@ -54,6 +54,8 @@ pub(crate) async fn review(
     let body = json!({"model":model,"stream":true,"max_tokens":2048,"messages":[
         {"role":"system","content":PROMPT},
         {"role":"user","content":operation}]});
+    // A Messages route gets the same request as its own blocks.
+    let body = crate::anthropic_messages::wire_body(state, model, &body);
     let request_id = crate::agent_service::uuid_like();
     let log = crate::model_transport::ModelRequestLog::new(
         &root,
@@ -64,12 +66,8 @@ pub(crate) async fn review(
     );
     log.sending();
     let pending = async {
-        let response = state
-            .model_client
-            .post(format!("{}/chat/completions", state.provider_url.trim_end_matches('/')))
-            .bearer_auth(&state.api_key)
+        let response = crate::anthropic_messages::send(state, task, "", &body)
             .header("x-client-request-id", request_id.as_str())
-            .json(&body)
             .send()
             .await?;
         log.headers(&response);

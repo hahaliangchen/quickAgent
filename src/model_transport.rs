@@ -34,6 +34,15 @@ pub fn client() -> anyhow::Result<reqwest::Client> {
         .build()?)
 }
 
+/// Self-hosted OpenAI-compatible services may use no authentication at all.
+pub fn with_bearer(request: reqwest::RequestBuilder, key: &str) -> reqwest::RequestBuilder {
+    if key.is_empty() {
+        request
+    } else {
+        request.bearer_auth(key)
+    }
+}
+
 /// Stable per working window, independent of turn/request/prompt length. A
 /// replica router can preserve prefix-cache locality without seeing task IDs.
 pub fn affinity(task: &str, scope: &str) -> String {
@@ -220,7 +229,7 @@ impl ModelRequestLog {
         .filter(|name| std::env::var_os(name).is_some())
         .collect::<Vec<_>>();
         log.event("prepared", json!({
-            "origin":origin,"endpoint":if responses { "responses" } else { "chat/completions" }, "request_bytes":bytes.len(),
+            "origin":origin,"endpoint":if responses { "responses" } else if body.get("thinking").is_some() { "messages" } else { "chat/completions" }, "request_bytes":bytes.len(),
             "body_sha256":crate::visual_artifacts::hash(&bytes),
             "message_count":messages.len(),"role_counts":roles,
             "proxy_env_names":proxy_env_names,
