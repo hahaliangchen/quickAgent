@@ -510,8 +510,35 @@ pub(super) async fn finish(
         if concurrent_caller.is_object() {
             let parent = concurrent_caller["task"].as_str().context("concurrent caller missing")?;
             let call_id = concurrent_caller["call_id"].as_str().context("concurrent call id missing")?;
-            let answer = json!({"task":node.title,"node_id":node.node_id,"return_event_seq":returned,"result":text,"assets":saved});
+            let answer = json!({"task":node.title.clone(),"node_id":node.node_id,"return_event_seq":returned,"result":text,"assets":saved});
             record_result(&tx, &task, turn, &concurrent_caller["step"], &concurrent_caller["flowNodeId"], call_id, parent, &answer)?;
+            let ledger = json!({
+                "turn": turn,
+                "task_node_id": parent,
+                "callId": call_id,
+                "action": "virtual_call",
+                "function": node.title.clone(),
+                "status": if failed { "failed" } else { "completed" },
+                "return_event_seq": returned,
+                "program_location": concurrent_caller["call_site"],
+            });
+            let ledger_seq = agent_service::append_event_tx(&tx, &task, "flow/ledger", &ledger, None)?;
+            let parent_scope = concurrent_caller["scope"].as_str().context("concurrent caller scope missing")?;
+            let raw: String = tx.query_row("SELECT state FROM agent_runtime_windows WHERE task_id=?1 AND scope=?2", params![task, parent_scope], |r| r.get(0))?;
+            let mut parent_window: Window = serde_json::from_str(&raw)?;
+            parent_window.messages.push(super::sourced(
+                super::execution_ledger_host_message(json!({
+                    "action": "virtual_call",
+                    "function": ledger["function"],
+                    "status": ledger["status"],
+                    "event_seq": returned,
+                    "return_event_seq": returned,
+                    "program_location": ledger["program_location"],
+                })),
+                &task,
+                ledger_seq,
+            ));
+            write_window(&tx, &task, parent_scope, &parent_window)?;
             let mut frame = frame;
             super::function_scope::release_finished(&mut frame);
             write_window(&tx, &task, &old_scope, &frame)?;
