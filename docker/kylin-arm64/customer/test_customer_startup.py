@@ -15,6 +15,26 @@ spec.loader.exec_module(entrypoint)
 
 
 class CustomerStartupTests(unittest.TestCase):
+    def test_missing_ppt_registration_is_repaired_without_replacing_preferences(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary)
+            entrypoint.ensure_ppt_registration(profile)
+            path = profile / "skill-packages.json"
+            self.assertEqual(json.loads(path.read_text())["remotes"]["ppt-master"]["token"], "")
+            for config in [
+                {"remotes": {"ppt-master": {"url": "http://custom/plugin", "token": "customer"}}, "enabled": {"ppt-master": False}},
+                {"removed": ["ppt-master"], "remotes": {}},
+            ]:
+                path.write_text(json.dumps(config))
+                before = path.read_bytes()
+                entrypoint.ensure_ppt_registration(profile)
+                self.assertEqual(path.read_bytes(), before)
+            path.write_text('{"remotes":{"other":{"url":"http://other","token":"keep"}},"enabled":{"ppt-master":false}}')
+            entrypoint.ensure_ppt_registration(profile)
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["remotes"]["other"]["token"], "keep")
+            self.assertFalse(saved["enabled"]["ppt-master"])
+
     def test_legacy_factory_restrictions_upgrade_once_and_custom_settings_survive(self):
         for customized in [False, True]:
             with self.subTest(customized=customized), tempfile.TemporaryDirectory() as temporary:

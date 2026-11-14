@@ -1,4 +1,5 @@
-//! Modules: functions declared `@module`. AI writes a module's code once per
+//! Modules: saved code implementations of first-layer virtual functions.
+//! AI writes the implementation once per
 //! contract, and later calls in the same chat run that code instead of asking
 //! again. Every version is a row of `agent_modules`, kept per task and turn, so
 //! rewinding a turn or deleting the chat removes it. The chat's folder holds
@@ -97,20 +98,44 @@ fn unmatched_declaration(root: &Path, task: &str, contract: &Contract) -> Result
     if saved.is_empty() {
         return Ok(format!("no saved implementation of {name} in this chat; declare it without revise_modules and the host writes it as a new contract"));
     }
-    let mut message = format!("no saved implementation of {name} with this exact declaration. A revision keeps the signature and the contract comment exactly as saved; change only the implementation through `reason`. Saved declarations of {name}:");
+    let mut message = format!("No saved implementation of {name} has this exact declaration. A revision keeps the signature and contract comment exactly as saved; change only the implementation through `reason`. Saved declarations of {name} (copy one of these blocks exactly to reuse it):");
     for (signature, description, version) in saved {
         let differs = match (signature == contract.signature, description == contract.description) {
-            (false, false) => "signature and comment differ",
-            (false, true) => "signature differs",
-            (true, false) => "comment differs",
-            (true, true) => "identical",
+            (false, false) => "signature and comment differ from yours",
+            (false, true) => "signature differs from yours",
+            (true, false) => "comment differs from yours",
+            (true, true) => "identical to yours",
         };
-        message.push_str(&format!("\n- version {version} ({differs}): signature {}; comment {}",
-            serde_json::to_string(&signature)?, serde_json::to_string(&description)?));
+        message.push_str(&format!("\n\nversion {version} ({differs}):\n{}", declaration(&signature, &description)));
     }
-    message.push_str(&format!("\nYour declaration: signature {}; comment {}",
-        serde_json::to_string(&contract.signature)?, serde_json::to_string(&contract.description)?));
+    message.push_str(&format!("\n\nYour declaration:\n{}", declaration(&contract.signature, &contract.description)));
     Ok(message)
+}
+
+/// A saved contract written back as source the author can paste: the same
+/// signature and comment lines give the same contract and reuse its code.
+fn declaration(signature: &str, description: &str) -> String {
+    let lines = description.lines().map(|line| format!(" * {line}")).collect::<Vec<_>>().join("\n");
+    format!("/**\n * @virtual\n{lines}\n */\n{signature} {{}}")
+}
+
+/// A main program called `name` without declaring it. When this chat saved an
+/// implementation under that name, say how to reuse it: each program is its
+/// own source, so a saved function is linked only when declared again exactly.
+pub(super) fn undeclared_hint(root: &Path, task: &str, name: &str) -> Result<Option<String>> {
+    let conn = agent_service::open_db(root)?;
+    schema(&conn)?;
+    let mut statement = conn.prepare(
+        "SELECT signature,description FROM agent_modules WHERE task_id=?1 AND name=?2 GROUP BY contract ORDER BY MAX(created_at) DESC LIMIT 3",
+    )?;
+    let saved = statement
+        .query_map(params![task, name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if saved.is_empty() {
+        return Ok(None);
+    }
+    let blocks = saved.iter().map(|(signature, description)| declaration(signature, description)).collect::<Vec<_>>().join("\n\n");
+    Ok(Some(format!("This chat saved an implementation of {name} in an earlier program. Each program is its own source, so declare it again in this one: paste this declaration exactly and the host links the saved code without rewriting it.\n\n{blocks}")))
 }
 
 /// The module file, relative to the workspace, as the fixer is told it.
@@ -188,7 +213,7 @@ pub(super) const LISTED: &str = "_chat_modules";
 pub(super) const ANNOUNCED: &str = "_modules";
 /// Modules saved or changed after the window's list was made.
 pub(super) const UPDATE: &str = "chat_modules_update";
-const REUSE: &str = "Declare the same signature and contract to reuse one: the host links its saved implementation automatically, with no file import. Each path is in the chat's flow folder, not the workspace, so io cannot open it: read the source with read_session_history({programs:true, program:\"modules/<file>\"}), adding version for an earlier one.";
+const REUSE: &str = "Copy the saved signature and contract comment exactly to reuse one: rewording the comment creates a different contract and another implementation. Vary arguments instead. The host links the saved implementation automatically, with no file import. Each path is in the chat's flow folder, not the workspace, so io cannot open it: read the source with read_session_history({programs:true, program:\"modules/<file>\"}), adding version for an earlier one.";
 
 fn declarations<'a>(modules: impl Iterator<Item = &'a Row>) -> String {
     modules

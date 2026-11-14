@@ -504,7 +504,7 @@ mod tests {
     fn shell_in_module_example_main_declares_the_module_and_matches_the_skill() {
         let source = include_str!("../../skills/task-program/examples/shell-in-module.js");
         let program = crate::agent_program::compile(source).unwrap();
-        assert!(program.functions["inspectPackage"].module_task);
+        assert!(program.functions["inspectPackage"].virtual_task);
         let mut runtime = Runtime::new(program, crate::agent_program::ENTRY, vec![]).unwrap();
         let State::Action(action) = runtime.next() else { panic!("expected module invocation") };
         assert!(matches!(action.kind, ActionKind::Call { ref name, ref args, .. }

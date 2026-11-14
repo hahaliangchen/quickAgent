@@ -25,6 +25,8 @@ def main():
     assert report['quickagent_admin_auth'] and report['unicom_templates_removed'] and report['ui']['quickagent_settings_saved']
     assert report['quickagent_cross_origin_blocked'] and report['ui']['quickagent_draft_preserved']
     assert report['upgrade_template_cleanup']
+    assert report['ppt_registered_at_boot'] and report['ppt_library_registered'] and report['ppt_registered_after_restart']
+    assert report['ui']['ppt_plugin_visible']
     assert report['real_qwen_configured'] and report['real_qwen_called']
     assert report['initial_models_empty'] and report['all_test_models_deleted']
     assert report['models_empty_after_restart'] and report['database_models_empty'] and report['factory_models_empty']

@@ -337,21 +337,22 @@ pub(super) fn find_tool() -> Value {
 }
 /// The main AI's finding, while it gets to know the task.
 /// How the main AI and a module's author hand over code: the host writes it
-/// to the chat's file, compiles it and runs it once the reply ends.
+/// to the chat's file, compiles it and runs the next Console cell when the
+/// reply ends.
 pub(super) fn write_program_tool(module: bool) -> Value {
     let mut properties = json!({"source":{"type":"string","minLength":1,"description":"The complete source for this submission."}});
     let description = if module {
         properties["probe"] = json!({"type":"boolean","description":"If true, run a small probe with the current arguments. Only read_file, read_file_lines, search_text, list_dir and workspace_info may execute: shell and writes are forbidden even if their libraries import successfully. Omit probe to save and run the reusable module with its normal permissions."});
-        "Run a small read-only probe with probe:true, or submit the complete reusable module implementation. The implementation uses the contracted function signature; a probe may instead be a plain script, run as that function's body with its parameters bound to this call's arguments. A probe returns its actual result to this same author; the final implementation is saved and returns to the caller. Call it as the only call in its reply. Code in reply text is never run."
+        "Submit the code implementation of the requested virtual function, or run a read-only probe with probe:true. The final implementation must define the called entry and must not call it at top level. A probe may instead be a plain script: the host wraps its top-level statements in the called async entry, so top-level await and return are valid; its parameters are bound to this call's arguments. A probe returns its actual result to this same author; the final implementation is saved and returns to the caller. Call it as the only call in its reply. Code in reply text is never run."
     } else {
         properties["name"] = json!({"type":"string","maxLength":80,"description":"The program's file name, as you would name a code file in a project: a few English words in kebab-case saying what it does, e.g. save-permission-per-chat. The host adds .js, and -2 when the name is taken."});
         properties["resource"] = json!({"type":"string","description":"For a plugin-owned fixed program, the skill: path of its version-1 program bundle manifest. Omit source: the host fetches, verifies and executes the plugin's exact main/module sources, without AI transcription. Available only in this plugin's own session."});
-        properties["revise_modules"] = json!({"type":"object","description":"Optional compatible improvements to saved first-layer implementations, keyed by the top-level @virtual name. Keep the declaration identical. On its first call, the author revises that saved version and stores the new implementation.",
+        properties["revise_modules"] = json!({"type":"object","description":"Optional improvements to saved first-layer implementations, keyed by the top-level @virtual name. Use this only while the saved declaration still matches the caller; if inputs, outputs or the contract change, declare a new function and implementation instead.",
             "additionalProperties":{"type":"object","properties":{
                 "version":{"type":"integer","minimum":1,"description":"Current saved version from the module directory."},
                 "reason":{"type":"string","minLength":1,"maxLength":2000,"description":"Concrete improvement and existing behavior to preserve."}
             },"required":["version","reason"],"additionalProperties":false}});
-        "Hand over the program to run. The host writes source to a file in this chat's folder, compiles it, and when it compiles runs it once this reply ends; what the program logs with console.log and how it ended come back to you. Compile errors come back as this call's result, so call it again with the corrected program. Call it as the only call in its reply. Code in reply text is never run: write code there only to show it to the user."
+        "Append the next JavaScript Console cell to the current task and run it in the same persistent VM. Top-level bindings, functions, @virtual capabilities, closures and completed state from earlier cells remain available; ordinary block and function scopes keep their normal JavaScript lifetime. Express delegated capabilities as empty @virtual functions with responsibility, inputs and results; the host supplies their implementations. Compile errors do not change the existing VM. Runtime pauses preserve it; runtime errors preserve completed effects and the current state. Call write_program as the only call in the reply. Code in reply text is never run: write code there only to show it to the user."
     };
     let mut tool = function(WRITE_PROGRAM, description, properties, if module { json!(["source"]) } else { json!([]) });
     if !module { tool["function"]["parameters"]["oneOf"] = json!([{"required":["source"]},{"required":["resource"]}]); }
@@ -494,7 +495,7 @@ fn main_program(s: &Session<'_>) -> Result<Value> {
 }
 /// Keep every captured record with how the program ended (design guide §4).
 async fn record_end(s: &Session<'_>, w: &Window, ended: &str, detail: Value) -> Result<()> {
-    let console = w.program.as_ref().map(|program| program.logs().to_vec()).unwrap_or_default();
+    let console = printed(w);
     let program = main_program(s)?;
     append(s, "program/end", json!({"turn":s.turn,"program":program["file"],"position":program["position"],
         "ended":ended,"console":console,"detail":detail}), false).await?;
@@ -743,6 +744,11 @@ pub(super) fn shown_reply(message: &Value) -> Option<Value> {
 /// No source is auto-edited and no failed install replaces the saved program.
 pub(super) fn source_error(operation: &str, args: &Value, error: &anyhow::Error) -> Value {
     let message = format!("{error:#}");
+    if message.starts_with("FIXED_PROGRAM_REQUIRED:") {
+        return json!({"error":message,"code":"FIXED_PROGRAM_REQUIRED","phase":"program_authorization",
+            "retryable":false,"executed":false,"operation":operation,"diagnostics":[{"message":message}],
+            "recovery":"Use write_program with the exact installed resource named by the plugin. Do not rewrite the main orchestration. If that resource is unavailable, stop and report the deployment error."});
+    }
     let at = message.strip_prefix("TS_PROGRAM ").and_then(|rest| {
         let mut parts = rest.splitn(3, ':');
         Some((
@@ -784,8 +790,23 @@ fn install_with(
         "model-defined libraries are unsupported"
     );
     let source = args["source"].as_str().context("source is required")?;
-    let mut program = agent_program::compile_with_libraries(source, libraries)?;
-    agent_program::uncalled_functions(source, None)?;
+    let cell_entry = if w.program_task.is_none() {
+        Some(format!("$$cell/{}", w.console_cell))
+    } else {
+        None
+    };
+    let mut program = if let Some(entry) = cell_entry.as_deref() {
+        let names = w.console.as_ref().map(Runtime::module_names).unwrap_or_default();
+        agent_program::compile_cell_with_scope(source, entry, libraries, names)?
+    } else {
+        agent_program::compile_with_libraries(source, libraries)?
+    };
+    // A persistent Console cell may intentionally define a helper or virtual
+    // capability for a later cell; only standalone programs require every
+    // declared function to be used immediately.
+    if cell_entry.is_none() {
+        agent_program::uncalled_functions(source, None)?;
+    }
     // The first layer declares capabilities. The host resolves their code;
     // the author need not choose an implementation file or a second marker.
     for (name, function) in &mut program.functions {
@@ -810,12 +831,25 @@ fn install_with(
         Some(requests) => super::modules::revisions(session.context("module revisions need a session")?, &program, requests)?,
         None => BTreeMap::new(),
     };
-    let entry = agent_program::ENTRY;
-    let runtime = Runtime::task_program(program, entry, vec![])?;
-    w.program = Some(runtime);
+    let entry = if let Some(entry) = cell_entry.as_deref() {
+        entry.to_owned()
+    } else {
+        agent_program::ENTRY.to_owned()
+    };
+    if let Some(mut console) = w.console.take() {
+        w.console_log_start = console.logs().len();
+        console.append_cell(program, &entry)?;
+        w.program = Some(console);
+        w.console_cell = w.console_cell.saturating_add(1);
+    } else {
+        let runtime = Runtime::task_program(program, &entry, vec![])?;
+        w.console_log_start = 0;
+        w.program = Some(runtime);
+        w.console_cell = w.console_cell.saturating_add(1);
+    }
     w.program_value = None;
     w.module_revisions = revisions;
-    let mut receipt = json!({"status":"started","entry":entry,"version":agent_program::VERSION,"source_hash":crate::visual_artifacts::hash(source.as_bytes())});
+    let mut receipt = json!({"status":"started","entry":entry,"version":agent_program::VERSION,"source_hash":crate::visual_artifacts::hash(source.as_bytes()),"persistent_console":w.program_task.is_none()});
     if !w.module_revisions.is_empty() {
         receipt["revise_modules"] = args["revise_modules"].clone();
     }
@@ -1105,7 +1139,22 @@ fn turn_writes(s: &Session<'_>) -> Result<Vec<String>> {
 /// All captured records. Context capacity is checked before delivery, never
 /// implemented by dropping earlier records or cutting a record's text.
 fn printed(w: &Window) -> Vec<String> {
-    w.program.as_ref().map(|program| program.logs().to_vec()).unwrap_or_default()
+    w.program
+        .as_ref()
+        .or(w.console.as_ref())
+        .map(|program| program.logs().iter().skip(w.console_log_start).cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Move a completed main Console cell back into the persistent VM slot. A
+/// running cell remains in `program` so the scheduler can resume it; once it
+/// has returned or failed, the next write_program cell continues from here.
+fn retain_console(w: &mut Window) {
+    if w.program_task.is_none() {
+        if let Some(runtime) = w.program.take() {
+            w.console = Some(runtime);
+        }
+    }
 }
 
 fn delivery_capacity(s: &Session<'_>, w: &Window, message: &Value) -> (usize, bool) {
@@ -1356,15 +1405,16 @@ async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value
     if w.program_task.is_none() {
         // A successful main program is one piece of work, not necessarily the
         // end of the user's task. Give its actual result back to its author.
-        let text = outcome(s, &printed(w), Ok(&value))?;
+        let output = printed(w);
+        let text = outcome(s, &output, Ok(&value))?;
         let message = json!({"role":"user","name":"program_result","content":text});
         let (required, fits) = delivery_capacity(s,w,&message);
         if !fits {
             let reference = archive_program_output(s,w,&value).await?;
             return Box::pin(failed_program(s,w,step,output_capacity_error(s,required,reference))).await;
         }
+        retain_console(w);
         record_end(s, w, "completed", json!({"result":value})).await?;
-        w.program = None;
         w.program_value = None;
         let seq = append(s, "program/result", json!({"turn":s.turn,"step":step,"task_node_id":w.task_node_id,"result":value,"output":text}), false).await?;
         w.messages.push(sourced(json!({"role":"user","name":"program_result","content":text}), s.task, seq));
@@ -1478,7 +1528,7 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         // The main program heals the same way, a few times a turn: the
         // main AI gets the error and the files already written.
         record_end(s, w, "error", json!({"error":error})).await?;
-        w.program = None;
+        retain_console(w);
         let mut diagnostic = json!({"code":"PROGRAM_RUNTIME_ERROR","executed":true,"program":main_program(s)?,"error":error,
             "completed_writes":turn_writes(s)?,"console":console,
             "instruction":"Your program stopped with this error. Call write_program with the corrected complete program; it runs from its start, so do not redo the listed writes unless the task needs them redone. If the task cannot be done, tell the user why in plain text instead."});
@@ -1497,6 +1547,7 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         let ended = if waiting { "question" } else if blocked { "needs_user" } else if error["code"] == UNAVAILABLE { "unavailable" } else { "error" };
         record_end(s, w, ended, json!({"error":error})).await?;
         let (text, shown) = (outcome(s, &console, Err(&error))?, outcome(s, &[], Err(&error))?);
+        retain_console(w);
         end_program(s, w, step, Value::Null, text, Some(shown)).await
     }
 }
@@ -2128,6 +2179,13 @@ mod tests {
 
 
     #[test]
+    fn fixed_program_denial_does_not_ask_the_model_to_rewrite_orchestration() {
+        let d=source_error("program",&json!({"source":"invented()"}),&anyhow::anyhow!("FIXED_PROGRAM_REQUIRED: use skill:programs/fixed.bundle.json"));
+        assert_eq!(d["code"],"FIXED_PROGRAM_REQUIRED");assert_eq!(d["retryable"],false);assert_eq!(d["executed"],false);
+        let recovery=d["recovery"].as_str().unwrap();assert!(recovery.contains("installed resource") && recovery.contains("Do not rewrite"));
+    }
+
+    #[test]
     fn source_diagnostics_preserve_the_rejected_program_and_existing_window() {
         let broken = include_str!("../agent_program/fixtures/virtual-body-missing-brace.js");
         let mut window = Window {
@@ -2285,6 +2343,7 @@ mod tests {
             }
             log.lock().unwrap().push((role.clone(), tools, json!(prompt)));
             let answer = match role.as_str() {
+                "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
                 "main" => reply(TWO_LEVEL_MAIN.into()),
                 "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  const texts = [];\n  for (const path of paths) { texts.push(io.read({path: path}).content); }\n  return judge(texts);\n}\n/** @virtual */\nfunction judge(texts) {\n  // Join the texts into one summary. Returns {summary:string}.\n}\n```".into()),
                 "leaf" => {
@@ -2322,12 +2381,12 @@ mod tests {
         let program_steps: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='tool/call' AND json_extract(data,'$.program_location') IS NOT NULL", [], |r| r.get(0)).unwrap();
         assert!(program_steps >= 3, "the program's steps are still recorded, with their source location");
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.iter().map(|(role, _, _)| role.as_str()).collect::<Vec<_>>(), ["main", "implement", "leaf"]);
+        assert_eq!(seen.iter().map(|(role, _, _)| role.as_str()).collect::<Vec<_>>(), ["main", "implement", "leaf", "main"]);
         let (_, implement, prompt) = &seen[1];
         assert_eq!(implement, &["read_tool_contracts", "read_program_guide", "read_skill", "write_program"], "an implementation is code: it reads contracts, the guide and the skills its code will require, and hands its code over");
-        assert!(prompt.as_str().unwrap().starts_with("You write one @module"));
+        assert!(prompt.as_str().unwrap().starts_with("You are implementing an abstract `@virtual` capability"));
         let (_, leaf, prompt) = &seen[2];
-        assert!(prompt.as_str().unwrap().starts_with("You perform one @virtual function"));
+        assert!(prompt.as_str().unwrap().starts_with("Perform the supplied abstract `@virtual` capability"));
         assert!(leaf.contains(&"read_file".to_owned()) && leaf.contains(&FIND.to_owned()));
         for retired in ["read_tool_contracts", "define_task_body", "invoke_library", "create_task", "read_scope", "read_asset"] {
             assert!(!leaf.contains(&retired.to_owned()), "leaf must not see {retired}");
@@ -2992,6 +3051,29 @@ mod tests {
         assert_eq!(answer, "Done after both programs.");
     }
 
+    #[tokio::test]
+    async fn successive_main_cells_share_the_persistent_console_scope() {
+        let root = TestRoot::new();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        run_scripted(root.path(), move |body| {
+            match count.fetch_add(1, Ordering::SeqCst) {
+                0 => reply("```js\nconst base = 7; function add(n) { return base + n; }\n```".into()),
+                1 => {
+                    assert!(body["messages"].to_string().contains("program_result"));
+                    reply("```js\nconsole.log(add(5));\n```".into())
+                }
+                2 => {
+                    assert!(body["messages"].to_string().contains("12"));
+                    reply("Done.".into())
+                }
+                _ => panic!("unexpected additional request"),
+            }
+        })
+        .await;
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+    }
+
     /// The chat folder reads like a code project: a program named by the AI
     /// like a code file, and the turn's direct calls beside it as code.
     #[tokio::test]
@@ -3246,11 +3328,12 @@ mod tests {
                         json!({"id":"look","type":"function","function":{"name":"list_dir","arguments":json!({"path":"."}).to_string()}}));
                     json!({"choices":[{"finish_reason":"tool_calls","message":message}]})
                 }
-                _ => reply(program.into()),
+                2 => reply(program.into()),
+                _ => reply("Done.".into()),
             }
         }).await;
         let bodies = bodies.lock().unwrap();
-        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies.len(), 3);
         let second = bodies[1]["messages"].to_string();
         assert!(second.contains("PROGRAM_NOT_RUN") && second.contains("only call in its reply"), "{second}");
         assert_eq!(std::fs::read_to_string(root.path().join("x.txt")).unwrap(), "1", "the program alone ran");
@@ -3269,7 +3352,8 @@ mod tests {
             log.push(body.clone());
             match log.len() {
                 1 => reply("```js\nconst broken = ;\n```".into()),
-                _ => reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"z.txt\", content: \"3\"});\n```".into()),
+                2 => reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"z.txt\", content: \"3\"});\n```".into()),
+                _ => reply("Done.".into()),
             }
         }).await;
         let name = root.path().file_name().unwrap().to_string_lossy().into_owned();
@@ -4302,7 +4386,8 @@ mod tests {
         let fixes = Arc::new(AtomicUsize::new(0));
         let fixed = fixes.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" => reply(CATCHING_MAIN.into()),
+            "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
+                "main" => reply(CATCHING_MAIN.into()),
             "fix" => {
                 fixed.fetch_add(1, Ordering::SeqCst);
                 reply(json!({"$task_error":{"message":"no source files"}}).to_string())
@@ -4333,7 +4418,8 @@ mod tests {
         let leaf_names = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let log = leaf_names.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" => reply(TWO_LEVEL_MAIN.into()),
+            "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
+                "main" => reply(TWO_LEVEL_MAIN.into()),
             "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  /** @virtual */\n  function join(texts) {\n    // Join the texts. Returns {summary:string}.\n  }\n  const texts = [];\n  for (const path of paths) { texts.push(io.read({path: path}).content); }\n  return join(texts);\n}\n```".into()),
             _ => {
                 let input = body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "program_task_input").unwrap();
@@ -4481,6 +4567,8 @@ mod tests {
             let answer = if body["messages"].to_string().contains("And now?") {
                 *log.lock().unwrap() = memory_of(&body);
                 reply("Noted.".into())
+            } else if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") {
+                reply("Wrote one.txt and two.txt.".into())
             } else {
                 reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"one.txt\", content: \"1\"});\nio.write({path: \"two.txt\", content: \"2\"});\n```".into())
             };
@@ -4495,7 +4583,7 @@ mod tests {
         run_task(state, "task".into(), "fake".into(), "And now?".into(), 10, CancellationToken::new(), 2, false).await.unwrap();
         server.abort();
         let chat = memory.lock().unwrap().clone().expect("the next turn has the earlier chat");
-        assert_eq!(chat, json!([["user", "Write two files"], ["assistant", "程序已完成。\n写入：one.txt、two.txt"]]));
+        assert_eq!(chat, json!([["user", "Write two files"], ["assistant", "Wrote one.txt and two.txt."]]));
     }
 
     #[tokio::test]
@@ -4876,7 +4964,9 @@ mod tests {
         let root = TestRoot::new();
         run_scripted(root.path(), move |body| {
             let messages = body["messages"].to_string();
-            if messages.contains("PROGRAM_RUNTIME_ERROR") {
+            if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") {
+                reply("程序已完成。\n写入：draft.txt、done.txt".into())
+            } else if messages.contains("PROGRAM_RUNTIME_ERROR") {
                 assert!(messages.contains("draft.txt"), "the main AI sees what was already written: {messages}");
                 reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"done.txt\", content: \"fixed\"});\n```".into())
             } else {
@@ -4885,6 +4975,8 @@ mod tests {
         }).await;
         assert_eq!(std::fs::read_to_string(root.path().join("done.txt")).unwrap(), "fixed");
         let conn = agent_service::open_db(root.path()).unwrap();
+        let programs: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='program/start'", [], |r| r.get(0)).unwrap();
+        assert_eq!(programs, 2, "one failed program and one correction; no replay after success");
         let answer: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
         assert_eq!(answer, "程序已完成。\n写入：draft.txt、done.txt");
     }
@@ -4916,7 +5008,9 @@ mod tests {
         let log = healed.clone();
         run_scripted(root.path(), move |body| {
             let messages = body["messages"].to_string();
-            if messages.contains("PROGRAM_RUNTIME_ERROR") {
+            if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") {
+                reply("程序已完成。".into())
+            } else if messages.contains("PROGRAM_RUNTIME_ERROR") {
                 *log.lock().unwrap() = Some(messages);
                 reply("```js\nconsole.log(\"checked\", 2, \"files\");\nconsole.warn(\"b.txt is empty\");\n```".into())
             } else {
@@ -4926,10 +5020,12 @@ mod tests {
         let healed = healed.lock().unwrap().clone().expect("the error came back to heal");
         assert!(healed.contains("found {") && healed.contains("files"), "the diagnostic carries what it printed: {healed}");
         let conn = agent_service::open_db(root.path()).unwrap();
+        let programs: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='program/start'", [], |r| r.get(0)).unwrap();
+        assert_eq!(programs, 2, "one failed program and one correction; no replay after success");
         let answer: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
         assert_eq!(answer, "程序已完成。", "the user sees the outcome without what the program printed for the AI");
-        let kept: String = conn.query_row("SELECT json_extract(data,'$.result.result') FROM agent_task_nodes WHERE task_id='task' AND json_extract(data,'$.result.result') LIKE '%输出%'", [], |r| r.get(0)).unwrap();
-        assert_eq!(kept, "程序已完成。\n输出：\nchecked 2 files\n[warn] b.txt is empty", "the AI's record of the turn keeps it");
+        let kept: String = conn.query_row("SELECT json_extract(data,'$.output') FROM agent_task_events WHERE task_id='task' AND kind='program/result' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, "第 2 段程序（summarize-a-and-b-2.js）已完成。\n输出：\nchecked 2 files\n[warn] b.txt is empty", "the AI's record of the turn keeps it");
         let shown_code: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.message.content') LIKE '%```js%'", [], |r| r.get(0)).unwrap();
         assert_eq!(shown_code, 0, "programs are records, not shown replies");
     }
@@ -5015,7 +5111,8 @@ mod tests {
         let authors = Arc::new(AtomicUsize::new(0));
         let count = authors.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" => reply(format!("```js\nimport * as io from \"host:io\";\nconst a = await shout(\"a\");\nconst b = await shout(\"b\");\nio.write({{path: \"out.txt\", content: a.text + b.text}});\n\n{SHOUT}\n```")),
+            "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
+                "main" => reply(format!("```js\nimport * as io from \"host:io\";\nconst a = await shout(\"a\");\nconst b = await shout(\"b\");\nio.write({{path: \"out.txt\", content: a.text + b.text}});\n\n{SHOUT}\n```")),
             "implement" => {
                 count.fetch_add(1, Ordering::SeqCst);
                 reply(SHOUT_CODE.into())
@@ -5034,6 +5131,48 @@ mod tests {
         let dir = super::super::host_folder::chat_dir(root.path(), "task").unwrap().join("modules");
         assert!(dir.starts_with(root.path().join(".codex-workspace-mcp/projects")), "modules live in the host's project folder: {dir:?}");
         assert_eq!(std::fs::read_to_string(dir.join(&files[0])).unwrap(), source);
+    }
+
+    /// 2026-11-14: main programs called functions an earlier program had
+    /// declared (runTestsAtTree, runCargoChecks …) without declaring them, and
+    /// the diagnostic only said the name was unavailable.
+    #[tokio::test]
+    async fn an_undeclared_call_of_a_saved_function_gets_its_declaration_to_paste() {
+        let root = TestRoot::new();
+        let authors = Arc::new(AtomicUsize::new(0));
+        let count = authors.clone();
+        let mains = Arc::new(AtomicUsize::new(0));
+        let hints = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = hints.clone();
+        run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" => {
+                let messages = body["messages"].as_array().unwrap();
+                match mains.fetch_add(1, Ordering::SeqCst) {
+                    0 => reply("```js\nconst a = await shout(\"a\");\nconsole.log(a.text);\n\n/**\n * @virtual\n * Return {text:string}: word in capitals.\n */\nasync function shout(word) {}\n```".into()),
+                    1 => reply("```js\nconst b = await shout(\"b\");\nconsole.log(b.text);\n```".into()),
+                    2 => {
+                        let result = messages.iter().rev().find(|m| m["role"] == "tool").unwrap()["content"].as_str().unwrap();
+                        let hint = serde_json::from_str::<Value>(result).unwrap()["saved_declaration"].as_str().unwrap_or("").to_owned();
+                        seen.lock().unwrap().push(hint.clone());
+                        let block = hint.split_once("\n\n").map(|(_, block)| block.to_owned()).unwrap_or_default();
+                        reply(format!("```js\nconst c = await shout(\"c\");\nconsole.log(c.text);\n\n{block}\n```"))
+                    }
+                    _ => reply("Done.".into()),
+                }
+            }
+            "implement" => {
+                count.fetch_add(1, Ordering::SeqCst);
+                reply(SHOUT_CODE.into())
+            }
+            other => panic!("unexpected request: {other}"),
+        }).await;
+        let hints = hints.lock().unwrap();
+        assert!(hints[0].contains("saved an implementation of shout") && hints[0].contains("async function shout(word) {}")
+            && hints[0].contains(" * Return {text:string}: word in capitals."), "{hints:?}");
+        assert_eq!(authors.load(Ordering::SeqCst), 1, "the pasted declaration links the saved code instead of a new author");
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let printed: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='program/result' AND json_extract(data,'$.output') LIKE '%C%'", [], |r| r.get(0)).unwrap();
+        assert!(printed >= 1, "the third program ran with the saved code");
     }
 
     #[tokio::test]
@@ -5165,8 +5304,9 @@ mod tests {
             let output = match log.len() {
                 1 => json!([{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"Look first"}],"encrypted_content":"enc-1"},
                     {"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"a.txt\"}"}]),
-                _ => json!([{"type":"function_call","id":"fc_2","call_id":"call_2","name":"write_program",
+                2 => json!([{"type":"function_call","id":"fc_2","call_id":"call_2","name":"write_program",
                     "arguments":json!({"source":"import * as io from \"host:io\";\nio.write({path: \"out.txt\", content: \"done\"});"}).to_string()}]),
+                _ => json!([{ "type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"Done."}] }]),
             };
             let reply = json!({"object":"response","status":"completed","output":output,"usage":{"input_tokens":1,"output_tokens":1}});
             async move { Json(reply) }
@@ -5186,7 +5326,7 @@ mod tests {
         run_task(state, "task".into(), "fake".into(), "Summarize a".into(), 10, CancellationToken::new(), 1, false).await.unwrap();
         server.abort();
         let bodies = bodies.lock().unwrap();
-        assert_eq!(bodies.len(), 2, "both requests went to /v1/responses");
+        assert_eq!(bodies.len(), 3, "read, program submission and final answer all use /v1/responses");
         let first = &bodies[0];
         assert!(first["instructions"].as_str().unwrap().starts_with("Complete the user's authorized task"), "the role prompt is the instructions");
         assert_eq!(first["store"], false);
@@ -5328,7 +5468,9 @@ mod tests {
         let leaf_tools = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
         let log = leaf_tools.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" => reply("```js\nconst io = require(\"io\");\nconst { write } = require(\"io\");\nwrite({path: \"out.txt\", content: \"hello\"});\nconst back = io.read({path: \"out.txt\"});\nconst verdict = await judge(back.content);\nio.write({path: \"verdict.txt\", content: String(verdict.ok) + \" \" + String(require(\"io\") === io)});\n\n/** @virtual */\nasync function judge(text) {\n  // Decide whether text says hello. Returns {ok:boolean}.\n}\n```".into()),
+            "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
+                "main" => reply("```js\nconst io = require(\"io\");\nconst { write } = require(\"io\");\nwrite({path: \"out.txt\", content: \"hello\"});\nconst back = io.read({path: \"out.txt\"});\nconst verdict = await judge(back.content);\nio.write({path: \"verdict.txt\", content: String(verdict.ok) + \" \" + String(require(\"io\") === io)});\n\n/** @virtual */\nasync function judge(text) {\n  // Decide whether text says hello. Returns {ok:boolean}.\n}\n```".into()),
+            "implement" => reply("```js\nconst io = require(\"io\");\nasync function judge(text) { return await decide(text); }\n/** @virtual Decide whether text says hello; return {ok:boolean}. */\nasync function decide(text) {}\n```".into()),
             "leaf" => {
                 log.lock().unwrap().push(tool_names(body));
                 reply(json!({"ok":true}).to_string())
@@ -5340,9 +5482,10 @@ mod tests {
         let conn = agent_service::open_db(root.path()).unwrap();
         let links = conn.prepare("SELECT data FROM agent_task_events WHERE task_id='task' AND kind='program/require'").unwrap()
             .query_map([], |r| r.get::<_, String>(0)).unwrap().map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap()).collect::<Vec<_>>();
-        assert_eq!(links.len(), 1, "a run links a library once: {links:?}");
+        assert_eq!(links.len(), 2, "main and implementation each link the library once: {links:?}");
         assert_eq!((links[0]["failed"].as_bool(), links[0]["result"]["methods"]["read"].as_str()), (Some(false), Some("read_file")), "the host's io, not the project skill: {links:?}");
         let leaf_tools = leaf_tools.lock().unwrap();
+        assert_eq!(leaf_tools.len(), 1, "the terminal judgment runs once");
         assert!(leaf_tools[0].contains(&"read_file".to_owned()) && leaf_tools[0].contains(&"write_file".to_owned()),
             "a hook gets the methods of the host library its declaring code requires: {:?}", leaf_tools[0]);
     }
@@ -5357,9 +5500,11 @@ mod tests {
         let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
             log.lock().unwrap().push(body.clone());
             let answer = match role_of(&body).as_str() {
+                "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
                 // A static import of a plugin library is refused before it runs.
                 "main" if !body["messages"].to_string().contains("PROGRAM_SOURCE_INVALID") => reply("```js\nimport * as flow from \"host:flow\";\nflow.read_code_flow({});\n```".into()),
                 "main" => reply("```js\nconst flow = require(\"flow\");\nconst graph = flow.read_code_flow({});\nlet missing = \"\";\ntry { require(\"absent\"); } catch (error) { missing = error.code; }\nconst verdict = await check(graph);\nconsole.log(missing, verdict.ok);\n\n/** @virtual */\nasync function check(graph) {\n  // Look at the code flow graph. Returns {ok:boolean}.\n}\n```".into()),
+                "implement" => reply("```js\nconst flow = require(\"flow\");\nasync function check(graph) { return await judge(graph); }\n/** @virtual Look at the code flow graph; return {ok:boolean}. */\nasync function judge(graph) {}\n```".into()),
                 "leaf" if !body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool") =>
                     json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
                         "tool_calls":[{"id":"find","type":"function","function":{"name":FIND,"arguments":json!({"query":"code flow"}).to_string()}}]}}]}),
@@ -5392,7 +5537,7 @@ mod tests {
         assert!(found.contains("\"method\":\"flow.read_code_flow\""), "finding methods searches third-party libraries too: {found}");
         let links = conn.prepare("SELECT data FROM agent_task_events WHERE task_id='task' AND kind='program/require' ORDER BY seq").unwrap()
             .query_map([], |r| r.get::<_, String>(0)).unwrap().map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap()).collect::<Vec<_>>();
-        assert_eq!(links.len(), 2, "{links:?}");
+        assert_eq!(links.len(), 3, "{links:?}");
         assert_eq!(links[0]["library"], "flow");
         assert_eq!(links[0]["result"]["methods"], json!({"read_code_flow":"read_code_flow"}));
         assert_eq!(links[1]["library"], "absent");

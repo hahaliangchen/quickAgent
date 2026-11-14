@@ -40,13 +40,13 @@ const MODEL_ATTEMPTS: u32 = 4;
 const MAIN_PROMPT: &str = include_str!("../prompts/single_agent.md");
 /// Experiment (GROW_MAIN_VIRTUAL_LEAF=1, off by default): a main program's
 /// @virtual runs directly as a terminal AI loop instead of being written as a
-/// module first. Design guide §11 item 30 keeps the first layer modules-only;
-/// this exists to measure the difference before deciding.
+/// saved implementation first. The default resolves first-layer @virtual
+/// declarations to code; this switch is an explicit alternative experiment.
 pub(crate) fn main_virtual_leaves() -> bool {
     std::env::var("GROW_MAIN_VIRTUAL_LEAF").as_deref() == Ok("1")
 }
 const MAIN_PROMPT_LEAF: &str = concat!(include_str!("../prompts/single_agent.md"),
-    "\n\nIn this host, a main program's @virtual runs directly as a terminal AI tool loop on the arguments you pass: use it for one judgment or one piece of generation whose materials you already prepared, such as one page or one verdict. Declare @module instead for multi-step work that should become reusable code, needs shell or processes data; its implementation may declare @virtual helpers.\n");
+    "\n\nExperimental override for this run: a main program's @virtual runs directly as a terminal AI capability on the arguments you pass. Use it for one judgment or one piece of generation whose materials you already prepared, such as one page or one verdict. Keep larger deterministic orchestration in ordinary JavaScript and declare each delegated capability with @virtual.\n");
 fn main_prompt() -> &'static str { if main_virtual_leaves() { MAIN_PROMPT_LEAF } else { MAIN_PROMPT } }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -63,6 +63,15 @@ struct Window {
     active_skill_scopes: BTreeMap<String, crate::plugin_runtime::ScopeId>,
     #[serde(default)]
     program: Option<crate::agent_program::Runtime>,
+    /// The persistent top-level JavaScript Console for the main task. A
+    /// running cell lives in `program`; completed cells return here so the
+    /// next write_program call continues in the same VM and module scope.
+    #[serde(default)]
+    console: Option<crate::agent_program::Runtime>,
+    #[serde(default)]
+    console_cell: u64,
+    #[serde(default)]
+    console_log_start: usize,
     #[serde(default)]
     program_value: Option<Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -324,7 +333,7 @@ fn available_tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
         tools.push(function("list_skills", "List installed skill packages and their short applicability descriptions. Load only a skill useful for the current task; the host does not classify the request.",json!({}),json!([])));
         tools.push(function("read_skill", "Load a skill's original instructions by its skill or plugin ID, as returned by list_skills. The ID may differ from its program library name: for example read_skill({name:'code-flow'}) reads its skill, while require('flow') loads its library. Loaded instructions stay active across steps and user turns until unloaded or the package changes. A skill's library needs no loading: a program loads it with require(\"<library>\") where it needs it. Does not expand permissions or start another agent.",json!({"name":{"type":"string"}}),json!(["name"])));
         if s.is_primary() && s.plugin.is_none() {
-            tools.push(function("propose_project_note", "Ask the user whether to save a durable project rule to the project notes (AGENTS.md), which are injected into every future conversation in this project. Use it when the user states something that should apply to future work here: deployment or packaging requirements, environment constraints, conventions, things to always or never do. Not for one-off task details or anything already in the project notes. The host shows the user an editable card; this call never writes the file. Do not wait for the decision or ask again in text; continue the task.",
+            tools.push(function("propose_project_note", "Ask the user whether to save a durable project rule to the project notes (AGENTS.md), which are injected into every future conversation in this project. Use it when the user states something that should apply to future work here: deployment or packaging requirements, environment constraints, conventions, things to always or never do. Use it also for a fact about working in this project that you established yourself in this turn, by an attempt that failed and one that then worked, and that later conversations would otherwise have to find again: how its tests are run, where a tool they need is installed, what its sandbox refuses and what to do instead; say in reason what failed and what worked. Not for one-off task details, guesses you did not verify, or anything already in the project notes. The host shows the user an editable card; this call never writes the file. Do not wait for the decision or ask again in text; continue the task.",
                 json!({"note":{"type":"string","minLength":1,"description":"One concise rule in the user's language, phrased as an instruction for future work."},"reason":{"type":"string","description":"Why it is worth keeping, shown to the user."}}),json!(["note"])));
         }
         if s.plugin.is_none() {
@@ -727,14 +736,14 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
             .workspace_info(crate::tools::WorkspaceInfoRequest { workspace_root:None }).ok();
         let (access, own) = if role == "main" && read_only_shell(s) {
             ("main_ai_read_only_commands_and_module_code",
-                " You run read-only commands, builds and tests yourself with run_readonly_command; commands that change project files or need the network belong in module code.")
+                " Direct run_readonly_command is available for individual reads, builds and tests. In a flow, delegate a step that needs shell as an empty @virtual function describing its result; the host arranges the implementation and its API discovery.")
         } else { ("module_deterministic_code_only", "") };
         wire.insert(1.min(wire.len()), json!({"role":"system","name":"shell_environment",
             "content":json!({"shell":shell,"workspace":workspace,
                 "access":access,
                 "memory":{"ai_input_limit_tokens":s.input_budget,"program_shell_output_limit_bytes":crate::shell_process::PROGRAM_OUTPUT_LIMIT,
                     "boundary":"Command output stays in code until logged with console.log or passed to a virtual helper."},
-                "usage":format!("{}{own}", if cfg!(windows) { "Use PowerShell 7 with Windows paths. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." } else { "Use Bash. Only module implementations call shell methods. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." })}).to_string()}));
+                "usage":format!("{}{own}", if cfg!(windows) { "Use PowerShell 7 with Windows paths. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." } else { "Use Bash. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." })}).to_string()}));
         }
         let environment = crate::agent_program::ENVIRONMENT;
         #[cfg(test)]
@@ -1331,7 +1340,7 @@ async fn business_tool_inner(
     s:&Session<'_>,node:&str,name:&str,args:Value,call_id:&str,module_code:bool,program:bool,
 ) -> Result<Value> {
     ensure!(!crate::project_process::is_execution(name) || module_code,
-        "SHELL_MODULE_ONLY: OS execution is available only in first-layer implementation code. Declare a JSDoc @virtual function for the result needed (verified facts, counts or an evidence-based answer), then implement commands and output processing inside it; second-layer virtual helpers receive only prepared arguments.");
+        "SHELL_MODULE_ONLY: Shell runs in the code implementation of a first-layer virtual function. In a main flow, declare an empty @virtual for the needed result; the host arranges its implementation. Inside that implementation, call shell directly; terminal virtual helpers cannot run shell.");
     ensure!(page_allows(s, name), "PLUGIN_SCOPE_DENIED: {name}");
     if name == "read_session_history" {
         let mut args = args;
@@ -2896,6 +2905,8 @@ async fn submit_program(
     let body = program_flow::role(w) == program_flow::Role::Implement;
     let root = s.state.workspace.root();
     let mut args: Value = serde_json::from_str(&call.arguments)?;
+    #[cfg(test)]
+    documented_examples::replay_paths(s, &mut args);
     let mut path = None;
     let mut bundle_origin = Value::Null;
     let installed = async {
@@ -2948,12 +2959,20 @@ async fn submit_program(
             let note = if w.module_probe {
                 "This probe runs once. Its observations return to you in module_probe_result."
             } else {
-                "The program runs when this reply ends; its outcome comes back to you."
+                "This JavaScript Console cell runs when the reply ends; its VM state remains available to the next cell and its outcome comes back to you."
             };
             (json!({"status":"running","path":path,"note":note}), false)
         }
         Err(error) => {
-            let diagnostic = program_flow::source_error("program", &args, &error);
+            let mut diagnostic = program_flow::source_error("program", &args, &error);
+            // A main program calling a function an earlier program declared:
+            // give the saved declaration to paste. In an implementation the
+            // same name would declare a terminal step, not reuse the module.
+            if !body && let Some(name) = undeclared_name(&format!("{error:#}"))
+                && let Some(hint) = modules::undeclared_hint(&root, s.task, name)?
+            {
+                diagnostic["saved_declaration"] = json!(hint);
+            }
             append(s, "program/source_invalid", json!({"diagnostic":diagnostic,"path":path}), false).await?;
             // What never ran is not a file of the chat: its name is free for
             // the corrected program. The source stays in the call's record.
@@ -2968,6 +2987,15 @@ async fn submit_program(
         "meta":{"result":result}}), false).await?;
     w.messages.push(sourced(json!({"role":"tool","tool_call_id":call.call_id,"content":result.to_string()}), s.task, seq));
     save(s, w).await
+}
+
+/// The name a compile diagnostic says is not defined, as in
+/// `TS_PROGRAM 23:3: runTestsAtTree is not defined: …`.
+fn undeclared_name(message: &str) -> Option<&str> {
+    let rest = message.strip_prefix("TS_PROGRAM ")?;
+    let rest = rest.splitn(3, ':').nth(2)?.trim_start();
+    let (name, _) = rest.split_once(" is not defined")?;
+    (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')).then_some(name)
 }
 
 /// A file changed outside the Agent while a write was pending: tell the user
@@ -3040,13 +3068,15 @@ async fn execute_call(
     let output=async {
         let mut args:Value=serde_json::from_str(&call.arguments).context("invalid tool arguments JSON")?;
         crate::source_read::unmark(&mut args);
+        #[cfg(test)]
+        documented_examples::replay_paths(s, &mut args);
         if crate::project_process::is_execution(&call.name) {
             ensure!(at.is_some() && program_flow::shell_code_allowed(s,w),
-                "SHELL_MODULE_ONLY: declare @module for the needed result (facts, counts or an evidence-based answer), not merely a shell gateway. Run commands and process stdout in its deterministic code; do not expose shell to virtual hooks.");
+                "SHELL_MODULE_ONLY: Shell runs in the code implementation of a first-layer virtual function. In a main flow, declare an empty @virtual for the needed result; the host arranges its implementation. Inside that implementation, call shell directly; terminal virtual helpers cannot run shell.");
         }
         if w.module_probe && call.name != "parallel_read_batch" {
             ensure!(program_flow::probe_read(&call.name),
-                "MODULE_PROBE_READ_ONLY: probe:true forbids shell and writes; {} cannot execute. Only read_file, read_file_lines, search_text, list_dir and workspace_info may run. To use shell or other module capabilities, omit probe and submit the implementation with write_program({{source}}); normal permissions still apply. Changing import/require syntax will not change this permission.", call.name);
+                "MODULE_PROBE_READ_ONLY: probe:true forbids shell and writes; {} cannot execute. Only io.read, io.read_lines, io.search, io.list and io.workspace_info may run. To use shell or other module capabilities, omit probe and submit the implementation with write_program({{source}}); normal permissions still apply. Changing import/require syntax will not change this permission.", call.name);
         }
         // Mode enforcement is independent of the model's advertised schema.
         if !program_flow::internal_call(w,call) {validate_tool(s,w,definitions,&call.name)?;}
@@ -3384,8 +3414,8 @@ pub(crate) async fn run_task_with_resource(
         input_budget: crate::model_settings::input_budget(&state, &model),
     };
     let task_copy = task.clone();
-    let root_copy = state.workspace.root().to_path_buf();
-    let (saved, previous, memory, active, scope) = db(state.workspace.root(), move |conn| {
+    let code_session = s.plugin.is_none();
+    let (saved, mut previous, active, scope) = db(state.workspace.root(), move |conn| {
         let main: Option<String> = conn
             .query_row(
                 "SELECT state FROM agent_runtime_windows WHERE task_id=?1 AND scope='main'",
@@ -3412,31 +3442,38 @@ pub(crate) async fn run_task_with_resource(
                 |r| r.get(0),
             )
             .optional()?;
-        let at_top = active.node_id == crate::function_frames::ROOT;
-        let memory = if at_top {
-            // The chat folder's files follow the records before a new turn
-            // lists them: call records written, rewound turns' files gone.
-            if let Ok(dir) = host_folder::chat_dir(&root_copy, &task_copy) {
-                crate::session_history::turn_record::sync(&tx, &task_copy, &dir)?;
-            }
-            task_frames::chat_context(&tx, &task_copy, turn)?
-        } else {
-            Vec::new()
-        };
-        tx.commit()?;
         let saved = saved
             .map(|raw| serde_json::from_str::<Window>(&raw))
             .transpose()?;
-        if at_top {
-            // A request at the conversation level gets a clean main context.
-            return Ok((None, saved, memory, active.node_id, scope));
+        let refresh = active.node_id == crate::function_frames::ROOT
+            || (code_session && task_frames::can_refresh_main_window(&active, saved.as_ref()));
+        tx.commit()?;
+        if refresh {
+            return Ok((None, saved, active.node_id, scope));
         }
-        // An unfinished task (a stopped turn or a pending confirmation) continues in its own context.
+        // Executable continuations keep their own VM and calling window.
         let saved = saved.context("active task frame missing; refusing to recreate it")?;
-        Ok((Some(saved), None, Vec::new(), active.node_id, scope))
+        Ok((Some(saved), None, active.node_id, scope))
     })
     .await?;
     s.scope = scope;
+    let memory = if saved.is_none() {
+        // Settle pending calls before rebuilding the ordinary chat records.
+        // A new user turn does not inherit the old direct loop's reasoning.
+        if let Some(previous) = previous.as_mut() {
+            settle_unanswered_calls(&s, previous).await?;
+        }
+        let (root, task) = (state.workspace.root().to_path_buf(), task.clone());
+        let history_root = root.clone();
+        db(&root, move |conn| {
+            if let Ok(dir) = host_folder::chat_dir(&history_root, &task) {
+                crate::session_history::turn_record::sync(conn, &task, &dir)?;
+            }
+            task_frames::chat_context(conn, &task, turn)
+        }).await?
+    } else {
+        Vec::new()
+    };
     let mut w = match saved {
         Some(saved) => saved,
         None => {
@@ -4161,7 +4198,7 @@ mod tests {
             let received=received.clone();let instructions=instructions.clone();async move {
                 let mut requests=received.lock().unwrap();let n=requests.len();
                 let messages=body["messages"].as_array().unwrap();
-                assert!(messages.iter().any(|m| m["role"] == "system" && m["content"].as_str().is_some_and(|text| text.contains("The host has already opened this request"))), "plugin instructions never replace the core agent prompt");
+                assert!(messages.iter().any(|m| m["role"] == "system" && m["content"].as_str().is_some_and(|text| text.contains("Complete the user's authorized task"))), "plugin instructions never replace the core agent prompt");
                 let skill=messages.iter().filter(|m|m["name"]=="plugin_instructions").collect::<Vec<_>>();
                 assert_eq!(skill.len(),1);assert_eq!(skill[0]["role"],"system");
                 let content=skill[0]["content"].as_str().unwrap();
@@ -4553,13 +4590,9 @@ mod tests {
         let messages = body["messages"].as_array().unwrap();
         s.requests.push(body.clone());
         s.main_round += 1;
-        assert!(messages.iter().any(|m| {
-            m["name"] == "context_summary"
-                && m["content"]
-                    .as_str()
-                    .unwrap()
-                    .contains("继续第二页视觉检查")
-        }));
+        assert!(messages.iter().any(|m| m["role"] == "user" && m["content"] == "继续"));
+        assert!(!messages.iter().any(|m| m["name"] == "context_summary" || m["tool_call_id"] == "c0"),
+            "a fresh turn reads old tool evidence from chat files instead of carrying the old window");
         assert!(!body.to_string().contains("LONG_RAW_FILLER"));
         Json(
             json!({"choices":[{"message":{"role":"assistant","content":"继续检查第二页，保留窗口和服务，不改源码。"},"finish_reason":"stop"}]}),
@@ -4731,9 +4764,10 @@ mod tests {
         let (root, state, script, server) = setup().await;
         script.lock().unwrap().main_round = 1;
         let cancel = CancellationToken::new();
+        let node = open_task(root.path(), "task");
         let session = Session {
             agent_id: None,
-            task_node_id: None,
+            task_node_id: Some(node.clone()),
             plugin: None,
             state: &state,
             task: "task",
@@ -4753,7 +4787,7 @@ mod tests {
         let seq = append(
             &session,
             "assistant/message",
-            json!({"actor":"agent","message":assistant}),
+            json!({"actor":"agent","turn":1,"message":assistant}),
             false,
         )
         .await
@@ -4767,8 +4801,8 @@ mod tests {
             ..Default::default()
         };
         save(&session, &saved).await.unwrap();
+        append(&session, "tool/call", json!({"turn":1,"callId":"c0","name":"write_file","arguments":json!({"path":"never-repeat.txt","content":"test"}).to_string()}), false).await.unwrap();
         append(&session,"tool/result",json!({"message":{"toolCallId":"c0"},"meta":{"result":{"written":true,"receipt":"original-result"}}}),false).await.unwrap();
-        open_task(root.path(), "task");
         run_task(
             state,
             "task".into(),
@@ -4782,16 +4816,19 @@ mod tests {
         .await
         .unwrap();
         let requests = &script.lock().unwrap().requests;
-        let restored = requests[0]["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["tool_call_id"] == "c0")
-            .unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(restored["content"].as_str().unwrap()).unwrap(),
-            json!({"written":true,"receipt":"original-result"})
-        );
+        assert_eq!(requests.len(), 1, "one fresh request, with no replay");
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let receipts: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='tool/result' AND json_extract(data,'$.message.toolCallId')='c0'", [], |r| r.get(0)).unwrap();
+        assert_eq!(receipts, 1, "the original saved result is not executed or recorded twice");
+        let dir = host_folder::chat_dir(root.path(), "task").unwrap();
+        let records = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_string_lossy().ends_with(".calls.js"))
+            .map(|path| std::fs::read_to_string(path).unwrap()).collect::<Vec<_>>().join("\n");
+        let receipt: String = conn.query_row("SELECT json_extract(data,'$.meta.result') FROM agent_task_events WHERE kind='tool/result' AND json_extract(data,'$.message.toolCallId')='c0'", [], |r| r.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&receipt).unwrap(), json!({"written":true,"receipt":"original-result"}),
+            "the complete original receipt remains in history");
+        assert!(records.contains("已写入") && records.contains("never-repeat.txt"),
+            "the new turn can locate the completed write in its chat files: {records}");
         assert!(!root.path().join("never-repeat.txt").exists());
         server.abort();
     }

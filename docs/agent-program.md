@@ -4,15 +4,15 @@
 
 当前语言版本 **14**。使用常见 JS 基础语法表达流程，由 SWC 解析、Rust 执行持久化指令。内部值使用虚拟机堆以保留对象引用，变量按 JS 的块级作用域和词法作用域存放；宿主工具和 AI 仍通过 JSON 交接。**普通表达式由宿主确定性求值，智能判断必须写成显式任务函数。** 相同程序、相同输入和相同工具／任务返回值产生相同控制流；AI 任务及外部操作本身不因此变成确定性的。
 
-编排使用 JavaScript，主程序和 module 实现都由宿主的可恢复 Rust VM 执行，使用已支持的 JS 内置能力和宿主发布的库。主层描述流程，尚未实现的能力用 @virtual 空函数声明，宿主负责链接其实现。module 实现中的 AI 判断用 @virtual。入口提示词聚焦这些职责，API 来自当前工具契约；运行时兼容性、预算和恢复细节按需查询。被处理项目的技术栈由实际输入确定。
+编排使用 JavaScript Console cell，由宿主的可恢复 Rust VM 执行，使用已支持的 JS 内置能力和宿主发布的库。普通 JavaScript 表达过程、数据流和确定性检查；尚未实现的能力用 `@virtual` 空函数声明，宿主负责提供实现。每个 cell 继续使用同一任务的顶层环境，已有绑定、函数、闭包和状态可供后续 cell 使用；块和函数作用域仍按 JavaScript 规则结束。入口提示词聚焦这些职责，API 来自当前工具契约；运行时兼容性、预算和恢复细节按需查询。被处理项目的技术栈由实际输入确定。
 
 ## 运行方式与工具导入
 
-主任务的 AI 用 `write_program({source})` 提交完整 JS，作为该条回复唯一的工具调用；宿主保存源码，编译通过后运行，结果回到主任务。回复正文中的代码只是展示，不会执行。程序像 JS 模块一样从顶层第一条语句开始顺序执行，没有入口函数，也不需要返回值；需要的数据写在代码里，或用导入的工具读取。
+主任务的 AI 用 `write_program({source})` 提交下一个完整 JS cell，作为该条回复唯一的工具调用；宿主保存源码，编译通过后在同一持久 VM 中运行，结果回到主任务。回复正文中的代码只是展示，不会执行。cell 从顶层第一条语句开始顺序执行，没有入口函数，也不需要返回值；需要的数据写在代码里，或用导入的工具读取。编译失败不会改变已有 VM；运行时暂停、错误和已完成的副作用按当前状态保留。
 
-宿主 SDK 使用 import 或 require 加载：`import io from "io"`、`import * as io from "io"`、`import {read as load} from "io"`，或在函数里 `const io = require("io")`。`host:` 是兼容别名，import 和 require 都接受，例如 `require("host:process")` 与 `require("process")` 加载同一个库对象。默认导入绑定库的方法集合。`<library>/promises` 提供异步方法。没有 import 的程序里，宿主自带的库按名字就能用；程序自己声明了同名变量时，这个名字归程序自己。这里的 `io`、`process` 是宿主 SDK，方法以已发布的工具契约为准；VM 没有 Node 的全局 process 对象或 Buffer。
+宿主 SDK 使用 import 或 require 加载：`import io from "io"`、`import * as io from "io"`、`import {read as load} from "io"`，或在函数里 `const io = require("io")`。`host:` 是兼容别名，import 和 require 都接受，例如 `require("host:process")` 与 `require("process")` 加载同一个库对象。默认导入绑定库的方法集合。`<library>/promises` 提供异步方法。没有 import 的程序里，宿主自带的库按名字就能用；程序自己声明了同名变量时，这个名字归程序自己。这里的 `io`、`process` 是宿主 SDK，方法以已发布的工具契约为准；VM 支持 `Buffer.byteLength(text)`、`Buffer.from(text, "utf8")`、`new URL(input, base)` 和 `path.isAbsolute(path)`，以及 `process.env.NAME` / `process.env["NAME"]` 读取单个非凭据环境变量。`globalThis` 可用于访问这些受支持的全局对象；不提供完整 Node process 对象。源码自己绑定 `process` 时，该名称以源码绑定为准。
 
-插件和项目技能的库在用到的函数里用 `const ppt = require("ppt")` 加载；执行到这一行才链接，返回方法对象。同一次运行再次 require 同一库拿到同一个对象；找不到时抛出可捕获的 `MODULE_NOT_FOUND`。参数必须是库名字符串。静态 import 仅绑定当前已发布的宿主 SDK；宿主注册的第三方插件和技能库通过 require 在运行时加载。两种写法都不加载 Node 内置模块、npm 包或工作区 node_modules。确需 Node/npm 时，由第一层实现通过已发布的 process SDK 运行独立工作区脚本，检查退出码和实际输出后把数据返回流程。当前没有 `@node` 执行注解。工具以一个 JSON 对象传参，仍经过原权限检查。export、本地文件模块和动态 import 尚不支持。顶层运行完毕表示流程结束，不代表业务验收自动通过。
+插件和项目技能的库在用到的函数里用 `const ppt = require("ppt")` 加载；执行到这一行才链接，返回方法对象。同一次运行再次 require 同一库拿到同一个对象；找不到时抛出可捕获的 `MODULE_NOT_FOUND`。参数可以是字符串值。静态 import 仅绑定当前已发布的宿主 SDK；宿主注册的第三方插件和技能库通过 require 在运行时加载。两种写法都不加载 Node 内置模块、npm 包或工作区 node_modules。确需 Node/npm 时，由宿主提供的受限库运行独立工作区脚本，检查退出码和实际输出后把数据返回流程。工具以一个 JSON 对象传参，仍经过原权限检查。export、本地文件模块和动态 import 尚不支持。单个 cell 返回表示本次提交结束，不代表业务验收自动通过。
 
 `program_tool_headers` 是按用途组织的库目录。读代码时，用 `io.search` 在相关目录找定义或文本，再用 `io.read_lines` 查原文。`io.search` 像 grep：写成正则的查询按正则匹配，`output_mode` 可只列文件（`files`）或计数（`count`），`glob` 过滤文件，`context_lines` 带上下文行。用 `read_tool_contracts({libraries:["io"],overview:true})` 看该库的当前方法和用途，再用 `read_tool_contracts({methods:["io.read_lines"]})` 读单个方法的参数和返回字段。宿主也在目录下列出常用源码方法的短签名，字段来自工具契约。程序代码里的 `io.read` 和 `io.read_lines` 把内容交给 JS heap 而不是 AI 上下文：不传 `max_chars` 时一次返回整个文件或整个请求范围（`complete:true`），上限 200 万字符，超过才用 `next_start_line` 续读；`read_tool_contracts` 给程序作者看的契约按这个口径写。AI 直接调用同一工具时仍是默认 24000、最多 60000 字符一页。主 AI 可直接使用文件搜索和读取工具，模块作者的探路使用 `io` 的只读方法。
 
@@ -45,9 +45,9 @@ Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`�
 
 `compose` 和 `inspect` 是第一层虚函数：主程序只编排它们的契约、参数、依赖和验收；宿主自动链接已有实现，缺少时由 AI 写成代码。实现中需要判断或生成的部分再声明第二层 `@virtual`。两层声明统一使用 JSDoc @virtual，实现在宿主链接，无须导入实现文件（[设计文档](agent-design-guide.md)第 3 节）。普通函数调用使用局部 Runtime 函数帧，不创建 AI 任务节点，也不启动另一个 Agent。此例用 HTML 说明串行数据流，只检查实际执行过的内容／结构，不声称已经完成浏览器视觉验收。
 
-已有的真实结果通过参数交给需要它的函数，不因为进入虚函数就重读原材料。虚函数可在同一上下文连续观察、调用工具和处理；它只做一件事时最稳：只检查，或只处理，检查之后要不要处理由代码决定。调用方对函数契约中可以确定的输入与输出关系做代码核对，不能把不匹配的返回结果当作有效验收。处理实际状态后需要复检时才重新读回；多步的复杂处理写成代码或模块，不交给一个虚函数。
+已有的真实结果通过参数交给需要它的函数，不因为进入函数就重读原材料。主 AI 可以把一个探索、分析或实现阶段交给第一层虚函数，只需写清职责、输入和所需结果；无需先查清底层接口或实现内部步骤。第一层实现者根据实际输入组织代码，必要时调用更小的第二层虚函数，已有结果继续使用。
 
-虚函数是流程中的一次 AI 能力调用，有明确输入、职责和返回值；不要把它当作省略整段流程实现的默认容器。能具体表达的读取、遍历、判断分支、写入和复查等步骤尽量由普通函数编排；需要 AI 理解、判断或生成的部分才交给职责明确的虚函数，调用方再用其返回值继续推进。划分应符合当前任务，虚函数内仍可按职责和授权逐步使用工具、处理与复查，无需为了形式强制拆分。
+第二层是终端 AI 工作：根据材料和授权工具完成聚焦的理解、判断、生成或操作，不再提交实现代码或创建下一层 AI。它可以在自己的职责内连续观察和处理；需要多步编排时由第一层实现组织，粒度按实际任务决定。调用方核对契约中可由代码确定的输入输出关系；外部状态变化或修改后需要复检时才重新读回。
 
 验收要覆盖当前任务的实际要求，禁止用表面特征冒充完整验收。基础文本、数量或存在性检查只能证明其实际检查到的事项，不能单独证明内容正确或资源可用。可确定的步骤尽量写成普通代码，需要理解与判断时调用职责明确的 AI 函数或适用工具；未检查或无法确认的事项如实报告。遇到语言限制或工具缺失时，不得删减必要检查后将结果当作全面通过，应该改用其他可行能力或说明未完成的原因。
 
@@ -55,7 +55,7 @@ Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`�
 
 ## 异步函数、工具和并发
 
-宿主 SDK 从 `<library>` 导入，同步等待实际回执；需要异步工具时从 `<library>/promises` 导入；旧 `host:` 前缀仍可使用。用 require 时，异步方法用 `require("<库名>/promises")` 加载。async 函数和 async 虚函数返回 Promise，调用方可在等待前继续执行。`Promise.all`、`allSettled`、`race`、`any`、`then`、`catch`、`finally` 提供组合与错误传播；all 和 allSettled 按输入顺序排列结果，race 和 any 按完成结果决定。
+宿主 SDK 从 `<library>` 导入，同步等待实际回执；需要异步工具时从 `<library>/promises` 导入。用 require 时，异步方法用 `require("<库名>/promises")` 加载。async 函数和 async 虚函数返回 Promise，调用方可在等待前继续执行。`Promise.all`、`allSettled`、`race`、`any`、`then`、`catch`、`finally` 提供组合与错误传播；all 和 allSettled 按输入顺序排列结果，race 和 any 按完成结果决定。
 
 独立只读操作可由宿主合批，最多 32 项一批，逐项记录成功或失败。多个 async 虚函数运行在独立窗口，调用时固定参数和 `@uses` 点名的变量；模型请求共用并发队列，默认三个槽位。共享文件应由调用方统一写入；并发函数对同一文件的整文件写入会保留冲突候选并停止。
 
@@ -80,7 +80,7 @@ Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`�
 
 实现可以包含 import、函数声明、顶层常量和 require；每次调用使用新的模块作用域，await 写在函数内部。实现入口已有真实函数体时，可以保留入口的 `/** @virtual */` 注释；宿主在实现和修复上下文中把它视为普通代码。其他 AI 声明仍须使用空函数体，避免把声明误当实现。
 
-模块作者可用 `write_program({probe:true,source})` 运行小型只读探测。探测与正式实现使用同一套 SDK 名称和加载语法，权限在实际调用时检查：仅允许 `read_file`、`read_file_lines`、`search_text`、`list_dir`、`workspace_info`。即使 process 库成功加载，shell 和写入仍返回 `MODULE_PROBE_READ_ONLY`，诊断明确指出 probe:true 的限制并要求去掉 probe 后提交正式实现；更换 import/require 不改变权限。探测结果只回到当前作者，不保存为复用模块，也不能调用 AI 函数。正式实现按当前任务权限执行。
+模块作者可用 `write_program({probe:true,source})` 运行小型只读探测。探测与正式实现使用同一套 SDK 名称和加载语法，权限在实际调用时检查：仅允许 `io.read`、`io.read_lines`、`io.search`、`io.list`、`io.workspace_info`。即使 process 库成功加载，shell 和写入仍返回 `MODULE_PROBE_READ_ONLY`，诊断明确指出 probe:true 的限制并要求去掉 probe 后提交正式实现；更换 import/require 不改变权限。探测结果只回到当前作者，不保存为复用模块，也不能调用 AI 函数。正式实现按当前任务权限执行。
 
 分析代码应采集和整理证据，需要判断时把相关源码交给聚焦的 `@virtual`；不要把本次仓库的报告和结论硬编码成所谓通用分析算法。每层不重复采集同一材料，按工具已发布的结果结构编写。引用校验要确认原文及完整控制路径支持对应结论，仅检查文件或行号存在并不构成验证。
 
@@ -113,13 +113,13 @@ Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`�
 | 控制流 | if/else、for(init;test;update)、while、do/while、数组 for...of、简单绑定的 for...in、switch、带标签 break/continue、三元表达式、return、assert、try/catch/throw |
 | 表达式 | + - * / %、一元 + - ! typeof、== != === !== < <= > >=、&& || ??、模板字符串、逗号运算符（从左到右执行并返回末项）；宿主直接计算，不创建模型任务 |
 | 收集及数据方法 | 本地数组 push；确定性的 includes/indexOf/slice/at/concat、字符串 lastIndexOf/startsWith/endsWith/trim/toLowerCase/toUpperCase/split/replace/replaceAll/match、正则 test、数组 join，以及 JSON.stringify/JSON.parse、Array.isArray、Object.keys/values |
-| 路径和 URL 计算 | `path.join/resolve/relative/normalize/dirname/basename/extname`、`url.parse`；由 Rust 直接计算，不访问文件系统 |
+| 路径和 URL 计算 | `path.join/resolve/relative/normalize/dirname/basename/extname/isAbsolute`、`url.parse`、`new URL`；由 Rust 直接计算，不访问文件系统 |
 | YAML | `require("yaml")` 的 `parse/stringify`、`require("js-yaml")` 的 `load/dump`；单个文档，映射的键转成字符串，合并键 `<<` 生效 |
 | 异步并发 | async 虚函数和异步工具返回 Promise；可用 Promise.all 等待，失败可由 try/catch 处理 |
 
 常见语法归约为已有赋值、分支、跳转、调用和返回结构，不为每种写法新增调度协议。for 的 continue 进入 update 再检查条件；while 的 continue 进入条件；do/while 的 continue 进入末尾条件。break/continue 只退出其跨越的异常处理现场，保留外围 catch。
 
-顶层和 async 函数可以 await Promise；`Promise.all` 等组合子支持 async 虚函数与异步工具。Promise 回调和 await 恢复按 JS 微任务顺序执行：async 函数返回 Promise、`then` 回调返回 Promise 或 resolve 传入 Promise 时，与 JS 一样多等两轮。直接把顶层 async 函数（含 async 虚函数）或 `host:<库>/promises` 工具的调用结果当作值使用时编译失败，例如 `inspect(page).passed`、`if (inspect(page))`、`assert(inspect(page))`、`` `${work()}` `` 或参与运算；赋值保存、传给 `Promise.all`、调用 `then`/`catch`/`finally` 和 `void` 不受影响。局部函数值或变量保存的 Promise 在编译期无法识别，运行时读取 Promise 属性时报“this is a Promise; the value may need await”。运行时实现的是 JS 子集，不是完整 Node.js。支持对象和数组成员的赋值、复合赋值及自增自减；声明、普通函数参数和 catch 支持嵌套解构、默认值及解构剩余项；数组/对象解构赋值返回原右值，成员和 super 属性也可作目标，目标 object/key 在读取对应迭代值或属性之前求值，const 目标拒绝赋值；对象和数组字面量支持展开；支持可选函数调用、剩余参数、调用参数展开和内置构造器实参展开。非简单参数先在独立的参数作用域中初始化；默认值及其创建的闭包不会看到函数体内的同名绑定。其余仍禁止 call()/ai() 包装、本地文件模块导入（第三方库用 require）和 export、TS 类型／断言、BigInt，以及 JS 全局环境。`new RegExp`、`new Promise`、`new Array`、`new Date`、`new Map/Set/WeakMap/WeakSet` 和内置 Error 类是构造例外。源码字符串里的这些词语只是数据，不按词语拦截。需要智能处理时声明注释任务；没有“计算失败后自动交给 AI”的路径。
+顶层和 async 函数可以 await Promise；`Promise.all` 等组合子支持 async 虚函数与异步工具。Promise 回调和 await 恢复按 JS 微任务顺序执行：async 函数返回 Promise、`then` 回调返回 Promise 或 resolve 传入 Promise 时，与 JS 一样多等两轮。直接把顶层 async 函数（含 async 虚函数）或 `<库>/promises` 工具的调用结果当作值使用时编译失败，例如 `inspect(page).passed`、`if (inspect(page))`、`assert(inspect(page))`、`` `${work()}` `` 或参与运算；赋值保存、传给 `Promise.all`、调用 `then`/`catch`/`finally` 和 `void` 不受影响。局部函数值或变量保存的 Promise 在编译期无法识别，运行时读取 Promise 属性时报“this is a Promise; the value may need await”。运行时实现的是 JS 子集，不是完整 Node.js。支持对象和数组成员的赋值、复合赋值及自增自减；声明、普通函数参数和 catch 支持嵌套解构、默认值及解构剩余项；数组/对象解构赋值返回原右值，成员和 super 属性也可作目标，目标 object/key 在读取对应迭代值或属性之前求值，const 目标拒绝赋值；对象和数组字面量支持展开；支持可选函数调用、剩余参数、调用参数展开和内置构造器实参展开。非简单参数先在独立的参数作用域中初始化；默认值及其创建的闭包不会看到函数体内的同名绑定。其余仍禁止 call()/ai() 包装、本地文件模块导入（第三方库用 require）和 export、TS 类型／断言、BigInt，以及 JS 全局环境。`new RegExp`、`new Promise`、`new Array`、`new Date`、`new Map/Set/WeakMap/WeakSet` 和内置 Error 类是构造例外。源码字符串里的这些词语只是数据，不按词语拦截。需要智能处理时声明注释任务；没有“计算失败后自动交给 AI”的路径。
 
 函数是值：嵌套函数声明、函数表达式、箭头函数和对象方法简写创建闭包，可保存、传递和调用。数组回调支持函数值、多语句和嵌套调用，包括在回调中调用工具并跨存盘恢复；字符串 replace/replaceAll 的替换函数也支持此方式。所有数组回调及 Map/Set.forEach 都接受 async 函数：只执行同步段并消费返回的 Promise 值，不自动等待；filter/some/every 将 Promise 视为真，reduce 可以自行构造 Promise 链，未处理的拒绝沿用现有错误规则。生成器回调返回迭代器。支持通过索引赋值、length 和数组字面量空位产生稀疏数组（例如 [1,,3] 的 length 为 3，但没有索引 1）；数组可保存非索引属性（包括正则结果的 groups/index/input），这些属性不改变 length，也不作为数组元素参与 JSON.stringify。
 
@@ -162,7 +162,7 @@ Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`�
 
 `typeof` 支持已声明的值，null 和数组返回 `"object"`；未声明的名字仍在编译期拒绝。`Array.isArray` 判断数组；`Object.keys/values` 接受对象，整数键按索引排序，其余键按插入顺序排列。通过 JSON 输入的原始键顺序可能已经改变。
 
-路径和 URL 由宿主 Rust 直接计算：如 `path.join("docs", "page.html")`、`path.resolve("/project", "docs", "page.html")` 和 `url.parse("../a.html", "https://example.com/docs/")`。`url.parse` 返回 `{href,origin,protocol,hostname,port,pathname,search,hash}`；`path.resolve` 至少要求一个绝对路径，`path.relative` 的两个参数必须均为绝对路径，避免隐式依赖服务进程目录。路径按运行平台的规则进行词法处理，不访问文件系统或解析符号链接；输入最多 64 KiB，输出最多 256 KiB。常见 POSIX 路径和 URL 行为与 Node 对照测试，Windows 复杂路径尚未做真实环境兼容性验证，不承诺完整 Node 行为。调用不启动外部进程或 AI 任务；文件读取与修改仍使用 `io` 工具。
+路径和 URL 由宿主 Rust 直接计算：如 `path.join("docs", "page.html")`、`path.resolve("/project", "docs", "page.html")`、`path.isAbsolute("/project")`、`url.parse("../a.html", "https://example.com/docs/")` 和 `new URL("../a.html", "https://example.com/docs/")`。`url.parse` 与 `URL` 返回 `{href,origin,protocol,hostname,port,pathname,search,hash}`；`path.resolve` 至少要求一个绝对路径，`path.relative` 的两个参数必须均为绝对路径，避免隐式依赖服务进程目录。路径按运行平台的规则进行词法处理，不访问文件系统或解析符号链接；输入最多 64 KiB，输出最多 256 KiB。常见 POSIX 路径和 URL 行为与 Node 对照测试，Windows 复杂路径尚未做真实环境兼容性验证，不承诺完整 Node 行为。调用不启动外部进程或 AI 任务；文件读取与修改仍使用 `io` 工具。
 
 `lastIndexOf` 接受一个字符串，返回 Unicode 标量下标或 -1。`replace` 和 `replaceAll` 分别替换首次或全部匹配；查找可以是字符串或正则（`replaceAll` 的正则必须带 `g`），替换文本按 JS 规则展开 `$$`、`$&`、`` $` ``、`$'`、`$1` 和 `$<name>`，也可以是替换函数（接收匹配、捕获组、位置和原文，有命名组时再接收 groups），结果最多 4 MiB。
 
@@ -198,7 +198,7 @@ import 的库名是编译期绑定，不是可变 JS 对象；它的方法和 re
 
 ### Shell stage 1：process 库
 
-程序里的 shell 只允许在第一层 `@virtual` 的确定性实现代码中调用；主 AI、主程序和第二层 `@virtual` 叶子均不能直接调用这些方法，也不能靠查找方法或 import 放宽。主 AI 熟悉任务时另有自己的 `run_readonly_command`：只读挂载、断网，只在 Linux 上提供，不是库方法（[设计指南](agent-design-guide.md)第 11 节第 34 条）。需要 shell 的主流程声明第一层虚函数，由其实现执行实际命令、轮询、解析和检查；虚函数仍是接收必要材料、只做一件事的 AI 判断钩子。三个方法属于 `host:process`：`process.exec_command({cmd,workdir,yield_time_ms})`、`process.write_stdin`、`process.kill_session`。命令默认不接标准输入，读到的是输入结束；需要用 `write_stdin` 的非空 chars 送输入时，启动时传 `stdin:true`，否则回 `SHELL_STDIN_CLOSED`（起因：2026-11-13 一条不带路径的 `rg` 去读开着的输入管道，挂了 9 分钟）。旧工具保留，但不作为绕过 shell 边界的入口。shell 路径、能力和工作区由 system 动态注入；Windows 用 PowerShell 7（pwsh）语法与 `D:/project` 路径，Linux 用 Bash。每条 cmd 启动新进程、单独传 workdir，变量和 cd 不跨命令保留；长进程仍保留 session，标准输入输出用管道，无 PTY。
+程序里的 shell 只允许在第一层 `@virtual` 的确定性实现代码中调用；主 AI、主程序和第二层 `@virtual` 叶子均不能直接调用这些方法，也不能靠查找方法或 import 放宽。主 AI 熟悉任务时另有自己的 `run_readonly_command`：只读挂载、断网，只在 Linux 上提供，不是库方法（[设计指南](agent-design-guide.md)第 11 节第 34 条）。需要 shell 的主流程声明第一层虚函数，由其实现执行实际命令、轮询、解析和检查；实现中需要 AI 理解或判断的部分交给第二层终端虚函数。三个方法属于 `process` 库：`process.exec_command({cmd,workdir,yield_time_ms})`、`process.write_stdin`、`process.kill_session`。命令默认不接标准输入，读到的是输入结束；需要用 `write_stdin` 的非空 chars 送输入时，启动时传 `stdin:true`，否则回 `SHELL_STDIN_CLOSED`（起因：2026-11-13 一条不带路径的 `rg` 去读开着的输入管道，挂了 9 分钟）。旧工具保留，但不作为绕过 shell 边界的入口。shell 路径、能力和工作区由 system 动态注入；Windows 用 PowerShell 7（pwsh）语法与 `D:/project` 路径，Linux 用 Bash。每条 cmd 启动新进程、单独传 workdir，变量和 cd 不跨命令保留；长进程仍保留 session，标准输入输出用管道，无 PTY。
 
 同一个 workspace 内，同 task、同 turn 的 shell 可以共存并共享 `change_interval`：例如先启动 `npm dev`、保留它的 session_id，再用后续 `exec_command` 执行 `curl` 探测。重叠期间的文件改动合并跟踪，跟踪范围是工作区里 git 没有忽略的文件（隐藏文件照常跟踪），被 `.gitignore` 忽略的不记录、不可从改动卡片撤销；直到区间里最后一个 shell 退出才结算；一个命令退出不代表整个区间完成。别的 task/turn，以及宿主文件写入、编辑和 undo，都必须等待该区间的所有 shell 停止。超过 `yield_time_ms` 等待仍未退出时，保留返回的 `session_id`，用 `process.write_stdin({session_id,chars:"",yield_time_ms})` 轮询增量输出；非空 `chars` 写 stdin，`process.kill_session({session_id})` 终止该会话的整个进程树。结果的 `running`、`exit_code`、`stdout`、`stderr`、`duration_ms`、`encoding`、`truncated` 是实际观测；空退出码不当作成功，业务验收仍需检查真实结果。
 
@@ -220,7 +220,7 @@ Windows 运行器每次调用 `pwsh -NoLogo -NoProfile -NonInteractive -Command`
 比如一个模块的代码里，虚函数声明在 require 了库的函数里，用 `@uses` 点名库的变量：
 
 ```js
-function process(notes) {
+function writeNotes(notes) {
   const md = require("markdown");
   /**
    * @virtual
@@ -236,7 +236,7 @@ function process(notes) {
 
 业务 skill 和用户决定范围、依赖、确认点、验收与交付；通用 task-program skill 负责表达这些关系。宿主为每个用户请求建立主任务；AI 准备缺失的技能／工具契约后，用 `write_program` 交出一段覆盖完整工作、检查与交付的 JS 程序。
 
-普通 helper 在宿主的局部函数帧中执行，不创建 AI 任务节点；工具调用是实际操作步骤。显式的 @virtual helper 创建独立的 AI 上下文，把职责注释与命名实参交给 AI。标记放在紧邻函数的前置 JSDoc 或函数体注释中，体内可为空，或仅写 throw new Error("固定说明") 作为占位；不允许占位 return 或其他可执行语句；未标记的空函数是普通 JS，返回 undefined，不声明 AI 工作。返回结构写入注释契约，实际返回来自 AI 或模块代码。普通代码中的注释没有执行效果。两层统一声明为 JSDoc @virtual：主编排的第一层由宿主生成或复用代码实现，实现里的第二层由 AI 工具循环返回判断。宿主按调用层级选择行为。注释应说明职责、输入与返回字段。所有调用一律按位置绑定实参，模块代码保持契约的参数个数；不按名字猜测，也不把多参自动打包成单对象。bindings 中的值就是局部参数值，没有额外 input 包装；closure 列出契约里 `@uses` 点名的变量。
+普通 helper 在宿主的局部函数帧中执行，不创建 AI 任务节点；工具调用是实际操作步骤。显式的 @virtual helper 创建独立的 AI 上下文，把职责注释与命名实参交给 AI。标记放在紧邻函数的前置 JSDoc 或函数体注释中，体内可为空，或仅写 throw new Error("固定说明") 作为占位；不允许占位 return 或其他可执行语句；未标记的空函数是普通 JS，返回 undefined，不声明 AI 工作；但它若带契约注释又被调用，宿主在交出程序时报编译错误，提示补上 @virtual 或写出函数体。返回结构写入注释契约，实际返回来自 AI 或模块代码。普通代码中的注释没有执行效果。两层统一声明为 JSDoc @virtual：主编排的第一层由宿主生成或复用代码实现，实现里的第二层由 AI 工具循环返回判断。宿主按调用层级选择行为。注释应说明职责、输入与返回字段。所有调用一律按位置绑定实参，模块代码保持契约的参数个数；不按名字猜测，也不把多参自动打包成单对象。bindings 中的值就是局部参数值，没有额外 input 包装；closure 列出契约里 `@uses` 点名的变量。
 
 ```js
 const request = {output: "report.html", requirements: "按用户要求制作并验收报告"};
@@ -311,7 +311,7 @@ agent_runtime_windows.state.program 保存源码、指令、函数帧、PC、变
 
 ## 示例的可执行回归
 
-手册和 task-program Skill 中标为 js 的片段由测试提取原文编译，模块 process 的代码按模块代码编译。Skill 内嵌的完整示例还要和 examples/*.js 完全一致，并由测试直接运行原文，工具和 AI 的结果由测试控制，不重写流程。
+手册和 task-program Skill 中标为 js 的片段由测试提取原文编译，模块 writeNotes 的代码按模块代码编译。Skill 内嵌的完整示例还要和 examples/*.js 完全一致，并由测试直接运行原文，工具和 AI 的结果由测试控制，不重写流程。
 
 | 示例 | 实际验证 |
 | --- | --- |

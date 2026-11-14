@@ -260,6 +260,7 @@ impl Compiler {
                     }
                 }
                 Effect::Require(_) => {}
+                Effect::RequireValue(value) => visit(value),
             },
             _ => {}
         }

@@ -32,7 +32,7 @@ pub(crate) fn stem(words: &str, limit: usize) -> Option<String> {
     let mut found = Vec::<String>::new();
     let mut word = String::new();
     let mut previous: Option<char> = None;
-    let mut push = |word: &mut String, found: &mut Vec<String>| {
+    let push = |word: &mut String, found: &mut Vec<String>| {
         if !word.is_empty() && !found.contains(word) {
             found.push(std::mem::take(word));
         }
@@ -305,6 +305,9 @@ fn outcome(name: &str, result: &Value, failed: bool) -> String {
     if !result["external_change"].is_null() {
         return "文件已被别人改过，没有写入".into();
     }
+    if let Some(reason) = result["termination_reason"].as_str() {
+        return format!("停止：{reason}（执行未正常结束）");
+    }
     let count = |key: &str| result[key].as_array().map(Vec::len);
     match name {
         "read_file" | "read_file_lines" => match result["content"].as_str() {
@@ -438,14 +441,14 @@ pub(crate) fn render(conn: &Connection, task: &str, turn: i64, before: Option<i6
         )
         .optional()?
         .flatten();
-    let mut results = HashMap::<String, (bool, Value)>::new();
+    let mut results = HashMap::<String, (i64, bool, Value)>::new();
     let mut events = Vec::new();
     for (seq, kind, raw) in rows {
         let Ok(data) = serde_json::from_str::<Value>(&raw) else { continue };
         if kind == "tool/result" {
             if let Some(call) = data.pointer("/message/toolCallId").and_then(Value::as_str) {
                 let payload = super::saved_history_payload(&kind, &data).cloned().unwrap_or(Value::Null);
-                results.insert(call.to_owned(), (data.pointer("/message/isError") == Some(&Value::Bool(true)), payload));
+                results.insert(call.to_owned(), (seq, data.pointer("/message/isError") == Some(&Value::Bool(true)), payload));
             }
             continue;
         }
@@ -476,7 +479,7 @@ pub(crate) fn render(conn: &Connection, task: &str, turn: i64, before: Option<i6
                 let result = data["callId"].as_str().and_then(|call| results.get(call));
                 if name == WRITE_PROGRAM {
                     // A program that ran shows as its file; one that did not compile says where.
-                    if let Some((failed, result)) = result
+                    if let Some((_, failed, result)) = result
                         && (*failed || error_text(result).is_some())
                     {
                         lines.push(format!("// 交出的程序没有运行：{}", rejected(result)));
@@ -485,7 +488,14 @@ pub(crate) fn render(conn: &Connection, task: &str, turn: i64, before: Option<i6
                 }
                 let line = call_line(name, data["arguments"].as_str());
                 lines.push(match result {
-                    Some((failed, result)) => format!("{line}  // → {}", outcome(name, result, *failed)),
+                    Some((seq, failed, result)) => {
+                        let reference = if result.get("exit_code").is_some() || result["termination_reason"].is_string() {
+                            // The last output line is only a clue. Recover the actual
+                            // command and full result through the existing history API.
+                            format!("；完整输入/结果 read_session_history({{event_seq:{seq}}})")
+                        } else { String::new() };
+                        format!("{line}  // → {}{reference}", outcome(name, result, *failed))
+                    },
                     None => format!("{line}  // → 没有结果（被打断）"),
                 });
             }
@@ -501,7 +511,7 @@ pub(crate) fn render(conn: &Connection, task: &str, turn: i64, before: Option<i6
 }
 
 /// A record cut to `limit` characters for a request. Its opening lines stay,
-/// then what changed things (writes, edits, programs, errors), then the
+/// then execution evidence (including nonzero exits), writes and programs, then the
 /// AI's words, then the latest of the other calls; what is left out shows
 /// as one line per gap. Cutting the middle instead dropped 23 of a turn's
 /// 24 edits and kept the reads before them (2026-11-13 review).
@@ -510,6 +520,7 @@ pub(crate) fn condense(source: &str, limit: usize) -> String {
     let rank = |line: &str| {
         if line.starts_with("io.write(") || line.starts_with("io.edit(") || line.starts_with("io.replace(")
             || line.starts_with("// 运行程序") || line.starts_with("// 交出的程序") || line.contains("// → 出错")
+            || line.contains("// → 退出 ") || line.contains("// → 停止：")
         {
             1
         } else if line.starts_with("//") {
@@ -521,7 +532,7 @@ pub(crate) fn condense(source: &str, limit: usize) -> String {
     let opening = lines.iter().take_while(|line| line.starts_with("// 第 ") || line.starts_with("// 用户：")).count();
     let mut keep = vec![false; lines.len()];
     let mut used = 0;
-    let mut take = |at: usize, keep: &mut Vec<bool>, used: &mut usize| {
+    let take = |at: usize, keep: &mut Vec<bool>, used: &mut usize| {
         let size = lines[at].chars().count() + 1;
         if *used + size <= limit {
             keep[at] = true;
@@ -598,6 +609,36 @@ pub(crate) fn sync(conn: &Connection, task: &str, dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn execution_record_opens_its_original_result() {
+        let root = std::env::temp_dir().join(format!("test-evidence-{}", crate::agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = crate::agent_service::open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','investigate','fake','completed',0,0)", []).unwrap();
+        conn.execute("INSERT INTO agent_task_nodes(task_id,node_id,parent_id,executor,status,data) VALUES ('t','request',?1,'inline','done','{}')", [ROOT]).unwrap();
+        let command = format!("python3 probe.py {} current trim empty", "--explain ".repeat(40));
+        let original = json!({"exit_code":1,"stdout":"trim FAILED: missing strip\nempty FAILED: missing strip\n2 failed\n","stderr":"","duration_ms":15});
+        for (seq, kind, data) in [
+            (1, "user/message", json!({"turn":1,"message":{"content":"Investigate the existing failures"}})),
+            (2, "tool/call", json!({"turn":1,"name":"run_readonly_command","callId":"probe","arguments":json!({"cmd":command}).to_string()})),
+            (3, "tool/result", json!({"message":{"toolCallId":"probe","isError":false},"meta":{"result":original}})),
+        ] {
+            conn.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data,node_id) VALUES ('t',?1,?1,?2,?3,'request')", params![seq,kind,data.to_string()]).unwrap();
+        }
+        let record = render(&conn, "t", 1, None).unwrap().unwrap();
+        assert!(record.contains("退出 1：2 failed") && record.contains("read_session_history({event_seq:3})"), "{record}");
+        assert!(record.contains("python3 probe.py"), "the immutable audit is unchanged");
+        let noisy = format!("{record}{}", "// Guess: rebuild everything again.\n".repeat(80));
+        let cut = condense(&noisy, 700);
+        assert!(cut.contains("read_session_history({event_seq:3})"), "execution evidence stays before AI commentary: {cut}");
+        let saved = crate::session_history::read(&root, "t", &json!({"event_seq":3})).await.unwrap();
+        assert_eq!(serde_json::from_str::<Value>(saved["records"][0]["content"].as_str().unwrap()).unwrap(), original);
+        assert_eq!(saved["records"][0]["tool_call"]["arguments"], json!({"cmd":command}).to_string());
+        assert_eq!(outcome("run_readonly_command", &json!({"exit_code":null,"termination_reason":"timeout","stdout":"partial"}), false), "停止：timeout（执行未正常结束）");
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_call_reads_like_the_program_line_that_would_make_it() {

@@ -128,12 +128,25 @@ fn tool_value(mut response: Value) -> Result<Value> {
 }
 struct Transport;
 impl crate::plugin_io::SessionIo for Transport {
+    fn authorize_program<'a>(&'a self, state: &'a AgentServiceState, task: &'a str,
+        resource: Option<&'a str>, module: bool) -> futures::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let Some((conversation, _, connection)) = bound(state.workspace.root(), task)? else { return Ok(()) };
+            if connection.supports("fixed_programs") {
+                let decision = connection.rpc("plugin/authorizeProgram", json!({"resource":resource,"module":module,"context":context(task,&conversation)})).await?;
+                ensure!(decision["allowed"].as_bool().context("plugin program authorization returned no decision")?,
+                    "{}: {}", decision["code"].as_str().unwrap_or("PLUGIN_PROGRAM_DENIED"), decision["message"].as_str().unwrap_or("program rejected by plugin"));
+            }
+            Ok(())
+        })
+    }
     fn program_resource<'a>(&'a self, state: &'a AgentServiceState, task: &'a str,
         path: &'a str) -> futures::future::BoxFuture<'a, Result<Vec<u8>>> {
         Box::pin(async move {
             let (_, _, connection) = bound(state.workspace.root(), task)?
                 .context("Remote plugin login required")?;
-            let (_, bytes) = connection.asset("resource", &[("path", path.to_owned())]).await?;
+            let (_, bytes) = connection.asset("resource", &[("path", path.to_owned())]).await
+                .with_context(|| format!("plugin program resource {path} could not be loaded"))?;
             Ok(bytes)
         })
     }
@@ -305,13 +318,17 @@ pub async fn request(
     headers: HeaderMap,
     args: Value,
 ) -> Response {
+    let task = args["task_id"].as_str().unwrap_or("").to_owned();
     match handle(runtime, state, plugin, method, headers, args).await {
         Ok(value) => value,
-        Err(error) => (
+        Err(error) => {
+            tracing::warn!(plugin, method, task_id=%task, error=%format!("{error:#}"), "plugin session request failed");
+            (
             StatusCode::BAD_REQUEST,
             Json(json!({"error":format!("{error:#}")})),
         )
-            .into_response(),
+            .into_response()
+        },
     }
 }
 async fn handle(
@@ -478,6 +495,11 @@ async fn handle(
         } else {
             Value::Null
         };
+        if operation == "prompt" && let Some(resource) = extra.get("required_program_resource") {
+            let resource = resource.as_str().context("plugin required program resource must be a string")?;
+            ensure!(resource.starts_with("skill:") && resource.len() <= 4096, "invalid plugin required program resource");
+            args["program_resource"] = json!(resource);
+        }
         let response = crate::plugin_sessions::handle(state, plugin, args).await?;
         if operation == "status" {
             let status = response.status();
@@ -523,10 +545,11 @@ mod tests {
                 let user=h["authorization"].to_str().unwrap().strip_prefix("Bearer ").unwrap();
                 let args=&body["payload"]["args"];
                 let result=match method.as_str() {
-                    "handshake"=>json!({"version":1,"subject":user,"state":"awaiting_confirmation","connection_id":format!("c-{user}"),"plugin":{"id":"notes-test","title":"Notes","skill":"skill:SKILL.md","pages":[],"tools":[{"name":"save","description":"Save note","inputSchema":{"type":"object","properties":{}}}]}}),
+                    "handshake"=>json!({"version":1,"subject":user,"state":"awaiting_confirmation","connection_id":format!("c-{user}"),"plugin":{"id":"notes-test","title":"Notes","skill":"skill:SKILL.md","capabilities":["fixed_programs"],"pages":[],"tools":[{"name":"save","description":"Save note","inputSchema":{"type":"object","properties":{}}}]}}),
                     "confirm"=>json!({"state":"ready"}),"identity"=>json!({"subject":user}),
                     "session"=>{received.lock().unwrap().push(args.clone());json!({"document_key":"plugin-owned","project_id":"opaque-state"})},
                     "call"=>{received.lock().unwrap().push(args.clone());json!({"value":{"saved":true}})},
+                    "authorizeProgram"=>json!({"allowed":args["module"]==true || args["resource"]=="skill:approved.bundle.json","code":"FIXED_PROGRAM_REQUIRED","message":"Use the installed bundle"}),
                     "service"=>json!({"echo":args}),_=>panic!("unexpected {method}")
                 };
                 Json(json!({"type":"server-response","rpcId":body["rpcId"],"result":{"ok":true,"value":result}}))
@@ -582,6 +605,11 @@ mod tests {
         let created=value(handle(&runtime,state.clone(),"notes-test","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"method":"create","document":"D1"})).await.unwrap()).await;
         let task = created["task_id"].as_str().unwrap();
         assert_eq!(created["plugin_state"]["project_id"], "opaque-state");
+        let denied=crate::plugin_io::authorize_program(&state,task,None,false).await.unwrap_err();
+        assert!(denied.to_string().contains("FIXED_PROGRAM_REQUIRED"));
+        crate::plugin_io::authorize_program(&state,task,Some("skill:approved.bundle.json"),false).await.unwrap();
+        crate::plugin_io::authorize_program(&state,task,None,true).await.unwrap();
+
         assert!(handle(&runtime,state.clone(),"notes-test","session",headers("bob"),json!({"connection_handle":bob["connection_handle"],"task_id":task,"method":"events"})).await.is_err());
         assert!(handle(&runtime,state.clone(),"other","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"task_id":task,"method":"events"})).await.is_err());
         let db = crate::agent_service::open_db(&root).unwrap();

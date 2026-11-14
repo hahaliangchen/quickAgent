@@ -25,6 +25,7 @@ async fn read(s: &Session<'_>, resource: &Resource) -> Result<String> {
     Ok(String::from_utf8(bytes).context("plugin program source must be UTF-8")?)
 }
 pub(super) async fn load(s: &Session<'_>, args: &mut Value, body: bool) -> Result<Option<Loaded>> {
+    crate::plugin_io::authorize_program(s.state, s.task, args["resource"].as_str(), body).await?;
     let Some(path) = args.get("resource") else { return Ok(None) };
     ensure!(!body && s.plugin.is_some(), "plugin bundles require a main program in the owning plugin session");
     ensure!(args.as_object().is_some_and(|args| args.len() == 1),
@@ -137,6 +138,53 @@ mod tests {
         assert!(start < end && end < request, "fixed program must execute before a model can choose another workflow");
         server.abort(); runtime.shutdown().unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn fixed_program_missing_resource_stops_before_any_model_request() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let calls=Arc::new(AtomicUsize::new(0));let seen=calls.clone();
+        let app=Router::new().route("/v1/chat/completions",post(move|| {let seen=seen.clone();async move {seen.fetch_add(1,Ordering::SeqCst);Json(json!({"choices":[]}))}}));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
+        let root=std::env::temp_dir().join(format!("missing-fixed-program-{}",agent_service::uuid_like()));std::fs::create_dir_all(&root).unwrap();
+        let state=agent_service::tests::test_state(&root,address);
+        let conn=agent_service::open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",[]).unwrap();
+        let plugin=format!("missing-program-{}",agent_service::uuid_like());
+        conn.execute("INSERT INTO plugin_sessions VALUES ('task',?1)",[&plugin]).unwrap();
+        crate::plugin_io::register(&plugin,Arc::new(Resources(BTreeMap::new())));
+        let error=super::super::run_task_with_resource(state,"task".into(),"fake".into(),"confirmed".into(),4,CancellationToken::new(),1,false,Some("skill:missing.bundle.json".into())).await.unwrap_err();
+        assert!(error.to_string().contains("could not be installed"));
+        assert_eq!(calls.load(Ordering::SeqCst),0,"missing fixed program must never fall through to model-written orchestration");
+        let invalid:i64=conn.query_row("SELECT COUNT(*) FROM agent_task_events WHERE kind='program/source_invalid'",[],|r|r.get(0)).unwrap();assert_eq!(invalid,1);
+        server.abort();drop(conn);let _=std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    #[ignore = "set PPT_PROGRAM_SKILL_ROOT; offline validation of actual plugin bundle sources"]
+    async fn actual_ppt_bundles_load_compile_and_bind_without_model_or_ppt_execution() {
+        let skill=std::path::PathBuf::from(std::env::var("PPT_PROGRAM_SKILL_ROOT").unwrap());
+        for name in ["layout-fill.bundle.json","svg-generate.bundle.json"] {
+            let root=std::env::temp_dir().join(format!("ppt-bundle-link-{}",agent_service::uuid_like()));std::fs::create_dir_all(&root).unwrap();
+            let state=agent_service::tests::test_state(&root,"127.0.0.1:9".parse().unwrap());
+            let conn=agent_service::open_db(&root).unwrap();
+            conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",[]).unwrap();
+            let plugin=format!("ppt-bundle-{}",agent_service::uuid_like());conn.execute("INSERT INTO plugin_sessions VALUES ('task',?1)",[&plugin]).unwrap();
+            let path=format!("skill:programs/{name}");let raw=std::fs::read(skill.join("programs").join(name)).unwrap();let manifest:Value=serde_json::from_slice(&raw).unwrap();
+            let mut resources=BTreeMap::from([(path.clone(),raw)]);
+            for item in std::iter::once(&manifest["source"]).chain(manifest["modules"].as_object().unwrap().values()) {
+                let path=item["path"].as_str().unwrap();resources.insert(path.to_owned(),std::fs::read(skill.join(path.strip_prefix("skill:").unwrap())).unwrap());
+            }
+            crate::plugin_io::register(&plugin,std::sync::Arc::new(Resources(resources)));
+            let cancel=CancellationToken::new();let session=Session{agent_id:None,task_node_id:None,plugin:Some(plugin),state:&state,task:"task",model:"fake",turn:1,cancel:&cancel,ban_execution:false,scope:"main".into(),parent:None,input_budget:INPUT_BUDGET};
+            let mut args=json!({"resource":path});let loaded=load(&session,&mut args,false).await.unwrap().unwrap();
+            let mut window=Window::default();program_flow::install_scoped(&session,&mut window,&args,false).unwrap_or_else(|e|panic!("{name}: {e:#}"));
+            modules::provide(&session,&window,&loaded.modules).await.unwrap_or_else(|e|panic!("{name}: {e:#}"));
+            assert!(args["source"].as_str().unwrap().contains("require(\"ppt\")"));
+            drop(conn);let _=std::fs::remove_dir_all(root);
+        }
     }
 
 }

@@ -7,15 +7,27 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 
 from customer_templates import prune_unicom_templates
+from customer_logging import CustomerLog, start_collector, stream_output
 
 APP = Path("/opt/customer")
 STATE = Path("/state")
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+RUNTIME_LOG = None
+
+
+def start_logged(command, service, cwd=None):
+    process = subprocess.Popen(command, cwd=cwd, start_new_session=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    thread = threading.Thread(target=stream_output, args=(process.stdout, service, RUNTIME_LOG), daemon=True)
+    thread.start()
+    RUNTIME_LOG.write(service, "started", pid=process.pid)
+    return process, thread
 
 
 def gateway_request():
@@ -24,13 +36,44 @@ def gateway_request():
                                   headers={"Authorization": "Basic " + credentials})
 
 
+def ppt_registration_request():
+    request = gateway_request()
+    return urllib.request.Request("http://127.0.0.1:3002/agent/skill-packages", headers=dict(request.header_items()))
+
+
+def ppt_registered():
+    path = STATE / "agent-config/skill-packages.json"
+    if path.is_file() and "ppt-master" in json.loads(path.read_text()).get("removed", []):
+        return True
+    with HTTP.open(ppt_registration_request(), timeout=3) as response:
+        packages = json.load(response)["packages"]
+    return any(p.get("id") == "ppt-master" and p.get("remote") and p.get("library") == "ppt"
+               and p.get("has_skill") and p.get("tools") for p in packages)
+
+
 def check_health():
     for target in ["http://127.0.0.1:8899/prod-api/health/filing-worker",
                    "http://127.0.0.1:3000/health", gateway_request()]:
         with HTTP.open(target, timeout=3) as response:
             if response.status != 200:
                 raise RuntimeError("Customer service is not ready")
+    if not ppt_registered():
+        raise RuntimeError("PPT plugin has not registered its skill and ppt library")
     return 0
+
+
+def ensure_ppt_registration(profile):
+    path = profile / "skill-packages.json"
+    config = json.loads(path.read_text()) if path.exists() else {}
+    # Preserve an explicit removal, disabled plugin, custom URL and credentials.
+    if "ppt-master" in config.get("remotes", {}) or "ppt-master" in config.get("removed", []):
+        return
+    config.setdefault("remotes", {})["ppt-master"] = {
+        "url": "http://127.0.0.1:8899/prod-api/aiPpt/plugin", "token": ""}
+    temporary = path.with_name(path.name + ".upgrade-tmp")
+    temporary.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+    temporary.chmod(0o600)
+    temporary.replace(path)
 
 
 def upgrade_customer_defaults(profile):
@@ -85,6 +128,7 @@ def write_config():
     # The bundled profile is sanitized during assembly. Persisted profiles belong
     # to the customer; let the Agent validate and load their selected providers.
     upgrade_customer_defaults(profile)
+    ensure_ppt_registration(profile)
     config = {
         "system": {"db-type":"mysql", "oss-type":"local", "addr":8899, "router-prefix":"/prod-api", "web-root":str(APP / "server/web"),
                    "enable-api-rbac":True, "use-redis":True, "use-mongo":False, "use-multipoint":False, "disable-auto-migrate":False,
@@ -109,6 +153,9 @@ def write_config():
         "AGENT_BIND":"127.0.0.1:3001", "MCP_BIND":"127.0.0.1:3000", "AGENT_WEB_DIR":str(APP / "agent-web"),
         "GROW_RESOURCES_DIR":str(APP / "agent-resources"), "PPT_AGENT_URL":"http://127.0.0.1:3001",
         "PPT_RENDER_URL":os.getenv("PPT_RENDER_URL","http://renderer:8787")})
+    # Installed code must not be shadowed by an older mounted resource tree.
+    # Mutable customer templates and projects remain under /state.
+    os.environ["PPT_BUNDLED_SKILL_DIR"] = str(APP / "server/resource/ai_skills/ppt-master")
 
 
 def wait_ready(url, processes, timeout=180):
@@ -128,12 +175,18 @@ def wait_ready(url, processes, timeout=180):
 
 
 def main():
+    global RUNTIME_LOG
     if sys.argv[1:] == ["healthcheck"]:
         return check_health()
+    RUNTIME_LOG = CustomerLog(os.environ.get("CUSTOMER_LOG_DIR", str(STATE / "logs")))
+    RUNTIME_LOG.write("supervisor", "starting", command=sys.argv[1:] or ["serve"])
     write_config()
     if sys.argv[1:] == ["init"]:
-        os.chdir(STATE / "server")
-        os.execv(APP / "bin/customer-init", [str(APP / "bin/customer-init")])
+        process, output = start_logged([str(APP / "bin/customer-init")], "init", STATE / "server")
+        code = process.wait()
+        output.join(timeout=5)
+        RUNTIME_LOG.write("init", "exited", code=code)
+        return code
     if sys.argv[1:] == ["check"]:
         subprocess.run([str(APP / "bin/ai-ppt-server"), "--help"], check=True)
         print("Customer profile and ARM64 backend executable: OK")
@@ -141,6 +194,12 @@ def main():
     if not (STATE / "customer-initialized.json").is_file():
         raise RuntimeError("Initialize a fresh customer database with deploy.sh init before starting")
     children = []
+    outputs = []
+    collector_stop, collector_thread = start_collector(STATE, RUNTIME_LOG)
+    def start(command, service, cwd=None):
+        process, output = start_logged(command, service, cwd)
+        children.append(process)
+        outputs.append(output)
     stopping = False
     def stop(signum, frame):
         nonlocal stopping
@@ -148,18 +207,25 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
-        children.append(subprocess.Popen([str(APP / "bin/ai-ppt-server")], cwd=STATE / "server", start_new_session=True))
+        start([str(APP / "bin/ai-ppt-server")], "backend", STATE / "server")
         wait_ready("http://127.0.0.1:8899/prod-api/health/filing-worker", children, timeout=300)
-        children.append(subprocess.Popen([str(APP / "bin/quickagent")], cwd=STATE / "workspace", start_new_session=True))
+        start([str(APP / "bin/quickagent")], "agent", STATE / "workspace")
         wait_ready("http://127.0.0.1:3000/health", children)
         wait_ready("http://127.0.0.1:3001/agent/", children)
-        children.append(subprocess.Popen([str(APP / "bin/customer-gateway")], start_new_session=True))
+        start([str(APP / "bin/customer-gateway")], "gateway")
         wait_ready(gateway_request(), children)
+        deadline = time.monotonic() + 60
+        while not ppt_registered():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("PPT plugin registration timed out; inspect Agent startup logs")
+            time.sleep(.5)
         print("Customer PPT is ready on 8899; authenticated QuickAgent gateway on 3002", flush=True)
+        RUNTIME_LOG.write("supervisor", "ready")
         while not stopping:
             for child in children:
                 code = child.poll()
                 if code is not None:
+                    RUNTIME_LOG.write("supervisor", "service_exited", pid=child.pid, code=code)
                     raise RuntimeError("Customer service exited: " + str(code))
             time.sleep(.5)
     finally:
@@ -172,6 +238,11 @@ def main():
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
+        for output in outputs:
+            output.join(timeout=2)
+        collector_stop.set()
+        collector_thread.join(timeout=5)
+        RUNTIME_LOG.write("supervisor", "stopped")
     return 0
 
 
@@ -179,5 +250,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as error:
+        if RUNTIME_LOG is not None:
+            RUNTIME_LOG.write("supervisor", "startup_failed", message=str(error))
         print("Customer startup failed: " + str(error), file=sys.stderr, flush=True)
         sys.exit(1)

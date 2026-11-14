@@ -1,6 +1,8 @@
 //! The flow graph's view of a conversation: its function frames, read from the
 //! tables the agent already keeps. Nothing here writes, and the agent loop does
 //! not know this view exists.
+use std::collections::HashMap;
+
 use anyhow::Result;
 use axum::{
     Json,
@@ -73,10 +75,13 @@ fn failed(error: &str) -> Response {
 
 /// Every frame of a conversation, in the order they were opened.
 pub(crate) fn frame_list(conn: &Connection, task: &str) -> Result<Vec<Value>> {
+    // One query for the whole conversation: the graph reads this every 1.5 seconds.
+    let tools = tool_calls(conn, task)?;
     frames::nodes(conn, task)?
         .iter()
         .map(|node| {
-            let mut frame = summary(conn, task, node)?;
+            let called = tools.get(&node.node_id).copied().unwrap_or(0);
+            let mut frame = summary(conn, task, node, called)?;
             if node.status == "running" {
                 frame["activity"] = activity(conn, task, &node.node_id)?;
             }
@@ -91,7 +96,7 @@ pub(crate) fn frame_detail(conn: &Connection, task: &str, id: &str) -> Result<Op
     let Some(node) = stored(conn, task, id)? else {
         return Ok(None);
     };
-    let mut frame = summary(conn, task, &node)?;
+    let mut frame = summary(conn, task, &node, tool_calls(conn, task)?.get(id).copied().unwrap_or(0))?;
     let call = &node.inputs["program_task"];
     frame["goal"] = json!(node.goal);
     frame["arguments"] = call["arguments"].clone();
@@ -141,7 +146,7 @@ fn kind(node: &Node) -> &str {
     }
 }
 
-fn summary(conn: &Connection, task: &str, node: &Node) -> Result<Value> {
+fn summary(conn: &Connection, task: &str, node: &Node, tools: i64) -> Result<Value> {
     let call = &node.inputs["program_task"];
     let ended = !matches!(node.status.as_str(), "pending" | "running" | "suspended" | "paused");
     Ok(json!({
@@ -161,6 +166,9 @@ fn summary(conn: &Connection, task: &str, node: &Node) -> Result<Value> {
         "ended_at": if ended { time_of(conn, task, node.returned_seq.or(node.last_seq))? } else { None },
         "last_seq": node.last_seq,
         "error": failure(node),
+        // What the frame's AI did instead of calling a function: the graph
+        // names these where it would have drawn a call's frame.
+        "tool_calls": tools,
     }))
 }
 
@@ -173,6 +181,26 @@ fn time_of(conn: &Connection, task: &str, seq: Option<i64>) -> Result<Option<i64
             |r| r.get(0),
         )
         .optional()?)
+}
+
+/// Tools each frame's AI called directly, by frame. A frame's steps are the
+/// host's own execution nodes rather than frames, so a call made inside one
+/// belongs to the frame whose AI made it.
+fn tool_calls(conn: &Connection, task: &str) -> Result<HashMap<String, i64>> {
+    let mut statement = conn.prepare(
+        "WITH RECURSIVE owner(id,frame,depth) AS (
+             SELECT node_id,node_id,0 FROM agent_task_nodes WHERE task_id=?1
+             UNION ALL
+             SELECT node.node_id,owner.frame,owner.depth+1
+             FROM agent_task_nodes node JOIN owner ON node.parent_id=owner.id AND node.task_id=?1
+             WHERE json_extract(node.data,'$.kind')='step' AND owner.depth<64)
+         SELECT owner.frame,COUNT(*)
+         FROM agent_task_events event JOIN owner ON owner.id=event.node_id
+         WHERE event.task_id=?1 AND event.kind='tool/call'
+         GROUP BY owner.frame",
+    )?;
+    let rows = statement.query_map(params![task], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
 }
 
 /// Why a frame ended without a value: what its function gave up with, or the host's note.
@@ -380,6 +408,43 @@ mod tests {
         (root, conn, main.node_id, summarize.node_id, judge.node_id)
     }
 
+    /// A conversation whose AI worked without a program: it called tools on its
+    /// own, and the host kept those calls on its execution steps.
+    fn tools_only() -> (Root, Connection, String) {
+        let root = Root(std::env::temp_dir().join(format!("frame-view-tools-{}", crate::agent_service::uuid_like())));
+        std::fs::create_dir_all(&root.0).unwrap();
+        let mut conn = open_db(&root.0).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let mut root_node = frames::ensure_root(&tx, "task", 1).unwrap();
+        let mut main = frames::planned(&root_node, &json!({"title":"Adjust the layout","goal":"Adjust the layout"}), 0, "task").unwrap();
+        main.metadata = json!({"role":"main","turn":1});
+        root_node.status = "suspended".into();
+        frames::emit(&tx, "task", "task/node_suspended", &mut root_node, 1).unwrap();
+        main.status = "running".into();
+        frames::emit(&tx, "task", "task/node_started", &mut main, 1).unwrap();
+        let called = |node: &str, index: usize| {
+            append_event_tx(&tx, "task", "tool/call", &json!({"turn":1,"step":1,"task_node_id":node,
+                "callId":format!("call-{index}"),"name":"read_file","arguments":"{\"path\":\"a.ts\"}"}), None).unwrap();
+        };
+        // Two calls of the request itself, one in each of its steps.
+        called(&main.node_id, 1);
+        called(&main.node_id, 2);
+        for (index, title) in ["read the layout", "write the layout"].iter().enumerate() {
+            let mut step = frames::planned(&main, &json!({"title":title,"goal":title}), index, "step").unwrap();
+            frames::emit(&tx, "task", "task/node_planned", &mut step, 1).unwrap();
+            step.status = "done".into();
+            frames::emit(&tx, "task", "task/node_returned", &mut step, 1).unwrap();
+            called(&step.node_id, index + 3);
+        }
+        tx.commit().unwrap();
+        (root, conn, main.node_id)
+    }
+
     #[test]
     fn frames_show_calls_with_their_contract_line_state_and_what_the_ai_is_doing() {
         let (_root, conn, main, summarize, judge) = conversation();
@@ -398,9 +463,12 @@ mod tests {
         assert!(call["started_at"].is_i64() && call["ended_at"].is_null());
         assert_eq!(call["activity"]["reasoning"], "**Reading the notes**");
         assert_eq!(call["activity"]["tool"], json!({"name":"read_file","arguments":{"path":"notes.md"}}));
+        assert_eq!(call["tool_calls"], 1);
         let gave_up = by_id(&judge);
         assert_eq!(gave_up["status"], "failed");
         assert_eq!(gave_up["error"], "The notes are empty.");
+        // A frame that called nothing says 0 rather than leaving the count out.
+        assert_eq!(gave_up["tool_calls"], 0);
         assert!(gave_up["ended_at"].is_i64());
         assert!(gave_up.get("activity").is_none(), "only running frames report activity");
     }
@@ -419,5 +487,23 @@ mod tests {
         let request = frame_detail(&conn, "task", &main).unwrap().unwrap();
         assert!(request["caller_program"].is_null(), "a request is not called by a program");
         assert!(request["events"].as_array().unwrap().iter().any(|event| event["type"] == "program/start"));
+    }
+
+    #[test]
+    fn a_request_counts_the_tools_it_called_without_a_program() {
+        let (_root, conn, main) = tools_only();
+        let frames = frame_list(&conn, "task").unwrap();
+        let by_id = |id: &str| frames.iter().find(|frame| frame["id"] == id).unwrap().clone();
+        let request = by_id(&main);
+        assert_eq!(request["kind"], "request");
+        // Both its own calls and the calls its steps made: the steps are the
+        // host's, not frames a program opened.
+        assert_eq!(request["tool_calls"], 4);
+        assert_eq!(by_id(frames::ROOT)["tool_calls"], 0);
+        let detail = frame_detail(&conn, "task", &main).unwrap().unwrap();
+        assert_eq!(detail["frame"]["tool_calls"], 4);
+        // Nothing opened a frame of its own, so the turn reads as the request.
+        let calls = frames.iter().filter(|frame| !matches!(frame["kind"].as_str(), Some("conversation" | "request" | "step"))).count();
+        assert_eq!(calls, 0, "a turn without a program has no call frames: {frames:?}");
     }
 }

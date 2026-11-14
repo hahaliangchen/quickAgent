@@ -58,8 +58,27 @@ def main():
             dc('run','--rm','init')
             # Exercise upgrade pruning against a legacy layout absent from indexes.
             dc('run','--rm','--no-deps','--entrypoint','python','app','-c',
-               "from pathlib import Path; p=Path('/state/server/resource/ai_skills/ppt-master/templates/layouts/unicom_upgrade_fixture');p.mkdir(parents=True);(p/'01_cover.svg').write_text('legacy');Path('/state/workspace/customer-note.txt').write_text('preserve user work')")
+               "from pathlib import Path; p=Path('/state/server/resource/ai_skills/ppt-master/templates/layouts/unicom_upgrade_fixture');p.mkdir(parents=True);(p/'01_cover.svg').write_text('legacy');Path('/state/workspace/customer-note.txt').write_text('preserve user work');Path('/state/agent-config/skill-packages.json').unlink()")
         dc('up','-d','--wait','--wait-timeout','480','app')
+        def registered_ppt():
+            catalog=json.loads(dc('exec','-T','app','python','-c',"import json,urllib.request;print(json.dumps(json.load(urllib.request.urlopen('http://127.0.0.1:3001/agent/skill-packages'))))",capture=True))
+            plugin=next((p for p in catalog['packages'] if p['id']=='ppt-master'),None)
+            assert plugin and plugin['remote'] and plugin['enabled'] and plugin['has_skill'] and plugin['scope'], plugin
+            assert plugin['library']=='ppt' and plugin['tools'], plugin
+            return plugin
+        # This runs before any user login, page load or explicit connection.
+        boot_plugin=registered_ppt()
+        # Read-only registration must not make project operations public.
+        try:
+            post('/prod-api/aiPpt/plugin/api/plugin/call',{'type':'client-request','rpcId':'anonymous','method':'plugin/call','payload':{'args':{'tool':'read_file'}}})
+            raise AssertionError('Anonymous PPT business RPC unexpectedly succeeded')
+        except urllib.error.HTTPError as error:
+            assert error.code==401
+        try:
+            urllib.request.urlopen(base+'/prod-api/aiPpt/plugin/registration-resource?path=skill:SKILL.md',timeout=30)
+            raise AssertionError('PPT registration resource allowed without handshake')
+        except urllib.error.HTTPError as error:
+            assert error.code==403
         login=post('/prod-api/base/login',{'username':'admin','password':hashlib.md5((values['CUSTOMER_ADMIN_PASSWORD']+'ai-ppt-login-salt-v1').encode()).hexdigest(),'captcha':'','captchaId':''})
         assert login['code']==0, login.get('msg')
         token=login['data']['token']
@@ -120,6 +139,7 @@ def main():
         (work/'ui-result.json').write_text(json.dumps(ui,ensure_ascii=False)+'\n')
         try:
             local_model = verify_real_model(admin_base, admin_auth, args.model_id, args.fallback_url)
+            (work/'model-result.json').write_text(json.dumps(local_model,ensure_ascii=False)+'\n')
         finally:
             fixture.write_text(json.dumps({**fixture_values,'cleanup':True}))
             run(['docker','cp',str(fixture),renderer_id+':/tmp/customer-fixture.json'])
@@ -127,24 +147,26 @@ def main():
             assert cleanup['all_models_deleted']
         dc('restart','app')
         dc('up','-d','--wait','--wait-timeout','480','app')
+        registered_ppt()  # Restart recovery must also work before reconnecting a user.
         request=urllib.request.Request(admin_base+'/agent/settings/data',headers={'Authorization':admin_auth})
         with urllib.request.urlopen(request,timeout=30) as response: empty=json.load(response)
         assert empty['providers']==[] and empty['orchestrator_provider'] is None and empty['orchestrator_model'] is None
-        dc('exec','-T','app','python','-c',"import json;from pathlib import Path;p=Path('/state/agent-config');assert json.loads((p/'providers.yml').read_text())[0]['config']['providers']=={};assert json.loads((p/'credentials.yaml').read_text())['refs']=={};assert json.loads((p/'agent-generation.yml').read_text())['model_capabilities']=={};assert json.loads(Path('/opt/customer/config/agent/providers.yml').read_text())[0]['config']['providers']=={}")
+        dc('exec','-T','app','python','-c',"import yaml;from pathlib import Path;p=Path('/state/agent-config');assert yaml.safe_load((p/'providers.yml').read_text())[0]['config']['providers']=={};assert not (p/'credentials.yaml').exists() or yaml.safe_load((p/'credentials.yaml').read_text())['refs']=={};assert yaml.safe_load((p/'agent-generation.yml').read_text())['model_capabilities']=={};assert yaml.safe_load(Path('/opt/customer/config/agent/providers.yml').read_text())[0]['config']['providers']=={}")
         rows=dc('exec','-T','db','sh','-c','MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -N -uroot ai_ppt',capture=True,data=sql).splitlines()
         assert set(rows)=={'user:admin'},rows
         args.output.mkdir(parents=True,exist_ok=True)
         evidence=args.output/'verification'
         evidence.mkdir(exist_ok=True)
-        for filename in ['customer-render.png','customer-render.pptx','customer-create-ppt.png','customer-ppt-history.png','customer-quickagent-settings.png','customer-quickagent-empty.png']:
+        for filename in ['customer-render.png','customer-render.pptx','customer-create-ppt.png','customer-ppt-history.png','customer-quickagent-settings.png','customer-quickagent-empty.png','customer-ppt-plugin-registered.png']:
             run(['docker','cp',renderer_id+':/tmp/'+filename,str(evidence/filename)])
         images={}
-        for image in ['quickagent-customer-ppt-arm64:20261113-latest-empty','quickagent-customer-ppt-renderer-arm64:20261113-latest-empty','quickagent-customer-mysql-arm64:8.0','quickagent-customer-redis-arm64:7']:
+        for image in ['quickagent-customer-ppt-arm64:20261113-fixed-flow','quickagent-customer-ppt-renderer-arm64:20261113-fixed-flow','quickagent-customer-mysql-arm64:8.0','quickagent-customer-redis-arm64:7']:
             item=json.loads(run(['docker','image','inspect','--platform','linux/arm64',image],capture=True))[0]
             assert item['Architecture']=='arm64'
             images[image]=item['Id']
         report={'passed':True,'checked_at':datetime.now(timezone.utc).isoformat(),'host':platform.machine(),'execution':'ARM64 QEMU' if platform.machine()=='x86_64' else 'native ARM64','customer_login':True,'menus':[m['path'] for m in menus],'models':sorted([list(m) for m in expected]),'fresh_database_only_admin':True,'authenticated_plugin_connection':True,'session_creation':True,'anonymous_plugin_blocked':True,'render':render,'ui':ui,'images':images,'quickagent_admin_auth':True,'quickagent_cross_origin_blocked':True,'unicom_templates_removed':True,'template_static_examples_removed':True,'template_count':len(templates),'deepseek_api_generation_tested':False,'physical_halberd_server_tested':False,'redis_qemu_fixture_override':values.get('QUICKAGENT_ARM64_EMULATED')=='1'}
         report.update(upgrade_template_cleanup=upgrade_tested,initial_models_empty=True,all_test_models_deleted=True,models_empty_after_restart=True,database_models_empty=True,factory_models_empty=True)
+        report.update(ppt_registered_at_boot=True,ppt_library_registered=True,ppt_registered_after_restart=True,ppt_registered_tool_count=len(boot_plugin['tools']))
         report.update(local_model)
         (args.output/'verification.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
         print('Customer integration verification passed: '+str(args.output/'verification.json'),flush=True)

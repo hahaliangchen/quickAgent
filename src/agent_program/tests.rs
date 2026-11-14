@@ -1,5 +1,6 @@
 use super::*;
 use runtime::ActionKind;
+use std::collections::BTreeSet;
 
 #[test]
 fn binary_chains_compile_and_run_on_a_runtime_worker_stack() {
@@ -650,10 +651,12 @@ fn vm_stage0_saved_budget_and_whole_program_deadline_survive_restore() {
 
 #[test]
 fn vm_stage0_unsupported_syntax_diagnostics_name_the_feature() {
-    for (source,name) in [("new WeakRef({})","WeakRef"),("new Proxy({}, {})","Proxy"),("new URL('https://example.com')","URL")] {
+    for (source,name) in [("new WeakRef({})","WeakRef"),("new Proxy({}, {})","Proxy")] {
         let error=compile(source).unwrap_err().to_string();
         assert!(error.contains(name),"{source}: {error}");
     }
+    let url = returned(runtime("function main(){const u=new URL('https://example.com/a?x=1#h');return [u.href,u.hostname,u.search,u.hash];}"));
+    assert_eq!(url, json!(["https://example.com/a?x=1#h", "example.com", "?x=1", "#h"]));
 }
 
 #[test]
@@ -816,10 +819,10 @@ fn compatibility_uri_encoding_and_malformed_inputs() {
 #[test]
 fn compatibility_diagnostics_name_missing_global() {
     let error=compile("function main(){return absentGlobal(3);}").unwrap_err().to_string();
-    assert!(error.contains("absentGlobal 在流程运行时里不可用"),"{error}");
+    assert!(error.contains("absentGlobal is not defined"),"{error}");
     assert!(!error.contains("call/ai wrappers"),"{error}");
     let error=compile("function main(){print('result');}").unwrap_err().to_string();
-    assert!(error.contains("print 在流程运行时里不可用") && error.contains("console.log(...)"),"{error}");
+    assert!(error.contains("print is not defined") && error.contains("console.log(...)"),"{error}");
 }
 
 #[test]
@@ -945,6 +948,51 @@ fn top_level_with(source: &str, args: Vec<Value>) -> Runtime {
 fn top_level_task(program: Program) -> Runtime {
     Runtime::task_program(program, ENTRY, vec![]).unwrap()
 }
+
+#[test]
+fn persistent_console_cells_share_top_level_bindings_and_functions() {
+    let first = compile_cell_with_scope(
+        "const base = 7; function add(n) { return base + n; }",
+        "$$cell/0",
+        libraries::builtin(),
+        BTreeSet::new(),
+    )
+    .unwrap();
+    let mut run = Runtime::task_program(first, "$$cell/0", vec![]).unwrap();
+    assert!(matches!(run.next(), State::Returned(Value::Null)));
+
+    let second = compile_cell_with_scope(
+        "console.log(add(5));",
+        "$$cell/1",
+        libraries::builtin(),
+        ["base".to_owned(), "add".to_owned()].into_iter().collect(),
+    )
+    .unwrap();
+    run.append_cell(second, "$$cell/1").unwrap();
+    assert!(matches!(run.next(), State::Returned(Value::Null)));
+    assert_eq!(run.logs(), &["12"]);
+
+    let duplicate = compile_cell_with_scope(
+        "const base = 8;",
+        "$$cell/2",
+        libraries::builtin(),
+        run.module_names(),
+    )
+    .unwrap();
+    assert!(run.append_cell(duplicate, "$$cell/2").is_err());
+
+    let third = compile_cell_with_scope(
+        "console.log(add(6));",
+        "$$cell/3",
+        libraries::builtin(),
+        run.module_names(),
+    )
+    .unwrap();
+    run.append_cell(third, "$$cell/3").unwrap();
+    assert!(matches!(run.next(), State::Returned(Value::Null)));
+    assert_eq!(run.logs(), &["12", "13"]);
+}
+
 fn returned(mut r: Runtime) -> Value {
     match r.next() {
         State::Returned(v) => v,
@@ -1133,16 +1181,19 @@ function main() {
     size: Buffer.byteLength("é中🙂"),
     utf8: Buffer.byteLength("x", "utf8"),
     kind: typeof TextEncoder,
+    globalBuffer: globalThis.Buffer === Buffer,
+    globalURL: globalThis.URL === URL,
   };
 }
 "#,
     ));
-    assert_eq!(result, json!({"length":5,"first":195,"encoding":"utf-8","inline":2,"empty":0,"size":9,"utf8":1,"kind":"function"}));
+    assert_eq!(result, json!({"length":5,"first":195,"encoding":"utf-8","inline":2,"empty":0,"size":9,"utf8":1,"kind":"function","globalBuffer":true,"globalURL":true}));
     // What the runtime lacks is rejected with a request not to rewrite it by hand.
-    for source in ["function main(){return new TextDecoder().decode([104]);}", "function main(){return Buffer.from('x','utf8').length;}"] {
+    for source in ["function main(){return new TextDecoder().decode([104]);}"] {
         let error = compile(source).err().expect("unsupported").to_string();
         assert!(error.contains("Do not hand-write a replacement"), "{source}: {error}");
     }
+    assert_eq!(returned(runtime("function main(){return [Buffer.from('x','utf8').length, path.isAbsolute('/tmp')];}")), json!([1, true]));
     let other = returned(runtime("function main(){try{return Buffer.byteLength('x','base64');}catch(error){return error.message;}}"));
     assert!(other.as_str().unwrap().contains("only the utf8"), "{other}");
     // A local TextEncoder is the program's own.
@@ -2090,12 +2141,12 @@ fn published_flow_examples_compile_with_the_fixed_whitelist() {
         let text = text.replace("\r\n", "\n");
         for block in text.split("```js\n").skip(1) {
             let source = block.split("```").next().unwrap();
-            let result =
-                if source.contains("function process(") && !source.contains("function main(") {
-                    compile_body(source, "process")
-                } else {
-                    compile(source)
-                };
+            let entry = ["writeNotes", "transformPart"].into_iter()
+                .find(|name| source.contains(&format!("function {name}(")));
+            let result = match entry {
+                Some(entry) => compile_body(source, entry),
+                None => compile(source),
+            };
             result.unwrap_or_else(|error| panic!("published example failed: {error}\n{source}"));
             examples += 1;
         }
@@ -2293,7 +2344,7 @@ fn documented_parallel_example_checks_all_five_pages() {
 #[test]
 fn documented_module_example_summarizes_each_file_with_one_module() {
     let source = include_str!("../../skills/task-program/examples/module-notes.js");
-    assert!(compile(source).unwrap().functions["summarizeFile"].module_task);
+    assert!(compile(source).unwrap().functions["summarizeFile"].virtual_task);
     let mut harness = TutorialRun::default();
     let output = harness.run(tutorial(source)).unwrap();
     assert_eq!(output, Value::Null);
@@ -2628,8 +2679,12 @@ fn a_required_library_outlives_collection_and_its_promises_variant_is_async() {
 
 #[test]
 fn require_takes_a_library_name_and_gives_its_methods_to_the_hooks_of_that_source() {
+    assert!(compile("function main(){const name='ppt';return require(name);}").is_ok());
+    let mut dynamic = runtime("function main(){const name='ppt';return require(name);}");
+    let State::Action(action) = dynamic.next() else { panic!("dynamic require asks the host") };
+    assert!(matches!(&action.kind, ActionKind::Require { library } if library == "ppt"));
+    assert_eq!(returned(runtime("function main(){const name='path';return require(name).isAbsolute('/tmp');}")), json!(true));
     for source in [
-        "function main(){const name='ppt';return require(name);}",
         "function main(){return require('ppt', 1);}",
         "function main(){return require('a b');}",
     ] {
@@ -2647,6 +2702,19 @@ judge(ppt);"#).unwrap();
     assert!(program.functions["build"].leaf_libraries.is_empty(), "a module requires its own");
     // A declared function named require is an ordinary call.
     assert_eq!(returned(runtime("function require(name){return 'own ' + name;} function main(){return require('ppt');}")), json!("own ppt"));
+}
+
+#[test]
+fn virtual_declarations_accept_standard_parameter_patterns() {
+    let program = compile(
+        "function main(){return inspect({id:7});}\n/** @virtual Inspect the object and return a result. */\nfunction inspect({id}){}",
+    )
+    .unwrap();
+    assert_eq!(program.functions["inspect"].params.len(), 1);
+    let mut run = runtime(
+        "function main(){return inspect({id:7});}\n/** @virtual Inspect the object and return a result. */\nfunction inspect({id}){}",
+    );
+    assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Call { name, .. }, .. }) if name == "inspect"));
 }
 
 #[test]
@@ -4220,4 +4288,30 @@ fn a_declared_function_nothing_calls_is_named_before_it_runs() {
     let helper = uncalled_functions("async function summarize(paths) { return paths; }\nfunction unused() {}", Some("summarize")).unwrap_err().to_string();
     assert!(helper.contains("unused") && helper.contains("only summarize"), "{helper}");
     assert!(uncalled_functions("export function api() {}", None).is_ok());
+}
+
+/// 2026-11-14: a main program called `collectBaseline`, a 20-line contract
+/// whose JSDoc left out @virtual; as ordinary JS it returned undefined and the
+/// main AI stopped orchestrating.
+#[test]
+fn a_contract_without_its_virtual_tag_is_named_before_it_runs() {
+    use super::uncalled_functions;
+    let untagged = "const found = await collectBaseline(\"log\");\nconsole.log(found);\n\n/**\n * Read the log and list failing tests.\n * Return {tests:[string]}.\n */\nasync function collectBaseline(path) {}";
+    let error = uncalled_functions(untagged, None).unwrap_err().to_string();
+    assert!(error.contains("TS_PROGRAM 8:1") && error.contains("collectBaseline") && error.contains("@virtual"), "{error}");
+    // The same contract inside the body, as the examples write it.
+    let inner = "console.log(judge(1));\nfunction judge(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}";
+    assert!(uncalled_functions(inner, None).unwrap_err().to_string().contains("judge"));
+    // Nested in a module implementation too.
+    let nested = "async function run(x) {\n  /** Summarize x. Returns {text:string}. */\n  async function summarize(x) {}\n  return summarize(x);\n}";
+    assert!(uncalled_functions(nested, Some("run")).unwrap_err().to_string().contains("summarize"));
+    // Tagged contracts, in the header or the body, are AI work as declared.
+    assert!(uncalled_functions(&untagged.replace(" * Read", " * @virtual\n * Read"), None).is_ok());
+    assert!(uncalled_functions("console.log(judge(1));\n/** @module */\nfunction judge(x) {\n  // Returns {ok:boolean}.\n}", None).is_ok());
+    assert!(uncalled_functions("console.log(judge(1));\nfunction judge(x) {\n  // @virtual Returns {ok:boolean}.\n}", None).is_ok());
+    // An empty function with no contract, or a contract on a real body, is ordinary JS.
+    assert!(uncalled_functions("function noop() {}\nnoop();", None).is_ok());
+    assert!(uncalled_functions("/** Doubles x. */\nfunction twice(x) { return x * 2; }\nconsole.log(twice(1));", None).is_ok());
+    // A comment separated by a blank line belongs to the code above it.
+    assert!(uncalled_functions("const a = 1; // the first value\n\nfunction noop() {}\nnoop(); console.log(a);", None).is_ok());
 }

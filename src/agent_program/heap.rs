@@ -343,6 +343,16 @@ impl Heap {
         Ok(())
     }
 
+    /// Add a top-level lexical binding to an already-live environment. This
+    /// is used by persistent Console cells before their declaration executes.
+    pub(super) fn declare_uninitialized(&mut self, environment: HeapId, name: &str) -> Result<()> {
+        let (bindings, uninitialized) = self.environment_mut(environment)?;
+        ensure!(!bindings.contains_key(name), "Identifier '{name}' has already been declared");
+        bindings.insert(name.to_owned(), VmValue::Undefined);
+        uninitialized.insert(name.to_owned());
+        Ok(())
+    }
+
     fn export_json(
         &self,
         value: &VmValue,
@@ -903,6 +913,15 @@ impl Heap {
                 .filter(|(name, _)| !uninitialized.contains(*name))
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect()),
+            _ => bail!("reference is not a lexical environment"),
+        }
+    }
+
+    /// Names declared in one environment, including lexical bindings still
+    /// in their temporal dead zone.
+    pub(super) fn binding_names(&self, environment: HeapId) -> Result<Vec<String>> {
+        match self.get(environment)? {
+            HeapNode::Environment { bindings, .. } => Ok(bindings.keys().cloned().collect()),
             _ => bail!("reference is not a lexical environment"),
         }
     }

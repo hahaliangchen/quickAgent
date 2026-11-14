@@ -761,7 +761,7 @@ pub fn read_only_available() -> bool {
 
 pub fn read_only_definition() -> Value {
     json!({"type":"function","function":{"name":READ_ONLY,
-        "description":"Run one Bash command yourself to look at the project or check it: git status/log/diff/show, rg, ls, wc, sed -n, and builds and tests such as cargo build/test, npm test or pytest. The project's own files are read-only and there is no network; only its build-output folders (the ones git ignores, such as target/ or node_modules/) and a private /tmp, discarded afterwards, are writable. So builds and tests run, but a command cannot change source files, install or fetch anything: make changes with the file-editing tools, and use module code for commands that must change project files or reach the network. Each call starts a fresh shell in workdir (default: the project root), without stdin, profile or PTY, and returns full stdout/stderr with exit_code once the command exits (rg: 0 matches, 1 none, 2 error). For a long build or test run, send its whole output to a file in a build-output folder once (cmd > target/run.log 2>&1) and read what you need from that file with later commands; do not run it again to see another part. More than 8 MiB of delivered output fails without a prefix. A command still running at timeout_ms is stopped; give builds and test suites a longer timeout_ms.",
+        "description":"Run one read-only Bash command directly, including builds and tests. This tool is available for individual operations; use JavaScript flow programs to express the evolving task, including exploration. For a flow step that needs shell, declare an empty @virtual for the result needed; its implementer handles the commands and API discovery. Examples: git status/log/diff/show, rg, ls, wc, sed -n, and builds and tests such as cargo build/test, npm test or pytest. The project's own files are read-only and there is no network; only its build-output folders (the ones git ignores, such as target/ or node_modules/; git status --ignored lists them) and a private /tmp are writable. That /tmp is emptied when the command ends: the next call cannot read anything written there, so a log or script a later call needs goes in a build-output folder. .git is read-only too, so git worktree, stash, checkout and commit fail: to build or test another commit, unpack it into a build-output folder (git archive <commit> | tar -x -C target/at-<commit>) and run there. So builds and tests run, but a command cannot change source files, install or fetch anything: make changes with the file-editing tools, and use module code for commands that must change project files or reach the network. Each call starts a fresh shell in workdir (default: the project root), without stdin, profile or PTY, and returns full stdout/stderr with exit_code once the command exits (rg: 0 matches, 1 none, 2 error). For a long build or test run, send its whole output to a file in one of this project's build-output folders once (cmd > target/run.log 2>&1 in a Rust project, cmd > node_modules/.cache/run.log 2>&1 in a Node one; never /tmp) and read what you need from that file with later commands; do not run it again to see another part. More than 8 MiB of delivered output fails without a prefix. A command still running at timeout_ms is stopped; give builds and test suites a longer timeout_ms.",
         "parameters":{"type":"object","properties":{
             "cmd":{"type":"string","minLength":1},
             "workdir":{"type":"string","description":"Directory inside the project, relative to its root. Default: the root."},
@@ -992,8 +992,11 @@ mod tests {
         assert!(source["stdout"].as_str().unwrap().contains("status=1"), "sources stay read-only: {source}");
         if std::process::Command::new("cargo").arg("--version").output().is_ok() {
             // A checked-out project has its lockfile; cargo does not rewrite it.
-            std::process::Command::new("cargo").args(["generate-lockfile", "--offline"]).current_dir(&f.root).output()?;
-            let tested = run("cargo test --quiet 2>&1 | tail -15").await?;
+            let locked = std::process::Command::new("cargo").args(["generate-lockfile", "--offline"]).current_dir(&f.root).output()?;
+            assert!(locked.status.success(), "{}", String::from_utf8_lossy(&locked.stderr));
+            // The parent suite may have its own CARGO_TARGET_DIR outside this sandbox.
+            let tested = run("CARGO_TARGET_DIR=\"$PWD/target\" cargo test --offline --quiet").await?;
+            assert_eq!(tested["exit_code"], 0, "{tested}");
             assert!(tested["stdout"].as_str().unwrap().contains("1 passed"), "{tested}");
         }
         assert!(!std::path::Path::new("/tmp/x").exists() || std::fs::read_to_string("/tmp/x").map(|x| x != "tmp\n").unwrap_or(true),
@@ -1039,10 +1042,10 @@ mod tests {
         assert_eq!(v["stdout"], "ok\n");
         let v = f.run(if cfg!(windows) { "throw 'x'" } else { "exit 1" }).await?;
         assert_eq!(v["exit_code"], 1, "{v}");
-        let v = f.run("python -c \"print('中文')\"").await?;
+        let v = f.run("python3 -c \"print('中文')\"").await?;
         assert_eq!(v["exit_code"], 0, "{v}");
         assert_eq!(v["stdout"].as_str().unwrap().trim(), "中文");
-        let v = f.run(if cfg!(windows) { "Get-Command rg,git,node,npm,cargo,python -ErrorAction Stop | ForEach-Object { $_.Source }" } else { "command -v rg git node npm cargo python" }).await?;
+        let v = f.run(if cfg!(windows) { "Get-Command rg,git,node,npm,cargo,python3 -ErrorAction Stop | ForEach-Object { $_.Source }" } else { "command -v rg git node npm cargo python3" }).await?;
         assert_eq!(v["exit_code"], 0, "{v}");
         assert_eq!(v["stdout"].as_str().unwrap().lines().count(), 6, "{v}");
         let v = f.run("node -e 'process.stdout.write(Buffer.from([214,208,206,196]))'").await?;

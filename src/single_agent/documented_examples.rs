@@ -225,6 +225,93 @@ fn real_with_effort(name: &str, effort: &str) -> Result<(std::path::PathBuf, Age
     Ok((root,state,model))
 }
 
+/// Behavioral probe: normal prompts choose the workflow; the counter measures
+/// actual test executions, including shell calls hidden inside a module.
+#[tokio::test]
+#[ignore = "real configured model, two-turn test investigation, consumes provider tokens"]
+async fn real_model_test_investigation_reuses_evidence() -> Result<()> {
+    let (root, mut state, model) = real_with_effort("test-investigation", "low")?;
+    state.permission_mode = agent_service::PermissionMode::FullAccess;
+    for folder in ["baseline", "current", "target"] {
+        std::fs::create_dir_all(root.join(folder))?;
+    }
+    std::fs::write(root.join(".gitignore"), "target/\n__pycache__/\n")?;
+    ensure!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).status()?.success(), "fixture git init failed");
+    std::fs::write(root.join("baseline/codec.py"), "def normalize(text):\n    return text.strip().lower()\n")?;
+    std::fs::write(root.join("current/codec.py"), "def normalize(text):\n    return text.lower()\n")?;
+    std::fs::write(root.join("probe.py"), include_str!("fixtures/test_investigation_probe.py").replace("__TEST_RUN_LEDGER__", &root.join("target/runs.jsonl").to_string_lossy()))?;
+    std::fs::write(root.join("README.md"), "# normalize\n约定：删除首尾空白，再转成小写。baseline 和 current 是两个源码快照。\n运行方式：python3 probe.py baseline|current [trim empty]。测试结果和调用计数写在 target/。\n现有 target/current.log 是当前源码运行 trim、empty 的完整失败日志；生成后源码、测试和环境均未改变。\n")?;
+    let seed = std::process::Command::new("python3").args(["probe.py", "current"]).current_dir(&root).output()?;
+    ensure!(seed.status.code() == Some(1), "fixture must start with two failing assertions");
+    let started = std::time::Instant::now();
+    eprintln!("TEST_INVESTIGATION_START model={model} root={}", root.display());
+    let prompts = [
+        "这个小型 Python 项目当前有 trim、empty 两个失败，完整日志在 target/current.log。请只读排查根因，和 baseline 对照，说明属于同一个原因还是不同原因，给出证据和修复建议。不要修改源码。",
+        "继续上一轮，整理成最终表格：两个测试各自的原因、baseline 对照证据、建议怎么修。指出还没有验证的部分。仍然只查原因，不改源码。",
+    ];
+    for (index, prompt) in prompts.iter().enumerate() {
+        let turn = index + 1;
+        agent_service::open_db(&root)?.execute("UPDATE agent_tasks SET status='running' WHERE id='example'", [])?;
+        let cancel = CancellationToken::new();
+        let run = tokio::time::timeout(Duration::from_secs(240), run_task(state.clone(), "example".into(), model.clone(), (*prompt).into(), 40, cancel.clone(), turn, false)).await;
+        if run.is_err() { cancel.cancel(); }
+        run.context("test investigation timed out")??;
+        let answer = last_answer(&root)?;
+        std::fs::write(root.join(format!("target/answer-{turn}.md")), &answer)?;
+        let count = std::fs::read_to_string(root.join("target/runs.jsonl"))?.lines().count();
+        eprintln!("TEST_INVESTIGATION_TURN turn={turn} actual_test_runs={count} answer={}", clip(&answer, 800));
+    }
+    let runs = std::fs::read_to_string(root.join("target/runs.jsonl"))?.lines()
+        .map(serde_json::from_str::<Value>).collect::<std::result::Result<Vec<_>, _>>()?;
+    let current = runs.iter().filter(|r| r["version"] == "current").count();
+    let baseline = runs.iter().filter(|r| r["version"] == "baseline").count();
+    let conn = agent_service::open_db(&root)?;
+    let programs: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id='example' AND kind='program/start' AND json_extract(data,'$.function') IS NULL", [], |r|r.get(0))?;
+    // The ledger counts probe.py only. Include every shell command as evidence:
+    // a model can also repeat the same cases in its own Python snippet.
+    let commands = conn.prepare("SELECT json_extract(data,'$.arguments') FROM agent_task_events WHERE task_id='example' AND kind='tool/call' AND json_extract(data,'$.name') IN ('run_readonly_command','exec_command') ORDER BY seq")?
+        .query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let summary = json!({"root":root,"model":model,"seconds":started.elapsed().as_secs_f64(),"current_probe_runs_including_seed":current,"baseline_probe_runs":baseline,"programs":programs,"runs":runs,"shell_commands":commands});
+    std::fs::write(root.join("target/investigation-summary.json"), serde_json::to_vec_pretty(&summary)?)?;
+    eprintln!("TEST_INVESTIGATION_RESULT {summary}");
+    ensure!(current == 1, "current probe.py was replayed: {summary}");
+    ensure!(baseline == 1, "baseline must be run once, not inferred from source, and reused in the next turn: {summary}");
+    // Orchestration is a preference: report its use, do not make it a gate.
+    ensure!(std::fs::read_to_string(root.join("current/codec.py"))? == "def normalize(text):\n    return text.lower()\n", "investigation changed source");
+    Ok(())
+}
+
+/// Continue the measured investigation, without replaying its setup or tests.
+#[tokio::test]
+#[ignore = "real configured model; TEST_INVESTIGATION_ROOT points to the earlier probe workspace"]
+async fn real_model_test_investigation_program_handoff() -> Result<()> {
+    let root = std::path::PathBuf::from(std::env::var("TEST_INVESTIGATION_ROOT")?);
+    ensure!(root.join("target/investigation-summary.json").is_file(), "complete the two-turn probe first");
+    let (_, mut state, model) = real_with_effort("test-handoff-provider", "low")?;
+    state.workspace = std::sync::Arc::new(crate::tools::Workspace::new(&root)?);
+    state.permission_mode = agent_service::PermissionMode::FullAccess;
+    let before = std::fs::read_to_string(root.join("target/runs.jsonl"))?;
+    let conn = agent_service::open_db(&root)?;
+    let programs = || conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id='example' AND kind='program/start' AND json_extract(data,'$.function') IS NULL", [], |r|r.get::<_,i64>(0));
+    let old_programs = programs()?;
+    conn.execute("UPDATE agent_tasks SET status='running' WHERE id='example'", [])?;
+    let cancel = CancellationToken::new();
+    let prompt = "接续前两轮，把“解释两个测试的原因、尚未验证的部分和修复建议”作为一个工作阶段交给虚函数。主程序只把已有证据作为参数传入，声明职责并执行调用，不必实现内部分析。不要重新读文件或运行测试，不修改项目源码。";
+    let started = std::time::Instant::now();
+    let run = tokio::time::timeout(Duration::from_secs(180), run_task(state, "example".into(), model.clone(), prompt.into(), 30, cancel.clone(), 3, false)).await;
+    if run.is_err() { cancel.cancel(); }
+    run.context("program evidence handoff timed out")??;
+    let after = std::fs::read_to_string(root.join("target/runs.jsonl"))?;
+    let new_programs = programs()? - old_programs;
+    let answer = last_answer(&root)?;
+    let summary = json!({"root":root,"model":model,"seconds":started.elapsed().as_secs_f64(),"new_programs":new_programs,"test_runs_unchanged":before==after,"answer":answer});
+    std::fs::write(root.join("target/program-handoff-summary.json"), serde_json::to_vec_pretty(&summary)?)?;
+    eprintln!("TEST_HANDOFF_RESULT {summary}");
+    ensure!(new_programs > 0, "this follow-up explicitly requests the existing VM path");
+    ensure!(before == after, "handoff replayed an existing test run");
+    Ok(())
+}
+
 fn program_outcomes(root: &Path) -> Result<Vec<String>> {
     let conn=agent_service::open_db(root)?;
     let rows=conn.prepare("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE task_id='example' AND kind='assistant/message' AND json_extract(data,'$.actor')='program' ORDER BY seq")?
@@ -234,6 +321,81 @@ fn program_outcomes(root: &Path) -> Result<Vec<String>> {
 
 fn last_answer(root: &Path) -> Result<String> {
     Ok(agent_service::open_db(root)?.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE task_id='example' AND kind='assistant/message' ORDER BY seq DESC LIMIT 1",[],|row|row.get(0))?)
+}
+
+/// A test-only path alias for historical absolute paths. It neither changes
+/// the model's tool choices nor bypasses the normal command sandbox.
+pub(super) fn replay_paths(s: &Session<'_>, args: &mut Value) {
+    if std::env::var("CONTINUATION_REPLAY_TASK").as_deref() != Ok(s.task) { return; }
+    let (Ok(from), Ok(to)) = (std::env::var("CONTINUATION_REPLAY_ORIGINAL_PROJECT"), std::env::var("CONTINUATION_REPLAY_PROJECT")) else { return };
+    fn rewrite(value: &mut Value, key: &str, from: &str, to: &str) {
+        match value {
+            Value::String(text) if matches!(key, "cmd"|"path"|"paths"|"workdir"|"cwd"|"project_path"|"workspace_root"|"source"|"content") => *text = text.replace(from, to),
+            Value::Array(items) => { for item in items { rewrite(item, key, from, to); } },
+            Value::Object(fields) => { for (key, value) in fields { rewrite(value, key, from, to); } },
+            _ => {},
+        }
+    }
+    rewrite(args, "", &from, &to);
+}
+
+/// Replay the actual user's stopped investigation in an isolated snapshot.
+/// No workflow or answer is supplied to the model: its user message is the
+/// original continuation, and all tools and orchestration remain available.
+#[tokio::test]
+#[ignore = "real provider; requires isolated workspace and saved actual-task snapshot"]
+async fn real_model_continues_recorded_investigation() -> Result<()> {
+    let root = std::path::PathBuf::from(std::env::var("CONTINUATION_REPLAY_HOST")?);
+    ensure!(root.join(".continuation-replay").is_file(), "refusing to replay in the live host");
+    let project = std::path::PathBuf::from(std::env::var("CONTINUATION_REPLAY_PROJECT")?);
+    ensure!(project.join(".continuation-replay").is_file(), "refusing to use the live project");
+    let task = std::env::var("CONTINUATION_REPLAY_TASK")?;
+    let turn: usize = std::env::var("CONTINUATION_REPLAY_TURN")?.parse()?;
+    let output = std::path::PathBuf::from(std::env::var("CONTINUATION_REPLAY_OUTPUT")?);
+    std::fs::create_dir_all(&output)?;
+    let conn = agent_service::open_db(&root)?;
+    conn.execute("UPDATE agent_session_meta SET workspace=?2 WHERE task_id=?1", params![task,project.to_string_lossy()])?;
+    let changed: i64 = conn.query_row("SELECT count(*) FROM agent_file_changes WHERE task_id=?1 AND turn>=?2 AND reverted=0 AND path NOT LIKE 'target/%'", params![task,turn], |r|r.get(0))?;
+    ensure!(changed == 0, "this replay must not need source-file undo");
+    let baseline_path = output.join("original-first-request.json");
+    let baseline: String = if baseline_path.is_file() { std::fs::read_to_string(&baseline_path)? } else {
+        let body = conn.query_row("SELECT request_json FROM agent_request_contexts WHERE task_id=?1 AND turn=?2 ORDER BY id LIMIT 1", params![task,turn], |r|r.get::<_,String>(0))?;
+        std::fs::write(&baseline_path, &body)?; body
+    };
+    conn.execute("UPDATE agent_tasks SET status='interrupted' WHERE id=?1", [&task])?;
+    let restored = crate::rewind::rewind(&root, &task, turn)?;
+    let prompt = restored["prompt"].as_str().context("replay prompt missing")?.to_owned();
+    ensure!(!prompt.is_empty(), "replay needs the original user continuation");
+    let before: i64 = conn.query_row("SELECT COALESCE(MAX(seq),-1) FROM agent_task_events WHERE task_id=?1", [&task], |r|r.get(0))?;
+    let (_, mut state, model) = real_with_effort("continuation-provider", "high")?;
+    state.workspace = std::sync::Arc::new(crate::tools::Workspace::new(&root)?);
+    state.permission_mode = agent_service::PermissionMode::FullAccess;
+    conn.execute("UPDATE agent_tasks SET status='running' WHERE id=?1", [&task])?;
+    let cancel = CancellationToken::new();
+    let started = std::time::Instant::now();
+    eprintln!("CONTINUATION_REPLAY_START root={} task={task} turn={turn} model={model}", root.display());
+    let run = tokio::time::timeout(Duration::from_secs(720), run_task(state, task.clone(), model.clone(), prompt.clone(), 24, cancel.clone(), turn, false)).await;
+    if run.is_err() { cancel.cancel(); }
+    let count = |kind: &str| conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id=?1 AND seq>?2 AND kind=?3", params![task,before,kind], |r|r.get::<_,i64>(0)).unwrap_or(0);
+    let first: String = conn.query_row("SELECT request_json FROM agent_request_contexts WHERE task_id=?1 AND turn=?2 ORDER BY id LIMIT 1", params![task,turn], |r|r.get(0))?;
+    std::fs::write(output.join("revised-first-request.json"), &first)?;
+    let events = conn.prepare("SELECT seq,kind,data FROM agent_task_events WHERE task_id=?1 AND seq>?2 ORDER BY seq")?
+        .query_map(params![task,before], |r|Ok(json!({"seq":r.get::<_,i64>(0)?,"type":r.get::<_,String>(1)?,"data":serde_json::from_str::<Value>(&r.get::<_,String>(2)?).unwrap_or(Value::Null)})))?
+        .collect::<std::result::Result<Vec<_>,_>>()?;
+    std::fs::write(output.join("revised-events.json"), serde_json::to_vec_pretty(&events)?)?;
+    let fresh_window = count("context/main_reset") > 0;
+    let summary = json!({"task":task,"turn":turn,"model":model,"prompt":prompt,"seconds":started.elapsed().as_secs_f64(),
+        "original_request_chars":baseline.chars().count(),"revised_request_chars":first.chars().count(),"fresh_window":fresh_window,
+        "program_starts":count("program/start"),"program_results":count("program/result"),"model_requests":count("debug/context_request"),
+        "module_saves":count("module/saved"),"module_loads":count("module/loaded"),
+        "run_ok":matches!(run,Ok(Ok(()))),"root":root});
+    std::fs::write(output.join("summary.json"), serde_json::to_vec_pretty(&summary)?)?;
+    eprintln!("CONTINUATION_REPLAY_RESULT {summary}");
+    ensure!(fresh_window && first.chars().count() < baseline.chars().count(), "the stopped direct loop did not get a fresh window");
+    ensure!(matches!(run, Ok(Ok(()))), "the bounded real-task replay did not finish successfully");
+    let status: String = conn.query_row("SELECT status FROM agent_tasks WHERE id=?1", [&task], |r| r.get(0))?;
+    ensure!(status == "completed", "the real-task replay ended with {status}");
+    Ok(())
 }
 
 #[tokio::test]
@@ -478,12 +640,14 @@ async fn skills_reach_only_the_code_that_references_them() {
         let function=messages.iter().find(|m|m["name"]=="program_task_input")
             .map(|m|serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap()["name"].as_str().unwrap().to_owned());
         let answer=match function.as_deref() {
+            Some("inspect")=>text("```js\nasync function inspect(x) {\n const cm = require(\"commonmark\");\n /**\n * @virtual\n * Decide whether x follows the rules. Returns {ok:boolean}.\n * @uses cm the rules to follow\n */\n async function judge(x) {}\n /** @virtual Count the characters of x. Return {n:number}. */\n async function count(x) {}\n const kept = await judge(x);\n const counted = await count(x);\n return {ok:kept.ok,n:counted.n};\n}\n```"),
             Some("judge")=>text(r#"{"ok":true}"#),
             Some("count")=>text(r#"{"n":1}"#),
             // The module's code requires a skill; its first version does not compile.
             Some(_) if all.contains("PROGRAM_SOURCE_INVALID")=>text("```js\nasync function check(input) {\n  require(\"spec-driven-testing\");\n  return {ok: true};\n}\n```"),
             Some(_)=>text("```js\nimport * as io from \"host:io\";\nasync function check(input) {\n  require(\"spec-driven-testing\");\n  io.nothing({});\n  return {ok: true};\n}\n```"),
-            None if all.contains("PROGRAM_RUNTIME_ERROR")=>text("```js\nconst cm = require(\"commonmark\");\nconst kept = await judge(\"x\");\nconst counted = await count(\"x\");\nconst checked = await check(\"x\");\n\n/**\n * @virtual\n * Decide whether x follows the rules.\n * @uses cm the rules to follow\n * Returns {ok:boolean}.\n */\nasync function judge(x) {}\n\n/**\n * @virtual\n * Count the characters of x.\n * Returns {n:number}.\n */\nasync function count(x) {}\n\n/** @module */\nasync function check(input) {\n  // Return {ok:true}.\n}\n```"),
+            None if messages.iter().any(|m|m["name"]=="program_result")=>text("Done."),
+            None if all.contains("PROGRAM_RUNTIME_ERROR")=>text("```js\nconst kept = await inspect(\"x\");\nconst checked = await check(\"x\");\n/** @virtual Check whether x follows the rules and count it. Returns {ok:boolean,n:number}. */\nasync function inspect(x) {}\n/** @virtual Return {ok:true}. */\nasync function check(input) {}\n```"),
             None=>match results {
                 0=>call("list_skills",json!({})),
                 1=>call("read_skill",json!({"name":"commonmark"})),
@@ -507,7 +671,7 @@ async fn skills_reach_only_the_code_that_references_them() {
     let main=seen.iter().filter(|body|function(body).is_none()).cloned().collect::<Vec<_>>();
     // commonmark's instructions hold the delimiter stack; spec-driven-testing's say to write tests from the spec.
     let (commonmark,testing)=("分隔符栈","按规格写测试");
-    assert_eq!(main.len(),4,"three requests before the program and one to heal it");
+    assert_eq!(main.len(),6,"three setup requests, two repair submissions and one final answer");
     for body in &main {
         assert!(named(body,"project_skills").contains("- commonmark:"),"the main AI is told which skills it can read");
     }

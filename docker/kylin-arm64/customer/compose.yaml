@@ -8,6 +8,7 @@ x-app-environment: &app-environment
   REDIS_ADDR: redis:6379
   REDIS_PASSWORD: ${REDIS_PASSWORD:?Run deploy.sh init to generate .env}
   PPT_RENDER_URL: http://renderer:8787
+  CUSTOMER_LOG_DIR: /logs
 
 services:
   db:
@@ -44,7 +45,7 @@ services:
       retries: 20
 
   renderer:
-    image: quickagent-customer-ppt-renderer-arm64:20261113-latest-empty
+    image: quickagent-customer-ppt-renderer-arm64:20261113-fixed-flow
     pull_policy: never
     platform: linux/arm64
     init: true
@@ -59,19 +60,19 @@ services:
       retries: 20
 
   init:
-    image: quickagent-customer-ppt-arm64:20261113-latest-empty
+    image: quickagent-customer-ppt-arm64:20261113-fixed-flow
     pull_policy: never
     platform: linux/arm64
     profiles: ["setup"]
     environment: *app-environment
-    volumes: ["./state:/state"]
+    volumes: ["./state:/state", "./logs:/logs"]
     command: ["init"]
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
 
   app:
-    image: quickagent-customer-ppt-arm64:20261113-latest-empty
+    image: quickagent-customer-ppt-arm64:20261113-fixed-flow
     pull_policy: never
     platform: linux/arm64
     init: true
@@ -80,7 +81,7 @@ services:
     ports:
       - "${PPT_BIND:-0.0.0.0}:${PPT_PORT:-8899}:8899"
       - "${QUICKAGENT_BIND:-0.0.0.0}:${QUICKAGENT_PORT:-3001}:3002"
-    volumes: ["./state:/state"]
+    volumes: ["./state:/state", "./logs:/logs"]
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}

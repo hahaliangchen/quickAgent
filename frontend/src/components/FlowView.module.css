@@ -77,6 +77,29 @@
   color: var(--codex-text-muted, #6b7280);
 }
 
+/* Says why a turn draws one frame: its tools were called directly. */
+.note {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 5;
+  max-width: min(420px, calc(100% - 32px));
+  padding: 8px 12px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+  color: var(--codex-text-muted, #6b7280);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.note:hover {
+  background: var(--codex-hover-bg, #f5f6f7);
+}
+
 .drawer {
   position: absolute;
   top: 16px;

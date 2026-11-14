@@ -86,7 +86,7 @@ fn library_specifier(spec: &str) -> Option<&str> {
 /// `require("path")` gives the same pure operations as the `path` global.
 fn node_builtin_module(spec: &str) -> Option<(&'static str, &'static [&'static str])> {
     Some(match spec.strip_prefix("node:").unwrap_or(spec) {
-        "path" => ("path", &["join", "resolve", "relative", "basename", "normalize", "dirname", "extname"]),
+        "path" => ("path", &["join", "resolve", "relative", "basename", "normalize", "dirname", "extname", "isAbsolute"]),
         "url" => ("url", &["parse"]),
         "os" => ("os", &["homedir", "platform", "tmpdir"]),
         // The npm packages flows reach for most; `yaml` and `js-yaml` spell
@@ -221,7 +221,7 @@ const NATIVE_GLOBALS: &[&str] = &[
     "String", "Number", "Boolean", "parseInt", "parseFloat", "isNaN", "isFinite",
     "Symbol", "Array", "Date", "encodeURI", "decodeURI", "encodeURIComponent", "decodeURIComponent", "structuredClone",
     "Map", "Set", "WeakMap", "WeakSet",
-    "Object", "Function", "RegExp", "Promise", "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError",
+    "Object", "Function", "RegExp", "Promise", "URL", "Buffer", "globalThis", "Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "EvalError", "URIError", "AggregateError",
     "setTimeout", "setInterval", "clearTimeout", "clearInterval", "queueMicrotask",
 ];
 
@@ -780,7 +780,7 @@ impl Compiler {
                 && matches!(&m.prop, ast::MemberProp::Ident(p) if p.sym == *"main") => Expr::Undefined,
             E::Ident(i) => {
                 if super::vm_eval::ERROR_CLASSES.contains(&i.sym.as_ref()) {
-                    return self.error(i.span,&format!("{} 作为函数值在当前流程运行时里不可用；构造调用 {}(...) / new {}(...) 可用",i.sym,i.sym,i.sym));
+                    return self.error(i.span,&format!("{} cannot be used as a function value in this runtime; call {}(...) or new {}(...) directly",i.sym,i.sym,i.sym));
                 }
                 return self.error(
                     e.span(),
@@ -847,20 +847,20 @@ impl Compiler {
                 );
             }
             E::New(new) => {
-                let name=match &*new.callee {E::Ident(i)=>i.sym.to_string(),_=>"表达式构造器".into()};
+                let name=match &*new.callee {E::Ident(i)=>i.sym.to_string(),_=>"<expression>".into()};
                 let alternative=match name.as_str() {
-                    "Map" | "WeakMap"=>"；当前可用普通对象保存字符串键，但不能替代对象键和引用身份语义",
-                    "Set" | "WeakSet"=>"；当前可用数组配合 includes 处理小集合，但不能替代全部集合语义",
+                    "Map" | "WeakMap"=>"; a plain object can hold string keys, but not object keys or reference identity",
+                    "Set" | "WeakSet"=>"; an array with includes handles a small set, but not all Set semantics",
                     _=>"",
                 };
-                return self.error(new.span,&format!("new {name}(...) 构造在流程运行时里尚不支持{alternative}。{}", crate::agent_program::NOT_AVAILABLE_HINT));
+                return self.error(new.span,&format!("new {name}(...) is not supported in this runtime yet{alternative}. {}", crate::agent_program::NOT_AVAILABLE_HINT));
             }
             E::This(_)=>Expr::Variable("\0this".into()),
-            E::Class(node)=>return self.error(node.class.span,"class 表达式在流程运行时里尚不支持"),
+            E::Class(node)=>return self.error(node.class.span,"class expressions are not supported in this runtime yet; declare the class with a class statement"),
             E::Yield(node)=>return self.error(node.span,"yield must pass through the resumable expression boundary"),
             E::TaggedTpl(node) => return self.error(node.span, "tagged templates must be evaluated as expressions"),
             E::MetaProp(node) if node.kind==ast::MetaPropKind::NewTarget=>Expr::Variable("\0newTarget".into()),
-            E::MetaProp(node)=>return self.error(node.span,"import.meta 在流程运行时里尚不支持"),
+            E::MetaProp(node)=>return self.error(node.span,"import.meta is not supported in this runtime"),
             _ => {
                 return self.error(
                     e.span(),
@@ -1028,9 +1028,6 @@ impl Compiler {
         match source.body {
             FunctionBody::Block(body) if contract.is_some() => {
                 let (_, _, description) = contract.clone().unwrap();
-                if patterned {
-                    return c.error(source.span, "@virtual and @module functions require simple parameters");
-                }
                 if !body.stmts.iter().all(|s| matches!(s, ast::Stmt::Empty(_))) {
                     return c.error(body.span, "@virtual and @module declare AI work: the body holds only comments describing it");
                 }
@@ -1231,11 +1228,12 @@ impl Compiler {
             }
             _ => {
                 if let ast::Expr::Ident(name) = target {
+                    // Worded as JS says it, so the author recognises the mistake.
                     let alternative = match name.sym.as_ref() {
-                        "print" | "println" => "请改用 console.log(...) 输出；其他日志方法见 read_program_guide",
-                        _ => "请使用已声明的函数或程序指南中列出的内置函数",
+                        "print" | "println" => "use console.log(...); the other log methods are in read_program_guide",
+                        _ => "declare it in this source (AI work is an empty function with a @virtual contract) or use a built-in listed in read_program_guide",
                     };
-                    return self.error(call.span, &format!("{} 在流程运行时里不可用；{alternative}", name.sym));
+                    return self.error(call.span, &format!("{} is not defined: {alternative}", name.sym));
                 }
                 return self.error(
                     call.span,
@@ -1693,6 +1691,14 @@ impl Compiler {
                 }
                 Ok(self.snapshot(new.span, Expr::NodeBuiltin(format!("new {}", name.sym), values)))
             }
+            ast::Expr::New(new) if matches!(&*new.callee, ast::Expr::Ident(i) if i.sym == *"URL" && self.global("URL")) => {
+                let args = new.args.as_deref().unwrap_or(&[]);
+                if args.len() > 2 || args.iter().any(|arg| arg.spread.is_some()) {
+                    return self.error(new.span, "URL takes an input and an optional base URL");
+                }
+                let values = args.iter().map(|arg| self.lower(&arg.expr).map(|value| self.snapshot(arg.span(), value))).collect::<Result<Vec<_>>>()?;
+                Ok(self.snapshot(new.span, Expr::NodeBuiltin("new URL".into(), values)))
+            }
             ast::Expr::TaggedTpl(tagged) => self.lower_tagged_template(tagged),
             ast::Expr::OptChain(chain) => self.with_chain(chain.span, |c| c.chain_link(chain)),
             ast::Expr::New(new) if cfg!(test) && self.external.contains("__test262CheckThrown") && matches!(&*new.callee,ast::Expr::Ident(i) if i.sym==*"Test262Error") => {
@@ -2000,22 +2006,28 @@ impl Compiler {
                     && matches!(&**target, ast::Expr::Ident(i) if i.sym == *"require")
                     && self.global("require")
                 {
-                    let Some(library) = required_name(call) else {
-                        return self.error(call.span, "require takes one library name string, such as require(\"ppt\")");
-                    };
-                    if let Some((module, functions)) = node_builtin_module(&library)
-                        && !self.libraries.contains_key(module)
-                    {
-                        return Ok(Expr::Object(functions.iter().map(|function| ((*function).to_owned(), Expr::Native(format!("{module}.{function}")))).collect()));
+                    if call.args.len() != 1 || call.args[0].spread.is_some() {
+                        return self.error(call.span, "require takes exactly one library name");
                     }
-                    let Some(specifier) = library_specifier(&library) else {
-                        return self.error(
-                            call.span,
-                            &format!("require(\"{library}\"): a library name has letters, digits, _ or -, optionally followed by /promises; host: is an optional compatibility prefix"),
-                        );
-                    };
+                    if let Some(library) = required_name(call) {
+                        if let Some((module, functions)) = node_builtin_module(&library)
+                            && !self.libraries.contains_key(module)
+                        {
+                            return Ok(Expr::Object(functions.iter().map(|function| ((*function).to_owned(), Expr::Native(format!("{module}.{function}")))).collect()));
+                        }
+                        let Some(specifier) = library_specifier(&library) else {
+                            return self.error(
+                                call.span,
+                                &format!("require(\"{library}\"): a library name has letters, digits, _ or -, optionally followed by /promises; host: is an optional compatibility prefix"),
+                            );
+                        };
+                        let destination = self.temp();
+                        self.emit(call.span, Op::Effect(Some(destination.clone()), Effect::Require(specifier.to_owned())));
+                        return Ok(Expr::Variable(destination));
+                    }
+                    let value = self.lower(&call.args[0].expr)?;
                     let destination = self.temp();
-                    self.emit(call.span, Op::Effect(Some(destination.clone()), Effect::Require(specifier.to_owned())));
+                    self.emit(call.span, Op::Effect(Some(destination.clone()), Effect::RequireValue(value)));
                     return Ok(Expr::Variable(destination));
                 }
                 if call.args.iter().any(|arg| arg.spread.is_some()) {
@@ -2783,21 +2795,50 @@ pub fn compile_with_libraries(
 ) -> Result<Program> {
     link_prelude(compile_inner(source, super::ENTRY, false, libraries, BTreeSet::new(), false)?)
 }
+
+/// Compile one top-level Console cell. The unique entry lets the cell be
+/// appended to an existing Runtime without recompiling or replaying earlier
+/// cells.
+pub fn compile_cell_with_scope(
+    source: &str,
+    entry: &str,
+    libraries: super::libraries::Libraries,
+    external_names: BTreeSet<String>,
+) -> Result<Program> {
+    ensure!(entry.starts_with("$$cell/"), "invalid Console cell entry");
+    link_prelude(compile_inner(source, entry, false, libraries, external_names, false)?)
+}
 /// A declared function nothing calls or passes on is work the author meant to
-/// run: the host calls no function for a program, only a module's entry. Name
+/// run: the host calls no ordinary function for a Console cell, only its cell
+/// entry (or a declared capability entry). Name
 /// it instead of letting the program end having done nothing (2026-11-11: a
 /// main() that was never called made eighteen programs finish silently).
 /// The host checks what an AI submits; the VM's own tests keep their main()
 /// entry convention.
+///
+/// It also names a called function whose body is empty and which carries a
+/// contract comment but no @virtual or @module tag: that is AI work with its
+/// tag left out, and as ordinary JS it would silently return undefined
+/// (2026-11-14: a 20-line contract without @virtual made the first program of
+/// a test investigation print `undefined`, and the main AI gave up
+/// orchestrating). Ordinary functions are never handed to AI on their own.
 pub fn uncalled_functions(source: &str, entry: Option<&str>) -> Result<()> {
     let map: Lrc<SourceMap> = Default::default();
     let file = map.new_source_file(FileName::Custom("agent-program.js".into()).into(), source.to_owned());
-    let mut parser = Parser::new_from(Lexer::new(Syntax::Es(EsSyntax::default()), Default::default(), StringInput::from(&*file), None));
+    let comments = SingleThreadedComments::default();
+    let mut parser = Parser::new_from(Lexer::new(Syntax::Es(EsSyntax::default()), Default::default(), StringInput::from(&*file), Some(&comments)));
     let Ok(module) = parser.parse_module() else { return Ok(()) };
-    struct Scan { declared: Vec<(String, Span)>, exported: BTreeSet<String>, uses: BTreeMap<String, usize> }
+    /// Name, function span and body span of a declaration whose body holds no statement.
+    type Empty = (String, Span, Span);
+    struct Scan { declared: Vec<(String, Span)>, empty: Vec<Empty>, exported: BTreeSet<String>, uses: BTreeMap<String, usize> }
     impl Visit for Scan {
         fn visit_fn_decl(&mut self, node: &ast::FnDecl) {
             self.declared.push((node.ident.sym.to_string(), node.ident.span));
+            if let Some(body) = &node.function.body
+                && body.stmts.iter().all(|s| matches!(s, ast::Stmt::Empty(_)))
+            {
+                self.empty.push((node.ident.sym.to_string(), node.function.span, body.span));
+            }
             node.visit_children_with(self);
         }
         fn visit_export_decl(&mut self, node: &ast::ExportDecl) {
@@ -2808,8 +2849,38 @@ pub fn uncalled_functions(source: &str, entry: Option<&str>) -> Result<()> {
             *self.uses.entry(node.sym.to_string()).or_default() += 1;
         }
     }
-    let mut scan = Scan { declared: Vec::new(), exported: BTreeSet::new(), uses: BTreeMap::new() };
+    let mut scan = Scan { declared: Vec::new(), empty: Vec::new(), exported: BTreeSet::new(), uses: BTreeMap::new() };
     module.visit_with(&mut scan);
+    let (leading, trailing) = comments.take_all();
+    let mut notes = leading.borrow().values().chain(trailing.borrow().values()).flat_map(|v| v.clone()).collect::<Vec<_>>();
+    notes.sort_by_key(|c| c.span.lo);
+    notes.dedup_by_key(|c| (c.span.lo, c.span.hi));
+    let offset = |pos: swc_common::BytePos| (pos.0 - file.start_pos.0) as usize;
+    for (name, function, body) in &scan.empty {
+        if Some(name.as_str()) == entry || scan.uses.get(name).copied().unwrap_or(0) <= 1 {
+            continue;
+        }
+        // The header is the comments directly above, as compile reads a contract.
+        let mut header = Vec::new();
+        let mut start = function.lo;
+        for note in notes.iter().rev().filter(|n| n.span.hi <= function.lo) {
+            if !source.get(offset(note.span.hi)..offset(start)).is_some_and(|gap| gap.trim().is_empty() && gap.matches('\n').count() <= 1) {
+                break;
+            }
+            header.push(note.text.to_string());
+            start = note.span.lo;
+        }
+        header.extend(notes.iter().filter(|n| n.span.lo >= body.lo && n.span.hi <= body.hi).map(|n| n.text.to_string()));
+        let contract = header.join("\n");
+        let tagged = contract
+            .split(|ch: char| !(ch.is_alphanumeric() || matches!(ch, '@' | '_')))
+            .any(|word| word == "@virtual" || word == "@module");
+        if contract.trim().is_empty() || tagged {
+            continue;
+        }
+        let at = map.lookup_char_pos(function.lo);
+        bail!("TS_PROGRAM {}:{}: function {name} has a contract comment and an empty body but no @virtual tag, so calling it would do nothing and return undefined. Add @virtual to its JSDoc to hand this work over, or give it a real body", at.line, at.col.0 + 1);
+    }
     for (name, span) in &scan.declared {
         // Its own declaration is one occurrence; any other is a call or a hand-off.
         if Some(name.as_str()) == entry || scan.exported.contains(name) || scan.uses.get(name).copied().unwrap_or(0) > 1 {
@@ -2959,6 +3030,8 @@ fn compile_inner(
         external.insert("module".into());
         external.insert("exports".into());
     }
+    // A Console cell is a top-level program with a unique synthetic entry.
+    let implicit_entry = !refinement && (entry == super::ENTRY || entry.starts_with("$$cell/"));
     for item in module.body {
         match item {
             ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
@@ -3013,7 +3086,7 @@ fn compile_inner(
                 }
             }
             ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(f))) => declarations.push(f),
-            ast::ModuleItem::Stmt(stmt) if refinement || entry == super::ENTRY => top_level.push(stmt),
+            ast::ModuleItem::Stmt(stmt) if refinement || implicit_entry => top_level.push(stmt),
             other => {
                 let p = map.lookup_char_pos(other.span().lo);
                 bail!(
@@ -3032,7 +3105,6 @@ fn compile_inner(
         .into_iter()
         .collect::<Vec<_>>();
     // The top-level statements are the program, as in a JavaScript module.
-    let implicit_entry = !refinement && entry == super::ENTRY;
     // An implementation's own top-level statements initialize its module scope.
     let module_init = refinement && !top_level.is_empty();
     if module_init {
@@ -3091,7 +3163,7 @@ fn compile_inner(
     );
     let mut names = BTreeSet::new();
     if implicit_entry {
-        names.insert(super::ENTRY.into());
+        names.insert(entry.into());
     }
     for f in &declarations {
         ensure!(
@@ -3128,7 +3200,7 @@ fn compile_inner(
         .map(|f| (f.ident.sym.to_string(), f.function.params.len()))
         .collect::<BTreeMap<_, _>>();
     if implicit_entry {
-        arities.insert(super::ENTRY.into(), 0);
+        arities.insert(entry.into(), 0);
     }
     let async_entry = declarations
         .iter()
@@ -3231,7 +3303,7 @@ fn compile_inner(
         .collect::<BTreeMap<_, _>>();
     let mut module_scope = function_bindings.clone();
     if implicit_entry || module_init {
-        let init_id = if implicit_entry { super::ENTRY } else { super::MODULE_INIT };
+        let init_id = if implicit_entry { entry } else { super::MODULE_INIT };
         let module_vars = var_names(&top_level);
         let module_lexical = lexical_names(&top_level);
         let mut c = Compiler {
@@ -3370,9 +3442,9 @@ fn compile_inner(
             .as_ref()
             .context("function body is required")?;
         let (virtual_task, module_task, description) = contracts[f.ident.sym.as_ref()].clone();
-        if virtual_task && !parameter_patterns.is_empty() {
-            return c.error(f.function.span, "@virtual and @module functions require simple parameters");
-        }
+        // Parameter patterns are lowered to ordinary positional parameters and
+        // rebound in the function scope below. Virtual declarations use the
+        // same JavaScript binding rules as ordinary functions.
         for (pattern, argument) in parameter_patterns {
             c.bind_value(pattern, Expr::Variable(argument), true)?;
         }

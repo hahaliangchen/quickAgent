@@ -261,6 +261,8 @@ export interface FrameSummary {
   readonly ended_at: number | null
   readonly last_seq: number | null
   readonly error: string | null
+  /** Tools its AI called itself; a frame that opened no calls did its work this way. */
+  readonly tool_calls?: number
   /** A running frame's latest reasoning summary, and a tool it called after it. */
   readonly activity?: {
     readonly reasoning: string

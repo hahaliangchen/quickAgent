@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const { chromium } = require('/opt/ppt-tools/node_modules/playwright');
 
 (async () => {
-    const fixture = JSON.parse(fs.readFileSync('/tmp/customer-fixture.json','utf8'));
+    const fixture = JSON.parse(fs.readFileSync(process.env.CUSTOMER_FIXTURE || '/tmp/customer-fixture.json','utf8'));
     const browser = await chromium.launch({executablePath:process.env.PPT_DESIGN_BROWSER,headless:true,args:['--no-sandbox']});
     let page;
     const failures = [];
@@ -12,6 +12,18 @@ const { chromium } = require('/opt/ppt-tools/node_modules/playwright');
         page.on('response', async response => { if(response.url().includes('/ppt-agent/')) console.error('Agent HTTP:',response.status(),new URL(response.url()).pathname); });
         page.on('requestfailed', request=>console.error('Request failure:',new URL(request.url()).pathname,request.failure()?.errorText));
         page.on('pageerror',error=>failures.push(error.message));
+        if (fixture.check_plugin) {
+            await page.goto('http://app:3002/agent/settings',{waitUntil:'domcontentloaded',timeout:180000});
+            const dialog=page.getByRole('dialog',{name:'设置',exact:true});
+            await dialog.getByRole('button',{name:'模型与提供商',exact:true}).click();
+            const pptPlugin=dialog.getByText('PPT Master 插件',{exact:true});
+            await pptPlugin.waitFor({timeout:120000});
+            await pptPlugin.scrollIntoViewIfNeeded();
+            await page.screenshot({path:'/tmp/customer-ppt-plugin-registered.png',fullPage:true,timeout:120000});
+            if(failures.length)throw Error(JSON.stringify(failures));
+            console.log(JSON.stringify({ppt_plugin_visible:true,uncaught_errors:0}));
+            return;
+        }
         if (fixture.cleanup) {
             await page.goto('http://app:3002/agent/settings',{waitUntil:'domcontentloaded',timeout:180000});
             const dialog=page.getByRole('dialog',{name:'设置',exact:true});
@@ -47,6 +59,10 @@ const { chromium } = require('/opt/ppt-tools/node_modules/playwright');
         const dialog=page.getByRole('dialog',{name:'设置',exact:true});
         await dialog.waitFor({timeout:120000});
         await dialog.getByRole('button',{name:'模型与提供商',exact:true}).click();
+        const pptPlugin=dialog.getByText('PPT Master 插件',{exact:true});
+        await pptPlugin.waitFor({timeout:120000});
+        await pptPlugin.scrollIntoViewIfNeeded();
+        await page.screenshot({path:'/tmp/customer-ppt-plugin-registered.png',fullPage:true,timeout:120000});
         await dialog.getByRole('button',{name:'添加模型提供商',exact:true}).click();
         await dialog.getByPlaceholder('例如 deepseek',{exact:true}).fill('qwen-test');
         await dialog.getByPlaceholder('例如 DeepSeek Official').fill('Qwen 客户配置验证');
@@ -66,7 +82,7 @@ const { chromium } = require('/opt/ppt-tools/node_modules/playwright');
         if(saved.providers.length!==1||saved.providers[0].id!=='qwen-test'||saved.providers[0].has_api_key||saved.orchestrator_model!==fixture.model_id)throw Error('Keyless Qwen setting was not persisted');
         await page.screenshot({path:'/tmp/customer-quickagent-settings.png',fullPage:true,timeout:120000});
         if (failures.length) throw new Error('Browser errors: '+JSON.stringify(failures));
-        console.log(JSON.stringify({browser_login:true,menus:['创建PPT','历史会话'],history_navigation:true,quickagent_page:true,quickagent_draft_preserved:true,quickagent_settings_saved:true,keyless_qwen_configured:true,uncaught_errors:0}));
+        console.log(JSON.stringify({browser_login:true,menus:['创建PPT','历史会话'],history_navigation:true,quickagent_page:true,ppt_plugin_visible:true,quickagent_draft_preserved:true,quickagent_settings_saved:true,keyless_qwen_configured:true,uncaught_errors:0}));
     } catch (error) {
         console.error("Original failure:",error.stack||error);
         if (page && !page.isClosed()) {

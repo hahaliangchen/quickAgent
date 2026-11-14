@@ -584,6 +584,15 @@ const FILE_CHARS: usize = 12_000;
 pub(super) const CHAT_HISTORY: &str = "chat_history";
 pub(super) const CHAT_FILES: &str = "chat_files";
 
+/// A new turn refreshes only the main AI's direct working loop.
+/// A saved VM or called function still owns its executable continuation.
+pub(super) fn can_refresh_main_window(node: &tree::Node, saved: Option<&Window>) -> bool {
+    node.metadata["role"] == "main" && node.agent_id.is_none()
+        && saved.is_some_and(|w| w.program.is_none() && w.program_task.is_none()
+            && w.resumable.is_none() && w.resumed.is_none()
+            && w.parallel_root.is_none() && !w.module_probe)
+}
+
 /// What a new turn knows of the earlier ones (docs/agent-design-guide.md §4):
 /// the chat itself, the user's words and the replies the user saw, as they
 /// were; and the chat folder as a code project, its program files and call
@@ -705,7 +714,7 @@ fn chat_files(conn: &rusqlite::Connection, task: &str, turn: i64, left_out: usiz
     // Where names are not sent (the Messages wire) this joins the user's
     // next words, so it says itself whose it is.
     let mut text = String::from(
-        "【宿主提供的材料，不是用户的话】\n这个聊天的文件夹，就是一个代码项目：每段主程序是一个文件；没写程序时主 AI 直接调用的方法，宿主按顺序记成 .calls.js，每行是一次调用，行尾注释是结果。模块在 modules/ 下，契约见 chat_modules。打开文件：read_session_history({programs:true, program:\"<文件名>\"})，可加 start_line、end_line；主程序加 output:true 读它当时的输出。\n",
+        "【宿主提供的材料，不是用户的话】\n这个聊天的文件夹，就是一个代码项目：每段主程序是一个文件；没写程序时主 AI 直接调用的方法，宿主按顺序记成 .calls.js，每行是一次调用，行尾注释是结果。模块在 modules/ 下，契约见 chat_modules。调用记录里的退出码和末行只是线索；有 event_seq 时用 read_session_history({event_seq:编号}) 读取当时完整输入和结果。打开文件：read_session_history({programs:true, program:\"<文件名>\"})，可加 start_line、end_line；主程序加 output:true 读它当时的输出。\n",
     );
     if left_out > 0 {
         text.push_str(&format!("最早 {left_out} 轮的对话不在上面，它们的文件仍列在这里。\n"));
@@ -731,7 +740,7 @@ fn chat_files(conn: &rusqlite::Connection, task: &str, turn: i64, left_out: usiz
         let shown = if chars.len() <= limit {
             source.clone()
         } else if file.ends_with(turn_record::CALLS) {
-            // A record keeps what changed things before what looked around.
+            // Keep execution evidence and changes before exploratory reads.
             turn_record::condense(&source, limit)
         } else {
             let half = limit / 2;
@@ -774,6 +783,9 @@ pub(super) async fn fresh_main_window(
     window.active_skills = previous.active_skills.clone();
     window.active_skill_scopes = previous.active_skill_scopes.clone();
     window.token_calibration = previous.token_calibration.clone();
+    window.console = previous.console.clone();
+    window.console_cell = previous.console_cell;
+    window.console_log_start = 0;
     for id in
         crate::context_assets::active_instruction_ids(&previous.messages, &previous.active_skills)
     {
@@ -1048,123 +1060,69 @@ mod tests {
 
 
 
-    /// A turn that stops before the finish node leaves the task open; the next
-    /// message continues it in the same context instead of starting over.
+    /// A direct request keeps its goal and evidence, while a new user turn
+    /// gets a fresh decision context instead of the old model's live plan.
     #[tokio::test]
-    async fn a_stopped_turn_resumes_its_task_in_the_same_context() {
+    async fn a_stopped_direct_request_starts_a_fresh_window_with_chat_and_calls() {
         let (address, seen, server) = model(|n, body| {
-            let text = body["messages"].to_string();
+            let messages = body["messages"].as_array().unwrap();
             match n {
-                0 => call(
-                    "start",
-                    "create_task",
-                    json!({"goal":"Draft the plan","briefing":"Read the brief"}),
-                ),
-                1 => call("skills", "list_skills", json!({})),
+                0 => {
+                    let mut reply = call("evidence", "read_file", json!({"path":"evidence.log"}));
+                    reply["reasoning_content"] = json!("OLD_PLAN: rebuild all four snapshots next");
+                    reply
+                }
+                1 => {
+                    assert!(messages.iter().any(|m| m["name"] == CHAT_HISTORY && m["content"] == "Investigate the failures"));
+                    assert!(messages.iter().any(|m| m["name"] == CHAT_FILES && m["content"].as_str().unwrap().contains("read_session_history")), "completed results remain recoverable");
+                    assert!(!messages.iter().any(|m| m["role"] == "tool" || m["tool_calls"].is_array()), "old native tool exchanges are history, not a live continuation");
+                    assert!(!body.to_string().contains("OLD_PLAN"), "old private reasoning must not choose the next plan");
+                    assert!(messages.iter().any(|m| m["role"] == "user" && m.get("name").is_none() && m["content"] == "continue"));
+                    answer("The recorded evidence is enough; no rerun.")
+                }
                 2 => {
-                    assert!(
-                        text.contains("Draft the plan") && text.contains("Draft a plan"),
-                        "the same task context continues"
-                    );
-                    assert!(
-                        !body["messages"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .any(|m| m["name"] == "conversation_memory"),
-                        "not a fresh context"
-                    );
-                    answer(&"计划已完成".repeat(50))
-                }
-                3 => {
-                    // The earlier chat comes as it was said: both messages of
-                    // the resumed task and the reply the user saw.
-                    let messages = body["messages"].as_array().unwrap();
-                    assert!(!messages.iter().any(|m| m["name"] == "conversation_memory"));
-                    let chat = messages.iter().filter(|m| m["name"] == CHAT_HISTORY || m["role"] == "assistant")
-                        .map(|m| (m["role"].as_str().unwrap(), m["content"].as_str().unwrap().to_owned())).collect::<Vec<_>>();
-                    assert_eq!(chat, [("user", "Draft a plan".to_owned()), ("user", "continue".to_owned()), ("assistant", "计划已完成".repeat(50))]);
-                    assert_eq!(messages.last().unwrap()["content"], "A separate question");
-                    answer(&"问答摘要".repeat(60))
-                }
-                4 => {
-                    let chat = body["messages"].as_array().unwrap().iter().filter(|m| m["name"] == CHAT_HISTORY || m["role"] == "assistant")
-                        .map(|m| m["content"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-                    assert_eq!(chat[3..], ["A separate question".to_owned(), "问答摘要".repeat(60)], "each turn keeps its own words");
+                    assert!(!messages.iter().any(|m| m["name"] == "request_handoff"));
+                    assert!(messages.iter().any(|m| m["content"].as_str().unwrap_or("").contains("no rerun")));
                     answer("Done")
                 }
                 _ => panic!("unexpected request {n}"),
             }
-        })
-        .await;
+        }).await;
         let mut h = Harness::new().await;
+        std::fs::write(h.root.join("evidence.log"), "two existing test failures").unwrap();
         h.state = agent_service::tests::test_state(&h.root, address);
-        run_task(
-            h.state.clone(),
-            "t".into(),
-            "fake".into(),
-            "Draft a plan".into(),
-            2,
-            CancellationToken::new(),
-            1,
-            false,
-        )
-        .await
-        .unwrap();
+        run_task(h.state.clone(), "t".into(), "fake".into(), "Investigate the failures".into(), 1, CancellationToken::new(), 1, false).await.unwrap();
         let conn = agent_service::open_db(&h.root).unwrap();
-        assert_eq!(
-            tree::active(&conn, "t").unwrap().unwrap().kind,
-            "task",
-            "the task stays open"
-        );
-        run_task(
-            h.state.clone(),
-            "t".into(),
-            "fake".into(),
-            "continue".into(),
-            4,
-            CancellationToken::new(),
-            2,
-            false,
-        )
-        .await
-        .unwrap();
+        let request = tree::active(&conn, "t").unwrap().unwrap().node_id;
+        run_task(h.state.clone(), "t".into(), "fake".into(), "continue".into(), 4, CancellationToken::new(), 2, false).await.unwrap();
+        assert_eq!(tree::get(&conn, "t", &request).unwrap().status, "done", "the original request frame finishes");
+        let resets: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id='t' AND kind='context/main_reset'", [], |r|r.get(0)).unwrap();
+        assert_eq!(resets, 2);
+        run_task(h.state.clone(), "t".into(), "fake".into(), "A separate question".into(), 4, CancellationToken::new(), 3, false).await.unwrap();
         assert_eq!(seen.lock().unwrap().len(), 3);
-        let main = tree::nodes(&conn, "t")
-            .unwrap()
-            .into_iter()
-            .find(|n| n.kind == "task")
-            .unwrap();
-        assert_eq!(main.status, "done");
-        let resets:i64=conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id='t' AND kind='context/main_reset'",[],|r|r.get(0)).unwrap();
-        assert_eq!(resets, 1);
-        drop(conn);
-        run_task(
-            h.state.clone(),
-            "t".into(),
-            "fake".into(),
-            "A separate question".into(),
-            4,
-            CancellationToken::new(),
-            3,
-            false,
-        )
-        .await
-        .unwrap();
-        run_task(
-            h.state.clone(),
-            "t".into(),
-            "fake".into(),
-            "Another question".into(),
-            4,
-            CancellationToken::new(),
-            4,
-            false,
-        )
-        .await
-        .unwrap();
         server.abort();
-        assert_eq!(seen.lock().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn a_new_turn_preserves_executable_function_state() {
+        let h = Harness::new().await;
+        let conn = agent_service::open_db(&h.root).unwrap();
+        let mut node = tree::get(&conn, "t", tree::ROOT).unwrap();
+        node.metadata = json!({"role":"main"});
+        let mut w = Window::default();
+        assert!(can_refresh_main_window(&node, Some(&w)));
+        let s = h.session();
+        super::super::program_flow::install_scoped(&s, &mut w, &json!({"source":"console.log(1);"}), false).unwrap();
+        assert!(!can_refresh_main_window(&node, Some(&w)), "an actual VM keeps its continuation");
+        w.program = None;
+        w.resumable = Some("paused-vm".into());
+        assert!(!can_refresh_main_window(&node, Some(&w)), "a paused VM retains its caller too");
+        w.resumable = None;
+        w.program_task = Some(json!({"role":"implement"}));
+        assert!(!can_refresh_main_window(&node, Some(&w)));
+        w.program_task = None;
+        w.parallel_root = Some("child".into());
+        assert!(!can_refresh_main_window(&node, Some(&w)));
     }
 
     /// Not a check: prints what the next turn of a real chat would be given.

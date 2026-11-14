@@ -23,7 +23,7 @@ mod values;
 
 #[cfg(test)]
 pub use compiler::{compile, compile_body, compile_entry};
-pub use compiler::{compile_body_with_scope, compile_with_libraries, probe_as_entry, required_libraries, uncalled_functions};
+pub use compiler::{compile_body_with_scope, compile_cell_with_scope, compile_with_libraries, probe_as_entry, required_libraries, uncalled_functions};
 pub use runtime::{Action, Runtime, State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 
 pub const VERSION: u32 = 14;
 pub(super) fn js_prototype_global(name:&str)->bool {
-    matches!(name,"Symbol"|"Object"|"Function"|"Array"|"String"|"Number"|"Boolean"|"Date"|"RegExp"|"Promise"|"Map"|"Set"|"WeakMap"|"WeakSet") || vm_eval::ERROR_CLASSES.contains(&name)
+    matches!(name,"Symbol"|"Object"|"Function"|"Array"|"String"|"Number"|"Boolean"|"Date"|"RegExp"|"Promise"|"Map"|"Set"|"WeakMap"|"WeakSet"|"URL"|"Buffer"|"globalThis") || vm_eval::ERROR_CLASSES.contains(&name)
 }
 /// Id of the function formed by a program's top-level statements. It is not
 /// a JavaScript identifier, so no declared function can take it.
@@ -219,8 +219,10 @@ pub enum Effect {
     Construct(Box<Invocation>),
     PromiseCreate { reject: bool, value: Expr },
     PromiseConstruct { executor: Expr },
-    /// `require("ppt")`: the host links a third-party library when this runs.
+    /// `require("ppt")`: the host links a library when this runs.
     Require(String),
+    /// Dynamic `require(name)`: evaluate the name, then ask the host to link it.
+    RequireValue(Expr),
     Tool(String, Vec<Expr>),
     ParallelReads(Vec<(String, Vec<Expr>)>),
     ParallelReadMap {
@@ -258,7 +260,7 @@ pub const SKILL: &str = include_str!("../skills/task-program/SKILL.md");
 pub const ENVIRONMENT: &str = include_str!("../prompts/flow_environment.md");
 /// Said wherever the runtime lacks something code reached for: a rewrite
 /// by hand runs as slow VM loops, so the gap is reported and filled by the host.
-pub const NOT_AVAILABLE_HINT: &str = "Do not hand-write a replacement: use the built-ins in read_program_guide or a host library, take another permitted route, or report this capability as missing in your result.";
+pub const NOT_AVAILABLE_HINT: &str = "Use the exact supported alternative: Buffer.byteLength/Buffer.from for UTF-8 bytes, new URL for URL parsing, path.isAbsolute for path checks, and require(name) for a dynamic library name. For anything else, consult read_program_guide or a host library. Do not hand-write a replacement; report the capability as missing when no permitted route exists.";
 pub const CAPABILITIES: &str = include_str!("../prompts/flow_capabilities.md");
 pub const BUILTIN_CONTRACTS: &str = include_str!("../prompts/flow_builtin_contracts.d.ts");
 

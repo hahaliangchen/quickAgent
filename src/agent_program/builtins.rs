@@ -13,6 +13,7 @@ const BASE64_LIMIT: usize = 4 * 1024 * 1024;
 pub(super) fn arity(name: &str) -> Option<(usize, usize)> {
     Some(match name {
         "path.join" | "path.resolve" => (1, 32),
+        "path.isAbsolute" => (1, 1),
         "path.relative" => (2, 2),
         "path.basename" | "url.parse" => (1, 2),
         "path.normalize" | "path.dirname" | "path.extname" => (1, 1),
@@ -20,6 +21,8 @@ pub(super) fn arity(name: &str) -> Option<(usize, usize)> {
         "process.env" | "atob" | "btoa" => (1, 1),
         "TextEncoder.encode" => (0, 1),
         "Buffer.byteLength" => (1, 2),
+        "Buffer.from" => (1, 2),
+        "new URL" => (1, 2),
         "yaml.parse" | "yaml.load" => (1, 2),
         "yaml.stringify" | "yaml.dump" => (1, 3),
         _ => return None,
@@ -300,6 +303,15 @@ fn text_encoding(name: &str, args: &[Value]) -> Result<Option<Value>> {
             }
             json!(text.len())
         }
+        "Buffer.from" => {
+            let text = args[0].as_str().context("TypeError: Buffer.from currently accepts a string")?;
+            match args.get(1) {
+                None | Some(Value::Null) => {}
+                Some(Value::String(encoding)) if matches!(encoding.to_ascii_lowercase().as_str(), "utf8" | "utf-8") => {}
+                Some(other) => bail!("Buffer.from supports only utf8 strings here, not {other}"),
+            }
+            json!(text.as_bytes())
+        }
         _ => return Ok(None),
     }))
 }
@@ -353,6 +365,7 @@ pub(super) fn call(name: &str, args: Vec<Value>) -> Result<Value> {
             std::env::var(strings[0]).map(Value::String).unwrap_or(Value::Null)
         }
         "path.normalize" => json!(normalize(strings[0], true)),
+        "path.isAbsolute" => json!(Path::new(strings[0]).is_absolute()),
         "path.join" => {
             let joined = strings
                 .iter()
@@ -416,7 +429,7 @@ pub(super) fn call(name: &str, args: Vec<Value>) -> Result<Value> {
             })
         }
         "path.extname" => json!(extension(strings[0])),
-        "url.parse" => url_parse(strings[0], strings.get(1).copied())?,
+        "url.parse" | "new URL" => url_parse(strings[0], strings.get(1).copied())?,
         _ => bail!("{name} is unavailable in the flow runtime"),
     };
     ensure!(

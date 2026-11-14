@@ -50,6 +50,7 @@ def main():
     for previous in [app/"agent-web", app/"server/web"]:
         if previous.exists(): shutil.rmtree(previous)
     copy_tree(source/"agent/frontend/dist", app/"agent-web")
+    if (app/"agent-resources").exists(): shutil.rmtree(app/"agent-resources")
     for name in ["code_flow", "code_index", "git", "web"]:
         copy_tree(source/"agent/src/builtin_plugins"/name, app/"agent-resources/src/builtin_plugins"/name)
     copy_tree(source/"view/build", app/"server/web")
@@ -62,6 +63,7 @@ def main():
             removed_static_documents.append(str(path.relative_to(app)))
             path.unlink()
     for name in ["ai_skills", "document-templates", "function", "mcp", "onlyoffice-plugins", "package", "plugin", "workbench"]:
+        if (app/"server/resource"/name).exists(): shutil.rmtree(app/"server/resource"/name)
         if (source/"server/resource"/name).is_dir():
             copy_tree(source/"server/resource"/name, app/"server/resource"/name)
     policy_spec = importlib.util.spec_from_file_location("customer_templates", HERE/"customer_templates.py")
@@ -71,6 +73,7 @@ def main():
     shutil.copy2(HERE/"customer_templates.py", app/"bin/customer_templates.py")
     renderer = stage / "renderer/engine"
     for name in ["src", "tools", "rust-engine/pkg", "rust-engine/pkg-node"]:
+        if (renderer/name).exists(): shutil.rmtree(renderer/name)
         copy_tree(source/"engine"/name, renderer/name)
     for name in ["package.json", "package-lock.json", "tsconfig.json", "arm64-native-dependencies.json"]:
         shutil.copy2(source/"engine"/name, renderer/name)
@@ -84,6 +87,7 @@ def main():
     spec.loader.exec_module(exporter)
     policy = exporter.write_profile(Path.home()/".config/grow", profile)
     shutil.copy2(HERE/"entrypoint.py", app/"bin/entrypoint.py")
+    shutil.copy2(HERE/"customer_logging.py", app/"bin/customer_logging.py")
     for file in ["app.Dockerfile", "renderer.Dockerfile"]:
         shutil.copy2(HERE/file, stage/file)
     licenses = app/"licenses"
@@ -99,7 +103,7 @@ def main():
                 "removed_unicom_templates":removed_templates,"removed_static_documents":removed_static_documents}
     manifest["build_recipe_sha256"] = {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(HERE.iterdir()) if p.is_file()}
     manifest["compiled_customer_source_files_sha256"] = {}
-    for relative in ["view/src/gva/router/menuAdapter.ts", "view/src/gva/router/defaultEntryPath.ts", "view/src/view/createPpt/index.tsx", "server/main.go", "server/initialize/gorm_biz.go", "server/initialize/ppt_agent_proxy.go", "server/cmd/customer-init/main.go", "server/cmd/customer-gateway/main.go", "agent/frontend/src/components/SettingsModal.tsx"]:
+    for relative in ["view/src/gva/router/menuAdapter.ts", "view/src/gva/router/defaultEntryPath.ts", "view/src/view/createPpt/index.tsx", "server/main.go", "server/initialize/gorm_biz.go", "server/initialize/ppt_agent_proxy.go", "server/cmd/customer-init/main.go", "server/cmd/customer-gateway/main.go", "agent/frontend/src/components/SettingsModal.tsx", "agent/src/skill_packages/remote.rs", "server/api/v1/system/ppt_plugin_agent.go", "server/api/v1/system/ppt_plugin_registration.go", "server/router/system/ppt_plugin.go", "server/router/system/sys_ppt.go"]:
         manifest["compiled_customer_source_files_sha256"][relative] = hashlib.sha256((source/relative).read_bytes()).hexdigest()
     for image in ["quickagent-kylin-arm64-env:v1", "quickagent-ppt-browser-arm64-env:v1"]:
         record=json.loads(subprocess.check_output(["docker","image","inspect",image]))[0]
@@ -107,9 +111,10 @@ def main():
     output=args.output.resolve()
     output.mkdir(parents=True,exist_ok=True)
     (output/"manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+"\n")
-    for name in ["compose.yaml","deploy.sh"]:
+    for name in ["compose.yaml","deploy.sh","collect-diagnostics.sh","diagnostics.py","customer_logging.py"]:
         shutil.copy2(HERE/name,output/name)
     (output/"deploy.sh").chmod(0o755)
+    (output/"collect-diagnostics.sh").chmod(0o755)
     (output/"README-部署.txt").write_text(
         "麒麟 ARM64 客户部署包（Web 版）\n\n"
         "目标：aarch64 / 麒麟 V10 Halberd / glibc 2.28 / 内核 4.19。\n"
@@ -124,6 +129,7 @@ def main():
         "客户入口只保留创建 PPT、历史会话；Agent 和数据库的初始提供商、模型目录全部为空。\n"
         "自部署模型：在设置页填写 OpenAI 兼容地址（通常以 /v1 结尾）及服务实际返回的模型 ID，免鉴权时 API 密钥留空。\n"
         "选择它作为主代理模型后保存；联网搜索默认未启用，缺少搜索密钥不会阻止本地模型设置和调用。\n"
+        "PPT 插件在 Agent 启动时自动注册，库名为 ppt；健康检查会确认注册成功，无需先打开页面手动连接。\n"
         "升级会一次性移除旧版出厂的 DeepSeek 专用 PPT 允许列表及视觉路由；客户自行定制的列表和路由保留。\n"
         "QuickAgent 页面：http://服务器地址:3001/agent/；设置页：/agent/settings。\n"
         "浏览器会要求登录：用户名 admin，密码为 .env 的 CUSTOMER_ADMIN_PASSWORD；该入口同时保护页面、设置和 API。\n"
@@ -131,12 +137,16 @@ def main():
         "可在 .env 设置 QUICKAGENT_PORT 和 QUICKAGENT_BIND；Agent 本身仍只监听容器回环地址，渲染器不发布。\n"
         "包内已删除联通品牌模板文件及索引；升级时也会清理旧数据目录里的同类内置模板。\n"
         "查看状态 ./deploy.sh status；日志 ./deploy.sh logs；停止 ./deploy.sh stop。\n"
+        "宿主机日志：logs/customer.log（JSONL，单文件 5 MiB，保留 4 个轮转备份）；重启后继续保留。\n"
+        "程序安装/编译/模块绑定的具体诊断及会话 ID 自动写入日志，进程输出和模型连接错误同步保存。\n"
+        "遇到问题运行 ./deploy.sh diagnostics，将 logs/customer-diagnostics-时间.tar.gz 发给维护人员；也可直接提供 customer.log 及其轮转备份。\n"
+        "诊断导出会提取旧版已有会话的错误记录，不包含 .env、模型凭据、整库、用户文档或完整对话。\n"
         "数据保存在 state/、Compose 的 mysql-data 与 redis-data volume；升级前保留并备份这些数据及 .env。\n"
         "初始化器拒绝在已有表的数据库执行首次初始化，不导入开发机数据库或业务数据。\n"
         "离线镜像可在无外网环境加载与启动；需要鉴权的模型在设置页填写其有效密钥。\n"
         "实际 ARM64 服务器保持 QUICKAGENT_ARM64_EMULATED=0；完整的 x86 QEMU 验证使用源码中的 smoke.py（含一次性 Redis 探针测试覆盖）。\n"
     )
-    tags=["quickagent-customer-ppt-arm64:20261113-latest-empty","quickagent-customer-ppt-renderer-arm64:20261113-latest-empty"]
+    tags=["quickagent-customer-ppt-arm64:20261113-fixed-flow","quickagent-customer-ppt-renderer-arm64:20261113-fixed-flow"]
     for dockerfile,tag in zip(["app.Dockerfile","renderer.Dockerfile"],tags):
         subprocess.run(["docker","build","--platform","linux/arm64","-t",tag,"-f",str(stage/dockerfile),str(stage)],check=True)
     for source_tag,target in [("mysql:8.0","quickagent-customer-mysql-arm64:8.0"),("redis:7-alpine","quickagent-customer-redis-arm64:7")]:

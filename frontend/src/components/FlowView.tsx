@@ -14,6 +14,8 @@ import styles from './FlowView.module.css'
 const nodeTypes = { frame: FrameNode }
 const ACTIVE = new Set(['pending', 'running', 'suspended', 'paused'])
 const POLL_MS = 1500
+/** The frames a program opened: the calls the graph draws below a request. */
+const CALL_KINDS = new Set(['virtual', 'function', 'module', 'paused_program'])
 
 /** The frames under one request, the request first. */
 function subtree(frames: readonly FrameSummary[], root: string): FrameSummary[] {
@@ -70,6 +72,11 @@ export function FlowView({ taskId, running }: { taskId?: string | undefined; run
     // Records from before function frames: show whatever frames there are.
     return frames.filter(frame => frame.kind !== 'conversation')
   }, [frames, request])
+
+  // A turn whose AI worked without a program draws one frame: no call sits below
+  // the request, so the tools it used are named there instead of drawn.
+  const calls = useMemo(() => shown.filter(frame => CALL_KINDS.has(frame.kind)), [shown])
+  const toolCalls = useMemo(() => shown.reduce((sum, frame) => sum + (frame.tool_calls ?? 0), 0), [shown])
 
   const [measured, setMeasured] = useState<Record<string, { width: number; height: number }>>({})
   const onNodesChange = useCallback((changes: NodeChange[]) => {
@@ -179,6 +186,14 @@ export function FlowView({ taskId, running }: { taskId?: string | undefined; run
               <Controls />
             </ReactFlow>
           )}
+        {request !== undefined && calls.length === 0 && (
+          <button type="button" className={styles.note} title="点开请求节点，查看它的执行过程"
+            onClick={() => { setSelectedId(request.id); setAllRequests(false) }}>
+            {toolCalls === 0
+              ? '本轮没有函数调用，也还没有工具调用：点开节点查看执行过程。'
+              : `本轮没有函数调用：直接调用了 ${toolCalls} 次工具，点开节点查看执行过程。`}
+          </button>
+        )}
         {allRequests && debug && (
           <aside className={styles.drawer}>
             <div className={styles.drawerHeader}>

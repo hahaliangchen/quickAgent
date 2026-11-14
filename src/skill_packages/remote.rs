@@ -17,6 +17,7 @@ pub struct Connection {
     pub subject: String,
     pub require_binding: bool,
     capabilities: BTreeSet<String>,
+    registration_resource: Option<String>,
 }
 impl Connection {
     pub fn authenticated(&self) -> Arc<Self> {
@@ -28,6 +29,7 @@ impl Connection {
             subject: self.subject.clone(),
             require_binding: false,
             capabilities: self.capabilities.clone(),
+            registration_resource: self.registration_resource.clone(),
         })
     }
     pub fn supports(&self, capability: &str) -> bool {
@@ -91,6 +93,11 @@ impl Connection {
             matches!(entry, "page" | "module.js" | "resource"),
             "undeclared remote resource"
         );
+        let entry = if entry == "resource" && self.config.token.is_empty()
+            && query.len() == 1 && query[0].0 == "path" && query[0].1.starts_with("skill:")
+        {
+            self.registration_resource.as_deref().unwrap_or(entry)
+        } else { entry };
         let response = self
             .client
             .get(format!("{}/{entry}", self.config.url))
@@ -195,6 +202,7 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
         subject: String::new(),
         require_binding: false,
         capabilities: BTreeSet::new(),
+        registration_resource: None,
     };
     let hello = remote.rpc("plugin/handshake", json!({"version":1})).await?;
     ensure!(
@@ -210,6 +218,11 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
             crate::visual_artifacts::hash(format!("{}:{subject}", remote.config.url).as_bytes());
     }
     let plugin = &hello["plugin"];
+    if let Some(entry) = plugin.get("registration_resource") {
+        let entry = entry.as_str().context("invalid registration resource endpoint")?;
+        ensure!(identifier(entry), "invalid registration resource endpoint");
+        remote.registration_resource = Some(entry.to_owned());
+    }
     let id = plugin["id"]
         .as_str()
         .context("missing plugin ID")?
@@ -316,7 +329,8 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
         names.push(name.clone());
         mapped.push((name, raw, definition));
     }
-    remote.require_binding = require_binding;
+    remote.require_binding = require_binding ||
+        (remote.config.token.is_empty() && plugin["requires_user_binding"] == true);
     let remote = Arc::new(remote);
     let mut native = NativeContributions::default();
     for (name, raw, definition) in mapped {
@@ -445,8 +459,8 @@ pub async fn restore(runtime: &PluginRuntime, registry: &Registry) -> Result<()>
                 set_enabled(runtime, registry, &id, false, false)?;
             }
             Ok(_) => {}
-            Err(_) => {
-                tracing::warn!(plugin=%id,"remote plugin unavailable; reconnect from plugin settings")
+            Err(error) => {
+                tracing::warn!(plugin=%id,error=%format!("{error:#}"),"remote plugin unavailable; reconnect from plugin settings")
             }
         }
     }
@@ -607,6 +621,31 @@ mod tests {
         server.abort();
     }
     #[tokio::test]
+    async fn registration_loads_metadata_without_granting_anonymous_business_access() {
+        let app = Router::new().route("/api/plugin/{method}", post(|Path(method):Path<String>, Json(body):Json<Value>| async move {
+            let value = if method == "handshake" {
+                json!({"version":1,"state":"awaiting_confirmation","connection_id":"c","plugin":{"id":"sample","library":"sample","registration_resource":"registration-resource","requires_user_binding":true,"skill":"skill:SKILL.md","pages":[],"tools":[]}})
+            } else { assert_eq!(method, "confirm"); json!({"state":"ready"}) };
+            Json(json!({"type":"server-response","rpcId":body["rpcId"],"result":{"ok":true,"value":value}}))
+        })).route("/registration-resource", get(|| async { "---\nname: sample\ndescription: Startup metadata\n---\nInstructions" }))
+        .route("/resource", get(|| async { axum::http::StatusCode::UNAUTHORIZED }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let package = connect(Config { url: format!("http://{address}"), token: String::new() }).await.unwrap();
+        let remote = package.remote.as_ref().unwrap();
+        assert_eq!(package.manifest.library.as_deref(), Some("sample"));
+        assert!(remote.skill.contains("Instructions"));
+        assert!(remote.subject.is_empty());
+        assert!(remote.require_binding);
+        assert!(remote.rpc("plugin/call", json!({})).await.unwrap_err().to_string().contains("authenticated user session"));
+        assert!(remote.asset("resource", &[("path", "project:private".into())]).await.is_err());
+        // An authenticated session must use the original protected resource path.
+        assert!(connect(Config { url: format!("http://{address}"), token: "login-token".into() }).await.is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn remote_contract_is_generic_and_preserves_business_arguments() {
         let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
         let received = captured.clone();
@@ -616,7 +655,7 @@ mod tests {
                 assert!(!headers.contains_key("x-ppt-connection"));
                 assert_eq!(body["method"],format!("plugin/{method}"));
                 let value=match method.as_str() {
-                    "handshake"=>json!({"version":1,"subject":"user-a","state":"awaiting_confirmation","connection_id":"test-connection","plugin":{"id":"note-book","library":"notes","title":"Notes","skill":"skill:SKILL.md","skill_resources":["skill:references/workflow.md"],"pages":[],"tools":[{"name":"read_file","description":"Read a note","inputSchema":{"type":"object","properties":{"document":{"type":"string"}},"required":["document"],"additionalProperties":false},"outputSchema":{"type":"object","properties":{"content":{"type":"string"}},"required":["content"]}}]}}),
+                    "handshake"=>json!({"version":1,"subject":"user-a","state":"awaiting_confirmation","connection_id":"test-connection","plugin":{"id":"note-book","library":"notes","title":"Notes","skill":"skill:SKILL.md","skill_resources":["skill:references/workflow.md"],"pages":[],"tools":[{"name":"read_file","description":"Read a note","inputSchema":{"type":"object","properties":{"document":{"type":"string"}},"required":["document"],"additionalProperties":false},"outputSchema":{"type":"object","properties":{"content":{"type":"string"},"data":{"type":"object","properties":{"templates":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"}}}}},"required":["templates"]}},"required":["content"]}}]}}),
                     "confirm"=>json!({"state":"ready"}),
                     "call"=>{assert_eq!(headers["x-plugin-connection"],"test-connection");received.lock().unwrap().push(body["payload"]["args"].clone());json!({"value":{"content":"note text"}})},
                     _=>panic!("unexpected method {method}")
@@ -667,6 +706,7 @@ mod tests {
             crate::agent_program::libraries::catalog(&tools, &catalog.packages.catalog());
         let headers = crate::agent_program::declarations::headers(&bindings, &tools);
         assert!(headers.contains("declare namespace notes") && headers.contains("content:"));
+        assert!(headers.contains("templates:") && headers.contains("[]"), "nested result arrays must be visible in the AI program contract: {headers}");
         assert!(!headers.contains("note_book__read_file"));
         assert_eq!(
             tools[0]["function"]["parameters"]["additionalProperties"],

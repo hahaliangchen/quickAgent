@@ -10,6 +10,12 @@ use std::{
 };
 
 pub trait SessionIo: Send + Sync {
+    /// A plugin may require its fixed main program for a particular workflow
+    /// phase. Module implementations remain governed by their normal scope.
+    fn authorize_program<'a>(&'a self, _state: &'a AgentServiceState, _task: &'a str,
+        _resource: Option<&'a str>, _module: bool) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     /// Read an executable skill resource from this session's own plugin.
     /// The host interprets only the generic program manifest, never business rules.
     fn program_resource<'a>(&'a self, _state: &'a AgentServiceState, _task: &'a str,
@@ -115,6 +121,12 @@ pub async fn program_resource(state: &AgentServiceState, task: &str, path: &str)
         .program_resource(state, task, path).await?;
     ensure!(!bytes.is_empty() && bytes.len() <= 256 * 1024, "plugin program resource is empty or too large");
     Ok(bytes)
+}
+pub async fn authorize_program(state: &AgentServiceState, task: &str, resource: Option<&str>, module: bool) -> Result<()> {
+    if let Some(adapter) = adapter(state, task)? {
+        adapter.authorize_program(state, task, resource, module).await?;
+    }
+    Ok(())
 }
 pub async fn sync_attachments(state: &AgentServiceState, task: &str) -> Result<()> {
     if let Some(adapter) = adapter(state, task)? {

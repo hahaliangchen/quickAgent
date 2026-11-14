@@ -430,6 +430,7 @@ impl Runtime {
                         Effect::PromiseCreate { value, .. } => expression(value, &mut live),
                         Effect::PromiseConstruct { executor } => expression(executor, &mut live),
                         Effect::Require(_) => {}
+                        Effect::RequireValue(value) => expression(value, &mut live),
                         Effect::ParallelReadMap { items, args, .. } => {
                             expression(items, &mut live);
                             for arg in args {
@@ -617,6 +618,103 @@ impl Runtime {
         runtime.scoped_calls = true;
         Ok(runtime)
     }
+
+    /// Names currently bound in the persistent top-level Console environment.
+    pub fn module_names(&self) -> BTreeSet<String> {
+        self.module_env
+            .and_then(|env| self.heap.binding_names(env).ok())
+            .into_iter()
+            .flatten()
+            .filter(|name| !name.starts_with('\0'))
+            .collect()
+    }
+
+    /// Append one compiled top-level Console cell to this finished Runtime.
+    /// The heap and module environment remain untouched; only the new cell's
+    /// functions and declarations are installed before its frame runs.
+    pub fn append_cell(&mut self, cell: Program, entry: &str) -> Result<()> {
+        ensure!(self.finished && self.frames.is_empty(), "the Console Runtime is still running");
+        ensure!(cell.version == VERSION, "unsupported Console cell version");
+        ensure!(cell.prelude_hash == super::prelude::hash(), "Console cell prelude changed");
+        ensure!(cell.functions.contains_key(entry), "Console cell entry is missing");
+        ensure!(!cell.commonjs || self.program.commonjs, "a Console cell cannot introduce CommonJS module bindings after the first cell");
+        let module_env = self.module_env.context("Console module environment missing")?;
+        let cell_entry = cell.functions.get(entry).context("Console cell entry is missing")?;
+        ensure!(cell_entry.module, "Console cell entry is not top-level code");
+        let declared_names = self.heap.binding_names(module_env)?.into_iter().collect::<BTreeSet<_>>();
+        // Console cells share one lexical environment: redeclaring let/const
+        // (or a class) is a syntax error, just as in a browser console.
+        for name in &cell_entry.lexical {
+            ensure!(!declared_names.contains(name), "Identifier '{name}' has already been declared");
+        }
+        for name in cell.functions.keys() {
+            if name.starts_with("$$") && self.program.functions.contains_key(name) {
+                continue;
+            }
+            ensure!(!self.program.functions.contains_key(name), "Identifier '{name}' has already been declared");
+            if !name.starts_with("$$") && !name.contains('/') {
+                ensure!(!declared_names.contains(name), "Identifier '{name}' has already been declared");
+            }
+        }
+
+        let mut added = Vec::new();
+        for (name, function) in cell.functions {
+            if name.starts_with("$$") && self.program.functions.contains_key(&name) {
+                continue;
+            }
+            ensure!(!self.program.functions.contains_key(&name), "Identifier '{name}' has already been declared");
+            self.heap.register_function_length(&name, function.length);
+            self.heap.register_constructor(&name, function.constructable);
+            self.heap.register_generator(&name, function.is_generator, function.is_async);
+            self.program.functions.insert(name.clone(), function);
+            added.push(name);
+        }
+
+        let function_names = added
+            .iter()
+            .filter(|name| !name.starts_with("$$") && !name.contains('/'))
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in function_names {
+            let closure = self.heap.allocate(HeapNode::Closure {
+                function: name.clone(),
+                environment: module_env,
+            })?;
+            self.heap.define_binding(module_env, &name, VmValue::Reference(closure))?;
+        }
+        let entry_id = entry.to_owned();
+        let entry_function = self.program.functions.get(entry).context("Console cell entry was not installed")?.clone();
+        for name in entry_function.vars {
+            if !declared_names.contains(&name) {
+                self.heap.define_binding(module_env, &name, VmValue::Undefined)?;
+            }
+        }
+        for name in entry_function.lexical {
+            if !declared_names.contains(&name) {
+                self.heap.declare_uninitialized(module_env, &name)?;
+            }
+        }
+
+        let mut frame = Self::vm_frame(
+            &self.program,
+            &mut self.heap,
+            Some(module_env),
+            &entry_id,
+            Vec::new(),
+            None,
+        )?;
+        frame.env = Some(module_env);
+        self.frames.push(frame);
+        self.pending = None;
+        self.finished = false;
+        self.result = Value::Null;
+        self.error = None;
+        self.root_result = None;
+        self.fuel = INSTRUCTION_LIMIT;
+        self.segment_limit = INSTRUCTION_LIMIT;
+        self.rejected_console = None;
+        Ok(())
+    }
     /// A frame for `name` with its own environment below `parent`: parameters,
     /// hoisted vars (undefined) and top-level let/const (in their dead zone).
     fn vm_frame(
@@ -691,6 +789,27 @@ impl Runtime {
         let id = self.heap.allocate(HeapNode::Object(properties))?;
         self.required.insert(library.to_owned(), id);
         Ok(VmValue::Reference(id))
+    }
+    /// Dynamic require can still load the pure built-in modules without a
+    /// host round trip. Static require calls are lowered to these same native
+    /// values at compile time.
+    fn builtin_module(&mut self, library: &str) -> Result<Option<VmValue>> {
+        let spec = library.strip_prefix("node:").unwrap_or(library);
+        let methods: &[&str] = match spec {
+            "path" => &["join", "resolve", "relative", "basename", "normalize", "dirname", "extname", "isAbsolute"],
+            "url" => &["parse"],
+            "os" => &["homedir", "platform", "tmpdir"],
+            "yaml" => &["parse", "stringify"],
+            "js-yaml" => &["load", "dump"],
+            _ => return Ok(None),
+        };
+        let mut properties = Vec::with_capacity(methods.len());
+        for method in methods {
+            let native = self.heap.native(&format!("{spec}.{method}"))?;
+            properties.push((method.to_string(), VmValue::Reference(native)));
+        }
+        let id = self.heap.allocate(HeapNode::Object(properties))?;
+        Ok(Some(VmValue::Reference(id)))
     }
     /// Write a call result into the caller's temporary.
     fn store(&mut self, destination: Option<String>, value: VmValue) -> Result<()> {
@@ -2319,6 +2438,20 @@ impl Runtime {
                             }
                             Effect::Require(library) => {
                                 // A library this run already required is the same object.
+                                if let Some(id) = self.required.get(&library) {
+                                    self.store(destination, VmValue::Reference(*id))?;
+                                    return Ok(None);
+                                }
+                                ActionKind::Require { library }
+                            }
+                            Effect::RequireValue(value) => {
+                                let value = eval(&value, locals, &mut self.heap)?;
+                                let library = super::js_value::to_string(&self.heap, &value)?;
+                                let library = library.strip_prefix("host:").unwrap_or(&library).to_owned();
+                                if let Some(module) = self.builtin_module(&library)? {
+                                    self.store(destination, module)?;
+                                    return Ok(None);
+                                }
                                 if let Some(id) = self.required.get(&library) {
                                     self.store(destination, VmValue::Reference(*id))?;
                                     return Ok(None);

@@ -1371,7 +1371,7 @@ pub(super) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
         | "Number.isSafeInteger" | "Number.isFinite" | "Number.isNaN" => (1, 1),
         "Object.keys" | "Object.values" | "Object.entries" | "Object.fromEntries" | "Array.isArray"
         | "Array.from" => (1, 1),
-        "Object"=>(0,1),"Function"=>(0,64),"Object.create"=>(1,2),"Object.getPrototypeOf"|"$$forInKeys"=>(1,1),"Object.setPrototypeOf"=>(2,2),
+        "Object"=>(0,1),"Function"=>(0,64),"new URL"=>(1,2),"Buffer.from"=>(1,2),"Buffer.byteLength"=>(1,2),"path.isAbsolute"=>(1,1),"Object.create"=>(1,2),"Object.getPrototypeOf"|"$$forInKeys"=>(1,1),"Object.setPrototypeOf"=>(2,2),
         "Object.assign" => (1, 64),
         "Array.of" => (0, 64),
         "Array" | "new Array" | "String.fromCharCode" | "String.fromCodePoint" => (0, 64),
@@ -1492,6 +1492,10 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
     if name=="test262.error" {return new_error(heap,"Test262Error",&arg(args,0),&arg(args,1));}
     let first = arg(args, 0);
     if name == "new Date" { return super::js_date::construct(heap, args); }
+    if name == "new URL" {
+        let values = args.iter().map(|value| heap.to_json(value)).collect::<Result<Vec<_>>>()?;
+        return heap.from_json(&super::builtins::call("new URL", values)?);
+    }
     if name == "Date" || name.starts_with("Date.") { return super::js_date::static_call(heap, name, args); }
     if name == "new Array" { return builtin(heap, "Array", args); }
     if let Some(class) = name.strip_prefix("new ") {

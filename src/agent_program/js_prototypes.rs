@@ -205,6 +205,7 @@ impl Heap {
             "EvalError",
             "URIError",
             "AggregateError",
+            "URL",
             "Map Iterator",
             "Set Iterator",
             "Array Iterator",
@@ -256,6 +257,7 @@ impl Heap {
             "EvalError",
             "URIError",
             "AggregateError",
+            "URL",
         ] {
             let ctor = self.native(class)?;
             let proto = self.intrinsics[&format!("{class}.prototype")];
@@ -390,6 +392,25 @@ impl Heap {
                 let value = self.native(&format!("{namespace}.{method}"))?;
                 self.define_builtin(ns, method, VmValue::Reference(value))?;
             }
+        }
+        let buffer = self.allocate(HeapNode::Object(vec![]))?;
+        self.intrinsics.insert("Buffer".into(), buffer);
+        self.prototypes.insert(buffer, Some(object));
+        for method in ["from", "byteLength"] {
+            let value = self.native(&format!("Buffer.{method}"))?;
+            self.define_builtin(buffer, method, VmValue::Reference(value))?;
+        }
+        let global = self.allocate(HeapNode::Object(vec![]))?;
+        self.intrinsics.insert("globalThis".into(), global);
+        self.prototypes.insert(global, Some(object));
+        for name in [
+            "Object", "Function", "Symbol", "Array", "String", "Number", "Boolean", "Date", "RegExp", "Promise", "Map", "Set", "WeakMap", "WeakSet", "Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "EvalError", "URIError", "AggregateError", "URL", "Buffer",
+        ] {
+            if let Some(value) = self.intrinsic(name) { self.define_builtin(global, name, value)?; }
+        }
+        for name in ["atob", "btoa", "parseInt", "parseFloat", "isNaN", "isFinite", "structuredClone", "TextEncoder"] {
+            let value = self.native(name)?;
+            self.define_builtin(global, name, VmValue::Reference(value))?;
         }
         for (namespace, keys) in [
             ("Math", "E LN10 LN2 LOG10E LOG2E PI SQRT1_2 SQRT2"),
