@@ -1,5 +1,5 @@
 //! Piped platform-shell sessions. The task owns the process tree until it exits.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -84,6 +84,50 @@ static INTERVALS: OnceLock<std::sync::Mutex<BTreeMap<PathBuf, IntervalSlot>>> = 
 fn interval_slot(root: &Path) -> IntervalSlot {
     INTERVALS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
         .entry(root.to_path_buf()).or_default().clone()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LaunchFailure {
+    attempts: usize,
+}
+static LAUNCH_FAILURES: OnceLock<std::sync::Mutex<BTreeMap<String, LaunchFailure>>> = OnceLock::new();
+
+fn launch_failure_key(host: &Path, task: &str, turn: usize, owner: Option<&str>) -> String {
+    format!("{}\0{task}\0{turn}\0{}", host.display(), owner.unwrap_or("main"))
+}
+
+fn shell_command_limit() -> usize {
+    #[cfg(unix)]
+    {
+        let limit = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+        if limit > 0 { (limit as usize).saturating_sub(128 * 1024) } else { 512 * 1024 }
+    }
+    #[cfg(windows)]
+    { 24 * 1024 }
+}
+
+fn launch_failure(host: &Path, task: &str, turn: usize, owner: Option<&str>, command_bytes: usize, limit: usize) -> anyhow::Error {
+    let key = launch_failure_key(host, task, turn, owner);
+    let mut failures = LAUNCH_FAILURES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    let attempts = failures.entry(key).and_modify(|failure| failure.attempts += 1)
+        .or_insert(LaunchFailure { attempts: 1 }).attempts;
+    if attempts > 1 {
+        anyhow!("REPEATED_NO_PROGRESS: shell launch failed {attempts} times for the same task turn because the command is too large ({command_bytes} bytes; safe limit {limit}). No process started. Change the command or split it before retrying.")
+    } else {
+        anyhow!("SHELL_COMMAND_TOO_LARGE: command plus shell overhead is {command_bytes} bytes, above the safe launch limit {limit}. The process was not started; split the command before retrying.")
+    }
+}
+
+fn clear_launch_failure(host: &Path, task: &str, turn: usize, owner: Option<&str>) {
+    let key = launch_failure_key(host, task, turn, owner);
+    if let Some(failures) = LAUNCH_FAILURES.get() {
+        failures.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
+    }
+}
+
+fn is_argument_list_too_long(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("Argument list too long") || text.contains("os error 7")
 }
 
 async fn begin_interval(state: &AgentServiceState, workspace: &crate::tools::Workspace,
@@ -293,6 +337,11 @@ async fn launch(
     command.env("LANG", "C.UTF-8").env("PAGER", "cat");
     crate::project_process::prepare_process_group(&mut command);
     ensure!(!cancel.is_cancelled(), "shell task cancelled");
+    let limit = shell_command_limit();
+    let command_bytes = cmd_text.len() + environment.executable.to_string_lossy().len() + 4096;
+    if command_bytes > limit {
+        return Err(launch_failure(&host, task, turn, owner, command_bytes, limit));
+    }
     // Finish the tracking interval even when process startup fails.
     let interval = begin_interval(state, workspace, task, turn, owner, cancel).await?;
     if cancel.is_cancelled() {
@@ -303,9 +352,13 @@ async fn launch(
         Ok(child) => child,
         Err(error) => {
             finish_interval(state, workspace, &interval).await?;
+            if is_argument_list_too_long(&error) {
+                return Err(launch_failure(&host, task, turn, owner, command_bytes, limit));
+            }
             return Err(error);
         }
     };
+    clear_launch_failure(&host, task, turn, owner);
     let group = match crate::project_process::ProcessGroup::attach(&child) {
         Ok(group) => group,
         Err(error) => {
@@ -1056,6 +1109,32 @@ mod tests {
             assert_eq!(v["exit_code"], 0, "{v}");
             assert_eq!(v["stdout"], "中文$literal\"quote\nnext\n");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_oversized_launches_are_marked_without_starting_a_process() {
+        let task = format!("shell-guard-{}", crate::agent_service::uuid_like());
+        let host = Path::new("/tmp/shell-guard-host");
+        let first = launch_failure(host, &task, 1, None, 900_000, 700_000).to_string();
+        assert!(first.starts_with("SHELL_COMMAND_TOO_LARGE:"), "{first}");
+        let second = launch_failure(host, &task, 1, None, 900_000, 700_000).to_string();
+        assert!(second.starts_with("REPEATED_NO_PROGRESS:"), "{second}");
+        clear_launch_failure(host, &task, 1, None);
+        let after_clear = launch_failure(host, &task, 1, None, 900_000, 700_000).to_string();
+        assert!(after_clear.starts_with("SHELL_COMMAND_TOO_LARGE:"), "{after_clear}");
+        clear_launch_failure(host, &task, 1, None);
+    }
+
+    #[tokio::test]
+    async fn oversized_command_is_rejected_before_process_start() -> Result<()> {
+        let f = Fixture::new()?;
+        let cmd = "x".repeat(shell_command_limit().saturating_add(1));
+        let args = json!({"cmd":cmd,"yield_time_ms":0});
+        let first = execute(&f.state, &f.state.workspace, "shell-test", 1, None, "exec_command", &args, &f.cancel, false).await.unwrap_err().to_string();
+        assert!(first.starts_with("SHELL_COMMAND_TOO_LARGE:"), "{first}");
+        let second = execute(&f.state, &f.state.workspace, "shell-test", 1, None, "exec_command", &args, &f.cancel, false).await.unwrap_err().to_string();
+        assert!(second.starts_with("REPEATED_NO_PROGRESS:"), "{second}");
         Ok(())
     }
 
