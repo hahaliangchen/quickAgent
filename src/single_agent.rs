@@ -2726,17 +2726,6 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                 }
             }
             w.messages.push(delivered_message);
-            let ledger = execution_ledger_message(&call, &result, is_error, seq, None);
-            let ledger_seq = append(s, "execution/ledger", json!({
-                "turn": s.turn,
-                "step": step,
-                "flowNodeId": node,
-                "callId": call.call_id.clone(),
-                "action": call.name.clone(),
-                "status": if !is_error { "completed" } else if result["code"] == "REPEATED_NO_PROGRESS" { "blocked_no_progress" } else { "failed" },
-                "tool_result_seq": seq,
-            }), false).await?;
-            w.messages.push(sourced(ledger, s.task, ledger_seq));
             if fits
                 && !is_error
                 && matches!(call.name.as_str(), "view_image" | "read_asset")
@@ -3357,6 +3346,17 @@ async fn execute_call(
     } else {
         None
     };
+    let ledger_seq = append(s, "execution/ledger", json!({
+        "turn": s.turn,
+        "step": step,
+        "flowNodeId": node,
+        "callId": call.call_id.clone(),
+        "action": call.name.clone(),
+        "status": if !is_error { "completed" } else if result["code"] == "REPEATED_NO_PROGRESS" { "blocked_no_progress" } else { "failed" },
+        "tool_result_seq": seq,
+        "program_location": at,
+    }), false).await?;
+    window.messages.push(sourced(execution_ledger_message(call, &result, is_error, seq, at), s.task, ledger_seq));
     Ok(Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets })
 }
 

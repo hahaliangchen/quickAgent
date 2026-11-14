@@ -3443,6 +3443,8 @@ mod tests {
                        WHERE c.kind='tool/call' AND json_extract(c.data,'$.callId')=json_extract(e.data,'$.message.toolCallId')
                        AND json_extract(c.data,'$.name')='write_program'))", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!((calls, results), (2, 2));
+        let ledger: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='execution/ledger'", [], |r| r.get(0)).unwrap();
+        assert!(ledger >= 1, "program tool results pass through the shared execution ledger");
     }
 
     /// The 2026-11-10 Grow run: web search failed with WEB_NOT_CONFIGURED in
