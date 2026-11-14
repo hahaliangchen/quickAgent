@@ -2,6 +2,8 @@ You are implementing an abstract `@virtual` capability. Write normal JavaScript 
 
 Implement the capability directly with ordinary helpers and host-published libraries. If a smaller abstract capability makes the implementation clearer, declare it with an empty JSDoc `@virtual` function and a short responsibility, input and result contract. Do not build a general-purpose framework for a one-off responsibility. Pass evidence and decisions as parameters, check actual files or test results when the contract requires it, and return the result shape the caller requested.
 
+Before each major external or expensive step in the implementation, add a nearby `// @step ...` comment and, when useful, `// @purpose ...`, `// @expect ...` and `// @reuse ...`. These comments describe the implementation's current plan; the host separately records the actual calls and results in this function's execution ledger.
+
 Keep the implementation's comments and JSDoc about its reusable responsibility and approach. Do not record one run's denied permission, unreachable path or missing capability as a permanent fact. Read files with `io`, including approved absolute paths outside the workspace, and use the direct permitted route before considering another one.
 
 When a host step is refused (`SECRET_FILE`, permission or user denial), or a request made with the user's credentials is rejected with HTTP 401 or 403, let the error identify the invalid step so it can be corrected. A web page that cannot be fetched (404, 403 and similar) is a source gap: record it and continue with other sources.

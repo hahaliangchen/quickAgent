@@ -105,6 +105,44 @@ pub(super) fn setup_notes<'a>(libraries: impl IntoIterator<Item = &'a String>) -
         .collect()
 }
 
+/// Extract the explicit execution plan written beside the JavaScript steps.
+/// Comments describe intent; runtime events remain the authority for what
+/// actually ran. Keeping this small, structured plan separate from the full
+/// source lets the host put it in the stable context prefix and append facts
+/// below it as execution proceeds.
+pub(super) fn execution_plan(source: &str) -> Value {
+    let mut steps = Vec::<serde_json::Map<String, Value>>::new();
+    let mut current = None;
+    for (index, raw) in source.lines().enumerate() {
+        let mut line = raw.trim();
+        if let Some(rest) = line.strip_prefix("//") { line = rest.trim(); }
+        if let Some(rest) = line.strip_prefix("/*") { line = rest.trim(); }
+        if let Some(rest) = line.strip_prefix('*') { line = rest.trim(); }
+        if let Some(rest) = line.strip_suffix("*/") { line = rest.trim(); }
+        let Some((tag, value)) = line.split_once(char::is_whitespace) else { continue };
+        let value = value.trim();
+        match tag {
+            "@step" if !value.is_empty() => {
+                let mut step = serde_json::Map::new();
+                step.insert("line".into(), json!(index + 1));
+                step.insert("title".into(), json!(value));
+                steps.push(step);
+                current = Some(steps.len() - 1);
+            }
+            "@purpose" | "@expect" | "@reuse" => {
+                if let Some(step) = current.and_then(|index| steps.get_mut(index)) {
+                    step.insert(tag.trim_start_matches('@').into(), json!(value));
+                }
+            }
+            _ => {}
+        }
+    }
+    json!({
+        "version": 1,
+        "steps": steps.into_iter().map(Value::Object).collect::<Vec<_>>(),
+    })
+}
+
 /// Package IDs address skill instructions; library names address require().
 /// Project skills take precedence in read_skill, so never advertise a shadowed ID.
 pub(super) fn skill_library_names(s: &Session<'_>) -> Vec<(String, String)> {
@@ -429,7 +467,8 @@ pub(super) fn end_familiarization(w: &mut Window, reply: &Value, source: &str) {
             // What this turn's finished programs produced is fact, not getting
             // to know the task: the work and the answer go on from it.
             w.messages.push(message);
-        } else if message.get(super::skill_scope::DELIVERED).is_some()
+        } else if matches!(message["name"].as_str(), Some("execution_plan" | "execution_ledger"))
+            || message.get(super::skill_scope::DELIVERED).is_some()
             || message["name"] == super::modules::UPDATE
             || message.get(crate::anthropic_messages::ADDED_TOOLS).is_some()
         {
@@ -1690,6 +1729,31 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
 #[cfg(test)]
 pub(super) fn example_pages(source: &str) -> Vec<&str> {
     source.split("path: \"").skip(1).filter_map(|rest| rest.split('"').next()).filter(|path| path.ends_with(".html")).collect()
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::execution_plan;
+
+    #[test]
+    fn execution_plan_extracts_structured_comments_without_rewriting_source() {
+        let source = r#"
+// @step Read the existing log
+// @purpose Reuse durable evidence before running anything
+// @expect The named failures and their existing results
+const log = readLog();
+/** @step Compare only the named commits */
+/** @reuse Do not rebuild a commit with an existing log */
+const result = compare(log);
+"#;
+        let plan = execution_plan(source);
+        assert_eq!(plan["version"], 1);
+        assert_eq!(plan["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(plan["steps"][0]["title"], "Read the existing log");
+        assert_eq!(plan["steps"][0]["purpose"], "Reuse durable evidence before running anything");
+        assert_eq!(plan["steps"][1]["reuse"], "Do not rebuild a commit with an existing log");
+        assert_eq!(plan["steps"][0]["line"], 2);
+    }
 }
 
 #[cfg(test)]

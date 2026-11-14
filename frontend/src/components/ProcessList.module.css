@@ -77,6 +77,33 @@
   word-break: break-word;
 }
 
+.plan {
+  flex-basis: 100%;
+  margin: 2px 0 2px 22px;
+  color: var(--codex-text-secondary, #4b5563);
+  font-size: 12px;
+}
+
+.plan summary {
+  cursor: pointer;
+  color: var(--codex-text-muted, #6b7280);
+}
+
+.plan ol {
+  margin: 4px 0 0 18px;
+  padding: 0;
+}
+
+.plan li {
+  padding: 2px 0;
+}
+
+.plan small {
+  display: block;
+  color: var(--codex-text-muted, #6b7280);
+  white-space: normal;
+}
+
 .event[data-tone='warn'] strong {
   color: var(--dsw-alias-state-warn-label, #b45309);
 }

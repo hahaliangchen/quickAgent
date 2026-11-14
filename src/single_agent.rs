@@ -1013,6 +1013,21 @@ fn host_message(mut message: Value) -> Value {
     message["content"] = json!(status.to_string());
     message
 }
+fn execution_ledger_message(call: &crate::model_stream::ToolCall, result: &Value, is_error: bool, seq: i64, at: Option<&Value>) -> Value {
+    let status = if !is_error { "completed" } else if result["code"] == "REPEATED_NO_PROGRESS" { "blocked_no_progress" } else { "failed" };
+    host_message(json!({
+        "name": "execution_ledger",
+        "content": json!({
+            "action": call.name.clone(),
+            "status": status,
+            "event_seq": seq,
+            "program_location": at,
+            "error_code": result.get("code"),
+            "message": result.get("message").or_else(|| result.get("error")),
+            "instruction": if status == "blocked_no_progress" { Some("Do not repeat this action without changing the method or inputs.") } else { None },
+        }).to_string(),
+    }))
+}
 fn output_tokens(s: &Session<'_>, body: &Value) -> usize {
     crate::model_settings::output_tokens(s.state, s.model, s.input_budget, estimate(body))
 }
@@ -2711,6 +2726,17 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                 }
             }
             w.messages.push(delivered_message);
+            let ledger = execution_ledger_message(&call, &result, is_error, seq, None);
+            let ledger_seq = append(s, "execution/ledger", json!({
+                "turn": s.turn,
+                "step": step,
+                "flowNodeId": node,
+                "callId": call.call_id.clone(),
+                "action": call.name.clone(),
+                "status": if !is_error { "completed" } else if result["code"] == "REPEATED_NO_PROGRESS" { "blocked_no_progress" } else { "failed" },
+                "tool_result_seq": seq,
+            }), false).await?;
+            w.messages.push(sourced(ledger, s.task, ledger_seq));
             if fits
                 && !is_error
                 && matches!(call.name.as_str(), "view_image" | "read_asset")
@@ -2947,8 +2973,15 @@ async fn submit_program(
             // Main flows are also kept in the project's saved flows.
             let saved_flow = if !body && s.plugin.is_none() { Some(project_flows::save(s, w, source)?) } else { None };
             let event = if w.module_probe { "program/probe_start" } else { "program/start" };
+            let plan = program_flow::execution_plan(source);
             append(s, event, json!({"turn":s.turn,"receipt":receipt,"function":function,"source":source,
-                "path":path,"saved_flow":saved_flow,"source_resource":bundle_origin}), false).await?;
+                "path":path,"saved_flow":saved_flow,"source_resource":bundle_origin,"plan":plan.clone()}), false).await?;
+            let plan_seq = append(s, "program/plan", json!({"turn":s.turn,"function":function,"plan":plan}), false).await?;
+            let plan_message = host_message(json!({
+                "name": "execution_plan",
+                "content": json!({"function":function,"plan":plan}).to_string(),
+            }));
+            w.messages.push(sourced(plan_message, s.task, plan_seq));
             if body && !w.module_probe {
                 // New and revised module code is saved for later calls of its contract.
                 modules::authored(s, w, source).await?;
@@ -3653,6 +3686,20 @@ pub(crate) async fn run_task_with_resource(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn execution_ledger_explains_completed_and_blocked_actions() {
+        let call = crate::model_stream::ToolCall { call_id: "c1".into(), name: "exec_command".into(), arguments: "{}".into() };
+        let done = execution_ledger_message(&call, &json!({"exit_code":0}), false, 7, None);
+        assert_eq!(done["name"], "execution_ledger");
+        let content: Value = serde_json::from_str(done["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["action"], "exec_command");
+        assert_eq!(content["status"], "completed");
+        let blocked = execution_ledger_message(&call, &json!({"code":"REPEATED_NO_PROGRESS","message":"same failure"}), true, 8, None);
+        let content: Value = serde_json::from_str(blocked["content"].as_str().unwrap()).unwrap();
+        assert_eq!(content["status"], "blocked_no_progress");
+        assert!(content["instruction"].as_str().unwrap().contains("Do not repeat"));
+    }
+
     #[test]
     fn failed_plugin_envelopes_are_errors_even_when_the_transport_succeeded() {
         let failed = json!({"status":"failed","data":"Locked element changed: ppt/slides/slide4.xml#10"});

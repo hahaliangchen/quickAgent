@@ -41,7 +41,7 @@ export interface AssistantItem {
   /** The function frame whose AI wrote it. */
   readonly frame?: string | undefined
   /** What the host did with the ```js program this reply holds. */
-  readonly program?: { readonly status: 'started' | 'invalid'; readonly error?: string | undefined; readonly line?: number | undefined } | undefined
+  readonly program?: { readonly status: 'started' | 'invalid'; readonly error?: string | undefined; readonly line?: number | undefined; readonly plan?: ExecutionPlan | undefined } | undefined
 }
 
 export interface ToolItem {
@@ -91,7 +91,13 @@ export interface ProgramItem {
   readonly event: 'started' | 'invalid' | 'failed' | 'question' | 'paused' | 'result_invalid' | 'module_loaded' | 'module_fix'
   readonly text: string
   readonly line?: number | undefined
+  readonly plan?: ExecutionPlan | undefined
   readonly time: number
+}
+
+export interface ExecutionPlan {
+  readonly version: number
+  readonly steps: readonly { readonly line?: number | undefined; readonly title: string; readonly purpose?: string | undefined; readonly expect?: string | undefined; readonly reuse?: string | undefined }[]
 }
 
 /** A reply whose ```js block the host runs as a program. */
@@ -212,6 +218,25 @@ function stringOf(value: unknown): string | undefined {
 
 function numberOf(value: unknown): number | undefined {
   return typeof value === 'number' ? value : undefined
+}
+
+function executionPlan(value: unknown): ExecutionPlan | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.version !== 'number' || !Array.isArray(record.steps)) return undefined
+  const steps = record.steps.flatMap(item => {
+    if (!item || typeof item !== 'object') return []
+    const step = item as Record<string, unknown>
+    if (typeof step.title !== 'string' || step.title.trim() === '') return []
+    return [{
+      line: typeof step.line === 'number' ? step.line : undefined,
+      title: step.title,
+      purpose: typeof step.purpose === 'string' ? step.purpose : undefined,
+      expect: typeof step.expect === 'string' ? step.expect : undefined,
+      reuse: typeof step.reuse === 'string' ? step.reuse : undefined,
+    }]
+  })
+  return { version: record.version, steps }
 }
 
 function argumentsOf(value: unknown): string {
@@ -547,8 +572,9 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
       }
       case 'program/start':
         // The host compiled the program the AI handed over and started it.
-        if (!markProgram(frame, { status: 'started' })) {
-          items.push({ kind: 'program', key, frame, event: 'started', text: event.data.fixed === true ? '修复后重新运行' : stringOf(event.data.function) ?? '', time: event.time })
+        const plan = executionPlan(event.data.plan)
+        if (!markProgram(frame, { status: 'started', plan })) {
+          items.push({ kind: 'program', key, frame, event: 'started', text: event.data.fixed === true ? '修复后重新运行' : stringOf(event.data.function) ?? '', plan, time: event.time })
         }
         break
       case 'program/source_invalid': {

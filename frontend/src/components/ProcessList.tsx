@@ -8,7 +8,7 @@ import { markdownLabels } from '../dsh/markdown-labels.ts'
 import { t } from '../i18n.ts'
 import {
   PROGRAM_FENCE, contractSummary, processEntries, reasoningHeadline, runningCallState,
-  type AssistantItem, type CallItem, type ChatItem, type ProgramItem, type ToolItem,
+  type AssistantItem, type CallItem, type ChatItem, type ExecutionPlan, type ProgramItem, type ToolItem,
 } from '../model.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
 import { ToolRow, toolLabel } from './ToolRow.tsx'
@@ -151,7 +151,7 @@ const ProgramReply = memo(function ProgramReply({ reply }: { reply: AssistantIte
         collapsedContent={<><Separator /><span className={`${toolCss.summary} ${program?.status === 'invalid' ? toolCss.errorSummary : ''}`}>
           {[`${programLines(reply.text)} 行`, status].filter(Boolean).join(' · ')}
         </span></>}>
-        {expanded && <div className={css.inside}><AssistantMessage text={reply.text} reasoning={reply.reasoning} streaming={reply.streaming} showActions={false} /></div>}
+        {expanded && <div className={css.inside}><ExecutionPlanView plan={program?.plan} /><AssistantMessage text={reply.text} reasoning={reply.reasoning} streaming={reply.streaming} showActions={false} /></div>}
       </DisclosureRow>
     </div>
   )
@@ -235,7 +235,25 @@ function ProgramEvent({ item }: { item: ProgramItem }) {
     <div className={css.event} data-tone={meta.tone} role={meta.tone === 'error' ? 'status' : undefined}>
       <strong>{meta.label}</strong>
       {(where !== '' || item.text !== '') && <span title={item.text}>{[where, item.text].filter(Boolean).join('：')}</span>}
+      <ExecutionPlanView plan={item.plan} />
     </div>
+  )
+}
+
+function ExecutionPlanView({ plan }: { plan: ExecutionPlan | undefined }) {
+  if (plan === undefined || plan.steps.length === 0) return null
+  return (
+    <details className={css.plan}>
+      <summary>计划（{plan.steps.length} 步）</summary>
+      <ol>
+        {plan.steps.map(step => (
+          <li key={`${step.line ?? 0}:${step.title}`}>
+            <span>{step.title}</span>
+            {(step.purpose || step.expect || step.reuse) && <small>{[step.purpose && `目的：${step.purpose}`, step.expect && `预期：${step.expect}`, step.reuse && `复用：${step.reuse}`].filter(Boolean).join('；')}</small>}
+          </li>
+        ))}
+      </ol>
+    </details>
   )
 }
 
