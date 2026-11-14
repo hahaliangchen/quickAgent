@@ -551,6 +551,29 @@ pub(super) async fn finish(
         let answer = json!({"task":node.title,"node_id":node.node_id,"return_event_seq":returned,"result":text,"assets":saved});
         // The caller's program reads the return from the recorded result.
         record_result(&tx, &task, turn, &serial_caller["step"], &serial_caller["flowNodeId"], &call_id, &parent.node_id, &answer)?;
+        let ledger = json!({
+            "turn": turn,
+            "task_node_id": parent.node_id.clone(),
+            "callId": call_id.clone(),
+            "action": "virtual_call",
+            "function": node.title.clone(),
+            "status": if failed { "failed" } else { "completed" },
+            "return_event_seq": returned,
+            "program_location": serial_caller["call_site"],
+        });
+        let ledger_seq = agent_service::append_event_tx(&tx, &task, "flow/ledger", &ledger, None)?;
+        resumed.messages.push(super::sourced(
+            super::execution_ledger_host_message(json!({
+                "action": "virtual_call",
+                "function": ledger["function"],
+                "status": ledger["status"],
+                "event_seq": returned,
+                "return_event_seq": returned,
+                "program_location": ledger["program_location"],
+            })),
+            &task,
+            ledger_seq,
+        ));
         // What the user said meanwhile belongs to the whole main task.
         for original in frame.messages.iter().filter(|m| is_user_original(m)) {
             if !resumed.messages.iter().any(|m| m["source"]["seq"] == original["source"]["seq"] && m["content"] == original["content"]) {

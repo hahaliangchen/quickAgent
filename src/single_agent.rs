@@ -1013,11 +1013,15 @@ fn host_message(mut message: Value) -> Value {
     message["content"] = json!(status.to_string());
     message
 }
-fn execution_ledger_message(call: &crate::model_stream::ToolCall, result: &Value, is_error: bool, seq: i64, at: Option<&Value>) -> Value {
-    let status = if !is_error { "completed" } else if result["code"] == "REPEATED_NO_PROGRESS" { "blocked_no_progress" } else { "failed" };
+pub(super) fn execution_ledger_host_message(content: Value) -> Value {
     host_message(json!({
         "name": "execution_ledger",
-        "content": json!({
+        "content": content.to_string(),
+    }))
+}
+fn execution_ledger_message(call: &crate::model_stream::ToolCall, result: &Value, is_error: bool, seq: i64, at: Option<&Value>) -> Value {
+    let status = if !is_error { "completed" } else if result["code"] == "REPEATED_NO_PROGRESS" { "blocked_no_progress" } else { "failed" };
+    execution_ledger_host_message(json!({
             "action": call.name.clone(),
             "status": status,
             "event_seq": seq,
@@ -1025,7 +1029,6 @@ fn execution_ledger_message(call: &crate::model_stream::ToolCall, result: &Value
             "error_code": result.get("code"),
             "message": result.get("message").or_else(|| result.get("error")),
             "instruction": if status == "blocked_no_progress" { Some("Do not repeat this action without changing the method or inputs.") } else { None },
-        }).to_string(),
     }))
 }
 fn output_tokens(s: &Session<'_>, body: &Value) -> usize {
@@ -3346,7 +3349,7 @@ async fn execute_call(
     } else {
         None
     };
-    let ledger_seq = append(s, "execution/ledger", json!({
+    let ledger_seq = append(s, "flow/ledger", json!({
         "turn": s.turn,
         "step": step,
         "flowNodeId": node,

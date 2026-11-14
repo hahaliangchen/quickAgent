@@ -2444,6 +2444,8 @@ mod tests {
         }
         let program_steps: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='tool/call' AND json_extract(data,'$.program_location') IS NOT NULL", [], |r| r.get(0)).unwrap();
         assert!(program_steps >= 3, "the program's steps are still recorded, with their source location");
+        let virtual_ledger: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='flow/ledger' AND json_extract(data,'$.action')='virtual_call'", [], |r| r.get(0)).unwrap();
+        assert!(virtual_ledger >= 1, "virtual function returns pass through the shared execution ledger");
         let seen = seen.lock().unwrap();
         assert_eq!(seen.iter().map(|(role, _, _)| role.as_str()).collect::<Vec<_>>(), ["main", "implement", "leaf", "main"]);
         let (_, implement, prompt) = &seen[1];
@@ -3443,7 +3445,7 @@ mod tests {
                        WHERE c.kind='tool/call' AND json_extract(c.data,'$.callId')=json_extract(e.data,'$.message.toolCallId')
                        AND json_extract(c.data,'$.name')='write_program'))", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!((calls, results), (2, 2));
-        let ledger: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='execution/ledger'", [], |r| r.get(0)).unwrap();
+        let ledger: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='flow/ledger'", [], |r| r.get(0)).unwrap();
         assert!(ledger >= 1, "program tool results pass through the shared execution ledger");
     }
 
