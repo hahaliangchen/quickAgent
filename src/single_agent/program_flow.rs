@@ -1113,7 +1113,7 @@ pub(super) async fn recover(s: &Session<'_>, w: &mut Window) -> Result<()> {
         if let Some((seq, event)) = recorded(s, &action.id)? { completed.push((seq, action, event)); }
     }
     completed.sort_by_key(|(seq, _, _)| *seq);
-    for (_, action, event) in completed {
+    for (seq, action, event) in completed {
         let mut value = event["meta"]["result"].clone();
         let mut failed = event["message"]["isError"] == true;
         if !failed {
@@ -1127,6 +1127,22 @@ pub(super) async fn recover(s: &Session<'_>, w: &mut Window) -> Result<()> {
             locate_question(&action, &mut value);
         }
         w.program.as_mut().unwrap().resume_action(&action.id, value, failed)?;
+        if let Some(function) = match &action.kind {
+            ActionKind::Task { name, .. } | ActionKind::Call { name, .. } => Some(name.clone()),
+            _ => None,
+        } {
+            w.messages.push(super::sourced(
+                super::execution_ledger_host_message(json!({
+                    "action": "virtual_call",
+                    "function": function,
+                    "status": if failed { "failed" } else { "completed" },
+                    "event_seq": seq,
+                    "return_event_seq": event["meta"]["result"]["return_event_seq"],
+                })),
+                s.task,
+                seq,
+            ));
+        }
         save(s, w).await?;
     }
     let Some(action) = w.program.as_ref().and_then(|p| p.pending.clone()) else {
