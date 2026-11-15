@@ -36,6 +36,19 @@ test('completed turns can report tool failures without claiming they were not re
   assert.deepEqual(failedToolNames(items), ['browser'])
 })
 
+test('a virtual frame program return is kept in the Call return value instead of the step transcript', () => {
+  seq = 0
+  const events = [
+    frame('task/node_planned', 'child', 'pending', { role: 'temp' }),
+    frame('task/node_started', 'child', 'running', { role: 'temp' }),
+    event('assistant/message', { task_node_id: 'child', actor: 'program', step: 2, message: { content: '{"ok":true}' } }),
+    event('assistant/message', { task_node_id: 'main', actor: 'agent', step: 3, message: { content: '主任务继续。' } }),
+  ]
+  const items = chatItems(events)
+  assert.equal(items.some(item => item.kind === 'assistant' && item.text.includes('ok')), false)
+  assert.equal(items.some(item => item.kind === 'assistant' && item.text === '主任务继续。'), true)
+})
+
 const shellRows = events => flattenItems(chatItems(events)).filter(item => item.kind === 'tool')
 
 test('shell end settles earlier running rows without replaying or mutating their output', () => {

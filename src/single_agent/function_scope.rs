@@ -51,5 +51,7 @@ pub(super) fn release_finished(window: &mut Window) {
     if let Some(answer) = answer {
         window.messages.push(answer);
     }
+    window.program = None;
+    window.failed_programs.clear();
     window.scope_values.clear();
 }

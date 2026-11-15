@@ -993,6 +993,72 @@ fn persistent_console_cells_share_top_level_bindings_and_functions() {
     assert_eq!(run.logs(), &["12", "13"]);
 }
 
+#[test]
+fn persistent_console_recovers_after_uncaught_runtime_error() {
+    let first = compile_cell_with_scope(
+        "const base = 7; function explode() { throw new Error('boom'); }",
+        "$$cell/0",
+        libraries::builtin(),
+        BTreeSet::new(),
+    )
+    .unwrap();
+    let mut run = Runtime::task_program(first, "$$cell/0", vec![]).unwrap();
+    assert!(matches!(run.next(), State::Returned(Value::Null)));
+
+    let failing = compile_cell_with_scope(
+        "const x = explode();",
+        "$$cell/1",
+        libraries::builtin(),
+        run.module_names(),
+    )
+    .unwrap();
+    run.append_cell(failing, "$$cell/1").unwrap();
+    assert!(matches!(run.next(), State::Failed(_)), "uncaught throw fails the cell while leaving error frames");
+
+    let next_cell = compile_cell_with_scope(
+        "console.log(base + 3);",
+        "$$cell/2",
+        libraries::builtin(),
+        run.module_names(),
+    )
+    .unwrap();
+    run.append_cell(next_cell, "$$cell/2")
+        .expect("append_cell succeeds after an earlier errored Console cell");
+    assert!(matches!(run.next(), State::Returned(Value::Null)));
+    assert_eq!(run.logs(), &["10"]);
+}
+
+#[test]
+fn console_dir_and_binding_previews_inspect_nested_large_values() {
+    let source = r#"
+        const huge = { complete: true, content: 'A'.repeat(120000) };
+        const records = [{ cmd: 'git status', stdout: 'B'.repeat(50000), exit_code: 0 }];
+        const ring = { name: 'self' };
+        ring.self = ring;
+        const bag = new Map([['first', 'alpha'], ['second', 'beta']]);
+        const deep = { outer: { nested: { a: 1, b: 2, c: 3 } } };
+        console.dir(records, { depth: 2, maxStringLength: 16 });
+        console.dir(ring);
+        console.dir(bag);
+    "#;
+    let cell = compile_cell_with_scope(source, "$$cell/0", libraries::builtin(), BTreeSet::new()).unwrap();
+    let mut run = Runtime::task_program(cell, "$$cell/0", vec![]).unwrap();
+    assert!(matches!(run.next(), State::Returned(Value::Null)));
+    assert_eq!(run.logs().len(), 3);
+    assert!(run.logs()[0].contains("Array(1)") && run.logs()[0].contains("string(50000 chars:"), "{}", run.logs()[0]);
+    assert!(run.logs()[0].len() < 1000, "dir preview must remain bounded: {}", run.logs()[0].len());
+    assert!(run.logs()[1].contains("[Circular]"), "{}", run.logs()[1]);
+    assert!(run.logs()[2].contains("Map(2)"), "{}", run.logs()[2]);
+
+    let previews = run.module_binding_previews();
+    let huge_preview = previews.get("huge").expect("huge preview");
+    assert!(huge_preview.contains("complete: true") && huge_preview.contains("string(120000 chars:"), "{huge_preview}");
+    let rec_preview = previews.get("records").expect("records preview");
+    assert!(rec_preview.contains("Array(1)") && rec_preview.contains("stdout: string(50000 chars:"), "{rec_preview}");
+    let deep_preview = previews.get("deep").expect("deep preview");
+    assert!(deep_preview.contains("Object(3 keys: a, b, c)"), "{deep_preview}");
+}
+
 fn returned(mut r: Runtime) -> Value {
     match r.next() {
         State::Returned(v) => v,
@@ -2264,6 +2330,10 @@ impl TutorialRun {
                         outputs.push(self.run(worker)?);
                     }
                     Ok(Value::Array(outputs))
+                }
+                ActionKind::LibraryCall { library, method, args } => {
+                    self.events.push(format!("library_call:{library}.{method}({})", args.len()));
+                    Err(json!({"message": format!("unhandled library call {library}.{method}")}))
                 }
             };
             let failed = result.is_err();
@@ -3624,16 +3694,22 @@ async function inspect(data) { throw new Error("Host must provide inspect"); }
         "throw new Error(io.read({path:'x'}));",
         "io.write({path:'x'}); throw new Error('x');",
         "throw 'oops';",
-        "throw new Other('x');",
+        "throw new TypeError('x');",
     ] {
         assert!(
             compile(&format!(
-                "/** @virtual Review and return result. */ function inspect(){{{body}}} inspect();"
+                "/** @module Review and return result. */ function inspect(){{{body}}} inspect();"
             ))
             .is_err(),
-            "must reject {body}"
+            "@module must reject {body}"
         );
+        let virtual_program = compile(&format!(
+            "/** @virtual Review and return result. */ function inspect(){{{body}}} inspect();"
+        ))
+        .unwrap_or_else(|error| panic!("@virtual partial body should compile {body}: {error:#}"));
+        assert!(virtual_program.functions["inspect"].partial_virtual, "expected partial_virtual for {body}");
     }
+    assert!(compile("/** @module Review. */ function inspect(){throw new Other('x');} inspect();").is_err());
 }
 
 
@@ -3908,6 +3984,35 @@ fn m5_synchronous_host_action_blocks_queued_async_actions() {
 }
 
 #[test]
+fn synchronous_host_and_virtual_calls_resume_in_order_echo_results_and_stop_on_error() {
+    let source = r#"
+import * as io from "host:io";
+const first = io.read({path:"first"});
+console.log(first.content);
+const verdict = check(first.content);
+console.log(verdict.ok);
+if (!verdict.ok) throw new Error("stop after verdict");
+io.write({path:"must-not-run", content:"unexpected"});
+
+/** @virtual Check the supplied value and return {ok:boolean}. */
+function check(value) {}
+"#;
+    let mut run = top_level(source);
+    let State::Action(first) = run.next() else { panic!("the first statement must ask for the first read") };
+    assert!(matches!(first.kind, ActionKind::Tool { ref name, ref args }
+        if name == "read_file" && args["path"] == "first"));
+    run.resume(json!({"content":"observed"}), false).unwrap();
+
+    let State::Action(check) = run.next() else { panic!("the next statement must call the virtual capability") };
+    assert!(matches!(check.kind, ActionKind::Call { ref name, ref args, .. }
+        if name == "check" && args == &vec![json!("observed")]));
+    assert_eq!(run.logs(), &["observed"], "the completed host result is visible before the next statement");
+    run.resume(json!({"ok":false}), false).unwrap();
+    assert!(matches!(run.next(), State::Failed(error) if error["message"] == "stop after verdict"));
+    assert_eq!(run.logs(), &["observed", "false"], "the virtual result is echoed before the branch");
+}
+
+#[test]
 fn m6_concurrent_calls_resume_by_id_in_completion_order_after_snapshot() {
     use runtime::ConcurrentState;
     let source = r#"async function main(){let shared='first';let a=work('a');shared='second';let b=work('b');let first=await a;let c=work(first);return await Promise.all([b,c]);}
@@ -4064,9 +4169,12 @@ fn a_nested_virtual_helper_is_ai_work_and_does_not_mark_its_enclosing_function()
     assert!(nested.virtual_task, "{id}");
     assert!(nested.description.contains("Write the page"));
     assert_eq!(nested.leaf_tools, Some(vec![]), "declared in an implementation: a leaf");
-    assert!(crate::agent_program::compiler::compile_body_with_scope(
+    let partial = crate::agent_program::compiler::compile_body_with_scope(
         "function f() {\n  /** @virtual */\n  function g() {\n    // Do it.\n    return 1;\n  }\n  return g();\n}\n",
-        "f", crate::agent_program::libraries::builtin(), Default::default()).is_err(), "a virtual has no executable body");
+        "f", crate::agent_program::libraries::builtin(), Default::default()).unwrap();
+    let (_, nested_g) = partial.functions.iter().find(|(id, _)| id.starts_with("f/g@")).unwrap();
+    assert!(nested_g.partial_virtual, "executable @virtual compiles as partial");
+    assert_eq!(returned(Runtime::task_program(partial, "f", vec![]).unwrap()), json!(1));
 }
 
 #[test]
@@ -4314,4 +4422,150 @@ fn a_contract_without_its_virtual_tag_is_named_before_it_runs() {
     assert!(uncalled_functions("/** Doubles x. */\nfunction twice(x) { return x * 2; }\nconsole.log(twice(1));", None).is_ok());
     // A comment separated by a blank line belongs to the code above it.
     assert!(uncalled_functions("const a = 1; // the first value\n\nfunction noop() {}\nnoop(); console.log(a);", None).is_ok());
+}
+
+#[test]
+fn runtime_links_library_methods_and_supports_sync_and_promises() {
+    use super::runtime::ConcurrentState;
+
+    let program = crate::agent_program::compile(
+        r#"
+        const wf = require("doc-flow");
+        const wfp = require("doc-flow/promises");
+        const first = wf.summarize("a.txt", 2);
+        const batch = await Promise.all([wfp.score("x"), wfp.score("y")]);
+        console.log(JSON.stringify({ first, batch }));
+        "#,
+    )
+    .unwrap();
+    let mut run = Runtime::new(program, super::ENTRY, vec![]).unwrap();
+
+    assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Require { ref library }, .. }) if library == "doc-flow"));
+    run.resume(json!({"library": "doc-flow", "methods": {}, "library_methods": ["summarize", "score"]}), false).unwrap();
+
+    assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Require { ref library }, .. }) if library == "doc-flow/promises"));
+    run.resume(json!({"library": "doc-flow/promises", "methods": {}, "library_methods": ["summarize", "score"]}), false).unwrap();
+
+    let State::Action(sync_call) = run.next() else { panic!("expected sync LibraryCall") };
+    assert!(matches!(
+        &sync_call.kind,
+        ActionKind::LibraryCall { library, method, args }
+            if library == "doc-flow" && method == "summarize" && args == &[json!("a.txt"), json!(2)]
+    ));
+    run.resume(json!({"done": true}), false).unwrap();
+
+    let ConcurrentState::Actions(calls) = run.next_concurrent() else {
+        panic!("expected concurrent Promise.all library calls")
+    };
+    assert_eq!(calls.len(), 2);
+    for (call, item) in calls.iter().zip(["x", "y"]) {
+        assert!(matches!(
+            &call.kind,
+            ActionKind::LibraryCall { library, method, args }
+                if library == "doc-flow" && method == "score" && args == &[json!(item)]
+        ));
+    }
+    let id0 = calls[0].id.clone();
+    let id1 = calls[1].id.clone();
+    run.resume_action(&id0, json!(10), false).unwrap();
+    assert!(matches!(run.next_concurrent(), ConcurrentState::Waiting));
+    run.resume_action(&id1, json!(20), false).unwrap();
+    let ConcurrentState::Returned(_) = run.next_concurrent() else {
+        panic!("expected Returned after settling both calls");
+    };
+    let output = run.logs().join("\n");
+    let final_value: Value = serde_json::from_str(output.trim()).unwrap();
+    assert_eq!(final_value, json!({"first": {"done": true}, "batch": [10, 20]}));
+}
+
+#[test]
+fn partial_virtual_returns_early_without_ai_or_falls_through_capturing_locals_and_closure() {
+    let source = r#"
+const io = require("io");
+const process = require("process");
+const host = require("host");
+const mainContext = host.context();
+
+/** @virtual Review target using prepared subContext and return { mode, score }. */
+async function analyze(target, fastHit) {
+  const subContext = { ...mainContext, messages: mainContext.messages.slice(0, 1), tools: { io } };
+  if (fastHit) {
+    return { mode: "js-fast", target };
+  }
+  const suffix = target + ":fallback";
+  // Hand off remaining analysis to AI with live subContext & suffix.
+}
+
+const fast = await analyze("a.ts", true);
+const ai = await analyze("b.ts", false);
+console.log(JSON.stringify({ fast, ai }));
+"#;
+    let program = compile(source).unwrap();
+    assert!(program.functions["analyze"].partial_virtual);
+    let mut run = Runtime::new(program, super::ENTRY, vec![]).unwrap();
+
+    assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Require { ref library }, .. }) if library == "io"));
+    run.resume(json!({"library": "io", "methods": {"read": "read_file"}}), false).unwrap();
+    assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Require { ref library }, .. }) if library == "process"));
+    run.resume(json!({"library": "process", "methods": {"exec": "exec_command"}}), false).unwrap();
+    assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Require { ref library }, .. }) if library == "host"));
+    run.resume(json!({"library": "host", "methods": {}, "library_methods": ["context", "tools"]}), false).unwrap();
+
+    assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::LibraryCall { ref library, ref method, .. }, .. }) if library == "host" && method == "context"));
+    run.resume(json!({
+        "messages": [{"role": "system", "content": "sys"}, {"role": "user", "content": "heavy"}],
+        "tools": ["read_file", "exec_command"],
+        "prompt_cache_key": "task-key-1"
+    }), false).unwrap();
+
+    // First call (`fastHit = true`) returns directly in JS; next Action is the second call's Task!
+    let State::Action(action) = run.next() else { panic!("expected second call ActionKind::Task") };
+    assert!(matches!(&action.kind, ActionKind::Task { name, input, .. } if name == "analyze" && input["target"] == "b.ts"), "{action:?}");
+    let scope = action.scope_variables().expect("captured scope");
+    assert_eq!(scope["suffix"], "b.ts:fallback");
+    assert_eq!(scope["subContext"]["messages"], json!([{"role": "system", "content": "sys"}]));
+    assert_eq!(scope["mainContext"]["prompt_cache_key"], "task-key-1");
+    assert_eq!(action.scope_libraries(), &["io".to_string()]);
+    // Bare module requires (`io`, `process`, `host`) are omitted from scope JSON while `io` referenced inside `subContext.tools` is tracked in `scope_libraries`.
+    assert!(!scope.contains_key("io"));
+    assert!(!scope.contains_key("process"));
+
+    run.resume(json!({"mode": "ai", "score": 9}), false).unwrap();
+    let State::Returned(_) = run.next() else { panic!("expected Returned") };
+    let out: Value = serde_json::from_str(run.logs().join("\n").trim()).unwrap();
+    assert_eq!(out, json!({
+        "fast": {"mode": "js-fast", "target": "a.ts"},
+        "ai": {"mode": "ai", "score": 9}
+    }));
+}
+
+#[test]
+fn virtual_call_captures_lexical_closure_and_library_refs_without_uses() {
+    let source = r#"
+const io = require("io");
+const process = require("process");
+const subTools = { io };
+const note = "keep-this-note";
+const result = judge("item.txt");
+console.log(JSON.stringify(result));
+
+/** @virtual Judge item.txt using lexical note and subTools. */
+function judge(item) {}
+"#;
+    let program = compile(source).unwrap();
+    assert!(!program.functions["judge"].partial_virtual);
+    assert!(program.functions["judge"].uses.is_empty());
+    let mut run = Runtime::new(program, super::ENTRY, vec![]).unwrap();
+
+    assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Require { ref library }, .. }) if library == "io"));
+    run.resume(json!({"library": "io", "methods": {"read": "read_file"}}), false).unwrap();
+    assert!(matches!(run.next(), State::Action(Action { kind: ActionKind::Require { ref library }, .. }) if library == "process"));
+    run.resume(json!({"library": "process", "methods": {"exec": "exec_command"}}), false).unwrap();
+
+    let State::Action(action) = run.next() else { panic!("expected ActionKind::Call") };
+    assert!(matches!(&action.kind, ActionKind::Call { name, args, captured } if name == "judge" && args == &[json!("item.txt")] && captured.is_empty()));
+    let scope = action.scope_variables().expect("captured scope");
+    assert_eq!(scope["note"], "keep-this-note");
+    assert_eq!(action.scope_libraries(), &["io".to_string()]);
+    assert!(!scope.contains_key("process"));
 }

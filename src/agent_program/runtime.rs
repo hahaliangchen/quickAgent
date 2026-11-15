@@ -198,12 +198,41 @@ pub struct Runtime {
     #[serde(default = "program_time_limit")]
     time_limit_ms: i64,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ActionScope {
+    /// Live lexical + local JS scope captured when suspending a `@virtual` call/task.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub variables: BTreeMap<String, Value>,
+    /// Required host libraries reachable from the call arguments or captured scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Action {
     pub id: String,
     pub at: Location,
     pub destination: Option<String>,
     pub kind: ActionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_scope: Option<Box<ActionScope>>,
+}
+impl Action {
+    pub fn scope_variables(&self) -> Option<&BTreeMap<String, Value>> {
+        self.captured_scope.as_deref().map(|s| &s.variables).filter(|v| !v.is_empty())
+    }
+    pub fn scope_libraries(&self) -> &[String] {
+        self.captured_scope.as_deref().map(|s| s.libraries.as_slice()).unwrap_or(&[])
+    }
+}
+struct PreparedAction {
+    kind: ActionKind,
+    captured_scope: Option<Box<ActionScope>>,
+}
+impl From<ActionKind> for PreparedAction {
+    fn from(kind: ActionKind) -> Self {
+        Self { kind, captured_scope: None }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ActionKind {
@@ -217,6 +246,12 @@ pub enum ActionKind {
     Tool {
         name: String,
         args: Value,
+    },
+    /// Call an exported JS function from a required orchestration/skill library.
+    LibraryCall {
+        library: String,
+        method: String,
+        args: Vec<Value>,
     },
     /// Link a third-party library: the host answers with its methods'
     /// tool names, or fails, and the program goes on from this line.
@@ -333,6 +368,188 @@ impl Runtime {
             }
         }
         bindings
+    }
+
+    fn capture_env_chain(&self, start: HeapId) -> Vec<HeapId> {
+        let mut chain = Vec::new();
+        let mut current = Some(start);
+        while let Some(id) = current {
+            if chain.contains(&id) {
+                break;
+            }
+            chain.push(id);
+            current = self.heap.environment_parent(id).ok().flatten();
+        }
+        chain
+    }
+
+    fn record_scope_binding(
+        &self,
+        scope: &mut BTreeMap<String, Value>,
+        bare_required_ids: &BTreeSet<HeapId>,
+        name: &str,
+        value: &VmValue,
+    ) {
+        const MAX_SCOPE_VALUE_BYTES: usize = 128 * 1024;
+        if name.starts_with("$$") || name.starts_with('\0') || is_temp(name) {
+            return;
+        }
+        if self.heap.json_absent(value)
+            || matches!(value, VmValue::Reference(id) if bare_required_ids.contains(id))
+        {
+            scope.remove(name);
+            return;
+        }
+        let Ok(exported) = self.heap.to_json(value) else {
+            return;
+        };
+        let is_context = exported.get("messages").is_some_and(Value::is_array);
+        if !is_context {
+            let serialized = exported.to_string();
+            if serialized.len() > MAX_SCOPE_VALUE_BYTES {
+                let preview: String = serialized.chars().take(512).collect();
+                scope.insert(
+                    name.to_owned(),
+                    json!({
+                        "$summarized": true,
+                        "bytes": serialized.len(),
+                        "preview": preview,
+                    }),
+                );
+                return;
+            }
+        }
+        scope.insert(name.to_owned(), exported);
+    }
+
+    fn collect_libraries_in_value(
+        &self,
+        value: &VmValue,
+        required_by_id: &BTreeMap<HeapId, String>,
+        seen: &mut BTreeSet<HeapId>,
+        found: &mut BTreeSet<String>,
+        depth: usize,
+    ) {
+        let VmValue::Reference(id) = *value else { return };
+        if let Some(lib) = required_by_id.get(&id) {
+            if lib != "host" {
+                found.insert(lib.clone());
+            }
+            return;
+        }
+        if depth >= 16 || !seen.insert(id) {
+            return;
+        }
+        match self.heap.get(id) {
+            Ok(HeapNode::Object(props)) => {
+                for (_, prop) in props {
+                    self.collect_libraries_in_value(prop, required_by_id, seen, found, depth + 1);
+                }
+            }
+            Ok(HeapNode::Array(items)) => {
+                for item in items {
+                    self.collect_libraries_in_value(item, required_by_id, seen, found, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn capture_virtual_metadata(
+        &self,
+        env: Option<HeapId>,
+        values: &[VmValue],
+        include_active_frame: bool,
+    ) -> Option<Box<ActionScope>> {
+        let required_by_id: BTreeMap<HeapId, String> = self
+            .required
+            .iter()
+            .map(|(name, id)| {
+                (
+                    *id,
+                    name.strip_suffix("/promises").unwrap_or(name).to_owned(),
+                )
+            })
+            .collect();
+        let bare_required_ids: BTreeSet<HeapId> = self.required.values().copied().collect();
+        let mut scope = BTreeMap::new();
+        let mut libraries = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+
+        for value in values {
+            self.collect_libraries_in_value(value, &required_by_id, &mut seen, &mut libraries, 0);
+        }
+
+        let mut env_ids = Vec::new();
+        if let Some(id) = env {
+            for item in self.capture_env_chain(id).into_iter().rev() {
+                if !env_ids.contains(&item) {
+                    env_ids.push(item);
+                }
+            }
+        }
+        if include_active_frame && let Some(frame) = self.frames.last() {
+            for start in frame.origin.iter().copied().chain(frame.env) {
+                for item in self.capture_env_chain(start).into_iter().rev() {
+                    if !env_ids.contains(&item) {
+                        env_ids.push(item);
+                    }
+                }
+            }
+        }
+
+        for id in env_ids {
+            let is_module_root = Some(id) == self.module_env;
+            for (name, value) in self.heap.initialized_bindings(id).unwrap_or_default() {
+                self.record_scope_binding(&mut scope, &bare_required_ids, &name, &value);
+                if name.starts_with("$$") || name.starts_with('\0') || is_temp(&name) {
+                    continue;
+                }
+                let is_bare_module_require = is_module_root
+                    && matches!(value, VmValue::Reference(ref_id) if bare_required_ids.contains(&ref_id));
+                if !is_bare_module_require {
+                    self.collect_libraries_in_value(
+                        &value,
+                        &required_by_id,
+                        &mut seen,
+                        &mut libraries,
+                        0,
+                    );
+                }
+            }
+        }
+
+        if include_active_frame && let Some(frame) = self.frames.last() {
+            if frame.env.is_none()
+                && let Some(locals) = &frame.vm_locals
+            {
+                for (name, value) in locals {
+                    self.record_scope_binding(&mut scope, &bare_required_ids, name, value);
+                    if !is_temp(name) {
+                        self.collect_libraries_in_value(
+                            value,
+                            &required_by_id,
+                            &mut seen,
+                            &mut libraries,
+                            0,
+                        );
+                    }
+                }
+            } else {
+                for (name, value) in &frame.locals {
+                    if !is_temp(name) {
+                        scope.insert(name.clone(), value.clone());
+                    }
+                }
+            }
+        }
+
+        let libraries: Vec<String> = libraries.into_iter().collect();
+        if scope.is_empty() && libraries.is_empty() {
+            None
+        } else {
+            Some(Box::new(ActionScope { variables: scope, libraries }))
+        }
     }
     /// Conservative reachability over the remaining control flow. Include
     /// back-edges and exception handlers; never infer liveness from comments.
@@ -619,21 +836,56 @@ impl Runtime {
         Ok(runtime)
     }
 
+    /// True when a module-environment binding is user-facing Console state.
+    pub(crate) fn is_visible_console_binding(name: &str) -> bool {
+        !name.starts_with('\0') && !name.starts_with("$$") && !matches!(name, "this" | "arguments")
+    }
+
     /// Names currently bound in the persistent top-level Console environment.
     pub fn module_names(&self) -> BTreeSet<String> {
         self.module_env
             .and_then(|env| self.heap.binding_names(env).ok())
             .into_iter()
             .flatten()
-            .filter(|name| !name.starts_with('\0'))
+            .filter(|name| Self::is_visible_console_binding(name))
             .collect()
+    }
+
+    /// Bounded Chrome-DevTools-style previews of live persistent Console bindings.
+    pub fn module_binding_previews(&self) -> BTreeMap<String, String> {
+        let Some(env) = self.module_env else {
+            return BTreeMap::new();
+        };
+        let names = self.heap.binding_names(env).unwrap_or_default();
+        let initialized: BTreeMap<String, VmValue> = self
+            .heap
+            .initialized_bindings(env)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let opts = super::js_value::InspectOptions::scope();
+        let mut previews = BTreeMap::new();
+        for name in names {
+            if !Self::is_visible_console_binding(&name) {
+                continue;
+            }
+            let preview = match initialized.get(&name) {
+                Some(value) => super::js_value::preview(&self.heap, value, opts),
+                None => "<uninitialized>".to_owned(),
+            };
+            previews.insert(name, preview);
+        }
+        previews
     }
 
     /// Append one compiled top-level Console cell to this finished Runtime.
     /// The heap and module environment remain untouched; only the new cell's
     /// functions and declarations are installed before its frame runs.
     pub fn append_cell(&mut self, cell: Program, entry: &str) -> Result<()> {
-        ensure!(self.finished && self.frames.is_empty(), "the Console Runtime is still running");
+        ensure!(
+            self.finished && (self.frames.is_empty() || self.error.is_some()),
+            "the Console Runtime is still running"
+        );
         ensure!(cell.version == VERSION, "unsupported Console cell version");
         ensure!(cell.prelude_hash == super::prelude::hash(), "Console cell prelude changed");
         ensure!(cell.functions.contains_key(entry), "Console cell entry is missing");
@@ -704,6 +956,22 @@ impl Runtime {
             None,
         )?;
         frame.env = Some(module_env);
+        // An earlier errored cell keeps its failed frames for inspection until a
+        // follow-up cell starts; clear all leftover execution queues first.
+        self.frames.clear();
+        self.promises.clear_pending_jobs();
+        self.timers.clear();
+        self.microtasks.clear();
+        self.forwarding.clear();
+        self.adopting.clear();
+        self.reactions.clear();
+        self.async_promises.clear();
+        self.throw_sites.clear();
+        self.async_actions.clear();
+        self.active_async_action = None;
+        self.active_reaction = None;
+        self.active_async_batch.clear();
+        self.inflight_async.clear();
         self.frames.push(frame);
         self.pending = None;
         self.finished = false;
@@ -779,12 +1047,26 @@ impl Runtime {
     /// for "<library>/promises", as with Node's fs and fs/promises.
     fn link(&mut self, library: &str, value: &Value) -> Result<VmValue> {
         let methods = value["methods"].as_object().context("a required library returns its methods")?;
-        let prefix = if library.ends_with("/promises") { "tool:async-tool:" } else { "tool:" };
+        let asynchronous = library.ends_with("/promises");
+        let prefix = if asynchronous { "tool:async-tool:" } else { "tool:" };
+        let lib_prefix = if asynchronous { "library-async:" } else { "library:" };
+        let base_library = library.strip_suffix("/promises").unwrap_or(library);
         let mut properties = Vec::with_capacity(methods.len());
         for (method, tool) in methods {
             let tool = tool.as_str().context("a library method names its tool")?;
             let native = self.heap.native(&format!("{prefix}{tool}"))?;
             properties.push((method.clone(), VmValue::Reference(native)));
+        }
+        if let Some(js_methods) = value["library_methods"].as_array() {
+            properties.reserve(js_methods.len());
+            for method in js_methods {
+                let method = method.as_str().context("a library method name must be a string")?;
+                if properties.iter().any(|(existing, _)| existing == method) {
+                    continue;
+                }
+                let native = self.heap.native(&format!("{lib_prefix}{base_library}:{method}"))?;
+                properties.push((method.to_owned(), VmValue::Reference(native)));
+            }
         }
         let id = self.heap.allocate(HeapNode::Object(properties))?;
         self.required.insert(library.to_owned(), id);
@@ -825,7 +1107,7 @@ impl Runtime {
         Ok(())
     }
 
-    fn invoke_method(&mut self, receiver: VmValue, name: &str, args: Vec<VmValue>, destination: Option<String>, ignore_property: bool) -> Result<Option<ActionKind>> {
+    fn invoke_method(&mut self, receiver: VmValue, name: &str, args: Vec<VmValue>, destination: Option<String>, ignore_property: bool) -> Result<Option<PreparedAction>> {
         #[cfg(test)]
         if let VmValue::Reference(id)=&receiver {
             if matches!(self.heap.get(*id)?,HeapNode::Native(n) if n=="test262.assert") {
@@ -906,20 +1188,48 @@ impl Runtime {
         Ok(None)
     }
 
+    fn dir_options(&self, value: Option<&VmValue>) -> super::js_value::InspectOptions {
+        let mut opts = super::js_value::InspectOptions::dir();
+        let Some(VmValue::Reference(id)) = value else {
+            return opts;
+        };
+        let num = |key: &str| -> Option<usize> {
+            match self.heap.own_property(*id, key).ok().flatten() {
+                Some(VmValue::Number(n)) if n.get().is_finite() && n.get() >= 0.0 => Some(n.get() as usize),
+                _ => None,
+            }
+        };
+        if let Some(depth) = num("depth") {
+            opts.max_depth = depth.min(6);
+        }
+        if let Some(chars) = num("maxStringLength") {
+            opts.max_string_chars = chars.clamp(16, 2_000);
+        }
+        if let Some(items) = num("maxArrayLength") {
+            opts.max_items = items.clamp(1, 50);
+        }
+        opts
+    }
+
     /// Preserve complete records. Exhausting capture memory ends this program;
     /// catching an ordinary JS exception cannot turn missing evidence into success.
     fn print(&mut self, method: &str, args: &[VmValue]) -> Result<()> {
-        let parts = args
-            .iter()
-            .map(|value| match value {
-                VmValue::Reference(_) => match self.heap.to_json(value) {
-                    Ok(json) => Ok(json.to_string()),
-                    Err(_) => super::js_value::to_string(&self.heap, value),
-                },
-                value => super::js_value::to_string(&self.heap, value),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut line = parts.join(" ");
+        let mut line = if method == "dir" {
+            let opts = self.dir_options(args.get(1));
+            super::js_value::preview(&self.heap, args.first().unwrap_or(&VmValue::Undefined), opts)
+        } else {
+            let parts = args
+                .iter()
+                .map(|value| match value {
+                    VmValue::Reference(_) => match self.heap.to_json(value) {
+                        Ok(json) => Ok(json.to_string()),
+                        Err(_) => super::js_value::to_string(&self.heap, value),
+                    },
+                    value => super::js_value::to_string(&self.heap, value),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            parts.join(" ")
+        };
         if matches!(method, "warn" | "error") {
             line = format!("[{method}] {line}");
         }
@@ -978,10 +1288,10 @@ impl Runtime {
         callee: VmValue,
         args: Vec<VmValue>,
         destination: Option<String>,
-    ) -> Result<Option<ActionKind>> {
+    ) -> Result<Option<PreparedAction>> {
         self.invoke_receiver(callee,VmValue::Undefined,args,destination)
     }
-    fn get_property(&mut self,target:VmValue,key:VmValue,receiver:VmValue,destination:Option<String>)->Result<Option<ActionKind>> {
+    fn get_property(&mut self,target:VmValue,key:VmValue,receiver:VmValue,destination:Option<String>)->Result<Option<PreparedAction>> {
         ensure!(!matches!(target,VmValue::Null|VmValue::Undefined),"TypeError: Cannot read properties of null or undefined");
         if matches!(key,VmValue::Reference(_)){let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$keyedGet",vec![target,key,receiver],destination)?;self.push_frame(frame);return Ok(None);}
         let original_key=key.clone();
@@ -1004,8 +1314,8 @@ impl Runtime {
         let value=super::vm_eval::member(&self.heap,&target,&original_key)?;
         self.store(destination,value)?;Ok(None)
     }
-    fn invoke_receiver(&mut self, callee:VmValue, receiver:VmValue, args:Vec<VmValue>, destination:Option<String>) -> Result<Option<ActionKind>> {self.invoke_receiver_mode(callee,receiver,args,destination,false)}
-    fn invoke_receiver_mode(&mut self, mut callee:VmValue, mut receiver:VmValue, mut args:Vec<VmValue>, destination:Option<String>, constructing:bool) -> Result<Option<ActionKind>> {
+    fn invoke_receiver(&mut self, callee:VmValue, receiver:VmValue, args:Vec<VmValue>, destination:Option<String>) -> Result<Option<PreparedAction>> {self.invoke_receiver_mode(callee,receiver,args,destination,false)}
+    fn invoke_receiver_mode(&mut self, mut callee:VmValue, mut receiver:VmValue, mut args:Vec<VmValue>, destination:Option<String>, constructing:bool) -> Result<Option<PreparedAction>> {
         loop {
         let node = match &callee {
             VmValue::Reference(id) => self.heap.get(*id)?.clone(),
@@ -1025,7 +1335,7 @@ impl Runtime {
                     .functions
                     .get(&function)
                     .with_context(|| format!("unknown function {function}"))?;
-                if f.virtual_task {
+                if f.virtual_task && !f.partial_virtual {
                     ensure!(
                         args.len() == f.params.len(),
                         "{function}: expected {} arguments, got {}",
@@ -1033,10 +1343,14 @@ impl Runtime {
                         args.len()
                     );
                     let captured = self.captured(&function, Some(environment))?;
-                    return Ok(Some(ActionKind::Call {
-                        name: function,
-                        args: json_args(args, &self.heap)?,
-                        captured,
+                    let captured_scope = self.capture_virtual_metadata(Some(environment), &args, false);
+                    return Ok(Some(PreparedAction {
+                        kind: ActionKind::Call {
+                            name: function,
+                            args: json_args(args, &self.heap)?,
+                            captured,
+                        },
+                        captured_scope,
                     }));
                 }
                 // A named function expression refers to itself unless one of
@@ -1293,14 +1607,8 @@ impl Runtime {
                     self.store(destination, VmValue::Undefined)?;
                     return Ok(None);
                 }
-                if let Some(tool) = name.strip_prefix("tool:") {
-                    let mut args = json_args(args, &self.heap)?;
-                    let args = if args.is_empty() { json!({}) } else { args.remove(0) };
-                    ensure!(args.is_object(), "tool arguments must be an object");
-                    return Ok(Some(ActionKind::Tool {
-                        name: tool.to_owned(),
-                        args,
-                    }));
+                if let Some((kind, _)) = self.native_host_action(&name, &args)? {
+                    return Ok(Some(kind.into()));
                 }
                 let value = super::js_methods::builtin(&mut self.heap, &name, &args)?;
                 self.store(destination, value)?;
@@ -1637,12 +1945,33 @@ impl Runtime {
         let error = self.host_error(value, at);
         self.throw(error, at);
     }
+    fn native_host_action(&self, name: &str, args: &[VmValue]) -> Result<Option<(ActionKind, bool)>> {
+        if let Some(tool) = name.strip_prefix("tool:") {
+            let mut values = json_args(args.to_vec(), &self.heap)?;
+            let arg = if values.is_empty() { json!({}) } else { values.remove(0) };
+            ensure!(arg.is_object(), "tool arguments must be an object");
+            let asynchronous = tool.starts_with("async-tool:");
+            return Ok(Some((ActionKind::Tool { name: tool.to_owned(), args: arg }, asynchronous)));
+        }
+        let (asynchronous, rest) = if let Some(rest) = name.strip_prefix("library-async:") {
+            (true, rest)
+        } else if let Some(rest) = name.strip_prefix("library:") {
+            (false, rest)
+        } else {
+            return Ok(None);
+        };
+        let (library, method) = rest.split_once(':').context("invalid library method reference")?;
+        let args = json_args(args.to_vec(), &self.heap)?;
+        let library = if asynchronous { format!("async:{library}") } else { library.to_owned() };
+        Ok(Some((ActionKind::LibraryCall { library, method: method.to_owned(), args }, asynchronous)))
+    }
     /// Dispatch virtual calls already issued by JS while preserving serial effects.
     pub fn next_concurrent(&mut self) -> ConcurrentState {
         let state = self.next();
         if let State::Action(action) = state {
+            let parallel_frame = |action: &Action| matches!(action.kind, ActionKind::Call { .. } | ActionKind::Task { .. } | ActionKind::LibraryCall { .. });
             let mut actions = Vec::new();
-            if self.active_async_action.as_ref().is_some_and(|pending| matches!(pending.action.kind, ActionKind::Call { .. })) {
+            if self.active_async_action.as_ref().is_some_and(|pending| parallel_frame(&pending.action)) {
                 self.pending = None;
                 let pending = self.active_async_action.take().expect("active async action");
                 actions.push(pending.action.clone());
@@ -1650,7 +1979,7 @@ impl Runtime {
             }
             let mut retained = VecDeque::new();
             while let Some(pending) = self.async_actions.pop_front() {
-                if matches!(pending.action.kind, ActionKind::Call { .. }) {
+                if parallel_frame(&pending.action) {
                     actions.push(pending.action.clone());
                     self.inflight_async.insert(pending.action.id.clone(), pending);
                 } else { retained.push_back(pending); }
@@ -1944,23 +2273,29 @@ impl Runtime {
                             continue;
                         }
                         let node = match &callback { VmValue::Reference(id) => self.heap.get(*id).cloned(), _ => unreachable!() };
-                        if let Ok(HeapNode::Native(name)) = &node && let Some(tool) = name.strip_prefix("tool:") {
-                            let input = json_args(vec![value.clone()], &self.heap).and_then(|args| {
-                                let input = args.into_iter().next().unwrap_or_else(|| json!({}));
-                                ensure!(input.is_object(), "tool arguments must be an object");
-                                Ok(input)
-                            });
-                            match input {
-                                Ok(input) => {
-                                    let asynchronous = tool.starts_with("async-tool:");
-                                    let tool = tool.strip_prefix("async-tool:").unwrap_or(tool);
-                                    let action = Action { id: format!("program-{}", crate::agent_service::uuid_like()), at: at.clone(), destination: None, kind: ActionKind::Tool { name: tool.into(), args: input } };
+                        if let Ok(HeapNode::Native(name)) = &node
+                            && (name.starts_with("tool:") || name.starts_with("library:") || name.starts_with("library-async:"))
+                        {
+                            let reaction_args = vec![value.clone()];
+                            match self.native_host_action(name, &reaction_args) {
+                                Ok(Some((mut kind, asynchronous))) => {
+                                    if let ActionKind::Tool { name, .. } = &mut kind
+                                        && let Some(stripped) = name.strip_prefix("async-tool:")
+                                    {
+                                        *name = stripped.to_owned();
+                                    } else if let ActionKind::LibraryCall { library, .. } = &mut kind
+                                        && let Some(stripped) = library.strip_prefix("async:")
+                                    {
+                                        *library = stripped.to_owned();
+                                    }
+                                    let action = Action { id: format!("program-{}", crate::agent_service::uuid_like()), at: at.clone(), destination: None, kind, captured_scope: None };
                                     let pending = PendingAsyncAction { action: action.clone(), promise: reaction.target, scope: reaction.scope };
                                     if asynchronous { self.async_actions.push_back(pending); continue; }
                                     self.pending = Some(action.clone());
                                     self.active_reaction = Some(pending);
                                     return State::Action(action);
                                 }
+                                Ok(None) => {}
                                 Err(error) => {
                                     let error = self.runtime_error(format!("{error:#}"), &at);
                                     if let Err(error) = self.promises.settle_heap_promise(&mut self.heap, reaction.target, super::promise::Outcome::Rejected(error)) {
@@ -2027,7 +2362,7 @@ impl Runtime {
                     continue;
                 }
                 if let Some(pending) = self.async_actions.pop_front() {
-                    let read = |action: &Action| matches!(&action.kind, ActionKind::Tool { name, .. } if matches!(name.as_str(), "read_file" | "read_file_lines" | "search_text" | "list_dir"));
+                    let read = |action: &Action| matches!(&action.kind, ActionKind::Tool { name, .. } if matches!(name.as_str(), "read_file" | "read_file_lines" | "read_file_chunk" | "search_text" | "list_dir"));
                     if read(&pending.action) && self.async_actions.front().is_some_and(|item| read(&item.action)) {
                         let at = pending.action.at.clone();
                         let mut batch = vec![pending];
@@ -2037,7 +2372,7 @@ impl Runtime {
                         let operations = batch.iter().map(|item| match &item.action.kind {
                             ActionKind::Tool { name, args } => (name.clone(), args.clone()), _ => unreachable!(),
                         }).collect();
-                        let action = Action { id: format!("program-{}", crate::agent_service::uuid_like()), at, destination: None, kind: ActionKind::ParallelReads { operations } };
+                        let action = Action { id: format!("program-{}", crate::agent_service::uuid_like()), at, destination: None, kind: ActionKind::ParallelReads { operations }, captured_scope: None };
                         self.pending = Some(action.clone());
                         self.active_async_batch = batch;
                         return State::Action(action);
@@ -2305,7 +2640,7 @@ impl Runtime {
                     }
                     Op::Effect(destination, effect) => {
                         let locals = self.frames.last().unwrap().locals()?;
-                        let kind = match effect {
+                        let prepared: PreparedAction = match effect {
                             Effect::PromiseConstruct { executor } => {
                                 let executor = eval(&executor, locals, &mut self.heap)?;
                                 self.promise_constructor(executor,destination,&at)?;
@@ -2333,7 +2668,7 @@ impl Runtime {
                                     .functions
                                     .get(&name)
                                     .with_context(|| format!("unknown function {name}"))?;
-                                if function.virtual_task {
+                                if function.virtual_task && !function.partial_virtual {
                                     // AI functions take exactly their declared parameters.
                                     ensure!(
                                         args.len() == function.params.len(),
@@ -2343,7 +2678,11 @@ impl Runtime {
                                     );
                                     // A top-level function closes over the module scope.
                                     let captured = self.captured(&name, self.module_env)?;
-                                    ActionKind::Call { name, args: json_args(args, &self.heap)?, captured }
+                                    let captured_scope = self.capture_virtual_metadata(self.module_env, &args, false);
+                                    PreparedAction {
+                                        kind: ActionKind::Call { name, args: json_args(args, &self.heap)?, captured },
+                                        captured_scope,
+                                    }
                                 } else {
                                     // Functions see the module scope, not their caller's variables.
                                     ensure!(self.frames.len() < 64, "program call depth limit");
@@ -2442,7 +2781,7 @@ impl Runtime {
                                     self.store(destination, VmValue::Reference(*id))?;
                                     return Ok(None);
                                 }
-                                ActionKind::Require { library }
+                                ActionKind::Require { library }.into()
                             }
                             Effect::RequireValue(value) => {
                                 let value = eval(&value, locals, &mut self.heap)?;
@@ -2456,7 +2795,7 @@ impl Runtime {
                                     self.store(destination, VmValue::Reference(*id))?;
                                     return Ok(None);
                                 }
-                                ActionKind::Require { library }
+                                ActionKind::Require { library }.into()
                             }
                             Effect::Tool(name, args) => {
                                 let values = vm_args(&args, locals, &mut self.heap)?;
@@ -2467,7 +2806,7 @@ impl Runtime {
                                     args.remove(0)
                                 };
                                 ensure!(args.is_object(), "tool arguments must be an object");
-                                ActionKind::Tool { name, args }
+                                ActionKind::Tool { name, args }.into()
                             }
                             Effect::ParallelReads(operations) => {
                                 let mut resolved = Vec::with_capacity(operations.len());
@@ -2485,6 +2824,7 @@ impl Runtime {
                                 ActionKind::ParallelReads {
                                     operations: resolved,
                                 }
+                                .into()
                             }
                             Effect::ParallelReadMap {
                                 name,
@@ -2518,6 +2858,7 @@ impl Runtime {
                                 ActionKind::ParallelReads {
                                     operations: resolved,
                                 }
+                                .into()
                             }
                             Effect::Fork(..) | Effect::Join(..) => bail!("saved fork/join programs are retired and cannot be resumed"),
                             Effect::Task {
@@ -2526,13 +2867,23 @@ impl Runtime {
                                 input,
                             } => {
                                 let value = eval(&input, locals, &mut self.heap)?;
-                                ActionKind::Task { name, description, input: self.heap.to_json(&value)? }
+                                let captured_scope =
+                                    self.capture_virtual_metadata(locals.env, &[value.clone()], true);
+                                PreparedAction {
+                                    kind: ActionKind::Task {
+                                        name,
+                                        description,
+                                        input: self.heap.to_json(&value)?,
+                                    },
+                                    captured_scope,
+                                }
                             },
                         };
-                        let mut kind = kind;
+                        let mut kind = prepared.kind;
                         let asynchronous = match &mut kind {
                             ActionKind::Tool { name, .. } if name.starts_with("async-tool:") => { *name = name["async-tool:".len()..].to_owned(); true }
-                            ActionKind::Call { name, .. } => self.program.functions.get(name).is_some_and(|f| f.virtual_task && f.is_async),
+                            ActionKind::LibraryCall { library, .. } if library.starts_with("async:") => { *library = library["async:".len()..].to_owned(); true }
+                            ActionKind::Call { name, .. } | ActionKind::Task { name, .. } => self.program.functions.get(name).is_some_and(|f| f.virtual_task && f.is_async),
                             _ => false,
                         };
                         let action = Action {
@@ -2540,6 +2891,7 @@ impl Runtime {
                             at: at.clone(),
                             destination: if asynchronous { None } else { destination.clone() },
                             kind,
+                            captured_scope: prepared.captured_scope,
                         };
                         if asynchronous {
                             ensure!(self.async_actions.len() + self.inflight_async.len() + usize::from(self.active_async_action.is_some()) + self.active_async_batch.len() < 64, "too many pending async host actions");

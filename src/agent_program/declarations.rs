@@ -288,7 +288,10 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
 pub fn directory(libraries: &Libraries) -> String {
     let sections: &[(&str, &[(&str, &str)])] = &[
         ("Read and navigate code", &[
-            ("io", "List files, search text, and read full files or small line ranges. Use for raw source and workspace paths."),
+            ("io", "List files, search text, read small files, tail line ranges, or stream large files chunk by chunk. Use for raw source and workspace paths."),
+        ]),
+        ("Inspect repository history", &[
+            ("git", "Read bounded structured status, diffs, and commit history without shell parsing."),
         ]),
         ("Run and inspect applications", &[
             ("process", "Run project commands and inspect their processes."),
@@ -329,13 +332,46 @@ pub fn core_methods(libraries: &Libraries, definitions: &[Value]) -> String {
     for (library, methods) in libraries {
         for (method, target) in methods {
             let (inputs, outputs, purpose): (&[&str], &[&str], &str) = match target.as_str() {
-                "list_dir" => (&["path", "recursive", "max_depth"], &["entries"], "Inspect the file layout."),
-                "read_file" => (&["path", "max_chars"], &["content", "complete"], "Read a file; in program code one call returns all of it."),
-                "read_file_lines" => (&["path", "start_line", "end_line", "max_chars"],
-                    &["lines", "complete", "next_start_line", "next_column"], "Read only the needed source lines."),
-                "search_text" => (&["query", "path", "regex", "output_mode", "glob", "context_lines", "max_matches"],
+                "list_dir" => (
+                    &["path", "recursive", "max_depth", "glob", "kind", "modified_after", "modified_before", "sort_by", "max_entries"],
+                    &["entries", "truncated"],
+                    "Find and sort files or inspect layout; entries include path, kind, size_bytes, modified_at, modified_ms.",
+                ),
+                "read_file" => (
+                    &["path", "max_bytes", "max_chars"],
+                    &["content", "complete", "bytes", "total_lines"],
+                    "Read a small/bounded UTF-8 file (max_bytes defaults to 1 MiB, max 16 MiB); for large logs, tail, or chunked streaming, prefer read_lines or read_chunk.",
+                ),
+                "read_file_lines" => (
+                    &["path", "start_line", "end_line", "max_chars"],
+                    &["content", "lines", "complete", "total_lines", "next_start_line", "next_column"],
+                    "Read inclusive lines (positive 1-based, or negative from EOF e.g. start_line:-80, end_line:-1 for tail; streams files >16 MiB).",
+                ),
+                "read_file_chunk" => (
+                    &["path", "byte_offset", "start_line", "max_bytes", "max_lines"],
+                    &["content", "lines", "eof", "bytes", "file_bytes", "next_byte_offset", "next_line"],
+                    "Stream a large file in bounded chunks from byte_offset; iterate until eof, summarize per chunk, and discard raw chunk text.",
+                ),
+                "search_text" => (
+                    &["query", "path", "regex", "output_mode", "glob", "context_lines", "max_matches", "max_matches_per_file"],
                     &["matches", "files", "counts", "truncated"],
-                    "Find text or patterns; list matching files or count them."),
+                    "Find text or patterns; list matching files or count them.",
+                ),
+                "git_status" => (
+                    &["paths", "include_untracked", "max_entries"],
+                    &["head", "branch", "clean", "staged", "modified", "untracked", "total_entries", "truncated"],
+                    "Read bounded structured working-tree status; use paths to scope a large repository.",
+                ),
+                "git_diff" => (
+                    &["rev_range", "staged", "paths", "stat_only", "unified", "max_lines", "max_chars"],
+                    &["diff", "files", "truncated", "stat_only"],
+                    "Read a bounded diff; start with stat_only and request a limited patch preview when needed.",
+                ),
+                "git_log" => (
+                    &["limit", "paths", "rev"],
+                    &["commits", "truncated"],
+                    "Read a bounded structured commit history.",
+                ),
                 "exec_command" => (&["cmd", "workdir", "yield_time_ms", "max_output_tokens", "stdin"],
                     &["session_id", "running", "exit_code", "stdout", "stderr", "duration_ms", "encoding", "truncated"],
                     "Module code only: run a platform-shell command; output enters JS heap, not AI context."),

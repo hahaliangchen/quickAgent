@@ -1,6 +1,7 @@
 import { Fragment, memo, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
-  DisclosureRow, IconCodeOutlineRegular, IconSparkleRegular, IconThinkOutlineRegular, MarkdownText,
+  DisclosureRow, IconClockOutlineMedium, IconCodeOutlineRegular, IconPlayOutlineMedium,
+  IconQuestionOutlineMedium, IconSparkleRegular, IconThinkOutlineRegular, IconWarningTriangleOutlineMedium, MarkdownText,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useDisclosure } from '../disclosure.ts'
 import toolCss from '../dsh/tool/ToolRow.module.css'
@@ -19,6 +20,31 @@ const ACTIVE = new Set(['pending', 'running', 'suspended'])
 
 function firstLine(text: string): string {
   return text.trim().split(/\r?\n/)[0] ?? ''
+}
+
+const LEAKED_PROGRAM_RE = /(?:^|\n)\s*(?:\/\/|\/\*+|\*)\s*@(?:step|purpose|expect|reuse|virtual)\b/
+const STEP_TAG_RE = /(?:^|\n)\s*(?:\/\/|\/\*+|\*)\s*@step\s+([^\n]+)/g
+
+function extractStepTitles(text: string): string[] {
+  const titles: string[] = []
+  for (const match of text.matchAll(STEP_TAG_RE)) {
+    const raw = (match[1] ?? '').replace(/\*\/\s*$/, '').trim()
+    if (raw !== '') titles.push(raw)
+  }
+  return titles
+}
+
+function isLeakedProgramDraft(text: string): boolean {
+  const trimmed = text.trimStart()
+  return !trimmed.startsWith('```') && LEAKED_PROGRAM_RE.test(trimmed)
+}
+
+function activityLine(reply: AssistantItem): string {
+  if (reply.text.trim() === '') return reasoningHeadline(reply.reasoning)
+  if (isLeakedProgramDraft(reply.text)) {
+    return extractStepTitles(reply.text)[0] ?? (reasoningHeadline(reply.reasoning) || '编写程序')
+  }
+  return firstLine(reply.text)
 }
 
 /** Lines of the ```js block a reply holds. */
@@ -46,8 +72,8 @@ export function liveActivity(items: readonly ChatItem[]): string {
     }
     if (item.kind === 'assistant') {
       if (item.streaming && item.toolProgress?.length) return toolProgressLabel(item)
-      if (PROGRAM_FENCE.test(item.text)) return '编写程序'
-      const line = item.text.trim() !== '' ? firstLine(item.text) : reasoningHeadline(item.reasoning)
+      if (item.program !== undefined) return '编写程序'
+      const line = activityLine(item)
       if (line !== '') return line
     }
   }
@@ -217,25 +243,42 @@ const Call = memo(function Call({ call, closed, onOpenTask, renderItem }: {
   )
 })
 
-const PROGRAM_EVENTS: Record<ProgramItem['event'], { label: string; tone: 'muted' | 'warn' | 'error' }> = {
-  started: { label: '开始运行', tone: 'muted' },
-  invalid: { label: '程序未通过编译', tone: 'error' },
-  failed: { label: '程序出错', tone: 'error' },
-  question: { label: '程序停下来等你回答', tone: 'warn' },
-  paused: { label: '程序已暂停', tone: 'warn' },
-  result_invalid: { label: '返回值不符合约定', tone: 'warn' },
-  module_loaded: { label: '使用已写好的模块', tone: 'muted' },
-  module_fix: { label: '模块出错，交给 AI 修复', tone: 'warn' },
+const PROGRAM_EVENTS: Record<ProgramItem['event'], {
+  label: string
+  tone: 'muted' | 'warn' | 'error'
+  chipTone: 'task' | 'context' | 'edit' | 'danger'
+  icon: ReactNode
+}> = {
+  started: { label: '开始运行', tone: 'muted', chipTone: 'task', icon: <IconPlayOutlineMedium /> },
+  invalid: { label: '程序未通过编译', tone: 'error', chipTone: 'danger', icon: <IconWarningTriangleOutlineMedium /> },
+  failed: { label: '程序出错', tone: 'error', chipTone: 'danger', icon: <IconWarningTriangleOutlineMedium /> },
+  question: { label: '程序停下来等你回答', tone: 'warn', chipTone: 'edit', icon: <IconQuestionOutlineMedium /> },
+  paused: { label: '程序已暂停', tone: 'warn', chipTone: 'edit', icon: <IconClockOutlineMedium /> },
+  result_invalid: { label: '返回值不符合约定', tone: 'warn', chipTone: 'edit', icon: <IconWarningTriangleOutlineMedium /> },
+  module_loaded: { label: '使用已写好的模块', tone: 'muted', chipTone: 'context', icon: <IconCodeOutlineRegular /> },
+  module_fix: { label: '模块出错，交给 AI 修复', tone: 'warn', chipTone: 'edit', icon: <IconWarningTriangleOutlineMedium /> },
 }
 
 function ProgramEvent({ item }: { item: ProgramItem }) {
   const meta = PROGRAM_EVENTS[item.event]
   const where = item.line === undefined ? '' : `第 ${item.line} 行`
   return (
-    <div className={css.event} data-tone={meta.tone} role={meta.tone === 'error' ? 'status' : undefined}>
-      <strong>{meta.label}</strong>
-      {(where !== '' || item.text !== '') && <span title={item.text}>{[where, item.text].filter(Boolean).join('：')}</span>}
-      <ExecutionPlanView plan={item.plan} />
+    <div
+      className={`${toolCss.root} ${css.event}`}
+      data-tone={meta.chipTone}
+      data-event-tone={meta.tone}
+      role={meta.tone === 'error' ? 'status' : undefined}
+    >
+      <div className={css.eventRow}>
+        <span className={`${toolCss.leading} ${css.eventLeading}`} aria-hidden>{meta.icon}</span>
+        <div className={css.eventBody}>
+          <div className={css.eventHeader}>
+            <strong>{meta.label}</strong>
+            {(where !== '' || item.text !== '') && <span title={item.text}>{[where, item.text].filter(Boolean).join('：')}</span>}
+          </div>
+          <ExecutionPlanView plan={item.plan} />
+        </div>
+      </div>
     </div>
   )
 }
@@ -243,19 +286,67 @@ function ProgramEvent({ item }: { item: ProgramItem }) {
 function ExecutionPlanView({ plan }: { plan: ExecutionPlan | undefined }) {
   if (plan === undefined || plan.steps.length === 0) return null
   return (
-    <details className={css.plan}>
-      <summary>计划（{plan.steps.length} 步）</summary>
-      <ol>
-        {plan.steps.map(step => (
-          <li key={`${step.line ?? 0}:${step.title}`}>
-            <span>{step.title}</span>
-            {(step.purpose || step.expect || step.reuse) && <small>{[step.purpose && `目的：${step.purpose}`, step.expect && `预期：${step.expect}`, step.reuse && `复用：${step.reuse}`].filter(Boolean).join('；')}</small>}
-          </li>
-        ))}
+    <div className={css.plan}>
+      <div className={css.planTitle}>计划（{plan.steps.length} 步）</div>
+      <ol className={css.planList}>
+        {plan.steps.map(step => {
+          const details = [
+            step.purpose ? { label: '目的：', value: step.purpose } : null,
+            step.expect ? { label: '预期：', value: step.expect } : null,
+            step.reuse ? { label: '复用：', value: step.reuse } : null,
+          ].filter((item): item is { label: string; value: string } => item !== null)
+          return (
+            <li key={`${step.line ?? 0}:${step.title}`} className={css.planStep}>
+              <div className={css.planStepTitle}>{step.title}</div>
+              {details.length > 0 && (
+                <div className={css.planMeta}>
+                  {details.map((item, idx) => (
+                    <Fragment key={item.label}>
+                      {idx > 0 && '；'}
+                      <strong className={css.planMetaLabel}>{item.label}</strong>
+                      {item.value}
+                    </Fragment>
+                  ))}
+                </div>
+              )}
+            </li>
+          )
+        })}
       </ol>
-    </details>
+    </div>
   )
 }
+
+/** A leaked @step draft reply: show only extracted step intent, keeping raw draft collapsed. */
+const LeakedDraftStep = memo(function LeakedDraftStep({ reply, tools, closed, onOpenTask }: {
+  reply: AssistantItem
+  tools: readonly ToolItem[]
+  closed: boolean
+  onOpenTask: (taskId: string) => void
+}) {
+  const { expanded, toggle } = useDisclosure()
+  const labels = useMemo(() => markdownLabels(t), [])
+  const titles = useMemo(() => extractStepTitles(reply.text), [reply.text])
+  const title = titles[0] ?? (reasoningHeadline(reply.reasoning) || '执行步骤')
+  return (
+    <>
+      <div className={toolCss.root} data-tone="context" data-state={reply.streaming ? 'running' : 'ok'}>
+        <DisclosureRow rowClassName={toolCss.row} leadingClassName={toolCss.leading} titleClassName={toolCss.title} chevronClassName={toolCss.chevron}
+          icon={<IconThinkOutlineRegular size={14} />} title={title} running={reply.streaming}
+          open={expanded} expandable expandOnRowClick keepContentWhenOpen onToggle={toggle}
+          collapsedContent={titles.length > 1 ? <><Separator /><span className={toolCss.summary}>{`共 ${titles.length} 步`}</span></> : undefined}>
+          {expanded && (
+            <div className={css.inside}>
+              {reply.reasoning.trim() !== '' && <div className={css.thought}><MarkdownText text={reply.reasoning} labels={labels} streaming={reply.streaming} variant="compact" /></div>}
+              <AssistantMessage text={reply.text} reasoning="" streaming={reply.streaming} showActions={false} />
+            </div>
+          )}
+        </DisclosureRow>
+      </div>
+      <Tools tools={tools} closed={closed} onOpenTask={onOpenTask} />
+    </>
+  )
+})
 
 const Step = memo(function Step({ reply, tools, closed, onOpenTask }: {
   reply: AssistantItem
@@ -263,8 +354,9 @@ const Step = memo(function Step({ reply, tools, closed, onOpenTask }: {
   closed: boolean
   onOpenTask: (taskId: string) => void
 }) {
-  if (PROGRAM_FENCE.test(reply.text)) return <><ProgramReply reply={reply} /><Tools tools={tools} closed={closed} onOpenTask={onOpenTask} /></>
+  if (reply.program !== undefined) return <><ProgramReply reply={reply} /><Tools tools={tools} closed={closed} onOpenTask={onOpenTask} /></>
   if (reply.text.trim() === '') return <Thought reply={reply} tools={tools} closed={closed} onOpenTask={onOpenTask} />
+  if (isLeakedProgramDraft(reply.text)) return <LeakedDraftStep reply={reply} tools={tools} closed={closed} onOpenTask={onOpenTask} />
   return (
     <>
       <AssistantMessage text={reply.text} reasoning={reply.reasoning} streaming={reply.streaming} showActions={false} />

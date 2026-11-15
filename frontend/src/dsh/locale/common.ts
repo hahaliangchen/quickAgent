@@ -39,6 +39,8 @@ export const zh = {
   'none': '无',
   'truncated': '已截断',
   'json.label': 'JSON',
+  'markdown.copy': '复制',
+  'markdown.copied': '已复制',
   'markdown.footnotes': '脚注',
   'markdown.truncatedCharacters': '… 已截断，共 {total} 字符',
   'number.thousand': '{value}K',

@@ -4,6 +4,7 @@ use crate::agent_service::{self, AgentServiceState};
 use anyhow::{Context, Result, ensure};
 use axum::{extract::{Path, State}, http::StatusCode, response::{IntoResponse, Response}, Json};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::{BTreeMap, HashMap}, fs, path::{Path as FsPath, PathBuf}};
 
@@ -731,9 +732,179 @@ pub async fn read(State(state): State<AgentServiceState>, Path(id): Path<String>
     respond(tokio::task::spawn_blocking(move || draft_view(&root, &id)).await, StatusCode::NOT_FOUND)
 }
 
+#[derive(Deserialize)]
+pub struct PublishInput {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default)]
+    pub modules: Vec<crate::flow_skills::SaveModule>,
+}
+
+fn default_library_skill_body(name: &str, specs: &[crate::flow_libraries::MethodSpec]) -> String {
+    let mut out = format!(
+        "## 使用方式\n\n在程序代码中通过只读编排库加载：\n\n```js\nconst lib = require(\"{name}\");\n// 或并发调用：\nconst libAsync = require(\"{name}/promises\");\n```\n\n## 导出方法\n"
+    );
+    for spec in specs {
+        let sig = format!(
+            "{}function {}({})",
+            if spec.is_async { "async " } else { "" },
+            spec.name,
+            spec.params.join(", ")
+        );
+        let desc = spec.description.lines().next().map(str::trim).unwrap_or("");
+        if desc.is_empty() {
+            out.push_str(&format!("- `{sig}`\n"));
+        } else {
+            out.push_str(&format!("- `{sig}` — {desc}\n"));
+        }
+    }
+    out
+}
+
+fn persist_library_bundle(
+    root: &FsPath,
+    source_task: Option<&str>,
+    input: &PublishInput,
+    discovered: Vec<crate::flow_skills::SaveModule>,
+) -> Result<Value> {
+    let name = input.name.trim();
+    let project = match input.project.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => {
+            let task = source_task.context("缺少目标项目路径或来源代码会话")?;
+            crate::project_notes::task_project(root, task)?
+                .context("无法确定固化目标项目目录（插件或纯对话会话请显式指定 project）")?
+        }
+    };
+    let candidate_modules = if input.modules.is_empty() { discovered } else { input.modules.clone() };
+    ensure!(!candidate_modules.is_empty(), "没有可固化为编排库的有效 JS 模块");
+
+    let pairs = candidate_modules
+        .iter()
+        .map(|module| (module.file.clone(), module.source.clone()))
+        .collect::<Vec<_>>();
+    let specs = crate::flow_libraries::validate_module_set(&pairs)?;
+    let body = input
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| default_library_skill_body(name, &specs));
+    let skill_path = crate::flow_skills::save_with_modules(
+        &project,
+        name,
+        &input.description,
+        &body,
+        &candidate_modules,
+        input.overwrite,
+    )?;
+    Ok(json!({
+        "name": name,
+        "library": name,
+        "project": project,
+        "path": skill_path,
+        "requirable": true,
+        "modules": specs.iter().enumerate().map(|(idx, spec)| json!({
+            "file": candidate_modules[idx].file,
+            "method": spec.name,
+            "params": spec.params,
+            "contract": spec.contract_key,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// Promote a workflow draft's edited `modules/*.js` into a reusable project
+/// orchestration skill library under `.agents/skills/<name>/modules/`.
+pub fn promote_draft_to_skill(root: &FsPath, id: &str, input: &PublishInput) -> Result<Value> {
+    let dir = folder(root, id)?;
+    let manifest: Value = serde_json::from_slice(&fs::read(dir.join("draft.json")).context("draft not found")?)?;
+    let mut name_by_file = BTreeMap::new();
+    for entry in manifest["modules"].as_array().into_iter().flatten() {
+        if let (Some(file), Some(fn_name)) = (entry["file"].as_str(), entry["name"].as_str()) {
+            name_by_file.insert(file.to_owned(), fn_name.to_owned());
+        }
+    }
+    let mut discovered = Vec::new();
+    let modules_dir = dir.join("modules");
+    if modules_dir.is_dir() {
+        let mut paths = fs::read_dir(&modules_dir)?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && path.extension().is_some_and(|ext| ext == "js"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            let raw_name = path.file_name().context("missing file name")?.to_string_lossy().into_owned();
+            let source = fs::read_to_string(&path)?;
+            let rel = format!("modules/{raw_name}");
+            let target_file = if crate::flow_libraries::validate_module_source(&raw_name, &source).is_ok() {
+                raw_name
+            } else if let Some(fn_name) = name_by_file.get(&rel) {
+                format!("{fn_name}.js")
+            } else {
+                raw_name
+            };
+            discovered.push(crate::flow_skills::SaveModule { file: target_file, source });
+        }
+    }
+    persist_library_bundle(root, manifest["source_task"].as_str(), input, discovered)
+}
+
+/// Directly promote the latest verified modules from a conversation (`task_id`)
+/// into a reusable project orchestration skill library.
+pub fn promote_task_to_skill(root: &FsPath, task: &str, input: &PublishInput) -> Result<Value> {
+    let conn = agent_service::open_db(root)?;
+    let mut by_name: BTreeMap<String, String> = BTreeMap::new();
+    if let Ok(mut q) = conn.prepare(
+        "SELECT m.name, m.source FROM agent_modules m \
+         WHERE m.task_id=?1 \
+           AND m.version=(SELECT MAX(v.version) FROM agent_modules v WHERE v.task_id=m.task_id AND v.contract=m.contract) \
+         ORDER BY m.turn ASC, m.created_at ASC",
+    ) {
+        let rows = q.query_map([task], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (name, source) = row?;
+            by_name.insert(name, source);
+        }
+    }
+    let discovered = by_name
+        .into_iter()
+        .map(|(name, source)| crate::flow_skills::SaveModule {
+            file: format!("{name}.js"),
+            source,
+        })
+        .collect::<Vec<_>>();
+    persist_library_bundle(root, Some(task), input, discovered)
+}
+
 pub async fn chat(State(state): State<AgentServiceState>, Path(id): Path<String>) -> Response {
     let root = state.workspace.root().to_path_buf();
     respond(tokio::task::spawn_blocking(move || draft_chat(&root, &id)).await, StatusCode::BAD_REQUEST)
+}
+
+pub async fn publish(
+    State(state): State<AgentServiceState>,
+    Path(id): Path<String>,
+    Json(input): Json<PublishInput>,
+) -> Response {
+    let root = state.workspace.root().to_path_buf();
+    respond(tokio::task::spawn_blocking(move || promote_draft_to_skill(&root, &id, &input)).await, StatusCode::CONFLICT)
+}
+
+pub async fn publish_task(
+    State(state): State<AgentServiceState>,
+    Path(task): Path<String>,
+    Json(input): Json<PublishInput>,
+) -> Response {
+    let root = state.workspace.root().to_path_buf();
+    respond(tokio::task::spawn_blocking(move || promote_task_to_skill(&root, &task, &input)).await, StatusCode::CONFLICT)
 }
 
 #[cfg(test)]
@@ -881,5 +1052,101 @@ mod tests {
         assert_eq!((listed[0]["id"].as_str(), listed[0]["chat_task"].as_str(), listed[0]["programs"].as_u64()), (Some(id.as_str()), Some(chat.as_str()), Some(2)));
         assert_eq!(draft_chat(&root, &id).unwrap()["task_id"], chat.as_str(), "a draft keeps one conversation");
         drop(db); let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn promotes_draft_and_task_modules_into_requirable_project_library() {
+        let root = std::env::temp_dir().join(format!("workflow-promote-{}", agent_service::uuid_like()));
+        let project = root.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let db = agent_service::open_db(&root).unwrap();
+        db.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','build workflow','fake','completed',1,1)", []).unwrap();
+        db.execute("INSERT INTO agent_session_meta(task_id,workspace,kind) VALUES ('t',?1,'code')", [project.to_string_lossy().as_ref()]).unwrap();
+        event(&db, 1, "n0", "program/start", json!({"turn":1,"function":null,"source":"greet('ok');"}));
+        db.execute_batch("CREATE TABLE IF NOT EXISTS agent_modules(task_id TEXT,turn INTEGER,contract TEXT,name TEXT,signature TEXT,description TEXT,version INTEGER,source TEXT,fixed INTEGER,created_at INTEGER);").unwrap();
+        db.execute(
+            "INSERT INTO agent_modules VALUES ('t',1,'c111','greet','greet(who)','Greet user',1,'/** Old greet */ function greet(who) { return \"old:\" + who; }',0,1)",
+            [],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO agent_modules VALUES ('t',1,'c111','greet','greet(who)','Greet user',2,'/** Greet user */ async function greet(who) { return \"hi:\" + who; }',0,2)",
+            [],
+        ).unwrap();
+
+        let draft = create_draft(&root, "t").unwrap();
+        let draft_id = draft["id"].as_str().unwrap().to_owned();
+
+        // Invalid module bundles must be rejected before creating .agents/skills/<name>.
+        let bad = promote_task_to_skill(
+            &root,
+            "t",
+            &PublishInput {
+                name: "bad-flow".into(),
+                description: "Broken".into(),
+                body: None,
+                project: None,
+                overwrite: false,
+                modules: vec![crate::flow_skills::SaveModule {
+                    file: "bad.js".into(),
+                    source: "function wrongName() {}".into(),
+                }],
+            },
+        );
+        assert!(bad.is_err());
+        assert!(!project.join(".agents/skills/bad-flow").exists());
+
+        // Promote directly from task modules (takes latest version v2 of greet).
+        let promoted = promote_task_to_skill(
+            &root,
+            "t",
+            &PublishInput {
+                name: "greet-flow".into(),
+                description: "Greeting preset".into(),
+                body: None,
+                project: None,
+                overwrite: false,
+                modules: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(promoted["library"], "greet-flow");
+        let saved_js = fs::read_to_string(project.join(".agents/skills/greet-flow/modules/greet.js")).unwrap();
+        assert!(saved_js.contains("hi:"));
+        let skill_md = fs::read_to_string(project.join(".agents/skills/greet-flow/SKILL.md")).unwrap();
+        assert!(skill_md.contains("require(\"greet-flow\")") && skill_md.contains("async function greet(who)"));
+
+        // Non-overwrite publish refuses duplicate name.
+        let dup = promote_draft_to_skill(
+            &root,
+            &draft_id,
+            &PublishInput {
+                name: "greet-flow".into(),
+                description: "From draft".into(),
+                body: None,
+                project: None,
+                overwrite: false,
+                modules: vec![],
+            },
+        );
+        assert!(dup.is_err());
+
+        // Promote from draft with overwrite updates the library modules.
+        let from_draft = promote_draft_to_skill(
+            &root,
+            &draft_id,
+            &PublishInput {
+                name: "greet-flow".into(),
+                description: "Updated from draft".into(),
+                body: None,
+                project: None,
+                overwrite: true,
+                modules: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(from_draft["modules"][0]["method"], "greet");
+
+        drop(db);
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -103,13 +103,13 @@ export interface ExecutionPlan {
 /** A reply whose ```js block the host runs as a program. */
 export const PROGRAM_FENCE = /^```js[ \t]*$/m
 
-/** Keep progress and actions in event order; only a final reply with text is a conclusion. */
+/** Keep progress and actions in event order; only a final non-program reply with text is a conclusion. */
 export function splitTurnItems(items: readonly ChatItem[]): {
   process: readonly ChatItem[]
   conclusion: AssistantItem | undefined
 } {
   const last = items.at(-1)
-  return last?.kind === 'assistant' && last.text.trim() !== '' && !PROGRAM_FENCE.test(last.text)
+  return last?.kind === 'assistant' && last.text.trim() !== '' && last.program === undefined
     ? { process: items.slice(0, -1), conclusion: last }
     : { process: items, conclusion: undefined }
 }
@@ -425,6 +425,16 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
   const items: ChatItem[] = []
   // The reply each frame is streaming: concurrent functions stream at once.
   const streaming = new Map<string, number>()
+  // Programs submitted via write_program emit their own program/start or program/source_invalid;
+  // do not retroactively attach those events to an earlier assistant reply that merely quotes ```js.
+  const pendingWriteProgram = new Map<string, number>()
+  const consumeWriteProgram = (frame: string | undefined): boolean => {
+    const frameKey = frame ?? ''
+    const count = pendingWriteProgram.get(frameKey) ?? 0
+    if (count <= 0) return false
+    pendingWriteProgram.set(frameKey, count - 1)
+    return true
+  }
   let turnStartTime: number | undefined
   /** The latest reply in a frame that holds a program the host has not answered yet. */
   const programReply = (frame: string | undefined): number => items.findLastIndex(item =>
@@ -494,6 +504,11 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
       case 'assistant/message': {
         // A draft is a function's closing reply; in the main frame it is provisional.
         if (event.type === 'assistant/draft' && (frame === undefined || frames.get(frame)?.role !== 'temp')) break
+        // A virtual/module frame's program return is already rendered by the
+        // owning Call's collapsed ReturnValue. Keeping this event as an
+        // AssistantItem duplicates a one-line JSON receipt in the step list.
+        if (event.type === 'assistant/message' && event.data.actor === 'program'
+          && frame !== undefined && frames.get(frame)?.role === 'temp') break
         const message = messageOf(event)
         // A function's closing reply is its return value, which its call shows.
         const text = event.type === 'assistant/draft' ? ''
@@ -550,7 +565,11 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
         const callId = stringOf(event.data.callId) ?? key
         const name = stringOf(event.data.name) ?? 'tool'
         // A handed-over program shows as its program item, not as a tool card with its source.
-        if (name === 'write_program') break
+        if (name === 'write_program') {
+          const frameKey = frame ?? ''
+          pendingWriteProgram.set(frameKey, (pendingWriteProgram.get(frameKey) ?? 0) + 1)
+          break
+        }
         const raw = argumentsOf(event.data.arguments)
         const result = results.get(callId)
         const call = name === 'create_task' ? functionCall(raw) : undefined
@@ -570,19 +589,25 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
         items.push({ kind: 'tool', key, callId, name, arguments: raw, time: event.time, result, frame, step: numberOf(event.data.step), line: numberOf(location.line), review: reviews.get(callId) })
         break
       }
-      case 'program/start':
+      case 'program/probe_start':
+        consumeWriteProgram(frame)
+        break
+      case 'program/start': {
         // The host compiled the program the AI handed over and started it.
         const plan = executionPlan(event.data.plan)
-        if (!markProgram(frame, { status: 'started', plan })) {
+        if (consumeWriteProgram(frame) || !markProgram(frame, { status: 'started', plan })) {
           items.push({ kind: 'program', key, frame, event: 'started', text: event.data.fixed === true ? '修复后重新运行' : stringOf(event.data.function) ?? '', plan, time: event.time })
         }
         break
+      }
       case 'program/source_invalid': {
         const diagnostic = recordOf(event.data.diagnostic)
         const first = recordOf(Array.isArray(diagnostic.diagnostics) ? diagnostic.diagnostics[0] : undefined)
         const error = stringOf(first.message) ?? stringOf(diagnostic.error) ?? ''
         const line = numberOf(first.line)
-        if (!markProgram(frame, { status: 'invalid', error, line })) items.push({ kind: 'program', key, frame, event: 'invalid', text: error, line, time: event.time })
+        if (consumeWriteProgram(frame) || !markProgram(frame, { status: 'invalid', error, line })) {
+          items.push({ kind: 'program', key, frame, event: 'invalid', text: error, line, time: event.time })
+        }
         break
       }
       case 'program/error': {

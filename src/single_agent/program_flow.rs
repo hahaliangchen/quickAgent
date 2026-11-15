@@ -26,7 +26,7 @@ fn packages(s: &Session<'_>) -> Value {
 fn execution_boundary(task: &Value) -> Option<bool> {
     if !task.is_object() { return None; }
     if task["role"] == "leaf" { return Some(false); }
-    if task["module"] == true { return Some(true); }
+    if task["module"] == true || task["library_module"] == true { return Some(true); }
     if task["role"] == "body" { None } else { Some(false) }
 }
 fn ancestor_execution_allowed(s: &Session<'_>, node: Option<&str>) -> bool {
@@ -64,13 +64,28 @@ pub(super) fn library_catalog(
 ) -> agent_program::libraries::Libraries {
     catalog_with_execution(s, definitions, catalog_execution_allowed(s))
 }
+pub(super) fn compile_static_libraries(
+    s: &Session<'_>,
+    w: &Window,
+    definitions: &[Value],
+    body: bool,
+) -> agent_program::libraries::Libraries {
+    static_libraries_with(s, definitions, body && shell_code_allowed(s, w))
+}
 /// The host's own libraries, which source imports from host: and compiles against.
 pub(super) fn static_libraries(
     s: &Session<'_>,
     definitions: &[Value],
 ) -> agent_program::libraries::Libraries {
+    static_libraries_with(s, definitions, catalog_execution_allowed(s))
+}
+fn static_libraries_with(
+    s: &Session<'_>,
+    definitions: &[Value],
+    execution: bool,
+) -> agent_program::libraries::Libraries {
     let packages = packages(s);
-    let mut libraries = library_catalog(s, definitions);
+    let mut libraries = catalog_with_execution(s, definitions, execution);
     for name in agent_program::libraries::third_party(&libraries, &packages) {
         libraries.remove(&name);
     }
@@ -79,9 +94,14 @@ pub(super) fn static_libraries(
 /// The third-party libraries a program can require, each with what it is for: enabled
 /// plugin packages, with or without methods, and project skills.
 pub(super) fn requirable(s: &Session<'_>, definitions: &[Value]) -> BTreeMap<String, String> {
-    let static_names = static_libraries(s, definitions);
+    let static_names = catalog_with_execution(s, definitions, catalog_execution_allowed(s));
+    let packages_list = packages(s);
+    let third_party = agent_program::libraries::third_party(&static_names, &packages_list)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let is_static = |name: &str| static_names.contains_key(name) && !third_party.contains(name);
     let mut result = super::skill_scope::project_skills(s).into_iter().collect::<BTreeMap<_, _>>();
-    for package in packages(s).as_array().into_iter().flatten().filter(|package| package["enabled"] == true) {
+    for package in packages_list.as_array().into_iter().flatten().filter(|package| package["enabled"] == true) {
         let Some(name) = package["library"]
             .as_str()
             .map(str::to_owned)
@@ -89,8 +109,13 @@ pub(super) fn requirable(s: &Session<'_>, definitions: &[Value]) -> BTreeMap<Str
         else {
             continue;
         };
-        if !static_names.contains_key(&name) && (s.plugin.is_none() || library_catalog(s, definitions).contains_key(&name) || package["id"].as_str() == s.plugin.as_deref()) {
+        if !is_static(&name) && (s.plugin.is_none() || library_catalog(s, definitions).contains_key(&name) || package["id"].as_str() == s.plugin.as_deref()) {
             result.insert(name, package["description"].as_str().unwrap_or("").to_owned());
+        }
+    }
+    for (name, desc) in crate::flow_libraries::list_libraries(s) {
+        if !is_static(&name) {
+            result.entry(name).or_insert(desc);
         }
     }
     result
@@ -161,16 +186,34 @@ pub(super) fn skill_library_names(s: &Session<'_>) -> Vec<(String, String)> {
 /// libraries come first, as Node's built-in modules do.
 fn link(s: &Session<'_>, definitions: &[Value], spec: &str) -> (Value, bool) {
     let name = spec.strip_suffix("/promises").unwrap_or(spec);
-    if let Some(methods) = library_catalog(s, definitions).get(name) {
-        return (json!({"library":spec,"methods":methods}), false);
+    if name == "host" {
+        return (
+            json!({
+                "library": spec,
+                "methods": {},
+                "library_methods": ["context", "tools"],
+            }),
+            false,
+        );
+    }
+    let catalog = library_catalog(s, definitions);
+    let native_methods = catalog.get(name);
+    let js_methods = crate::flow_libraries::public_method_names(s, name);
+    if native_methods.is_some() || js_methods.is_some() {
+        let mut linked = json!({"library": spec, "methods": native_methods.cloned().unwrap_or_default()});
+        if let Some(methods) = js_methods {
+            linked["library_methods"] = json!(methods);
+        }
+        return (linked, false);
     }
     // A skill with instructions alone is required for them, as a stylesheet
     // is imported for its effect: its object has no methods.
     if super::skill_scope::exists(s, name) {
         return (json!({"library":spec,"methods":{}}), false);
     }
-    let mut names = library_catalog(s, definitions).into_keys().collect::<BTreeSet<_>>();
+    let mut names = catalog.into_keys().collect::<BTreeSet<_>>();
     names.extend(skill_library_names(s).into_iter().map(|(_, library)| library));
+    names.extend(crate::flow_libraries::list_libraries(s).into_iter().map(|(library, _)| library));
     (json!({"code":"MODULE_NOT_FOUND","message":format!("Cannot find library '{spec}'; {}{}", node_module_hint(name).map(|hint| format!("{hint}; ")).unwrap_or_default(), available_libraries(names))}), true)
 }
 /// A failed require names what can be required here, so a guessed or
@@ -195,14 +238,17 @@ fn node_module_hint(name: &str) -> Option<&'static str> {
 /// The libraries a hook's declaring code requires, the host's own or
 /// third-party ones; their methods join its tools.
 pub(super) fn leaf_libraries(w: &Window) -> Vec<String> {
-    w.program_task
-        .as_ref()
-        .and_then(|task| task["leaf_libraries"].as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect()
+    let mut libs = Vec::new();
+    if let Some(task) = &w.program_task {
+        for key in ["leaf_libraries", "scope_libraries"] {
+            for lib in task[key].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if !libs.iter().any(|existing| existing == lib) {
+                    libs.push(lib.to_owned());
+                }
+            }
+        }
+    }
+    libs
 }
 /// One call representation for ordinary, virtual and forked functions.
 pub(super) fn function_task(
@@ -254,40 +300,88 @@ pub(super) fn function_task(
     }
     Ok(task)
 }
+fn task_ai_layer(task: &Value) -> usize {
+    if task["role"] == "leaf" {
+        2
+    } else if task["module"] == true
+        || task["library_module"] == true
+        || task["role"] == "implement"
+    {
+        1
+    } else {
+        0
+    }
+}
 /// Count AI boundaries in the durable call path, not ordinary JS frames or
 /// model-provided annotations. Fixing/reloading a module keeps its boundary.
 fn current_ai_layer(s: &Session<'_>, w: &Window) -> Result<usize> {
-    let boundary = |task: &Value| task["module"] == true || matches!(task["role"].as_str(), Some("implement" | "leaf"));
-    let minimum = w.program_task.as_ref().map(|task| {
-        if task["role"] == "leaf" { 2 } else { usize::from(boundary(task)) }
-    }).unwrap_or(0);
+    let minimum = w.program_task.as_ref().map(task_ai_layer).unwrap_or(0);
     let node = w.task_node_id.as_deref().or_else(|| s.scope.strip_prefix("node:")).or(s.task_node_id.as_deref());
     let Some(node) = node else { return Ok(minimum) };
     let conn = agent_service::open_db(s.state.workspace.root())?;
     let path = crate::function_frames::path(&conn, s.task, node)?;
-    Ok(path.iter().filter(|node| boundary(&node.inputs["program_task"])).count().max(minimum))
+    Ok(path
+        .iter()
+        .map(|node| task_ai_layer(&node.inputs["program_task"]))
+        .max()
+        .unwrap_or(0)
+        .max(minimum))
 }
 
 /// Both synchronous and concurrent dispatch use this same host-owned layer
 /// check. The source marker never chooses a tool-loop/implementation role.
+fn extract_js_context(arguments: &[Value], action_scope: &BTreeMap<String, Value>) -> Option<Value> {
+    let is_context = |v: &Value| v.get("messages").is_some_and(Value::is_array);
+    if let Some(arg) = arguments.iter().find(|v| is_context(v)) {
+        return Some(arg.clone());
+    }
+    for key in ["subContext", "context", "ctx", "mainContext"] {
+        if let Some(value) = action_scope.get(key)
+            && is_context(value)
+        {
+            return Some(value.clone());
+        }
+    }
+    action_scope.values().find(|v| is_context(v)).cloned()
+}
+
 pub(super) fn scheduled_function_task(
     s: &Session<'_>, w: &Window, program: &agent_program::Program,
     name: &str, arguments: &[Value], captured: &BTreeMap<String, Value>,
 ) -> Result<Value> {
+    scheduled_function_task_with_scope(s, w, program, name, arguments, captured, &BTreeMap::new(), &[])
+}
+
+pub(super) fn scheduled_function_task_with_scope(
+    s: &Session<'_>, w: &Window, program: &agent_program::Program,
+    name: &str, arguments: &[Value], captured: &BTreeMap<String, Value>,
+    action_scope: &BTreeMap<String, Value>, action_libraries: &[String],
+) -> Result<Value> {
     let mut task = function_task(program, name, arguments, captured)?;
     let function = &program.functions[name];
+    let js_context = extract_js_context(arguments, action_scope);
+    let context_or_partial = function.partial_virtual
+        || !captured.is_empty()
+        || js_context.is_some()
+        || !action_libraries.is_empty();
+    let leaf_promoted_virtual = !function.explicit_module && context_or_partial;
     let parent_layer = current_ai_layer(s, w)?;
     let layer = parent_layer + usize::from(function.virtual_task);
     ensure!(layer <= 2,
         "VIRTUAL_LAYER_LIMIT: {name} would enter AI layer {layer}; layer 2 is a terminal judgment/tool loop and cannot create more AI work. Ordinary JS helpers do not add a layer.");
     if function.virtual_task {
-        if layer == 1 && !function.module_task && super::main_virtual_leaves() {
+        if layer == 1 && (!function.module_task || leaf_promoted_virtual) && (super::main_virtual_leaves() || context_or_partial) {
             task["role"] = json!("leaf");
             task["module"] = json!(false);
         } else if layer == 1 {
             ensure!(captured.is_empty(), "FIRST_LAYER_ARGUMENTS_REQUIRED: pass inputs to {name} as parameters; first-layer implementations do not capture caller variables");
             task["role"] = json!("implement");
             task["module"] = json!(true);
+            task["leaf_tools"] = Value::Null;
+            task.as_object_mut().map(|o| {
+                o.remove("leaf_libraries");
+                o.remove("skills");
+            });
         } else {
             ensure!(!function.module_task,
                 "SECOND_LAYER_VIRTUAL_REQUIRED: @module belongs to layer 1; use @virtual for {name} inside an implementation");
@@ -295,8 +389,228 @@ pub(super) fn scheduled_function_task(
             task["module"] = json!(false);
         }
     }
+    if !action_scope.is_empty() {
+        task["scope"] = json!(action_scope);
+    }
+    if task["role"] != "implement" && !action_libraries.is_empty() {
+        task["scope_libraries"] = json!(action_libraries);
+        let mut libs: Vec<String> = task["leaf_libraries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        for lib in action_libraries {
+            if !libs.iter().any(|existing| existing == lib) {
+                libs.push(lib.clone());
+            }
+        }
+        task["leaf_libraries"] = json!(libs);
+    }
+    if task["role"] != "implement"
+        && let Some(js_ctx) = js_context
+    {
+        let mut custom_tools = !action_libraries.is_empty();
+        let mut resolved_tools = Vec::new();
+        if !action_libraries.is_empty() {
+            let catalog = library_catalog(s, &super::tools(s, w));
+            for lib in action_libraries {
+                if let Some(methods) = catalog.get(lib) {
+                    resolved_tools.extend(methods.values().cloned());
+                }
+            }
+            if let Some(arr) = js_ctx.get("tools").and_then(Value::as_array) {
+                for item in arr.iter().filter_map(Value::as_str) {
+                    if !resolved_tools.iter().any(|t| t == item) {
+                        resolved_tools.push(item.to_owned());
+                    }
+                }
+            }
+        } else if let Some(arr) = js_ctx.get("tools").and_then(Value::as_array) {
+            resolved_tools = arr.iter().filter_map(Value::as_str).map(str::to_owned).collect();
+            if js_ctx.get("_custom_tools") == Some(&json!(true)) {
+                custom_tools = true;
+            }
+        }
+        // A leaf child waiting on an active parent Console cell can never call write_program
+        // (doing so always fails with PROGRAM_NOT_RUN and tricks it into taking over main).
+        resolved_tools.retain(|tool| tool != WRITE_PROGRAM);
+        if !resolved_tools.is_empty() || custom_tools || js_ctx.get("tools").is_some_and(Value::is_array) {
+            task["js_tools"] = json!(resolved_tools);
+            task["js_custom_tools"] = json!(custom_tools);
+        }
+        task["js_context"] = js_ctx;
+    }
     task["ai_layer"] = json!(layer);
+    task["context"] = execution_context(s, w, &task)?;
     Ok(task)
+}
+
+fn library_module_task(
+    s: &Session<'_>,
+    w: &Window,
+    library: &str,
+    spec: &crate::flow_libraries::MethodSpec,
+    compiled: &agent_program::Program,
+    arguments: &[Value],
+) -> Result<Value> {
+    let description = if spec.description.is_empty() {
+        format!(
+            "Execute {library}.{} using its supplied arguments and pre-saved orchestration module",
+            spec.name
+        )
+    } else {
+        spec.description.clone()
+    };
+    let mut task = json!({
+        "name": spec.name,
+        "description": description,
+        "parameters": spec.params,
+        "arguments": arguments,
+        "captured": {},
+        "role": "body",
+        "module": false,
+        "library": library,
+        "library_method": spec.name,
+        "library_module": true,
+        "library_contract": spec.contract_key,
+        "async": spec.is_async,
+        "ai_layer": 1,
+        "body": {"compiled": compiled},
+    });
+    task["context"] = execution_context(s, w, &task)?;
+    Ok(task)
+}
+
+/// Build the `create_task` arguments for synchronous or concurrent function
+/// and orchestration-library invocations.
+pub(super) fn action_task_descriptor(
+    s: &Session<'_>,
+    w: &Window,
+    program: Option<&agent_program::Program>,
+    action: &Action,
+) -> Result<Value> {
+    let at = json!(action.at);
+    match &action.kind {
+        ActionKind::Call { name, args, captured } => {
+            let program = program.context("caller has no compiled program")?;
+            let function = &program.functions[name];
+            if function.virtual_task
+                && !function.module_task
+                && let Some(library) = w.program_task.as_ref().and_then(|task| task["library"].as_str())
+            {
+                let static_libs = crate::flow_libraries::compile_static_libraries(s, w, library, name);
+                if let Some((spec, compiled)) = crate::flow_libraries::compile_sibling(
+                    s,
+                    library,
+                    program,
+                    name,
+                    args,
+                    captured,
+                    static_libs,
+                )? {
+                    let task = library_module_task(s, w, library, &spec, &compiled, args)?;
+                    return Ok(json!({
+                        "goal": format!("{library}.{}", spec.name),
+                        "briefing": task["description"],
+                        "program_task": task,
+                        "call_site": at,
+                    }));
+                }
+            }
+            let empty_scope = BTreeMap::new();
+            let mut task = scheduled_function_task_with_scope(
+                s,
+                w,
+                program,
+                name,
+                args,
+                captured,
+                action.scope_variables().unwrap_or(&empty_scope),
+                action.scope_libraries(),
+            )?;
+            let description = task["description"].clone();
+            if !function.virtual_task {
+                task["body"] = json!({"compiled": program});
+                if let Some(library) = w.program_task.as_ref().and_then(|parent| parent["library"].as_str()) {
+                    task["library"] = json!(library);
+                    task["library_module"] = json!(true);
+                }
+            }
+            Ok(json!({"goal": name, "briefing": description, "program_task": task, "call_site": at}))
+        }
+        ActionKind::LibraryCall { library, method, args } => {
+            ensure!(
+                current_ai_layer(s, w)? < 2,
+                "VIRTUAL_LAYER_LIMIT: {library}.{method} cannot run inside a layer-2 leaf"
+            );
+            let static_libs = crate::flow_libraries::compile_static_libraries(s, w, library, method);
+            let (spec, compiled) = crate::flow_libraries::compile_entry(s, library, method, args, static_libs)?;
+            let task = library_module_task(s, w, library, &spec, &compiled, args)?;
+            Ok(json!({
+                "goal": format!("{library}.{method}"),
+                "briefing": task["description"],
+                "program_task": task,
+                "call_site": at,
+            }))
+        }
+        ActionKind::Task { name, description, input } => {
+            let program = program.context("caller has no compiled program")?;
+            let arguments = program.functions[name]
+                .params
+                .iter()
+                .map(|parameter| input.get(parameter).cloned().context("virtual argument missing"))
+                .collect::<Result<Vec<_>>>()?;
+            let captured = program.functions[name]
+                .uses
+                .iter()
+                .map(|used| Ok((used.clone(), input.get(used).cloned().context("captured variable missing")?)))
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            let empty_scope = BTreeMap::new();
+            let task = scheduled_function_task_with_scope(
+                s,
+                w,
+                program,
+                name,
+                &arguments,
+                &captured,
+                action.scope_variables().unwrap_or(&empty_scope),
+                action.scope_libraries(),
+            )?;
+            Ok(json!({"goal": name, "briefing": description, "program_task": task, "call_site": at}))
+        }
+        _ => anyhow::bail!("action does not open a task frame"),
+    }
+}
+
+/// A small request-scoped environment for a virtual function. It gives the
+/// child its place in the current work without copying the caller's chat,
+/// tool history or local heap into the child window.
+fn execution_context(s: &Session<'_>, w: &Window, task: &Value) -> Result<Value> {
+    let goal = agent_service::open_db(s.state.workspace.root())?
+        .query_row("SELECT prompt FROM agent_tasks WHERE id=?1", [s.task], |row| row.get::<_, String>(0))
+        .optional()?;
+    let workspace_root = crate::session_browser::task_workspace(s.state.workspace.root(), s.task)
+        .unwrap_or_else(|_| s.state.workspace.root().to_path_buf());
+    let mut context = json!({
+        "task_id": s.task,
+        "turn": s.turn,
+        "scope": s.scope,
+        "parent_scope": s.parent,
+        "function": task["name"],
+        "role": task["role"],
+        "ai_layer": task["ai_layer"],
+        "description": task["description"],
+        "workspace_root": workspace_root.to_string_lossy(),
+    });
+    if let Some(goal) = goal.filter(|goal| !goal.trim().is_empty()) {
+        context["goal"] = json!(goal);
+    }
+    if let Some(node) = w.task_node_id.as_deref() {
+        context["parent_node_id"] = json!(node);
+    }
+    Ok(context)
 }
 /// What the AI does in a function window. Only AI functions call AI: a
 /// first-layer virtual is implemented as code, a second-layer virtual is a
@@ -335,7 +649,7 @@ pub(super) fn request_role(messages: &[Value]) -> &'static str {
     if messages.iter().any(|m| m["name"] == super::modules::FIX_INPUT) {
         return "fix";
     }
-    let Some(input) = messages.iter().find(|m| m["name"] == "program_task_input") else {
+    let Some(input) = messages.iter().rev().find(|m| m["name"] == "program_task_input") else {
         return "main";
     };
     let view = serde_json::from_str::<Value>(input["content"].as_str().unwrap_or("")).unwrap_or_default();
@@ -390,14 +704,18 @@ pub(super) fn write_program_tool(module: bool) -> Value {
                 "version":{"type":"integer","minimum":1,"description":"Current saved version from the module directory."},
                 "reason":{"type":"string","minLength":1,"maxLength":2000,"description":"Concrete improvement and existing behavior to preserve."}
             },"required":["version","reason"],"additionalProperties":false}});
-        "Append the next JavaScript Console cell to the current task and run it in the same persistent VM. Top-level bindings, functions, @virtual capabilities, closures and completed state from earlier cells remain available; ordinary block and function scopes keep their normal JavaScript lifetime. Express delegated capabilities as empty @virtual functions with responsibility, inputs and results; the host supplies their implementations. Compile errors do not change the existing VM. Runtime pauses preserve it; runtime errors preserve completed effects and the current state. Call write_program as the only call in the reply. Code in reply text is never run: write code there only to show it to the user."
+        "Append the next JavaScript Console cell to the current task and run it in the same persistent VM. Top-level bindings, functions, @virtual capabilities, closures and completed state from earlier cells remain available; ordinary block and function scopes keep their normal JavaScript lifetime. Express AI-assisted stages as @virtual functions (empty or partial JS ahead of a trailing intent comment; lexical closures and require(\"host\") context/tools work naturally) or standalone @module contracts for reusable parameter-only modules. Compile errors do not change the existing VM. Runtime pauses preserve it; runtime errors preserve completed effects and the current state. Call write_program as the only call in the reply. Code in reply text is never run: write code there only to show it to the user."
     };
     let mut tool = function(WRITE_PROGRAM, description, properties, if module { json!(["source"]) } else { json!([]) });
     if !module { tool["function"]["parameters"]["oneOf"] = json!([{"required":["source"]},{"required":["resource"]}]); }
     tool
 }
 pub(super) fn probe_read(name: &str) -> bool {
-    matches!(name, "read_file" | "read_file_lines" | "search_text" | "list_dir" | "workspace_info")
+    matches!(
+        name,
+        "read_file" | "read_file_lines" | "read_file_chunk" | "search_text" | "list_dir" | "workspace_info"
+            | "git_status" | "git_diff" | "git_log"
+    )
 }
 fn probe_libraries(s: &Session<'_>, definitions: &[Value]) -> agent_program::libraries::Libraries {
     // Keep the same SDK surface as the implementation. Probe permissions are
@@ -411,9 +729,10 @@ pub(super) fn find_main_tool() -> Value {
 /// Tools the main AI can call directly, in addition to conversation tools.
 /// Other library methods can be discovered without expanding permissions;
 /// they are for its programs.
-pub(super) const FAMILIAR: [&str; 14] = [
+pub(super) const FAMILIAR: [&str; 15] = [
     "read_file",
     "read_file_lines",
+    "read_file_chunk",
     "write_file",
     "edit_file",
     "replace_range",
@@ -467,8 +786,7 @@ pub(super) fn end_familiarization(w: &mut Window, reply: &Value, source: &str) {
             // What this turn's finished programs produced is fact, not getting
             // to know the task: the work and the answer go on from it.
             w.messages.push(message);
-        } else if matches!(message["name"].as_str(), Some("execution_plan" | "execution_ledger"))
-            || message.get(super::skill_scope::DELIVERED).is_some()
+        } else if message.get(super::skill_scope::DELIVERED).is_some()
             || message["name"] == super::modules::UPDATE
             || message.get(crate::anthropic_messages::ADDED_TOOLS).is_some()
         {
@@ -493,6 +811,48 @@ pub(super) fn end_familiarization(w: &mut Window, reply: &Value, source: &str) {
             }
             w.messages.push(message);
         }
+    }
+    w.messages.push(script);
+}
+/// Clear superseded compile/runtime diagnostics, stale execution ledgers/plans,
+/// and earlier failed `write_program` attempts in a child implementation scope
+/// once a valid module/body program compiles and starts.
+pub(super) fn clear_failed_program_attempts(w: &mut Window, reply: &Value, source: &str) {
+    let start = w.messages.iter().rposition(|m| m["_frame_input"] == true).unwrap_or(0);
+    let script = w
+        .messages
+        .iter()
+        .rposition(|m| m["role"] == "assistant" && written_source(m).and_then(Result::ok).as_deref() == Some(source))
+        .filter(|at| *at > start)
+        .map(|at| w.messages.remove(at))
+        .unwrap_or_else(|| reply.clone());
+    let mut dropped_calls = BTreeSet::new();
+    let tail = w.messages.split_off(start + 1);
+    for message in &tail {
+        if message["role"] == "assistant" && written_source(message).is_some() {
+            for call in message["tool_calls"].as_array().into_iter().flatten() {
+                if let Some(id) = call["id"].as_str() {
+                    dropped_calls.insert(id.to_owned());
+                }
+            }
+        }
+    }
+    for message in tail {
+        if matches!(
+            message["name"].as_str(),
+            Some("execution_plan" | "execution_ledger" | "program_diagnostic")
+        ) {
+            continue;
+        }
+        if message["role"] == "assistant" && written_source(&message).is_some() {
+            continue;
+        }
+        if message["role"] == "tool"
+            && message["tool_call_id"].as_str().is_some_and(|id| dropped_calls.contains(id))
+        {
+            continue;
+        }
+        w.messages.push(message);
     }
     w.messages.push(script);
 }
@@ -549,6 +909,7 @@ async fn stop_unfinished(s: &Session<'_>, w: &mut Window) -> Result<Vec<Value>> 
         .iter()
         .filter_map(|action| match &action.kind {
             ActionKind::Call { name, .. } => Some(json!({"function":name.rsplit('/').next().unwrap_or(name),"line":action.at.line})),
+            ActionKind::LibraryCall { library, method, .. } => Some(json!({"function":format!("{library}.{method}"),"line":action.at.line})),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -595,6 +956,9 @@ pub(super) fn find(s: &Session<'_>, w: &Window, args: &Value) -> Result<Value> {
             })
         })
         .collect::<Vec<_>>();
+    if !matches!(role(w), Role::Leaf(_)) {
+        matches.extend(crate::flow_libraries::search_methods(s, &terms));
+    }
     // Methods matching more of the query's words come first; ties keep the
     // catalog's order.
     matches.sort_by(|a, b| b.0.cmp(&a.0));
@@ -647,6 +1011,80 @@ fn call_arguments(task: &Value) -> Result<(&Vec<Value>, &Vec<Value>)> {
     );
     Ok((parameters, arguments))
 }
+fn compact_view_value(value: &Value) -> Value {
+    let Some(obj) = value.as_object() else {
+        return value.clone();
+    };
+    let Some(messages) = obj.get("messages").and_then(Value::as_array) else {
+        return value.clone();
+    };
+    let mut summary = serde_json::Map::new();
+    summary.insert("$js_context".into(), json!(true));
+    summary.insert("messages_count".into(), json!(messages.len()));
+    if let Some(key) = obj.get("prompt_cache_key") {
+        summary.insert("prompt_cache_key".into(), key.clone());
+    }
+    if let Some(tools) = obj.get("tools") {
+        summary.insert("tools".into(), tools.clone());
+    }
+    Value::Object(summary)
+}
+
+fn summarize_scope_entry(value: &Value, max_bytes: usize) -> Option<Value> {
+    if value.get("$js_context") == Some(&json!(true)) || value.get("$summarized") == Some(&json!(true)) {
+        return None;
+    }
+    let serialized = value.to_string();
+    if serialized.len() <= max_bytes {
+        return None;
+    }
+    let preview: String = serialized.chars().take(512).collect();
+    Some(json!({
+        "$summarized": true,
+        "bytes": serialized.len(),
+        "preview": preview,
+        "note": "Large outer scope value summarized in prompt view; pass needed excerpts as arguments or read via files/assets."
+    }))
+}
+
+fn compact_scope_view(scope: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+    const MAX_SCOPE_ENTRY_BYTES: usize = 4 * 1024;
+    const MAX_SCOPE_TOTAL_BYTES: usize = 16 * 1024;
+    let mut compacted: serde_json::Map<String, Value> = scope
+        .iter()
+        .map(|(k, v)| {
+            let v = compact_view_value(v);
+            let v = summarize_scope_entry(&v, MAX_SCOPE_ENTRY_BYTES).unwrap_or(v);
+            (k.clone(), v)
+        })
+        .collect();
+    let total_bytes = |map: &serde_json::Map<String, Value>| {
+        map.values().map(|v| v.to_string().len()).sum::<usize>()
+    };
+    if total_bytes(&compacted) > MAX_SCOPE_TOTAL_BYTES {
+        let mut by_size: Vec<(String, usize)> = compacted
+            .iter()
+            .filter_map(|(k, v)| {
+                let len = v.to_string().len();
+                (v.get("$js_context") != Some(&json!(true))
+                    && v.get("$summarized") != Some(&json!(true))
+                    && len > 512)
+                    .then(|| (k.clone(), len))
+            })
+            .collect();
+        by_size.sort_by(|a, b| b.1.cmp(&a.1));
+        for (k, _) in by_size {
+            if total_bytes(&compacted) <= MAX_SCOPE_TOTAL_BYTES {
+                break;
+            }
+            if let Some(summary) = compacted.get(&k).and_then(|v| summarize_scope_entry(v, 512)) {
+                compacted.insert(k, summary);
+            }
+        }
+    }
+    compacted
+}
+
 /// Model-facing view: bindings are actual local variable values, not an input envelope.
 pub(super) fn call_view(task: &Value) -> Result<Value> {
     let (parameters, arguments) = call_arguments(task)?;
@@ -657,11 +1095,19 @@ pub(super) fn call_view(task: &Value) -> Result<Value> {
     let bindings = names
         .iter()
         .zip(arguments)
-        .map(|(p, v)| ((*p).to_owned(), v.clone()))
+        .map(|(p, v)| ((*p).to_owned(), compact_view_value(v)))
         .collect::<serde_json::Map<_, _>>();
     let mut view = json!({"name":task["name"],"signature":format!("{}function {}({})",if task["async"] == true {"async "} else {""},task["name"].as_str().context("function name missing")?,names.join(", ")),
         "role":task["role"],"ai_layer":task["ai_layer"],"description":task["description"],"bindings":bindings,"closure":task["captured"],
-        "binding_rule":"bindings lists actual local parameter values. Use each parameter directly as in the signature; bindings is display metadata, never another property of a parameter. Arguments bind by position only, never by name or automatic object packing. closure lists the outer variables the description names with @uses, read when this function was called; in code they are variables in scope, as in a JavaScript closure."});
+        "binding_rule":"bindings lists actual local parameter values. Use each parameter directly as in the signature; bindings is display metadata, never another property of a parameter. Arguments bind by position only, never by name or automatic object packing. scope and closure list outer variables captured when this function was called."});
+    if let Some(scope) = task["scope"].as_object()
+        && !scope.is_empty()
+    {
+        view["scope"] = Value::Object(compact_scope_view(scope));
+    }
+    if task["context"].is_object() {
+        view["context"] = task["context"].clone();
+    }
     // The libraries the contract names with @uses, whose instructions it has.
     if task["skills"].as_array().is_some_and(|skills| !skills.is_empty()) {
         view["skills"] = task["skills"].clone();
@@ -695,10 +1141,7 @@ pub(super) fn install_scoped(
     let libraries = if args["probe"] == true {
         probe_libraries(s, &definitions)
     } else {
-        let packages = packages(s);
-        let mut libraries = catalog_with_execution(s, &definitions, body && shell_code_allowed(s, w));
-        for name in agent_program::libraries::third_party(&libraries, &packages) { libraries.remove(&name); }
-        libraries
+        compile_static_libraries(s, w, &definitions, body)
     };
     if body {
         ensure!(args.get("revise_modules").is_none(), "only a main program can request module revisions");
@@ -846,20 +1289,25 @@ fn install_with(
     if cell_entry.is_none() {
         agent_program::uncalled_functions(source, None)?;
     }
-    // The first layer declares capabilities. The host resolves their code;
-    // the author need not choose an implementation file or a second marker.
+    // Pure empty @module / @virtual contracts at layer 1 link via reusable module
+    // implementations; partial @virtual functions and closure-bound @virtuals run
+    // directly with their live JS scope and explicit context.
     for (name, function) in &mut program.functions {
-        // Experiment: an explicit @virtual stays a leaf the main program calls.
-        if function.virtual_task && !function.module_task && super::main_virtual_leaves() {
+        if !function.virtual_task {
             continue;
         }
-        if function.virtual_task {
-            ensure!(function.uses.is_empty(),
-                "FIRST_LAYER_ARGUMENTS_REQUIRED: pass inputs to {name} as parameters instead of @uses; the host links its implementation independently");
-            function.module_task = true;
+        if function.module_task {
+            ensure!(
+                function.uses.is_empty(),
+                "FIRST_LAYER_ARGUMENTS_REQUIRED: pass inputs to {name} as parameters instead of @uses; @module implementations are parameter-only"
+            );
             function.leaf_tools = None;
             function.leaf_libraries.clear();
             function.skills.clear();
+            continue;
+        }
+        if !function.partial_virtual && function.uses.is_empty() && !super::main_virtual_leaves() {
+            function.module_task = true;
         }
     }
     ensure!(
@@ -876,8 +1324,13 @@ fn install_with(
         agent_program::ENTRY.to_owned()
     };
     if let Some(mut console) = w.console.take() {
+        let prev_log_start = w.console_log_start;
         w.console_log_start = console.logs().len();
-        console.append_cell(program, &entry)?;
+        if let Err(error) = console.append_cell(program, &entry) {
+            w.console = Some(console);
+            w.console_log_start = prev_log_start;
+            return Err(error);
+        }
         w.program = Some(console);
         w.console_cell = w.console_cell.saturating_add(1);
     } else {
@@ -1061,7 +1514,7 @@ fn resolve(
         match &action.kind {
             ActionKind::Fork { .. } | ActionKind::Join { .. } => anyhow::bail!("saved fork/join calls are retired"),
             ActionKind::Tool { .. } | ActionKind::Require { .. } | ActionKind::ParallelReads { .. } => {}
-            ActionKind::Task { .. } | ActionKind::Call { .. } => {
+            ActionKind::Task { .. } | ActionKind::Call { .. } | ActionKind::LibraryCall { .. } => {
                 match value["result"]
                     .as_str()
                     .context("comment task returned no value")
@@ -1113,7 +1566,7 @@ pub(super) async fn recover(s: &Session<'_>, w: &mut Window) -> Result<()> {
         if let Some((seq, event)) = recorded(s, &action.id)? { completed.push((seq, action, event)); }
     }
     completed.sort_by_key(|(seq, _, _)| *seq);
-    for (seq, action, event) in completed {
+    for (_seq, action, event) in completed {
         let mut value = event["meta"]["result"].clone();
         let mut failed = event["message"]["isError"] == true;
         if !failed {
@@ -1127,22 +1580,6 @@ pub(super) async fn recover(s: &Session<'_>, w: &mut Window) -> Result<()> {
             locate_question(&action, &mut value);
         }
         w.program.as_mut().unwrap().resume_action(&action.id, value, failed)?;
-        if let Some(function) = match &action.kind {
-            ActionKind::Task { name, .. } | ActionKind::Call { name, .. } => Some(name.clone()),
-            _ => None,
-        } {
-            w.messages.push(super::sourced(
-                super::execution_ledger_host_message(json!({
-                    "action": "virtual_call",
-                    "function": function,
-                    "status": if failed { "failed" } else { "completed" },
-                    "event_seq": seq,
-                    "return_event_seq": event["meta"]["result"]["return_event_seq"],
-                })),
-                s.task,
-                seq,
-            ));
-        }
         save(s, w).await?;
     }
     let Some(action) = w.program.as_ref().and_then(|p| p.pending.clone()) else {
@@ -1169,13 +1606,8 @@ pub(super) async fn interrupt_unfinished(s: &Session<'_>, w: &mut Window) -> Res
     }
     save(s, w).await
 }
-/// How many times a turn's main program may be rewritten after an error.
-const MAIN_REWRITES: i64 = 3;
-fn main_rewrites(s: &Session<'_>) -> Result<i64> {
-    let conn = agent_service::open_db(s.state.workspace.root())?;
-    Ok(conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id=?1 AND kind='program/runtime_error'
-        AND json_extract(data,'$.main')=1 AND json_extract(data,'$.turn')=?2", params![s.task, s.turn as i64], |r| r.get(0))?)
-}
+/// Number of rounds allowed on a turn is governed by the caller/model rather
+/// than a hard-coded rewrite limit.
 /// Files written this turn by any of its programs or AIs, for its outcome.
 fn turn_writes(s: &Session<'_>) -> Result<Vec<String>> {
     let conn = agent_service::open_db(s.state.workspace.root())?;
@@ -1212,11 +1644,62 @@ fn retain_console(w: &mut Window) {
     }
 }
 
+fn console_bindings(w: &Window) -> Vec<String> {
+    w.console
+        .as_ref()
+        .map(Runtime::module_names)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| Runtime::is_visible_console_binding(name))
+        .collect()
+}
+
+fn console_binding_previews(w: &Window) -> BTreeMap<String, String> {
+    const MAX_ENTRIES: usize = 24;
+    const MAX_TOTAL_CHARS: usize = 4_000;
+    let raw = w.console.as_ref().map(Runtime::module_binding_previews).unwrap_or_default();
+    let mut bounded = BTreeMap::new();
+    let mut total_chars = 0usize;
+    for (name, preview) in raw.into_iter().take(MAX_ENTRIES) {
+        let len = name.chars().count() + preview.chars().count();
+        if !bounded.is_empty() && total_chars + len > MAX_TOTAL_CHARS {
+            break;
+        }
+        total_chars += len;
+        bounded.insert(name, preview);
+    }
+    bounded
+}
+
+fn format_console_scope(previews: &BTreeMap<String, String>, total_bindings: usize) -> String {
+    let mut lines = previews
+        .iter()
+        .map(|(name, preview)| format!("{name}: {preview}"))
+        .collect::<Vec<_>>();
+    let omitted = total_bindings.saturating_sub(lines.len());
+    if omitted > 0 {
+        lines.push(format!("... (+{omitted} more bindings)"));
+    }
+    format!("[console_scope]\n{}", lines.join("\n"))
+}
+
+fn console_chars(records: &[String]) -> Vec<usize> {
+    records.iter().map(|line| line.chars().count()).collect()
+}
+
 fn delivery_capacity(s: &Session<'_>, w: &Window, message: &Value) -> (usize, bool) {
+    let tools = super::tools(s, w);
+    let base = w.input_tokens(s, &super::request(s, &w.messages, &tools));
     let mut candidate = w.messages.clone();
     candidate.push(message.clone());
-    let required = w.input_tokens(s, &super::request(s, &candidate, &super::tools(s, w)));
-    (required, required.saturating_add(4096) <= s.input_budget)
+    let required = w.input_tokens(s, &super::request(s, &candidate, &tools));
+    let added_tokens = required.saturating_sub(base);
+    let content_chars = message["content"].as_str().map(str::len).unwrap_or(0);
+    let limits = super::delivery_soft_limits(s.input_budget);
+    let fits = required.saturating_add(4096) <= s.input_budget
+        && added_tokens <= limits.round_tokens
+        && content_chars <= limits.round_chars;
+    (required, fits)
 }
 
 async fn archive_program_output(s: &Session<'_>, w: &Window, result: &Value) -> Result<Value> {
@@ -1231,11 +1714,18 @@ async fn archive_program_output(s: &Session<'_>, w: &Window, result: &Value) -> 
     tokio::task::spawn_blocking(move || crate::context_assets::register(&root,&task,seq,"program_output",&json!({}),&snapshot)).await?
 }
 
-fn output_capacity_error(s: &Session<'_>, required: usize, reference: Value) -> Value {
-    json!({"name":"ResourceLimitError","code":"OUTPUT_OVER_CAPACITY","boundary":"ai_context",
-        "message":"This program's complete output does not fit the remaining AI context. The program stopped; no successful prefix or shortened result was delivered. Full output is saved. Read the needed evidence or revise the orchestration to process material in stages; do not repeat completed commands or writes.",
-        "required_input_tokens":required,"input_budget":s.input_budget,"delivered":false,"original_saved":true,
-        "program_output_asset":reference,"read_output":reference["read_reference"]})
+fn output_capacity_error(s: &Session<'_>, required: usize, reference: Value, record_chars: &[usize]) -> Value {
+    let limits = super::delivery_soft_limits(s.input_budget);
+    let mut error = json!({"name":"ResourceLimitError","code":"OUTPUT_OVER_CAPACITY","boundary":"ai_context",
+        "message":"This delivery exceeds the 1/4-window soft delivery cap or remaining AI context. The program stopped; no prefix or shortened result was substituted. Full output is saved. Check console_binding_previews for each variable's type/size/keys, inspect nested values safely with console.dir(value, {depth: 2}), or read saved output via read_output instead of printing huge dumps with console.log; do not repeat completed commands or writes.",
+        "required_input_tokens":required,"input_budget":s.input_budget,
+        "soft_delivery_chars":limits.round_chars,"soft_delivery_tokens":limits.round_tokens,
+        "delivered":false,"original_saved":true,
+        "program_output_asset":reference,"read_output":reference["read_reference"]});
+    if !record_chars.is_empty() {
+        error["console_record_chars"] = json!(record_chars);
+    }
+    error
 }
 /// How a turn's main program ended, in a few lines: what it returned or where
 /// it stopped, and the files it wrote. It is the turn's answer and what later
@@ -1370,7 +1860,8 @@ pub(super) async fn stop_main(s: &Session<'_>, w: &mut Window) -> Result<bool> {
     let proposed = outcome(s, &console, Err(&json!({"code":STOPPED})))?;
     let (required, fits) = delivery_capacity(s, w, &json!({"role":"assistant","content":proposed}));
     let capacity = if fits { None } else {
-        Some(output_capacity_error(s, required, archive_program_output(s, w, &Value::Null).await?))
+        let chars = console_chars(&console);
+        Some(output_capacity_error(s, required, archive_program_output(s, w, &Value::Null).await?, &chars))
     };
     record_end(s, w, "stopped", json!({})).await?;
     let stopped_at = super::paused_programs::pause_main(s, w, true).await?;
@@ -1406,7 +1897,8 @@ pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window, step: usize, blo
     let proposed = outcome(s, &console, Err(&json!({"code":PAUSED,"blocker":blocker})))?;
     let (required, fits) = delivery_capacity(s,w,&json!({"role":"assistant","content":proposed}));
     let capacity = if fits {None} else {
-        Some(output_capacity_error(s,required,archive_program_output(s,w,&Value::Null).await?))
+        let chars = console_chars(&console);
+        Some(output_capacity_error(s,required,archive_program_output(s,w,&Value::Null).await?,&chars))
     };
     let ended = if blocker.is_some() { "needs_user" } else { "paused" };
     record_end(s, w, ended, json!({"blocker":blocker})).await?;
@@ -1436,8 +1928,9 @@ async fn finish_probe(s: &Session<'_>, w: &mut Window, outcome: Result<Value, Va
     let message = json!({"role":"user","name":"module_probe_result","content":observation.to_string()});
     let (required, fits) = delivery_capacity(s,w,&message);
     if !fits || agent_program::runtime::is_resource_error(&value) {
+        let chars = console_chars(&printed(w));
         let reference = archive_program_output(s,w,&value).await?;
-        let error = if !fits { output_capacity_error(s,required,reference) } else {
+        let error = if !fits { output_capacity_error(s,required,reference,&chars) } else {
             let mut error = value; error["program_output_asset"] = reference; error
         };
         stop_unfinished(s,w).await?;
@@ -1465,14 +1958,24 @@ async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value
         let message = json!({"role":"user","name":"program_result","content":text});
         let (required, fits) = delivery_capacity(s,w,&message);
         if !fits {
+            let chars = console_chars(&output);
             let reference = archive_program_output(s,w,&value).await?;
-            return Box::pin(failed_program(s,w,step,output_capacity_error(s,required,reference))).await;
+            return Box::pin(failed_program(s,w,step,output_capacity_error(s,required,reference,&chars))).await;
         }
         retain_console(w);
         record_end(s, w, "completed", json!({"result":value})).await?;
         w.program_value = None;
         let seq = append(s, "program/result", json!({"turn":s.turn,"step":step,"task_node_id":w.task_node_id,"result":value,"output":text}), false).await?;
-        w.messages.push(sourced(json!({"role":"user","name":"program_result","content":text}), s.task, seq));
+        let bindings = console_bindings(w);
+        let previews = console_binding_previews(w);
+        let ai_text = if bindings.is_empty() {
+            text
+        } else if previews.is_empty() {
+            format!("{text}\n[console_bindings: {}]", bindings.join(", "))
+        } else {
+            format!("{text}\n[console_bindings: {}]\n{}", bindings.join(", "), format_console_scope(&previews, bindings.len()))
+        };
+        w.messages.push(sourced(json!({"role":"user","name":"program_result","content":ai_text}), s.task, seq));
         save(s, w).await?;
         return Ok(Round::Continue);
     }
@@ -1521,6 +2024,7 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         return Ok(Round::Continue);
     }
     let mut console = printed(w);
+    let record_chars = console_chars(&console);
     let diagnostic = json!({"role":"user","name":"program_diagnostic",
         "content":json!({"error":error,"console":console}).to_string()});
     let (required, fits) = delivery_capacity(s,w,&diagnostic);
@@ -1528,11 +2032,14 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         let reference = if error["program_output_asset"].is_object() { error["program_output_asset"].clone() }
             else { archive_program_output(s,w,&w.program.as_ref().map(|p|p.result.clone()).unwrap_or(Value::Null)).await? };
         if !fits && !agent_program::runtime::is_resource_error(&error) {
-            error = output_capacity_error(s,required,reference);
+            error = output_capacity_error(s,required,reference,&record_chars);
         } else {
             error["program_output_asset"] = reference;
             error["original_saved"] = json!(true);
             error["delivered"] = json!(false);
+            if !record_chars.is_empty() && error.get("console_record_chars").is_none() {
+                error["console_record_chars"] = json!(record_chars);
+            }
         }
         console.clear();
     }
@@ -1579,14 +2086,23 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
     } else if w.program_task.is_some() {
         // A runtime failure throws to the caller, as in JavaScript.
         return_value(s, w, step, json!({"$task_error":error})).await
-    } else if !rises && main_rewrites(s)? < MAIN_REWRITES {
-        // The main program heals the same way, a few times a turn: the
-        // main AI gets the error and the files already written.
+    } else if !rises {
+        // The main program heals without an artificial rewrite cap: the
+        // main AI gets the error and the files already written, and can keep
+        // fixing, switch approaches, or explain in plain text why to stop.
         record_end(s, w, "error", json!({"error":error})).await?;
         retain_console(w);
         let mut diagnostic = json!({"code":"PROGRAM_RUNTIME_ERROR","executed":true,"program":main_program(s)?,"error":error,
             "completed_writes":turn_writes(s)?,"console":console,
             "instruction":"Your program stopped with this error. Call write_program with the corrected complete program; it runs from its start, so do not redo the listed writes unless the task needs them redone. If the task cannot be done, tell the user why in plain text instead."});
+        let bindings = console_bindings(w);
+        if !bindings.is_empty() {
+            diagnostic["console_bindings"] = json!(bindings);
+        }
+        let previews = console_binding_previews(w);
+        if !previews.is_empty() {
+            diagnostic["console_binding_previews"] = json!(previews);
+        }
         if !stopped.is_empty() {
             diagnostic["stopped_calls"] = json!(stopped);
             diagnostic["stopped_note"] = json!("These calls were still running when the program stopped; they were stopped before their next step and returned nothing.");
@@ -1596,9 +2112,9 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         save(s, w).await?;
         Ok(Round::Rewrite)
     } else {
-        // A question, or a program that keeps failing: its outcome ends
-        // the turn, so the next message starts fresh instead of
-        // resuming the failure.
+        // A question or host-level unavailability: its outcome ends the
+        // turn, so the next message starts fresh instead of resuming the
+        // failure.
         let ended = if waiting { "question" } else if blocked { "needs_user" } else if error["code"] == UNAVAILABLE { "unavailable" } else { "error" };
         record_end(s, w, ended, json!({"error":error})).await?;
         let (text, shown) = (outcome(s, &console, Err(&error))?, outcome(s, &[], Err(&error))?);
@@ -1606,14 +2122,64 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         end_program(s, w, step, Value::Null, text, Some(shown)).await
     }
 }
+fn is_readonly_program_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file"
+            | "read_file_lines"
+            | "read_file_chunk"
+            | "search_text"
+            | "list_dir"
+            | "workspace_info"
+            | "git_status"
+            | "git_diff"
+            | "git_log"
+            | "parallel_read_batch"
+            | "read_code_flow"
+            | "read_git"
+            | "read_asset"
+            | "list_skills"
+            | "read_skill"
+            | "list_work_memory"
+            | "search_work_memory"
+            | "list_architecture_memory"
+            | "search_architecture_memory"
+            | "list_symbol_business_context"
+            | "search_symbol_business_context"
+    )
+}
+
+#[inline(never)]
+async fn dispatch_host_library(s: &Session<'_>, w: &mut Window, method: &str) -> Result<Round> {
+    let definitions = super::tools(s, w);
+    let (value, failed) = match method {
+        "context" => (super::host_context_snapshot(s, w, &definitions), false),
+        "tools" => (super::host_tools_snapshot(s, &definitions), false),
+        other => (
+            json!({"code":"UNKNOWN_HOST_METHOD","message":format!("host has no method '{other}'; available: context, tools")}),
+            true,
+        ),
+    };
+    w.program.as_mut().unwrap().resume(value, failed)?;
+    super::checkpoint_program(s, w, false).await?;
+    Ok(Round::Continue)
+}
+
 pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result<Round> {
     recover(s, w).await?;
     let state = w.program.as_mut().unwrap().next_concurrent();
-    save(s, w).await?;
     let state = match state {
-        agent_program::runtime::ConcurrentState::Actions(actions) if actions.first().is_some_and(|action| w.program.as_ref().unwrap().async_scope(&action.id).is_some()) => return Ok(Round::Concurrent(actions)),
+        agent_program::runtime::ConcurrentState::Actions(actions) if actions.first().is_some_and(|action| w.program.as_ref().unwrap().async_scope(&action.id).is_some()) => {
+            super::checkpoint_program(s, w, true).await?;
+            return Ok(Round::Concurrent(actions));
+        }
         agent_program::runtime::ConcurrentState::Actions(mut actions) => State::Action(actions.remove(0)),
-        agent_program::runtime::ConcurrentState::Waiting => return Ok(Round::Waiting),
+        agent_program::runtime::ConcurrentState::Waiting => {
+            if w.unsaved_program_steps > 0 {
+                super::checkpoint_program(s, w, true).await?;
+            }
+            return Ok(Round::Waiting);
+        }
         agent_program::runtime::ConcurrentState::Returned(value) => State::Returned(value),
         agent_program::runtime::ConcurrentState::Failed(error) => State::Failed(error),
     };
@@ -1624,45 +2190,27 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
         State::Action(action) => {
             let at = json!(action.at);
             let (name, args) = match &action.kind {
-                ActionKind::Call { name, args, captured } => {
+                ActionKind::Call { .. } | ActionKind::Task { .. } => {
                     let program = &w.program.as_ref().unwrap().program;
-                    let function = &program.functions[name];
-                    let mut task = scheduled_function_task(s, w, program, name, args, captured)?;
-                    let description = task["description"].clone();
-                    if !function.virtual_task {
-                        task["body"] = json!({"compiled":program});
+                    (
+                        "create_task".into(),
+                        action_task_descriptor(s, w, Some(program), &action)?,
+                    )
+                }
+                ActionKind::LibraryCall { library, method, .. } if library == "host" => {
+                    return Box::pin(dispatch_host_library(s, w, &method)).await;
+                }
+                ActionKind::LibraryCall { .. } => match action_task_descriptor(s, w, None, &action) {
+                    Ok(args) => ("create_task".into(), args),
+                    Err(error) => {
+                        w.program
+                            .as_mut()
+                            .unwrap()
+                            .resume(json!({"code":"LIBRARY_CALL_ERROR","message":format!("{error:#}")}), true)?;
+                        super::checkpoint_program(s, w, false).await?;
+                        return Ok(Round::Continue);
                     }
-                    (
-                        "create_task".into(),
-                        json!({"goal":name,"briefing":description,"program_task":task,"call_site":at}),
-                    )
-                }
-                ActionKind::Task {
-                    name,
-                    description,
-                    input,
-                } => {
-                    let program = &w.program.as_ref().unwrap().program;
-                    let arguments = program.functions[name]
-                        .params
-                        .iter()
-                        .map(|parameter| {
-                            input
-                                .get(parameter)
-                                .cloned()
-                                .context("virtual argument missing")
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    // A nested virtual's captured variables ride in its input.
-                    let captured = program.functions[name].uses.iter()
-                        .map(|used| Ok((used.clone(), input.get(used).cloned().context("captured variable missing")?)))
-                        .collect::<Result<BTreeMap<_, _>>>()?;
-                    let task = scheduled_function_task(s, w, program, name, &arguments, &captured)?;
-                    (
-                        "create_task".into(),
-                        json!({"goal":name,"briefing":description,"program_task":task,"call_site":at}),
-                    )
-                }
+                },
                 ActionKind::Tool { name, args } => (name.clone(), args.clone()),
                 // The host links the library itself; no tool runs and no AI sees it.
                 ActionKind::Require { library } => {
@@ -1685,7 +2233,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                     }
                     append(s, "program/require", json!({"library":library,"result":value,"failed":failed,"program_location":at}), false).await?;
                     w.program.as_mut().unwrap().resume(value, failed)?;
-                    save(s, w).await?;
+                    super::checkpoint_program(s, w, false).await?;
                     return Ok(Round::Continue);
                 }
                 ActionKind::ParallelReads { operations } => (
@@ -1699,7 +2247,8 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
             // A function call opens its frame; a tool step runs and its result is
             // the value of the program's expression. Neither enters an AI window.
             if call.name == "create_task" {
-                let scope = task_frames::create_task(s, w, &call, &node, step).await?;
+                super::checkpoint_program(s, w, true).await?;
+                let scope = Box::pin(task_frames::create_task(s, w, &call, &node, step)).await?;
                 return Ok(Round::Entered(scope));
             }
             // Resuming runs the paused program first; when the user speaks
@@ -1710,8 +2259,14 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                 };
                 w.resumed = Some(resumed);
             }
+            let readonly = is_readonly_program_tool(&call.name) && w.resumed.is_none();
+            if !readonly {
+                // Persist pending state before side-effecting or blocking steps
+                // so crash recovery never replays them.
+                super::checkpoint_program(s, w, true).await?;
+            }
             let definitions = super::tools(s, w);
-            let done = super::execute_call(s, w, &definitions, &node, step, &call, 1, Some(&at)).await?;
+            let done = Box::pin(super::execute_call(s, w, &definitions, &node, step, &call, 1, Some(&at))).await?;
             if done.result["host_denied"] == true && done.result["code"] == WAITING && w.program_task.is_none() {
                 // A plugin's explicit user-confirmation boundary stops the
                 // main program even if its JavaScript would catch errors.
@@ -1726,7 +2281,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
             // is not the program: its result goes back to the author.
             if done.is_error && w.resumed.is_none() && !w.module_probe && agent_program::runtime::is_user_blocker(&done.result) {
                 super::blockers::request_pause(s, &done.result).await?;
-                save(s, w).await?;
+                super::checkpoint_program(s, w, true).await?;
                 return Ok(Round::Continue);
             }
             // A resumed program's error rises as it was, so a question keeps its code.
@@ -1735,7 +2290,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                 _ => (done.result, done.is_error),
             };
             resolve(s, w, &action, result, is_error, done.seq)?;
-            save(s, w).await?;
+            super::checkpoint_program(s, w, !readonly).await?;
             Ok(Round::Continue)
         }
     }
@@ -2106,6 +2661,11 @@ mod tests {
         assert_eq!(task["ai_layer"], 2);
         assert_eq!(task["role"], "leaf");
         assert_eq!(task["module"], false);
+        assert_eq!(task["context"]["task_id"], "task");
+        assert_eq!(task["context"]["function"], "judge");
+        assert_eq!(task["context"]["ai_layer"], 2);
+        assert!(task["context"].get("messages").is_none(), "context is compact and does not copy the caller chat");
+        assert_eq!(call_view(&task).unwrap()["context"], task["context"]);
         execution_frame(root.path(), "judgment", "helper-b", task);
         execution_frame(root.path(), "leaf-helper", "judgment", json!({"role":"body","ai_layer":0}));
         w.task_node_id = Some("leaf-helper".into());
@@ -2131,10 +2691,13 @@ mod tests {
         install(&mut old, &json!({"source":source.replace("@virtual", "@module")})).unwrap();
         let old = function_task(&old.program.as_ref().unwrap().program, "increment", &[json!(1)], &Default::default()).unwrap();
         assert_eq!(super::super::modules::contract(&first).unwrap().key, super::super::modules::contract(&old).unwrap().key);
-        let mut invalid = Window::default();
-        let error = install(&mut invalid, &json!({"source":"const hidden=1;\n/** @virtual Read hidden.\n * @uses hidden\n */ function work(){} work();"})).unwrap_err();
-        assert!(error.to_string().contains("FIRST_LAYER_ARGUMENTS_REQUIRED"));
-        assert!(invalid.program.is_none());
+        let mut module_with_uses = Window::default();
+        let error = install(&mut module_with_uses, &json!({"source":"const hidden=1;\n/** @module Read hidden.\n * @uses hidden\n */ function work(){} work();"})).unwrap_err();
+        assert!(error.to_string().contains("a @module takes what it needs as parameters"), "{error:#}");
+        assert!(module_with_uses.program.is_none());
+        let mut closure_virtual = Window::default();
+        install(&mut closure_virtual, &json!({"source":"const hidden=1;\n/** @virtual Read hidden.\n * @uses hidden\n */ function work(){} work();"})).unwrap();
+        assert!(!closure_virtual.program.as_ref().unwrap().program.functions["work"].module_task);
         let mut implementation = Window { program_task:Some(json!({"name":"work","parameters":[],"arguments":[],"module":true,"role":"implement"})), ..Default::default() };
         let error = install_body(&mut implementation, &json!({"source":"function work(){return nested();}\n/** @module More implementation. */ function nested(){}"})).unwrap_err();
         assert!(error.to_string().contains("SECOND_LAYER_VIRTUAL_REQUIRED"));
@@ -2377,6 +2940,13 @@ mod tests {
 
 
 
+    fn has_program_result(body: &Value) -> bool {
+        body["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|m| m["name"] == "program_result")
+    }
     fn role_of(body: &Value) -> String {
         if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == super::super::modules::FIX_INPUT) {
             return "fix".into();
@@ -2583,6 +3153,30 @@ mod tests {
         install(&mut w,&json!({"source":"console.log('smaller evidence');"})).unwrap();
         assert!(matches!(next(&s,&mut w,2).await.unwrap(),Round::Continue));
         assert!(w.messages.last().unwrap()["content"].as_str().unwrap().contains("smaller evidence"));
+    }
+
+    #[tokio::test]
+    async fn output_capacity_soft_limit_blocks_huge_dump_even_in_large_budget_and_retains_bindings() {
+        let root=TestRoot::new();
+        let state=agent_service::tests::test_state(root.path(),"127.0.0.1:9".parse().unwrap());
+        let cancel=CancellationToken::new();
+        let s=execution_test_session(&state,&cancel);
+        agent_service::open_db(root.path()).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",[]).unwrap();
+        let mut w=Window::default();
+        install(&mut w,&json!({"source":"const evidence = { ok: 42, items: [1, 2, 3] }; console.log('D'.repeat(200000));"})).unwrap();
+        assert!(matches!(next(&s,&mut w,1).await.unwrap(),Round::Rewrite));
+        let diagnostic:Value=serde_json::from_str(w.messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
+        assert_eq!(diagnostic["error"]["code"],"OUTPUT_OVER_CAPACITY");
+        assert_eq!(diagnostic["error"]["console_record_chars"],json!([200000]));
+        assert_eq!(diagnostic["console_bindings"],json!(["evidence"]));
+        let preview=diagnostic["console_binding_previews"]["evidence"].as_str().expect("binding preview");
+        assert!(preview.contains("ok: 42") && preview.contains("Array(3)"),"{preview}");
+        install(&mut w,&json!({"source":"console.log(evidence.ok, evidence.items.length);"})).unwrap();
+        assert!(matches!(next(&s,&mut w,2).await.unwrap(),Round::Continue));
+        let delivered=w.messages.last().unwrap()["content"].as_str().unwrap();
+        assert!(delivered.contains("42 3"),"{delivered}");
+        assert!(delivered.contains("[console_bindings: evidence]"),"{delivered}");
+        assert!(delivered.contains("[console_scope]") && delivered.contains("evidence: {ok: 42"),"{delivered}");
     }
 
     #[tokio::test]
@@ -2933,7 +3527,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let log = seen.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" if has_program_result(body) => reply("Done.".into()),
             "main" => reply("```js\nconsole.log((await measure(\"a.txt\")).size);\n/** @module Return {size:number}: the length of the file at path. */\nasync function measure(path) {}\n```".into()),
             "implement" => {
                 let observation = body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "module_probe_result")
@@ -2971,7 +3565,7 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let seen = attempts.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" if has_program_result(body) => reply("Done.".into()),
             "main" => reply("```js\nconsole.log(check());\n/** @module Return a checked result. */\nfunction check(){}\n```".into()),
             "implement" => {
                 let step = seen.fetch_add(1, Ordering::SeqCst);
@@ -3068,7 +3662,7 @@ mod tests {
         let requests = Arc::new(AtomicUsize::new(0));
         let leaf = requests.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" if has_program_result(body) => reply("Done.".into()),
             "main" => reply(TWO_LEVEL_MAIN.into()),
             "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) { return judge(paths[0]); }\n/** @virtual */\nfunction judge(path) {\n  // Find a match in the file. Returns {summary:string}.\n}\n```".into()),
             "leaf" => {
@@ -3506,7 +4100,7 @@ mod tests {
             let mut log = log.lock().unwrap();
             log.push(body.clone());
             let messages = body["messages"].to_string();
-            let answer = if messages.contains("program_result") || messages.contains("程序已完成") && messages.contains("resumed") {
+            let answer = if has_program_result(&body) || messages.contains("程序已完成") && messages.contains("resumed") {
                 reply("Done.".into())
             } else if messages.contains("I fixed it, continue") {
                 reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\nconsole.log(\"resumed\");\n```".into())
@@ -3635,7 +4229,7 @@ mod tests {
         let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
             let messages = body["messages"].to_string();
             let answer = match role_of(&body).as_str() {
-                "main" if messages.contains("program_result") => reply("Done.".into()),
+                "main" if has_program_result(&body) => reply("Done.".into()),
                 "main" if messages.contains("I fixed it, continue") => reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()),
                 "main" => reply(TWO_LEVEL_MAIN.into()),
                 "implement" => reply(IMPLEMENT.into()),
@@ -3796,6 +4390,9 @@ mod tests {
         // The file just read is in the request: nothing needs pointing at.
         assert!(!messages(1).iter().any(|m| m["name"] == "task_asset_index"), "{:?}", messages(1).last());
         // Everything the first request sent is still the second one's prefix.
+        assert_eq!(bodies[0]["prompt_cache_key"], crate::model_transport::affinity("task", "main"));
+        assert_eq!(bodies[0]["prompt_cache_key"], bodies[1]["prompt_cache_key"]);
+        assert!(!messages(1).iter().any(|m| m["name"] == "execution_ledger"), "normal direct calls add no duplicate ledger user message");
         let (first, second) = (messages(0), messages(1));
         assert_eq!(&second[..first.len()], &first[..], "the second request only appends");
         for message in &first {
@@ -4103,6 +4700,44 @@ mod tests {
         let kept = w.messages.iter().map(|m| m["name"].as_str().unwrap_or(m["role"].as_str().unwrap())).collect::<Vec<_>>();
         assert_eq!(kept, ["system", "user", "skill_instructions", "chat_modules_update", "assistant"], "the reads that led to the program leave; what the host delivered stays");
         assert_eq!(w.messages.last(), Some(&script));
+    }
+
+    #[test]
+    fn end_familiarization_and_implement_clear_stale_ledgers_plans_and_errors() {
+        let source = "console.log(2);";
+        let script = json!({"role":"assistant","content":null,"tool_calls":[{"id":"p2","type":"function",
+            "function":{"name":WRITE_PROGRAM,"arguments":json!({"source":source}).to_string()}}]});
+        let mut w = Window { messages: vec![
+            json!({"role":"system","content":MAIN_PROMPT}),
+            json!({"role":"user","content":"Do it"}),
+            json!({"role":"user","name":"execution_plan","content":"{}"}),
+            json!({"role":"user","name":"execution_ledger","content":"{\"action\":\"read_file\",\"status\":\"completed\"}"}),
+            json!({"role":"user","name":"execution_ledger","content":"{\"action\":\"virtual_call\",\"status\":\"completed\"}"}),
+            json!({"role":"user","name":"program_result","content":"step 1 ok"}),
+            script.clone(),
+        ], ..Default::default() };
+        end_familiarization(&mut w, &script, source);
+        let kept = w.messages.iter().map(|m| m["name"].as_str().unwrap_or(m["role"].as_str().unwrap())).collect::<Vec<_>>();
+        assert_eq!(kept, ["system", "user", "program_result", "assistant"], "stale plans and ledgers leave on program start");
+
+        let fixed = "async function run() { return {ok: true}; }";
+        let broken_call = json!({"role":"assistant","content":null,"tool_calls":[{"id":"bad","type":"function",
+            "function":{"name":WRITE_PROGRAM,"arguments":json!({"source":"const = ;"}).to_string()}}]});
+        let good_call = json!({"role":"assistant","content":null,"tool_calls":[{"id":"good","type":"function",
+            "function":{"name":WRITE_PROGRAM,"arguments":json!({"source":fixed}).to_string()}}]});
+        let mut impl_w = Window { messages: vec![
+            json!({"role":"system","content":IMPLEMENT_PROMPT}),
+            json!({"role":"user","name":"program_task_input","content":"{}","_frame_input":true}),
+            broken_call,
+            json!({"role":"tool","tool_call_id":"bad","content":"{\"code\":\"PROGRAM_SOURCE_INVALID\"}"}),
+            json!({"role":"user","name":"program_diagnostic","content":"{\"code\":\"FUNCTION_RUNTIME_ERROR\"}"}),
+            json!({"role":"user","name":"execution_ledger","content":"{}"}),
+            good_call.clone(),
+        ], ..Default::default() };
+        clear_failed_program_attempts(&mut impl_w, &good_call, fixed);
+        let impl_kept = impl_w.messages.iter().map(|m| m["name"].as_str().unwrap_or(m["role"].as_str().unwrap())).collect::<Vec<_>>();
+        assert_eq!(impl_kept, ["system", "program_task_input", "assistant"]);
+        assert_eq!(impl_w.messages.last(), Some(&good_call));
     }
 
     /// The same run: the index of saved material outside the request was
@@ -4544,7 +5179,7 @@ mod tests {
         let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
             let turn2 = body["messages"].to_string().contains("What did the last program do");
             let answer = match role_of(&body).as_str() {
-                "main" if !turn2 && body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+                "main" if !turn2 && has_program_result(&body) => reply("Done.".into()),
                 "main" if !turn2 => reply(TWO_LEVEL_MAIN.into()),
                 "main" => {
                     let messages = body["messages"].as_array().unwrap();
@@ -4671,7 +5306,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_main_program_that_keeps_failing_ends_its_turn_and_the_conversation_goes_on() {
+    async fn main_program_retries_past_three_errors_until_model_stops() {
         let root = TestRoot::new();
         let main = Arc::new(AtomicUsize::new(0));
         let rounds = main.clone();
@@ -4680,7 +5315,9 @@ mod tests {
         let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
             let answer = if body["messages"].to_string().contains("What happened?") {
                 *log.lock().unwrap() = memory_of(&body);
-                reply("It stopped with an error.".into())
+                reply("It stopped after 5 errors.".into())
+            } else if rounds.load(Ordering::SeqCst) >= 5 {
+                reply("Gave up after 5 failed programs.".into())
             } else {
                 rounds.fetch_add(1, Ordering::SeqCst);
                 reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"done.txt\", content: \"1\"});\nthrow new Error(\"boom\");\n```".into())
@@ -4695,10 +5332,9 @@ mod tests {
         run_task(state.clone(), "task".into(), "fake".into(), "Do it".into(), 10, CancellationToken::new(), 1, false).await.unwrap();
         run_task(state, "task".into(), "fake".into(), "What happened?".into(), 10, CancellationToken::new(), 2, false).await.unwrap();
         server.abort();
-        assert_eq!(main.load(Ordering::SeqCst), 4, "the first program and three rewrites");
-        let chat = memory.lock().unwrap().clone().expect("the next turn reached the model instead of re-running the failure");
-        assert_eq!(chat, json!([["user", "Do it"], ["assistant", "第 4 段程序（do-it-4.js）在第 3 行出错停止：boom\n之后的步骤没有执行。\n写入：done.txt"]]),
-            "the outcome the user saw is the earlier turn's reply");
+        assert_eq!(main.load(Ordering::SeqCst), 5, "the main program ran past the old 3-rewrite cap");
+        let chat = memory.lock().unwrap().clone().expect("the next turn reached the model");
+        assert_eq!(chat, json!([["user", "Do it"], ["assistant", "Gave up after 5 failed programs."]]));
         assert_eq!(conn.query_row("SELECT status FROM agent_tasks WHERE id='task'", [], |r| r.get::<_, String>(0)).unwrap(), "completed");
     }
 
@@ -4941,7 +5577,7 @@ mod tests {
         let leaf = Arc::new(AtomicUsize::new(0));
         let leaf_rounds = leaf.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" if has_program_result(body) => reply("Done.".into()),
             "main" if body["messages"].to_string().matches("被你的新消息暂停").count() >= 2 =>
                 reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()),
             "main" if body["messages"].to_string().contains("被你的新消息暂停") => reply(RESUMING_MAIN.into()),
@@ -5071,7 +5707,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(None::<String>));
         let log = seen.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" if has_program_result(body) => reply("Done.".into()),
             "main" => reply("```js\nimport * as io from \"host:io\";\nconst result = await summarizeAs(\"Only summarize a\", [\"a.txt\", \"b.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n\n/** @module */\nasync function summarizeAs(brief, paths) {\n  // Summarize the files at paths as brief asks. Returns {summary:string}.\n}\n```".into()),
             "implement" => reply("```js\nasync function summarizeAs(brief, paths) {\n  /**\n   * @virtual\n   * Summarize the files at paths as the brief asks.\n   * @uses brief the user's request, verbatim\n   * Returns {summary:string}.\n   */\n  async function summarize(paths) {}\n  return await summarize(paths);\n}\n```".into()),
             role => {
@@ -5332,7 +5968,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
         let log = seen.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" if has_program_result(body) => reply("Done.".into()),
             "main" => reply("```js\nimport * as io from \"host:io\";\nimport * as process from \"host:process\";\nconst result = await check(\"a.txt\");\nio.write({path: \"out.txt\", content: String(result.keep)});\n\n/** @module */\nasync function check(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
             "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function check(path) {\n  return await judge(path);\n}\n/** @virtual */\nasync function judge(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
             "leaf" => {
@@ -5358,7 +5994,7 @@ mod tests {
         let prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let log = prompts.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" if has_program_result(body) => reply("Done.".into()),
             "main" => reply("```js\nimport * as io from \"host:io\";\nconst changed = await polishFile(\"a.txt\");\nio.write({path: \"out.txt\", content: String(changed === null) + \":\" + io.read({path: \"a.txt\"}).content});\n\n/** @module */\nasync function polishFile(path) {\n  // Rewrite the file at path in its final form. Changes the file; returns nothing.\n}\n```".into()),
             "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function polishFile(path) {\n  return await polish(path);\n}\n/** @virtual */\nasync function polish(path) {\n  // Rewrite the file at path in its final form. Changes the file; returns nothing.\n}\n```".into()),
             "leaf" => {
@@ -5412,6 +6048,8 @@ mod tests {
         let bodies = bodies.lock().unwrap();
         assert_eq!(bodies.len(), 3, "read, program submission and final answer all use /v1/responses");
         let first = &bodies[0];
+        assert_eq!(first["prompt_cache_key"], crate::model_transport::affinity("task", "main"));
+        assert_eq!(first["prompt_cache_key"], bodies[1]["prompt_cache_key"]);
         assert!(first["instructions"].as_str().unwrap().starts_with("Complete the user's authorized task"), "the role prompt is the instructions");
         assert_eq!(first["store"], false);
         assert_eq!(first["reasoning"]["effort"], "low", "thinking is never off");
@@ -5430,7 +6068,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
         let log = seen.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" if body["messages"].to_string().contains("program_result") => reply("Done.".into()),
+            "main" if has_program_result(body) => reply("Done.".into()),
             "main" => reply("```js\nimport * as io from \"host:io\";\nconst result = await check(\"a.txt\");\nio.write({path: \"out.txt\", content: String(result.keep)});\n\n/** @module */\nasync function check(path) {\n  // Run the project's checks on the file at path. Returns {keep:boolean}.\n}\n```".into()),
             "implement" => reply("```js\nimport * as io from \"host:io\";\nimport * as process from \"host:process\";\nasync function check(path) {\n  return await judge(path);\n}\n/** @virtual */\nasync function judge(path) {\n  // Run the project's checks on the file at path. Returns {keep:boolean}.\n}\n```".into()),
             "leaf" => {
@@ -5448,6 +6086,42 @@ mod tests {
         assert_eq!(seen[0].iter().filter(|name| *name != FIND && *name != ASK).cloned().collect::<BTreeSet<_>>(), imported,
             "only imported io and process observation methods; OS execution stays in module code");
         assert!(seen[0].contains(&FIND.to_owned()) && seen[0].contains(&ASK.to_owned()));
+    }
+
+    #[tokio::test]
+    async fn virtual_function_errors_and_internal_details_do_not_leak_into_caller_window() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("secret.txt"), "INNER_ONLY_SECRET").unwrap();
+        let main_followup = Arc::new(std::sync::Mutex::new(None::<Value>));
+        let log = main_followup.clone();
+        run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => {
+                *log.lock().unwrap() = Some(body.clone());
+                reply("Done.".into())
+            }
+            "main" => reply("```js\nconst res = await inspect('top');\nconsole.log(JSON.stringify(res));\n/** @module */\nasync function inspect(tag) {\n  // Check files and return {results:any}.\n}\n```".into()),
+            "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function inspect(tag) {\n  const [a, b] = await Promise.all([judge('x'), judge('y')]);\n  return {results: [a, b]};\n}\n/** @virtual */\nasync function judge(part) {\n  // Read files with io and return {ok:boolean}.\n}\n```".into()),
+            "leaf" => {
+                let tools_done = body["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool").count();
+                match tools_done {
+                    0 => json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                        "tool_calls":[{"id":"miss","type":"function","function":{"name":"read_file","arguments":json!({"path":"missing.txt"}).to_string()}}]}}]}),
+                    1 => json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                        "tool_calls":[{"id":"hit","type":"function","function":{"name":"read_file","arguments":json!({"path":"secret.txt"}).to_string()}}]}}]}),
+                    _ => reply(json!({"ok":true}).to_string()),
+                }
+            }
+            other => panic!("unexpected request: {other}"),
+        }).await;
+        let followup = main_followup.lock().unwrap().clone().expect("main followup request");
+        let messages = followup["messages"].as_array().unwrap();
+        let wire = followup["messages"].to_string();
+        assert!(!messages.iter().any(|m| m["name"] == "execution_ledger"), "no virtual_call ledger in caller window: {wire}");
+        assert!(!wire.contains("INNER_ONLY_SECRET") && !wire.contains("missing.txt"), "child tool errors and internal reads stay inside child scope: {wire}");
+        assert!(wire.contains("\\\"ok\\\":true") || wire.contains("\"ok\":true"), "explicit child return reaches caller: {wire}");
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let child_windows: i64 = conn.query_row("SELECT count(*) FROM agent_runtime_windows WHERE scope<>'main'", [], |r| r.get(0)).unwrap();
+        assert_eq!(child_windows, 0, "finished child frames delete their working windows");
     }
 
     #[tokio::test]
@@ -5500,7 +6174,7 @@ mod tests {
                 if role_of(&body) == "implement" {
                     return Json(reply("```js\nasync function check(x) {\n  return await judge(x);\n}\n/** @virtual */\nasync function judge(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".into())).into_response();
                 }
-                let finished = body["messages"].to_string().contains("program_result");
+                let finished = has_program_result(&body);
                 log.lock().unwrap().push(body);
                 if finished {
                     return Json(reply("Done.".into())).into_response();
@@ -5636,5 +6310,671 @@ mod tests {
         let outcome = conn.query_row("SELECT data FROM agent_task_events WHERE task_id='task' AND data LIKE '%MODULE_NOT_FOUND true%' LIMIT 1", [], |r| r.get::<_, String>(0));
         assert!(outcome.is_ok(), "the program printed what require threw and what the hook decided");
         plugins.shutdown().unwrap();
+    }
+
+    fn write_skill_library(root: &std::path::Path, name: &str, description: &str, files: &[(&str, &str)]) {
+        let skill_dir = root.join(".agents/skills").join(name);
+        let modules_dir = skill_dir.join("modules");
+        std::fs::create_dir_all(&modules_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\nLibrary notes.\n"),
+        )
+        .unwrap();
+        for (file, content) in files {
+            std::fs::write(modules_dir.join(file), content).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn orchestration_library_runs_sibling_modules_and_isolated_virtual_leaf_end_to_end() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("a.txt"), "alpha-content").unwrap();
+        std::fs::write(root.path().join("b.txt"), "beta-content").unwrap();
+        let entry_source = r#"
+/** Inspect files via sibling helper and virtual leaf. */
+async function inspectFiles(paths, label) {
+  const normalized = await normalizeList(paths);
+  const io = require("io");
+  const contents = normalized.map((p) => io.read({ path: p }).content);
+  return await judgeSummary(contents, label);
+}
+
+/** @virtual Normalize list deterministically. */
+async function normalizeList(paths) {}
+
+/**
+ * @virtual
+ * Judge combined contents and return { label, count, combined }.
+ */
+async function judgeSummary(contents, label) {}
+"#;
+        let sibling_source = r#"
+/** Filter blank path entries. */
+async function normalizeList(paths) {
+  return paths.filter((p) => Boolean(p));
+}
+"#;
+        write_skill_library(
+            root.path(),
+            "doc-flow",
+            "Inspect documents and judge summaries.",
+            &[("inspectFiles.js", entry_source), ("normalizeList.js", sibling_source)],
+        );
+
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            log.lock().unwrap().push(body.clone());
+            match role_of(body).as_str() {
+                "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => {
+                    reply("Done.".into())
+                }
+                "main" => reply(
+                    "```js\nconst SECRET = \"MAIN-ONLY-SECRET-TOKEN\";\nconst flow = require(\"doc-flow\");\nconst verdict = await flow.inspectFiles([\"a.txt\", \"\", \"b.txt\"], \"demo\");\nconsole.log(SECRET.length, JSON.stringify(verdict));\n```"
+                        .into(),
+                ),
+                "implement" => panic!("pre-saved orchestration library must not invoke Layer-1 author AI"),
+                "leaf" => {
+                    let text = body["messages"].to_string();
+                    assert!(!text.contains("MAIN-ONLY-SECRET-TOKEN"), "leaf window must stay isolated from caller history");
+                    let input_msg = body["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|m| m["name"] == "program_task_input")
+                        .expect("leaf must receive program_task_input");
+                    let view: Value = serde_json::from_str(input_msg["content"].as_str().unwrap()).unwrap();
+                    assert_eq!(view["bindings"]["label"], "demo", "{view}");
+                    assert_eq!(view["bindings"]["contents"], json!(["alpha-content", "beta-content"]), "{view}");
+                    reply(json!({"label":"demo","count":2,"combined":"alpha+beta"}).to_string())
+                }
+                other => panic!("unexpected role {other}"),
+            }
+        })
+        .await;
+
+        let bodies = bodies.lock().unwrap();
+        let headers = bodies[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "program_tool_headers")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(headers.contains("declare module \"doc-flow\";"), "main index should advertise skill library: {headers}");
+        assert_eq!(
+            bodies.iter().filter(|b| role_of(b) == "leaf").count(),
+            1,
+            "only the internal @virtual leaf should invoke AI"
+        );
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let result: String = conn
+            .query_row(
+                "SELECT json_extract(data,'$.output') FROM agent_task_events WHERE task_id='task' AND kind='program/result' ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(result.contains("\"combined\":\"alpha+beta\""), "unexpected program result: {result}");
+    }
+
+    #[tokio::test]
+    async fn orchestration_library_promises_runs_concurrent_calls_and_reports_runtime_errors_without_fixing() {
+        let root = TestRoot::new();
+        let batch_module = r#"
+/** Analyze one item deterministically. */
+async function analyzeOne(item) {
+  if (item === "bad") {
+    throw new Error("invalid batch item");
+  }
+  return { item, ok: true };
+}
+"#;
+        write_skill_library(
+            root.path(),
+            "batch-flow",
+            "Deterministic batch helpers.",
+            &[("analyzeOne.js", batch_module)],
+        );
+
+        let roles = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let role_log = roles.clone();
+        run_scripted(root.path(), move |body| {
+            let role = role_of(body);
+            role_log.lock().unwrap().push(role.clone());
+            match role.as_str() {
+                "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => {
+                    reply("Batch finished.".into())
+                }
+                "main" => reply(
+                    "```js\nconst bf = require(\"batch-flow\");\nconst bfp = require(\"batch-flow/promises\");\nconst batch = await Promise.all([bfp.analyzeOne(\"ok1\"), bfp.analyzeOne(\"ok2\")]);\nlet caught = \"\";\ntry { bf.analyzeOne(\"bad\"); } catch (e) { caught = e.message; }\nconsole.log(JSON.stringify({ batch, caught }));\n```"
+                        .into(),
+                ),
+                other => panic!("unexpected AI call for deterministic orchestration library: {other}"),
+            }
+        })
+        .await;
+
+        assert_eq!(*roles.lock().unwrap(), vec!["main".to_owned(), "main".to_owned()]);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".agents/skills/batch-flow/modules/analyzeOne.js")).unwrap(),
+            batch_module,
+            "read-only library source must remain untouched after runtime error"
+        );
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let output: String = conn
+            .query_row(
+                "SELECT json_extract(data,'$.output') FROM agent_task_events WHERE task_id='task' AND kind='program/result' ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            output.contains("\"item\":\"ok1\"") && output.contains("\"item\":\"ok2\"") && output.contains("\"ok\":true"),
+            "{output}"
+        );
+        assert!(output.contains("invalid batch item"), "{output}");
+    }
+
+    #[test]
+    fn orchestration_library_contracts_and_execution_boundary() {
+        let root = TestRoot::new();
+        let mod_source = r#"
+/** Run build command in workspace. */
+async function runBuild(target) {
+  const proc = require("process");
+  return proc.exec_command({ cmd: "echo " + target, workdir: "." });
+}
+"#;
+        write_skill_library(
+            root.path(),
+            "build-flow",
+            "Build verification workflows.",
+            &[("runBuild.js", mod_source)],
+        );
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let mut s = execution_test_session(&state, &cancel);
+        execution_frame(root.path(), "parent", "n0", json!({"role":"body"}));
+        s.scope = "node:parent".into();
+        let definitions = execution_test_definitions();
+        let catalog = library_catalog(&s, &definitions);
+
+        let (overview, _) = crate::flow_libraries::read_contracts(
+            &s,
+            &catalog,
+            &definitions,
+            &json!({"libraries":["build-flow"],"overview":true}),
+        )
+        .unwrap();
+        assert!(overview["overview"].as_str().unwrap().contains("build-flow.runBuild(target)"));
+
+        let (decl, _) = crate::flow_libraries::read_contracts(
+            &s,
+            &catalog,
+            &definitions,
+            &json!({"methods":["build-flow.runBuild"]}),
+        )
+        .unwrap();
+        assert!(decl["declarations"].as_str().unwrap().contains("async function runBuild(target);"));
+
+        let missing = crate::flow_libraries::read_contracts(
+            &s,
+            &catalog,
+            &definitions,
+            &json!({"libraries":["does-not-exist"]}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing.contains("unknown or unavailable library does-not-exist"), "{missing}");
+
+        let found = find(&s, &Window::default(), &json!({"query":"verification runBuild"})).unwrap();
+        assert!(found["methods"].as_array().unwrap().iter().any(|m| m["method"] == "build-flow.runBuild" && m["orchestration"] == true));
+
+        let parent = Window::default();
+        let libs_allowed = crate::flow_libraries::compile_static_libraries(&s, &parent, "build-flow", "runBuild");
+        assert!(libs_allowed["process"].contains_key("exec_command"));
+
+        s.ban_execution = true;
+        let libs_banned = crate::flow_libraries::compile_static_libraries(&s, &parent, "build-flow", "runBuild");
+        assert!(
+            !libs_banned.get("process").is_some_and(|m| m.contains_key("run_program")),
+            "ban_execution must strip execution tools inside library modules"
+        );
+
+        let mut ro_state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        ro_state.permission_mode = crate::agent_service::PermissionMode::ReadOnly;
+        let ro_session = execution_test_session(&ro_state, &cancel);
+        let libs_ro = crate::flow_libraries::compile_static_libraries(&ro_session, &parent, "build-flow", "runBuild");
+        assert!(
+            !libs_ro.get("io").is_some_and(|m| m.contains_key("write"))
+                && !libs_ro.get("process").is_some_and(|m| m.contains_key("run_program")),
+            "read-only permission mode must block file writes and project process execution inside library modules"
+        );
+
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_session_meta(task_id,workspace,kind) VALUES ('task',NULL,'chat')",
+            [],
+        )
+        .unwrap();
+        let libs_chat = crate::flow_libraries::compile_static_libraries(&execution_test_session(&state, &cancel), &parent, "build-flow", "runBuild");
+        assert!(
+            !libs_chat.get("process").is_some_and(|m| m.contains_key("exec_command")),
+            "non-code chat session must block shell execution inside library modules"
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_preset_libraries_compile_and_execute_end_to_end() {
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("alpha.txt"), "preset-alpha-body").unwrap();
+
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        run_scripted(root.path(), move |body| {
+            log.lock().unwrap().push(body.clone());
+            match role_of(body).as_str() {
+                "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => {
+                    reply("Verified.".into())
+                }
+                "main" => reply(
+                    "```js\nconst bf = require(\"batch-files\");\nconst rv = require(\"repo-verify\");\nconst summary = await bf.summarizeFiles([\"alpha.txt\", \"missing.txt\"], \"What does alpha say?\");\nconst checks = await rv.runChecks([\"echo ok-check\", \"false\"], \".\");\nconsole.log(JSON.stringify({ summary, checks }));\n```"
+                        .into(),
+                ),
+                "implement" => panic!("built-in preset libraries must not call Layer-1 author AI"),
+                "leaf" => {
+                    let input_msg = body["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|m| m["name"] == "program_task_input")
+                        .unwrap();
+                    let view: Value = serde_json::from_str(input_msg["content"].as_str().unwrap()).unwrap();
+                    assert_eq!(view["bindings"]["question"], "What does alpha say?");
+                    let files = view["bindings"]["files"].as_array().unwrap();
+                    assert_eq!(files.len(), 2);
+                    assert_eq!(files[0]["ok"], true);
+                    assert_eq!(files[0]["content"], "preset-alpha-body");
+                    assert_eq!(files[1]["ok"], false);
+                    reply(json!({"answer":"alpha contains preset-alpha-body","citations":["alpha.txt"],"missing":["missing.txt"]}).to_string())
+                }
+                other => panic!("unexpected role {other}"),
+            }
+        })
+        .await;
+
+        let bodies = bodies.lock().unwrap();
+        let headers = bodies[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "program_tool_headers")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap();
+        assert!(headers.contains("declare module \"batch-files\";"), "{headers}");
+        assert!(headers.contains("declare module \"repo-verify\";"), "{headers}");
+        assert!(
+            headers.contains("readMany(paths)") && headers.contains("summarizeFiles(paths, question)"),
+            "preset method signatures should appear up front in headers: {headers}"
+        );
+        assert_eq!(bodies.iter().filter(|b| role_of(b) == "leaf").count(), 1);
+
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let output: String = conn
+            .query_row(
+                "SELECT json_extract(data,'$.output') FROM agent_task_events WHERE task_id='task' AND kind='program/result' ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(output.contains("preset-alpha-body") && output.contains("\"passed\":1") && output.contains("\"failed\":1"), "{output}");
+
+        // Built-in preset contracts are readable via read_tool_contracts, and plugin sessions hide non-plugin presets.
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let code_session = execution_test_session(&state, &cancel);
+        let defs = execution_test_definitions();
+        let catalog = library_catalog(&code_session, &defs);
+        let (overview, _) = crate::flow_libraries::read_contracts(
+            &code_session,
+            &catalog,
+            &defs,
+            &json!({"libraries":["batch-files","repo-verify"],"overview":true}),
+        )
+        .unwrap();
+        let text = overview["overview"].as_str().unwrap();
+        assert!(text.contains("batch-files.readMany") && text.contains("repo-verify.runChecks"), "{text}");
+
+        let mut plugin_session = code_session.clone();
+        plugin_session.plugin = Some("code-flow".into());
+        assert!(crate::flow_libraries::find_library(&plugin_session, "batch-files").is_none());
+    }
+
+    #[test]
+    fn persistent_console_preserves_bindings_when_append_fails_after_runtime_error() {
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let session = execution_test_session(&state, &cancel);
+        let mut window = Window::default();
+
+        // Cell 0 establishes `kept` in the persistent Console.
+        install_scoped(&session, &mut window, &json!({"source": "const kept = 41;"}), false).unwrap();
+        let mut runtime = window.program.take().unwrap();
+        assert!(matches!(runtime.next(), agent_program::runtime::State::Returned(_)));
+        window.program = Some(runtime);
+        retain_console(&mut window);
+
+        // Cell 1 fails with an uncaught runtime error.
+        install_scoped(&session, &mut window, &json!({"source": "throw new Error('cell1 failed');"}), false).unwrap();
+        let mut runtime = window.program.take().unwrap();
+        assert!(matches!(runtime.next(), agent_program::runtime::State::Failed(_)));
+        window.program = Some(runtime);
+        retain_console(&mut window);
+
+        // Cell 2 submits a bad redeclaration (`const kept = 99`): append_cell rejects it,
+        // yet `window.console` must NOT be dropped.
+        let err = install_scoped(&session, &mut window, &json!({"source": "const kept = 99;"}), false).unwrap_err();
+        assert!(err.to_string().contains("kept"), "{err:#}");
+        assert!(window.console.is_some(), "failed append_cell must restore w.console");
+
+        // Cell 3 continues cleanly in the same Console and still sees `kept`.
+        install_scoped(&session, &mut window, &json!({"source": "console.log(kept + 1);"}), false).unwrap();
+        let mut runtime = window.program.take().unwrap();
+        assert!(matches!(runtime.next(), agent_program::runtime::State::Returned(_)));
+        assert_eq!(runtime.logs(), &["42"]);
+    }
+
+    #[tokio::test]
+    async fn readonly_chunk_streaming_throttles_window_checkpoints() {
+        let root = TestRoot::new();
+        std::fs::write(
+            root.path().join("big.log"),
+            (1..=40).map(|i| format!("row-{i:02} ERROR={}\n", i % 7 == 0)).collect::<String>(),
+        )
+        .unwrap();
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let session = execution_test_session(&state, &cancel);
+        let mut window = Window::default();
+
+        let source = r#"
+const io = require("io");
+let offset = 0;
+let line = 1;
+let chunks = 0;
+let hits = 0;
+while (true) {
+  const page = io.read_chunk({ path: "big.log", byte_offset: offset, start_line: line, max_bytes: 120 });
+  chunks += 1;
+  for (const row of page.lines) {
+    if (row.text.indexOf("ERROR=true") >= 0) hits += 1;
+  }
+  if (page.eof) break;
+  offset = page.next_byte_offset;
+  line = page.next_line;
+}
+const tail = io.read_lines({ path: "big.log", start_line: -2, end_line: -1 });
+console.log(JSON.stringify({ chunks, hits, tail_last: tail.lines[tail.lines.length - 1].text }));
+"#;
+        install_scoped(&session, &mut window, &json!({"source": source}), false).unwrap();
+        // Seed last_program_save so the loop stays inside the 3s checkpoint interval.
+        window.last_program_save = Some(std::time::Instant::now());
+        let mut saw_throttled = false;
+        for step in 1..=64 {
+            match next(&session, &mut window, step).await.unwrap() {
+                Round::Continue if window.program.is_some() => {
+                    if window.unsaved_program_steps > 0 {
+                        saw_throttled = true;
+                    }
+                }
+                Round::Continue => break,
+                _ => panic!("unexpected round while streaming read_chunk"),
+            }
+        }
+        assert!(saw_throttled, "tight read-only chunk loop should skip intermediate full-heap saves");
+        assert!(window.program.is_none());
+        let last = window.messages.last().unwrap()["content"].as_str().unwrap();
+        assert!(last.contains("\"hits\":5") && last.contains("row-40 ERROR=false"), "{last}");
+    }
+
+    #[tokio::test]
+    async fn host_context_and_tools_dispatch_synchronously_in_program_flow() {
+        let root = TestRoot::new();
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let session = execution_test_session(&state, &cancel);
+        let mut window = Window {
+            messages: vec![
+                json!({"role":"system","content":MAIN_PROMPT}),
+                json!({"role":"user","content":"Inspect workspace"}),
+            ],
+            ..Default::default()
+        };
+
+        let source = r#"
+const host = require("host");
+const ctx = host.context();
+const reg = host.tools();
+console.log(JSON.stringify({
+  msgs: ctx.messages.length,
+  has_tools: Array.isArray(ctx.tools) && ctx.tools.includes("read_file"),
+  has_key: typeof ctx.prompt_cache_key === "string" && ctx.prompt_cache_key.length > 0,
+  has_ws: typeof ctx.workspace_root === "string" && ctx.workspace_root.length > 0,
+  has_io: Array.isArray(ctx.libraries) && ctx.libraries.includes("io"),
+  has_decl: typeof reg.declarations === "string" && reg.declarations.includes("io"),
+}));
+"#;
+        install_scoped(&session, &mut window, &json!({"source": source}), false).unwrap();
+        for step in 1..=16 {
+            match next(&session, &mut window, step).await.unwrap() {
+                Round::Continue if window.program.is_some() => {}
+                Round::Continue => break,
+                _ => panic!("unexpected round in host snapshot test"),
+            }
+        }
+        assert!(window.program.is_none());
+        let last = window.messages.last().unwrap()["content"].as_str().unwrap();
+        let line = last.lines().find(|l| l.starts_with('{')).expect(last);
+        let parsed: Value = serde_json::from_str(line).unwrap();
+        assert!(parsed["msgs"].as_u64().unwrap() >= 2, "{parsed}");
+        assert_eq!(parsed["has_tools"], true, "{parsed}");
+        assert_eq!(parsed["has_key"], true, "{parsed}");
+        assert_eq!(parsed["has_ws"], true, "{parsed}");
+        assert_eq!(parsed["has_io"], true, "{parsed}");
+        assert_eq!(parsed["has_decl"], true, "{parsed}");
+    }
+
+    #[tokio::test]
+    async fn partial_virtual_with_explicit_sub_context_preserves_cache_prefix_and_captures_scope() {
+        let root = TestRoot::new();
+        let leaf_requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let main_requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let leaf_log = leaf_requests.clone();
+        let main_log = main_requests.clone();
+        run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" if has_program_result(body) => reply("Done.".into()),
+            "main" => {
+                main_log.lock().unwrap().push(body.clone());
+                let source = r#"
+const host = require("host");
+const mainContext = host.context();
+const note = "lexical-clue-from-main";
+const subContext = {
+  ...mainContext,
+  messages: mainContext.messages.slice(0),
+  tools: mainContext.tools.filter((name) => name === "read_file" || name === "list_dir"),
+};
+const fast = inspectTarget("a.txt", subContext);
+const ai = inspectTarget("b.txt", subContext);
+console.log(JSON.stringify({ fast, ai }));
+
+/**
+ * @virtual
+ * Inspect target path, returning {kind:string, clue:string}.
+ */
+function inspectTarget(target, ctx) {
+  if (target === "a.txt") {
+    return { kind: "fast-js", clue: note + ":fast" };
+  }
+  // Fall back to AI inspection for other paths inside ctx.
+}
+"#;
+                reply(format!("```js\n{source}\n```"))
+            }
+            "leaf" => {
+                leaf_log.lock().unwrap().push(body.clone());
+                reply(json!({"kind": "leaf-ai", "clue": "from-leaf"}).to_string())
+            }
+            other => panic!("unexpected role {other}"),
+        })
+        .await;
+
+        let main_bodies = main_requests.lock().unwrap();
+        let leaf_bodies = leaf_requests.lock().unwrap();
+        assert_eq!(leaf_bodies.len(), 1, "early JS return must skip AI on a.txt; only b.txt wakes leaf");
+        let main_msgs = main_bodies[0]["messages"].as_array().unwrap();
+        let leaf_msgs = leaf_bodies[0]["messages"].as_array().unwrap();
+        // mainContext captured inside the running JS cell includes main's prefix
+        // plus the assistant write_program call and its tool response, then leaf
+        // appends program_task_input at the tail.
+        assert_eq!(
+            leaf_msgs.len(),
+            main_msgs.len() + 3,
+            "unexpected leaf message count: roles={:?}",
+            leaf_msgs.iter().map(|m| (&m["role"], &m["name"])).collect::<Vec<_>>()
+        );
+        assert_eq!(&leaf_msgs[..main_msgs.len()], main_msgs.as_slice(), "KV prefix must stay byte-identical");
+        assert_eq!(leaf_bodies[0]["prompt_cache_key"], main_bodies[0]["prompt_cache_key"]);
+
+        let leaf_tools = tool_names(&leaf_bodies[0]);
+        assert_eq!(leaf_tools, vec!["list_dir".to_string(), "read_file".to_string()]);
+
+        let tail = leaf_msgs.last().unwrap();
+        assert_eq!(tail["name"], "program_task_input");
+        let tail_json: Value = serde_json::from_str(tail["content"].as_str().unwrap()).unwrap();
+        assert_eq!(tail_json["scope"]["note"], "lexical-clue-from-main");
+        assert_eq!(tail_json["bindings"]["ctx"]["$js_context"], true);
+        assert!(tail_json["bindings"]["ctx"].get("messages").is_none(), "tail summary must not duplicate prefix messages");
+        assert!(
+            tail_json["role_override"].as_str().is_some_and(|s| s.contains("OVERRIDE PRIOR SYSTEM PROMPT") && s.contains("inspectTarget")),
+            "preserve_prefix leaf must inject explicit role_override at tail: {tail_json}"
+        );
+        assert!(
+            tail_json["leaf_instructions"].as_str().is_some_and(|s| s.contains("@virtual")),
+            "preserve_prefix leaf must carry LEAF_PROMPT instructions at tail: {tail_json}"
+        );
+
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let out: String = conn
+            .query_row("SELECT json_extract(data,'$.output') FROM agent_task_events WHERE kind='program/result' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(out.contains("fast-js") && out.contains("lexical-clue-from-main:fast") && out.contains("leaf-ai"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn empty_virtual_with_host_context_runs_as_leaf_with_parent_tools_aligned() {
+        let root = TestRoot::new();
+        let main_tools = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let leaf_tools = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let saw_implement = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let main_tools_log = main_tools.clone();
+        let leaf_tools_log = leaf_tools.clone();
+        let saw_implement_flag = saw_implement.clone();
+        run_scripted(root.path(), move |body| match role_of(body).as_str() {
+            "main" if has_program_result(body) => reply("Done.".into()),
+            "main" => {
+                *main_tools_log.lock().unwrap() = tool_names(body);
+                let source = r#"
+const host = require("host");
+const mainContext = host.context();
+/**
+ * Collect snapshot with inherited context.
+ * @virtual Returns {ok: boolean}.
+ */
+function collectSnapshot(input, ctx) {
+  // comment-only body
+}
+const res = collectSnapshot({ check: true }, mainContext);
+console.log(JSON.stringify(res));
+"#;
+                reply(format!("```js\n{source}\n```"))
+            }
+            "leaf" => {
+                *leaf_tools_log.lock().unwrap() = tool_names(body);
+                reply(json!({"ok": true}).to_string())
+            }
+            "implement" => {
+                saw_implement_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                reply("```js\nfunction collectSnapshot(input, ctx) { return { ok: false }; }\n```".into())
+            }
+            other => panic!("unexpected role {other}"),
+        })
+        .await;
+
+        assert!(!saw_implement.load(std::sync::atomic::Ordering::SeqCst), "empty @virtual with host.context() must run as leaf, never implement");
+        let main_list = main_tools.lock().unwrap();
+        let leaf_list = leaf_tools.lock().unwrap();
+        assert!(!leaf_list.is_empty(), "leaf must have run once");
+        assert!(leaf_list.contains(&"read_asset".to_owned()), "inherited js_tools must keep read_asset: {leaf_list:?}");
+        assert!(leaf_list.contains(&"read_session_history".to_owned()), "inherited js_tools must keep read_session_history: {leaf_list:?}");
+        assert!(!leaf_list.contains(&WRITE_PROGRAM.to_owned()), "leaf child must never receive write_program: {leaf_list:?}");
+        let expected_leaf_tools: Vec<String> = main_list.iter().filter(|t| t.as_str() != WRITE_PROGRAM).cloned().collect();
+        assert_eq!(*leaf_list, expected_leaf_tools, "passing host.context() directly must align tools with main minus write_program");
+    }
+
+    #[test]
+    fn call_view_compacts_oversized_outer_scope_entries_to_budget() {
+        let huge_guide = "g".repeat(60_000);
+        let medium_a = "a".repeat(3_500);
+        let medium_b = "b".repeat(3_500);
+        let medium_c = "c".repeat(3_500);
+        let medium_d = "d".repeat(3_500);
+        let medium_e = "e".repeat(3_500);
+        let task = json!({
+            "name": "snapshot",
+            "role": "leaf",
+            "ai_layer": 1,
+            "description": "Summarize",
+            "parameters": ["input"],
+            "arguments": [{"small": 1}],
+            "captured": {},
+            "scope": {
+                "tiny": "hello",
+                "huge_guide": huge_guide,
+                "medium_a": medium_a,
+                "medium_b": medium_b,
+                "medium_c": medium_c,
+                "medium_d": medium_d,
+                "medium_e": medium_e,
+            }
+        });
+        let view = call_view(&task).unwrap();
+        let scope = view["scope"].as_object().unwrap();
+        assert_eq!(scope["tiny"], "hello");
+        assert_eq!(scope["huge_guide"]["$summarized"], true);
+        assert_eq!(scope["huge_guide"]["bytes"], 60_002);
+        let scope_json_len = serde_json::to_string(scope).unwrap().len();
+        assert!(scope_json_len <= 17_000, "compacted scope view exceeded budget: {scope_json_len}");
     }
 }

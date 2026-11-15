@@ -1,6 +1,9 @@
 use std::{
+    collections::VecDeque,
     fs,
+    io::{BufRead, BufReader, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 use ignore::WalkBuilder;
@@ -30,9 +33,10 @@ use crate::ts_index::{
 };
 
 const DEFAULT_MAX_READ_BYTES: u64 = 1024 * 1024;
+const DEFAULT_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_CHUNK_BYTES: usize = 512 * 1024;
 const DEFAULT_MAX_MATCHES: usize = 100;
 const MAX_CONTEXT_LINES: usize = 20;
-const DEFAULT_MAX_DEPTH: usize = 1;
 const DEFAULT_WRITE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SEARCH_FILE_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 /// A matched line longer than this comes back as an excerpt around the match.
@@ -88,6 +92,8 @@ pub enum ToolError {
     InvalidEdit(String),
     #[error("invalid search pattern: {0}")]
     InvalidSearchPattern(String),
+    #[error("invalid parameter: {0}")]
+    InvalidParameter(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("utf-8 error: {0}")]
@@ -116,6 +122,97 @@ pub struct WorkspaceInfoRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GitStatusRequest {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default = "default_true")]
+    pub include_untracked: bool,
+    #[serde(default)]
+    pub max_entries: Option<usize>,
+}
+
+impl Default for GitStatusRequest {
+    fn default() -> Self {
+        Self { workspace_root: None, paths: Vec::new(), include_untracked: true, max_entries: None }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitStatusResponse {
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub clean: bool,
+    pub staged: Vec<String>,
+    pub modified: Vec<String>,
+    pub untracked: Vec<String>,
+    pub total_entries: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitDiffRequest {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub rev_range: Option<String>,
+    #[serde(default)]
+    pub staged: bool,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub stat_only: bool,
+    #[serde(default = "default_git_unified")]
+    pub unified: usize,
+    #[serde(default)]
+    pub max_lines: Option<usize>,
+    #[serde(default)]
+    pub max_chars: Option<usize>,
+}
+
+impl Default for GitDiffRequest {
+    fn default() -> Self {
+        Self { workspace_root: None, rev_range: None, staged: false, paths: Vec::new(), stat_only: false, unified: 3, max_lines: None, max_chars: None }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitDiffResponse {
+    pub diff: String,
+    pub files: Vec<String>,
+    pub truncated: bool,
+    pub stat_only: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct GitLogRequest {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub rev: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitCommit {
+    pub commit: String,
+    pub short_commit: String,
+    pub author: String,
+    pub date: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitLogResponse {
+    pub commits: Vec<GitCommit>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ListDirRequest {
     #[serde(default)]
     pub workspace_root: Option<String>,
@@ -123,16 +220,53 @@ pub struct ListDirRequest {
     pub path: String,
     #[serde(default)]
     pub recursive: bool,
-    #[serde(default = "default_max_depth")]
-    pub max_depth: usize,
+    #[serde(default)]
+    pub max_depth: Option<usize>,
     #[serde(default)]
     pub respect_gitignore: bool,
+    /// Only entries whose path matches one of these globs, as in `rg -g`:
+    /// `*.rs` matches at any depth, `src/**/*.ts` from the workspace root,
+    /// and a leading `!` excludes.
+    #[serde(default, alias = "globs", deserialize_with = "one_or_many")]
+    pub glob: Vec<String>,
+    #[serde(default)]
+    pub kind: Option<EntryKind>,
+    /// Keep entries modified at or after this time (RFC3339, `YYYY-MM-DD`,
+    /// epoch seconds/ms, or relative duration like `24h`, `7d`).
+    #[serde(default)]
+    pub modified_after: Option<String>,
+    /// Keep entries modified at or before this time (same formats as `modified_after`).
+    #[serde(default)]
+    pub modified_before: Option<String>,
+    #[serde(default)]
+    pub sort_by: ListSort,
+    #[serde(default, alias = "limit", alias = "head_limit")]
+    pub max_entries: Option<usize>,
+}
+
+impl Default for ListDirRequest {
+    fn default() -> Self {
+        Self {
+            workspace_root: None,
+            path: default_dot(),
+            recursive: false,
+            max_depth: None,
+            respect_gitignore: false,
+            glob: Vec::new(),
+            kind: None,
+            modified_after: None,
+            modified_before: None,
+            sort_by: ListSort::default(),
+            max_entries: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 pub struct ListDirResponse {
     pub root: String,
     pub entries: Vec<DirEntryInfo>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,15 +274,28 @@ pub struct DirEntryInfo {
     pub path: String,
     pub kind: EntryKind,
     pub size_bytes: Option<u64>,
+    pub modified_at: Option<String>,
+    pub modified_ms: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
     File,
     Directory,
     Symlink,
     Other,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListSort {
+    #[default]
+    Path,
+    ModifiedDesc,
+    ModifiedAsc,
+    SizeDesc,
+    SizeAsc,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,13 +316,18 @@ pub struct ReadFileResponse {
     pub total_lines: usize,
 }
 
+fn default_tail_end_line() -> isize {
+    -1
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ReadFileLinesRequest {
     #[serde(default)]
     pub workspace_root: Option<String>,
     pub path: String,
-    pub start_line: usize,
-    pub end_line: usize,
+    pub start_line: isize,
+    #[serde(default = "default_tail_end_line")]
+    pub end_line: isize,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,7 +339,7 @@ pub struct ReadFileLinesResponse {
     pub lines: Vec<LineContent>,
     pub content: String,
     pub total_lines: usize,
-    pub requested_end_line: usize,
+    pub requested_end_line: isize,
     pub end_clamped_to_eof: bool,
 }
 
@@ -195,6 +347,45 @@ pub struct ReadFileLinesResponse {
 pub struct LineContent {
     pub line: usize,
     pub text: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReadFileChunkRequest {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    pub path: String,
+    #[serde(default)]
+    pub byte_offset: u64,
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+    #[serde(default)]
+    pub max_lines: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChunkLine {
+    pub line: Option<usize>,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReadFileChunkResponse {
+    pub path: String,
+    pub file_bytes: u64,
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub next_byte_offset: Option<u64>,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub next_line: Option<usize>,
+    pub eof: bool,
+    pub line_truncated: bool,
+    pub bytes: usize,
+    pub line_count: usize,
+    pub content: String,
+    pub lines: Vec<ChunkLine>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -218,6 +409,10 @@ pub struct SearchTextRequest {
     pub respect_gitignore: Option<bool>,
     #[serde(default = "default_max_matches", alias = "limit", alias = "head_limit")]
     pub max_matches: usize,
+    /// Optional per-file match cap in `content` mode so one noisy file cannot
+    /// exhaust `max_matches`.
+    #[serde(default)]
+    pub max_matches_per_file: Option<usize>,
     /// What comes back: matching lines (`content`), the files that match
     /// (`files`), or each file's count of matching lines (`count`).
     #[serde(default)]
@@ -439,12 +634,151 @@ impl Workspace {
         })
     }
 
+    pub fn git_status(&self, request: GitStatusRequest) -> Result<GitStatusResponse> {
+        let workspace = self.with_root(request.workspace_root.as_deref())?;
+        let paths = git_paths(&request.paths)?;
+        let mut args = vec!["status", "--porcelain=v1", "--branch", "-z"];
+        args.push(if request.include_untracked { "--untracked-files=all" } else { "--untracked-files=no" });
+        if !paths.is_empty() {
+            args.push("--");
+            args.extend(paths.iter().map(String::as_str));
+        }
+        let raw = run_git(&workspace.root, &args)?;
+        let head = git_text(&workspace.root, &["rev-parse", "--verify", "-q", "HEAD"])
+            .ok()
+            .filter(|value| !value.is_empty());
+        let branch = git_text(&workspace.root, &["branch", "--show-current"])
+            .ok()
+            .filter(|value| !value.is_empty());
+        let mut staged = Vec::new();
+        let mut modified = Vec::new();
+        let mut untracked = Vec::new();
+        let mut total_entries = 0;
+        let max_entries = request.max_entries.unwrap_or(200).clamp(1, 1000);
+        let mut records = raw.stdout.split('\0');
+        while let Some(record) = records.next() {
+            if record.is_empty() || record.starts_with("## ") {
+                continue;
+            }
+            let Some(status) = record.get(0..2) else { continue };
+            let path = record.get(3..).unwrap_or_default();
+            if path.is_empty() { continue; }
+            let is_rename_or_copy = status.as_bytes().first().is_some_and(|value| matches!(*value, b'R' | b'C'));
+            total_entries += 1;
+            if total_entries <= max_entries {
+                if status == "??" {
+                    untracked.push(path.to_string());
+                } else {
+                    if status.as_bytes().first().is_some_and(|value| *value != b' ') {
+                        staged.push(path.to_string());
+                    }
+                    if status.as_bytes().get(1).is_some_and(|value| *value != b' ') {
+                        modified.push(path.to_string());
+                    }
+                }
+            }
+            // With `-z`, porcelain v1 emits the old path as a second
+            // NUL-delimited record for renames/copies. Consume it even when
+            // the primary entry is beyond max_entries, otherwise it would
+            // be counted as a second status record on the next iteration.
+            if is_rename_or_copy {
+                let _ = records.next();
+            }
+        }
+        let truncated = total_entries > max_entries;
+        Ok(GitStatusResponse {
+            head,
+            branch,
+            clean: total_entries == 0,
+            staged,
+            modified,
+            untracked,
+            total_entries,
+            truncated,
+        })
+    }
+
+    pub fn git_diff(&self, request: GitDiffRequest) -> Result<GitDiffResponse> {
+        let workspace = self.with_root(request.workspace_root.as_deref())?;
+        let paths = git_paths(&request.paths)?;
+        let mut args = vec!["diff", "--no-color", "--no-ext-diff"];
+        let unified = request.unified.min(100);
+        let unified_arg = format!("--unified={unified}");
+        args.push(&unified_arg);
+        if request.staged { args.push("--cached"); }
+        if request.stat_only { args.push("--stat"); }
+        if let Some(range) = request.rev_range.as_deref() {
+            validate_git_arg(range, "rev_range")?;
+            args.push(range);
+        }
+        if !paths.is_empty() {
+            args.push("--");
+            args.extend(paths.iter().map(String::as_str));
+        }
+        let raw = run_git(&workspace.root, &args)?;
+        let mut diff = raw.stdout;
+        let max_chars = request.max_chars.unwrap_or(48_000).clamp(256, 256_000);
+        let max_lines = request.max_lines.unwrap_or(2_000).clamp(1, 20_000);
+        let mut truncated = false;
+        if diff.lines().count() > max_lines {
+            diff = diff.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+            diff.push('\n');
+            truncated = true;
+        }
+        if diff.chars().count() > max_chars {
+            let mut end = diff.char_indices().nth(max_chars).map_or(diff.len(), |(index, _)| index);
+            while !diff.is_char_boundary(end) { end -= 1; }
+            diff.truncate(end);
+            diff.push_str("\n… [diff preview truncated]");
+            truncated = true;
+        }
+        let mut file_args = vec!["diff", "--no-color", "--no-ext-diff", "--name-only"];
+        if request.staged { file_args.push("--cached"); }
+        if let Some(range) = request.rev_range.as_deref() { file_args.push(range); }
+        if !paths.is_empty() { file_args.push("--"); file_args.extend(paths.iter().map(String::as_str)); }
+        let files = run_git(&workspace.root, &file_args)?.stdout.lines().map(str::to_owned).filter(|line| !line.is_empty()).collect();
+        Ok(GitDiffResponse { diff, files, truncated, stat_only: request.stat_only })
+    }
+
+    pub fn git_log(&self, request: GitLogRequest) -> Result<GitLogResponse> {
+        let workspace = self.with_root(request.workspace_root.as_deref())?;
+        let limit = request.limit.unwrap_or(20).clamp(1, 100);
+        let limit_arg = format!("-{}", limit.saturating_add(1).min(101));
+        let paths = git_paths(&request.paths)?;
+        let mut args = vec!["log", limit_arg.as_str(), "--date=iso-strict", "--format=%H%x00%h%x00%an%x00%aI%x00%s%x1e"];
+        if let Some(rev) = request.rev.as_deref() { validate_git_arg(rev, "rev")?; args.push(rev); }
+        if !paths.is_empty() { args.push("--"); args.extend(paths.iter().map(String::as_str)); }
+        let raw = run_git(&workspace.root, &args)?;
+        let mut commits = raw.stdout.split('\x1e').filter_map(|record| {
+            let fields: Vec<_> = record.trim_matches('\n').splitn(5, '\0').collect();
+            (fields.len() == 5).then(|| GitCommit { commit: fields[0].to_owned(), short_commit: fields[1].to_owned(), author: fields[2].to_owned(), date: fields[3].to_owned(), subject: fields[4].trim_end().to_owned() })
+        }).collect::<Vec<_>>();
+        let truncated = commits.len() > limit;
+        commits.truncate(limit);
+        Ok(GitLogResponse { truncated, commits })
+    }
+
     pub fn list_dir(&self, request: ListDirRequest) -> Result<ListDirResponse> {
         let workspace = self.with_root(request.workspace_root.as_deref())?;
         let root = workspace.resolve_existing(&request.path)?;
         if !root.is_dir() {
             return Err(ToolError::NotDirectory(request.path));
         }
+
+        let globs = search_globs(&workspace.root, &request.glob)?;
+        let allowed_noise = allowed_noise_dirs(&request.glob);
+        let modified_after = request
+            .modified_after
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| parse_timestamp_ms(s, false))
+            .transpose()?;
+        let modified_before = request
+            .modified_before
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| parse_timestamp_ms(s, true))
+            .transpose()?;
 
         let mut builder = WalkBuilder::new(&root);
         builder
@@ -453,17 +787,20 @@ impl Workspace {
             .git_ignore(request.respect_gitignore)
             .git_exclude(request.respect_gitignore)
             .parents(request.respect_gitignore)
-            .filter_entry(|entry| {
+            .filter_entry(move |entry| {
+                if entry.depth() == 0 {
+                    return true;
+                }
                 entry
                     .file_name()
                     .to_str()
-                    .map(|name| !NOISE_DIRS.contains(&name))
+                    .map(|name| !NOISE_DIRS.contains(&name) || allowed_noise.contains(name))
                     .unwrap_or(true)
             });
-        if request.recursive {
-            builder.max_depth(Some(request.max_depth.saturating_add(1)));
-        } else {
+        if !request.recursive && request.glob.is_empty() {
             builder.max_depth(Some(1));
+        } else if let Some(depth) = request.max_depth {
+            builder.max_depth(Some(depth.saturating_add(1)));
         }
 
         let mut entries = Vec::new();
@@ -477,17 +814,71 @@ impl Workspace {
                 Ok(metadata) => metadata,
                 Err(_) => continue,
             };
+            let kind = entry_kind(&metadata);
+            if request.kind.is_some_and(|want| want != kind) {
+                continue;
+            }
+            if let Some(globs) = &globs
+                && !globs.matched(path, metadata.is_dir()).is_whitelist()
+            {
+                continue;
+            }
+            let (modified_at, modified_ms) = format_modified(&metadata);
+            if let Some(after) = modified_after
+                && !modified_ms.is_some_and(|ms| ms >= after)
+            {
+                continue;
+            }
+            if let Some(before) = modified_before
+                && !modified_ms.is_some_and(|ms| ms <= before)
+            {
+                continue;
+            }
             entries.push(DirEntryInfo {
                 path: workspace.relative_display(path)?,
-                kind: entry_kind(&metadata),
+                kind,
                 size_bytes: metadata.is_file().then_some(metadata.len()),
+                modified_at,
+                modified_ms,
             });
         }
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
+
+        match request.sort_by {
+            ListSort::Path => entries.sort_by(|a, b| a.path.cmp(&b.path)),
+            ListSort::ModifiedDesc => entries.sort_by(|a, b| {
+                b.modified_ms
+                    .cmp(&a.modified_ms)
+                    .then_with(|| a.path.cmp(&b.path))
+            }),
+            ListSort::ModifiedAsc => entries.sort_by(|a, b| {
+                a.modified_ms
+                    .cmp(&b.modified_ms)
+                    .then_with(|| a.path.cmp(&b.path))
+            }),
+            ListSort::SizeDesc => entries.sort_by(|a, b| {
+                b.size_bytes
+                    .cmp(&a.size_bytes)
+                    .then_with(|| a.path.cmp(&b.path))
+            }),
+            ListSort::SizeAsc => entries.sort_by(|a, b| {
+                a.size_bytes
+                    .cmp(&b.size_bytes)
+                    .then_with(|| a.path.cmp(&b.path))
+            }),
+        }
+
+        let mut truncated = false;
+        if let Some(limit) = request.max_entries.filter(|&n| n > 0)
+            && entries.len() > limit
+        {
+            entries.truncate(limit);
+            truncated = true;
+        }
 
         Ok(ListDirResponse {
             root: workspace.relative_display(&root)?,
             entries,
+            truncated,
         })
     }
 
@@ -515,39 +906,85 @@ impl Workspace {
     }
 
     pub fn read_file_lines(&self, request: ReadFileLinesRequest) -> Result<ReadFileLinesResponse> {
-        validate_line_range(request.start_line, request.end_line)?;
+        if request.start_line == 0 || request.end_line == 0 {
+            return Err(ToolError::InvalidParameter(
+                "start_line and end_line must be non-zero (1-based positive or negative from EOF)"
+                    .to_string(),
+            ));
+        }
         let workspace = self.with_root(request.workspace_root.as_deref())?;
         let path = workspace.resolve_existing_file(&request.path)?;
-        let snapshot = crate::source_read::read(&path, crate::source_read::FILE_LIMIT)?;
-        let total_lines = snapshot.line_count();
-        if request.start_line > total_lines {
-            return Err(ToolError::InvalidEdit(format!(
-                "source_range_out_of_bounds: start_line={}, total_lines={total_lines}; no source returned",
-                request.start_line
-            )));
-        }
-        let end_line = request.end_line.min(total_lines);
-        let content = snapshot.range(request.start_line, end_line)?.to_owned();
-        let lines = content
-            .lines()
-            .enumerate()
-            .map(|(index, text)| LineContent {
-                line: request.start_line + index,
-                text: text.to_string(),
-            })
-            .collect();
+        let metadata = fs::metadata(&path)?;
+        let rel_path = workspace.relative_display(&path)?;
 
-        Ok(ReadFileLinesResponse {
-            code_hash: snapshot.hash.clone(),
-            path: workspace.relative_display(&path)?,
-            start_line: request.start_line,
-            end_line,
-            lines,
-            content,
-            total_lines,
-            requested_end_line: request.end_line,
-            end_clamped_to_eof: end_line < request.end_line,
-        })
+        // Files within FILE_LIMIT use the shared cached snapshot; larger files
+        // stream line-by-line so head/tail inspection never triggers FileTooLarge.
+        if metadata.len() <= crate::source_read::FILE_LIMIT as u64 {
+            let snapshot = crate::source_read::read(&path, crate::source_read::FILE_LIMIT)?;
+            let total_lines = snapshot.line_count();
+            let Some((start_line, end_line, end_clamped_to_eof)) =
+                resolve_line_bounds(total_lines, request.start_line, request.end_line)?
+            else {
+                return Ok(ReadFileLinesResponse {
+                    code_hash: snapshot.hash.clone(),
+                    path: rel_path,
+                    start_line: 0,
+                    end_line: 0,
+                    lines: Vec::new(),
+                    content: String::new(),
+                    total_lines: 0,
+                    requested_end_line: request.end_line,
+                    end_clamped_to_eof: false,
+                });
+            };
+            let content = snapshot.range(start_line, end_line)?.to_owned();
+            let lines = content
+                .lines()
+                .enumerate()
+                .map(|(index, text)| LineContent {
+                    line: start_line + index,
+                    text: text.to_string(),
+                })
+                .collect();
+
+            return Ok(ReadFileLinesResponse {
+                code_hash: snapshot.hash.clone(),
+                path: rel_path,
+                start_line,
+                end_line,
+                lines,
+                content,
+                total_lines,
+                requested_end_line: request.end_line,
+                end_clamped_to_eof,
+            });
+        }
+
+        read_large_file_lines(&path, &rel_path, request.start_line, request.end_line)
+    }
+
+    pub fn read_file_chunk(&self, request: ReadFileChunkRequest) -> Result<ReadFileChunkResponse> {
+        let workspace = self.with_root(request.workspace_root.as_deref())?;
+        let path = workspace.resolve_existing_file(&request.path)?;
+        let rel_path = workspace.relative_display(&path)?;
+        let max_bytes = request
+            .max_bytes
+            .unwrap_or(DEFAULT_CHUNK_BYTES)
+            .clamp(1, MAX_CHUNK_BYTES);
+        let max_lines = request.max_lines.filter(|&n| n > 0);
+        if request.start_line == Some(0) {
+            return Err(ToolError::InvalidParameter(
+                "start_line must be >= 1 when provided".to_string(),
+            ));
+        }
+        stream_file_chunk(
+            &path,
+            &rel_path,
+            request.byte_offset,
+            request.start_line,
+            max_bytes,
+            max_lines,
+        )
     }
 
     pub fn search_text(&self, request: SearchTextRequest) -> Result<SearchTextResponse> {
@@ -574,6 +1011,7 @@ impl Workspace {
             mode: request.output_mode,
             respect_gitignore: true,
             limit: max_matches,
+            max_matches_per_file: request.max_matches_per_file.map(|n| n.max(1)),
             context_lines: request.context_lines.min(MAX_CONTEXT_LINES),
             globs,
         };
@@ -583,11 +1021,12 @@ impl Workspace {
         let mut index_used = false;
 
         // 1. 优先尝试从 SQLite 符号索引库中查找精确匹配的符号定义（不因外部搜索在未索引目录创建状态库）
-        // Only for plain line results: the index knows no globs, files or counts.
+        // Only for plain line results: the index knows no globs, files, counts or per-file caps.
         if !regex
             && scan.mode == SearchOutput::Content
             && scan.globs.is_none()
             && scan.context_lines == 0
+            && scan.max_matches_per_file.is_none()
             && workspace
                 .root
                 .join(".codex-workspace-mcp")
@@ -1250,12 +1689,341 @@ fn sanitize_relative_path(raw: &str) -> Result<PathBuf> {
     Ok(clean)
 }
 
+struct GitOutput {
+    stdout: String,
+}
+
+fn validate_git_arg(value: &str, label: &str) -> Result<()> {
+    if value.is_empty() || value.starts_with('-') || value.contains('\0') {
+        return Err(ToolError::InvalidParameter(format!("{label} is invalid")));
+    }
+    Ok(())
+}
+
+fn git_paths(paths: &[String]) -> Result<Vec<String>> {
+    paths.iter().map(|path| {
+        let clean = sanitize_relative_path(path)?;
+        if clean.as_os_str().is_empty() {
+            return Err(ToolError::InvalidParameter("git path must not be empty".to_string()));
+        }
+        Ok(clean.to_string_lossy().replace('\\', "/"))
+    }).collect()
+}
+
+fn run_git(root: &Path, args: &[&str]) -> Result<GitOutput> {
+    let output = Command::new("git")
+        .args(["-c", "core.quotepath=off", "-c", "color.ui=never", "-c", "core.fsmonitor=false"])
+        .args(args)
+        .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(ToolError::from)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !output.status.success() {
+        return Err(ToolError::InvalidParameter(format!("git {} failed: {}", args.first().copied().unwrap_or("command"), stderr)));
+    }
+    Ok(GitOutput { stdout })
+}
+
+fn git_text(root: &Path, args: &[&str]) -> Result<String> {
+    Ok(run_git(root, args)?.stdout.trim().to_owned())
+}
+
 fn validate_line_range(start: usize, end: usize) -> Result<()> {
     if start == 0 || end == 0 || start > end {
         Err(ToolError::InvalidLineRange { start, end })
     } else {
         Ok(())
     }
+}
+
+fn resolve_line_bounds(
+    total_lines: usize,
+    start_line: isize,
+    end_line: isize,
+) -> Result<Option<(usize, usize, bool)>> {
+    if start_line == 0 || end_line == 0 {
+        return Err(ToolError::InvalidParameter(
+            "start_line and end_line must be non-zero (1-based positive or negative from EOF)"
+                .to_string(),
+        ));
+    }
+    if total_lines == 0 {
+        if start_line < 0 || (start_line == 1 && (end_line > 0 || end_line == -1)) {
+            return Ok(None);
+        }
+        return Err(ToolError::InvalidEdit(format!(
+            "source_range_out_of_bounds: start_line={start_line}, total_lines=0; no source returned"
+        )));
+    }
+    let start = if start_line > 0 {
+        start_line as usize
+    } else {
+        total_lines.saturating_sub(start_line.unsigned_abs()) + 1
+    };
+    let (end_raw, from_eof) = if end_line > 0 {
+        (end_line as usize, false)
+    } else {
+        let back = end_line.unsigned_abs();
+        if back > total_lines {
+            return Err(ToolError::InvalidParameter(format!(
+                "invalid line range: start_line={start_line}, end_line={end_line} before start of {total_lines}-line file"
+            )));
+        }
+        (total_lines - back + 1, true)
+    };
+    if start > end_raw {
+        return Err(ToolError::InvalidParameter(format!(
+            "invalid line range: start_line={start_line} resolves after end_line={end_line}"
+        )));
+    }
+    if start > total_lines {
+        return Err(ToolError::InvalidEdit(format!(
+            "source_range_out_of_bounds: start_line={start_line}, total_lines={total_lines}; no source returned"
+        )));
+    }
+    let end = end_raw.min(total_lines);
+    let clamped = !from_eof && end < end_raw;
+    Ok(Some((start, end, clamped)))
+}
+
+fn fnv1a_update(mut hash: u64, bytes: &[u8]) -> u64 {
+    for &byte in bytes {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn read_large_file_lines(
+    path: &Path,
+    rel_path: &str,
+    start_line: isize,
+    end_line: isize,
+) -> Result<ReadFileLinesResponse> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
+    let mut hash = 0xcbf29ce484222325u64;
+    let mut total_lines: usize = 0;
+
+    let tail_cap = (start_line < 0).then(|| start_line.unsigned_abs());
+    let pos_start = (start_line > 0).then(|| start_line as usize);
+    let pos_end = (end_line > 0).then(|| end_line as usize);
+    let mut tail_ring: VecDeque<(usize, String)> = VecDeque::new();
+    let mut forward_kept: Vec<(usize, String)> = Vec::new();
+    let mut kept_bytes: usize = 0;
+
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hash = fnv1a_update(hash, &buf);
+        total_lines += 1;
+        let line_no = total_lines;
+
+        if let Some(cap) = tail_cap {
+            let text = String::from_utf8(std::mem::take(&mut buf))?;
+            if tail_ring.len() == cap
+                && let Some((_, dropped)) = tail_ring.pop_front()
+            {
+                kept_bytes = kept_bytes.saturating_sub(dropped.len());
+            }
+            kept_bytes += text.len();
+            if kept_bytes > crate::source_read::FILE_LIMIT {
+                return Err(ToolError::ContentTooLarge {
+                    actual: kept_bytes,
+                    limit: crate::source_read::FILE_LIMIT,
+                });
+            }
+            tail_ring.push_back((line_no, text));
+        } else if let Some(s) = pos_start {
+            let in_window = line_no >= s && pos_end.is_none_or(|e| line_no <= e);
+            if in_window {
+                let text = String::from_utf8(std::mem::take(&mut buf))?;
+                kept_bytes += text.len();
+                if kept_bytes > crate::source_read::FILE_LIMIT {
+                    return Err(ToolError::ContentTooLarge {
+                        actual: kept_bytes,
+                        limit: crate::source_read::FILE_LIMIT,
+                    });
+                }
+                forward_kept.push((line_no, text));
+            }
+        }
+    }
+
+    let code_hash = format!("fnv1a64:{hash:016x}");
+    let Some((resolved_start, resolved_end, end_clamped_to_eof)) =
+        resolve_line_bounds(total_lines, start_line, end_line)?
+    else {
+        return Ok(ReadFileLinesResponse {
+            code_hash,
+            path: rel_path.to_string(),
+            start_line: 0,
+            end_line: 0,
+            lines: Vec::new(),
+            content: String::new(),
+            total_lines: 0,
+            requested_end_line: end_line,
+            end_clamped_to_eof: false,
+        });
+    };
+
+    let selected: Vec<(usize, String)> = if tail_cap.is_some() {
+        tail_ring
+            .into_iter()
+            .filter(|(line_no, _)| *line_no >= resolved_start && *line_no <= resolved_end)
+            .collect()
+    } else {
+        forward_kept
+            .into_iter()
+            .filter(|(line_no, _)| *line_no >= resolved_start && *line_no <= resolved_end)
+            .collect()
+    };
+
+    let mut content = String::new();
+    let mut lines = Vec::with_capacity(selected.len());
+    for (line_no, raw) in selected {
+        content.push_str(&raw);
+        let stripped = raw.trim_end_matches(['\n', '\r']).to_string();
+        lines.push(LineContent {
+            line: line_no,
+            text: stripped,
+        });
+    }
+
+    Ok(ReadFileLinesResponse {
+        code_hash,
+        path: rel_path.to_string(),
+        start_line: resolved_start,
+        end_line: resolved_end,
+        lines,
+        content,
+        total_lines,
+        requested_end_line: end_line,
+        end_clamped_to_eof,
+    })
+}
+
+fn stream_file_chunk(
+    path: &Path,
+    rel_path: &str,
+    byte_offset: u64,
+    start_line: Option<usize>,
+    max_bytes: usize,
+    max_lines: Option<usize>,
+) -> Result<ReadFileChunkResponse> {
+    let mut file = fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    if byte_offset > file_bytes {
+        return Err(ToolError::InvalidParameter(format!(
+            "byte_offset {byte_offset} exceeds file length {file_bytes}"
+        )));
+    }
+    if byte_offset == file_bytes {
+        return Ok(ReadFileChunkResponse {
+            path: rel_path.to_string(),
+            file_bytes,
+            start_byte: byte_offset,
+            end_byte: byte_offset,
+            next_byte_offset: None,
+            start_line: None,
+            end_line: None,
+            next_line: None,
+            eof: true,
+            line_truncated: false,
+            bytes: 0,
+            line_count: 0,
+            content: String::new(),
+            lines: Vec::new(),
+        });
+    }
+
+    let max_bytes = max_bytes.clamp(4, MAX_CHUNK_BYTES);
+    file.seek(SeekFrom::Start(byte_offset))?;
+    let mut reader = BufReader::new(file);
+    let mut raw_line = Vec::new();
+    let mut content = String::new();
+    let mut lines = Vec::new();
+    let mut consumed: u64 = 0;
+    let mut current_line = start_line.or_else(|| (byte_offset == 0).then_some(1));
+    let mut line_truncated = false;
+
+    loop {
+        if max_lines.is_some_and(|cap| lines.len() >= cap) {
+            break;
+        }
+        raw_line.clear();
+        let n = reader.read_until(b'\n', &mut raw_line)?;
+        if n == 0 {
+            break;
+        }
+        if !lines.is_empty() && content.len() + raw_line.len() > max_bytes {
+            break;
+        }
+        if raw_line.len() > max_bytes {
+            let prefix_bytes = &raw_line[..max_bytes];
+            let valid_len = match std::str::from_utf8(prefix_bytes) {
+                Ok(_) => prefix_bytes.len(),
+                Err(err) => err.valid_up_to(),
+            };
+            if valid_len == 0 {
+                return Err(ToolError::InvalidParameter(
+                    "invalid UTF-8 sequence at chunk boundary".to_string(),
+                ));
+            }
+            let prefix = std::str::from_utf8(&raw_line[..valid_len])
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            content.push_str(prefix);
+            lines.push(ChunkLine {
+                line: current_line,
+                text: prefix.trim_end_matches('\r').to_string(),
+            });
+            consumed += prefix.len() as u64;
+            line_truncated = true;
+            break;
+        }
+        let text = String::from_utf8(std::mem::take(&mut raw_line))?;
+        consumed += text.len() as u64;
+        content.push_str(&text);
+        lines.push(ChunkLine {
+            line: current_line,
+            text: text.trim_end_matches(['\n', '\r']).to_string(),
+        });
+        current_line = current_line.map(|line| line + 1);
+    }
+
+    let end_byte = byte_offset + consumed;
+    let eof = end_byte >= file_bytes;
+    let next_byte_offset = (!eof).then_some(end_byte);
+    let next_line = if eof { None } else { current_line };
+    let start_line_out = lines.first().and_then(|line| line.line);
+    let end_line_out = lines.last().and_then(|line| line.line);
+    let line_count = lines.len();
+    let bytes = content.len();
+
+    Ok(ReadFileChunkResponse {
+        path: rel_path.to_string(),
+        file_bytes,
+        start_byte: byte_offset,
+        end_byte,
+        next_byte_offset,
+        start_line: start_line_out,
+        end_line: end_line_out,
+        next_line,
+        eof,
+        line_truncated,
+        bytes,
+        line_count,
+        content,
+        lines,
+    })
 }
 
 fn check_write_size(size: usize) -> Result<()> {
@@ -1352,6 +2120,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_git_unified() -> usize {
+    3
+}
+
 fn default_max_read_bytes() -> u64 {
     DEFAULT_MAX_READ_BYTES
 }
@@ -1360,8 +2132,90 @@ fn default_max_matches() -> usize {
     DEFAULT_MAX_MATCHES
 }
 
-fn default_max_depth() -> usize {
-    DEFAULT_MAX_DEPTH
+fn allowed_noise_dirs(globs: &[String]) -> std::collections::HashSet<&'static str> {
+    let mut allowed = std::collections::HashSet::new();
+    for raw in globs {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('!') {
+            continue;
+        }
+        for &noise in NOISE_DIRS {
+            if trimmed.split('/').any(|seg| seg == noise) {
+                allowed.insert(noise);
+            }
+        }
+    }
+    allowed
+}
+
+fn format_modified(metadata: &fs::Metadata) -> (Option<String>, Option<i64>) {
+    let Ok(time) = metadata.modified() else {
+        return (None, None);
+    };
+    let dt: chrono::DateTime<chrono::Utc> = time.into();
+    (
+        Some(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        Some(dt.timestamp_millis()),
+    )
+}
+
+fn parse_relative_duration_ms(raw: &str) -> Option<i64> {
+    let body = raw.strip_prefix('-').unwrap_or(raw);
+    if body.len() < 2 {
+        return None;
+    }
+    let (digits, unit) = body.split_at(body.len() - 1);
+    let value: i64 = digits.parse().ok()?;
+    if value < 0 {
+        return None;
+    }
+    let multiplier = match unit {
+        "s" => 1_000i64,
+        "m" => 60 * 1_000i64,
+        "h" => 60 * 60 * 1_000i64,
+        "d" => 24 * 60 * 60 * 1_000i64,
+        "w" => 7 * 24 * 60 * 60 * 1_000i64,
+        _ => return None,
+    };
+    value.checked_mul(multiplier)
+}
+
+fn parse_timestamp_ms(raw: &str, inclusive_end: bool) -> Result<i64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ToolError::InvalidParameter("timestamp cannot be empty".into()));
+    }
+    if let Ok(num) = trimmed.parse::<i64>() {
+        return if num.abs() >= 100_000_000_000 {
+            Ok(num)
+        } else {
+            num.checked_mul(1_000)
+                .ok_or_else(|| ToolError::InvalidParameter(format!("timestamp out of range: {raw}")))
+        };
+    }
+    if let Some(delta_ms) = parse_relative_duration_ms(trimmed) {
+        return Ok(chrono::Utc::now().timestamp_millis() - delta_ms);
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(dt.timestamp_millis());
+    }
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Ok(ndt.and_utc().timestamp_millis());
+        }
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        let ndt = if inclusive_end {
+            date.and_hms_milli_opt(23, 59, 59, 999)
+        } else {
+            date.and_hms_opt(0, 0, 0)
+        }
+        .ok_or_else(|| ToolError::InvalidParameter(format!("invalid date: {raw}")))?;
+        return Ok(ndt.and_utc().timestamp_millis());
+    }
+    Err(ToolError::InvalidParameter(format!(
+        "invalid timestamp {raw:?}; use RFC3339, YYYY-MM-DD, epoch seconds/ms, or e.g. 24h / 7d"
+    )))
 }
 
 fn map_python_index_error(error: python_index::PythonIndexError) -> ToolError {
@@ -1391,6 +2245,7 @@ struct ScanOptions {
     respect_gitignore: bool,
     /// Matches in content mode, files otherwise.
     limit: usize,
+    max_matches_per_file: Option<usize>,
     context_lines: usize,
     globs: Option<ignore::overrides::Override>,
 }
@@ -1507,12 +2362,18 @@ fn scan_text_root(
             continue;
         }
         let lines = content.lines().collect::<Vec<_>>();
+        let mut file_matches = 0usize;
         for (line_index, line) in lines.iter().enumerate() {
             if let Some(found_at) = matcher.find(line) {
+                if scan.max_matches_per_file.is_some_and(|cap| file_matches >= cap) {
+                    found.truncated = true;
+                    break;
+                }
                 if found.matches.len() >= scan.limit {
                     found.truncated = true;
                     break 'outer;
                 }
+                file_matches += 1;
                 let column = line[..found_at.start()].chars().count() + 1;
                 let (text, line_chars) = match_excerpt(line, column - 1);
                 let near = |range: std::ops::Range<usize>| {
@@ -1778,6 +2639,170 @@ mod tests {
             .unwrap();
         assert_eq!(result.lines.len(), 2);
         assert_eq!(result.lines[0].text, "beta");
+
+        let tail = workspace
+            .read_file_lines(ReadFileLinesRequest {
+                workspace_root: None,
+                path: "demo.txt".to_string(),
+                start_line: -2,
+                end_line: -1,
+            })
+            .unwrap();
+        assert_eq!(tail.start_line, 2);
+        assert_eq!(tail.end_line, 3);
+        assert_eq!(tail.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), vec!["beta", "gamma"]);
+        assert!(!tail.end_clamped_to_eof);
+
+        // Negative start exceeding line count clamps cleanly to line 1.
+        let all_tail = workspace
+            .read_file_lines(ReadFileLinesRequest {
+                workspace_root: None,
+                path: "demo.txt".to_string(),
+                start_line: -50,
+                end_line: -1,
+            })
+            .unwrap();
+        assert_eq!(all_tail.start_line, 1);
+        assert_eq!(all_tail.end_line, 3);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_empty_file_line_ranges() {
+        let root = temp_workspace("empty_lines");
+        fs::write(root.join("empty.log"), "").unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+
+        for (start_line, end_line) in [(1, 35), (1, -1), (-35, -1)] {
+            let result = workspace
+                .read_file_lines(ReadFileLinesRequest {
+                    workspace_root: None,
+                    path: "empty.log".to_string(),
+                    start_line,
+                    end_line,
+                })
+                .unwrap();
+            assert_eq!(result.total_lines, 0);
+            assert_eq!(result.start_line, 0);
+            assert_eq!(result.end_line, 0);
+            assert!(result.lines.is_empty());
+            assert!(result.content.is_empty());
+            assert!(!result.end_clamped_to_eof);
+        }
+
+        let err = workspace
+            .read_file_lines(ReadFileLinesRequest {
+                workspace_root: None,
+                path: "empty.log".to_string(),
+                start_line: 2,
+                end_line: 10,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("source_range_out_of_bounds"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn streams_tail_on_file_larger_than_file_limit() {
+        let root = temp_workspace("large_lines");
+        let path = root.join("huge.log");
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&path).unwrap();
+            let pad = "x".repeat(250);
+            for i in 1..=70_000 {
+                writeln!(file, "line-{i:05} {pad}").unwrap();
+            }
+        }
+        assert!(fs::metadata(&path).unwrap().len() > crate::source_read::FILE_LIMIT as u64);
+        let workspace = Workspace::new(&root).unwrap();
+        let tail = workspace
+            .read_file_lines(ReadFileLinesRequest {
+                workspace_root: None,
+                path: "huge.log".to_string(),
+                start_line: -3,
+                end_line: -1,
+            })
+            .unwrap();
+        assert_eq!(tail.total_lines, 70_000);
+        assert_eq!(tail.start_line, 69_998);
+        assert_eq!(tail.end_line, 70_000);
+        assert!(tail.lines[0].text.starts_with("line-69998 "));
+        assert!(tail.lines[2].text.starts_with("line-70000 "));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn streams_file_chunks_sequentially_and_handles_long_utf8_lines() {
+        let root = temp_workspace("chunks");
+        fs::write(
+            root.join("stream.log"),
+            "first line\nsecond line\nthird line\nfourth line\n",
+        )
+        .unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+        let mut offset = 0;
+        let mut line = Some(1);
+        let mut collected = Vec::new();
+        loop {
+            let chunk = workspace
+                .read_file_chunk(ReadFileChunkRequest {
+                    workspace_root: None,
+                    path: "stream.log".to_string(),
+                    byte_offset: offset,
+                    start_line: line,
+                    max_bytes: Some(25),
+                    max_lines: None,
+                })
+                .unwrap();
+            assert!(!chunk.line_truncated);
+            collected.extend(chunk.lines.into_iter().map(|l| (l.line, l.text)));
+            if chunk.eof {
+                assert!(chunk.next_byte_offset.is_none());
+                assert!(chunk.next_line.is_none());
+                break;
+            }
+            offset = chunk.next_byte_offset.unwrap();
+            line = chunk.next_line;
+        }
+        assert_eq!(
+            collected,
+            vec![
+                (Some(1), "first line".to_string()),
+                (Some(2), "second line".to_string()),
+                (Some(3), "third line".to_string()),
+                (Some(4), "fourth line".to_string()),
+            ]
+        );
+
+        // A single line longer than max_bytes splits on a valid UTF-8 boundary and resumes cleanly.
+        let utf8_line = "中".repeat(10) + "\nend\n";
+        fs::write(root.join("wide.txt"), &utf8_line).unwrap();
+        let c1 = workspace
+            .read_file_chunk(ReadFileChunkRequest {
+                workspace_root: None,
+                path: "wide.txt".to_string(),
+                byte_offset: 0,
+                start_line: None,
+                max_bytes: Some(10),
+                max_lines: None,
+            })
+            .unwrap();
+        assert!(c1.line_truncated);
+        assert_eq!(c1.content, "中中中");
+        assert!(!c1.eof);
+        let c2 = workspace
+            .read_file_chunk(ReadFileChunkRequest {
+                workspace_root: None,
+                path: "wide.txt".to_string(),
+                byte_offset: c1.next_byte_offset.unwrap(),
+                start_line: c1.next_line,
+                max_bytes: Some(64),
+                max_lines: None,
+            })
+            .unwrap();
+        assert_eq!(c2.content, "中中中中中中中\nend\n");
+        assert!(c2.eof);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1805,7 +2830,7 @@ mod tests {
     }
 
     fn plain_scan() -> ScanOptions {
-        ScanOptions { mode: SearchOutput::Content, respect_gitignore: false, limit: 100, context_lines: 0, globs: None }
+        ScanOptions { mode: SearchOutput::Content, respect_gitignore: false, limit: 100, max_matches_per_file: None, context_lines: 0, globs: None }
     }
 
     #[test]
@@ -2188,6 +3213,134 @@ mod tests {
             .unwrap();
         assert_eq!(search.matches.len(), 1);
         assert_eq!(search.matches[0].name, "NewName");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_dir_supports_glob_kind_sort_mtime_and_limit() {
+        let root = temp_workspace("list_dir_find_features");
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        fs::create_dir_all(root.join("target/logs")).unwrap();
+        fs::write(root.join("src/small.rs"), "a").unwrap();
+        fs::write(root.join("src/nested/big.rs"), "1234567890").unwrap();
+        fs::write(root.join("target/logs/fail.log"), "err").unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+
+        let rust_files = workspace
+            .list_dir(ListDirRequest {
+                glob: vec!["**/*.rs".to_string()],
+                kind: Some(EntryKind::File),
+                sort_by: ListSort::SizeDesc,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rust_files.entries.len(), 2);
+        assert_eq!(rust_files.entries[0].path, "src/nested/big.rs");
+        assert_eq!(rust_files.entries[1].path, "src/small.rs");
+        assert!(rust_files.entries[0].modified_ms.is_some());
+        assert!(rust_files.entries[0].modified_at.as_deref().is_some_and(|s| s.ends_with('Z')));
+        assert!(!rust_files.truncated);
+
+        let limited = workspace
+            .list_dir(ListDirRequest {
+                glob: vec!["**/*.rs".to_string()],
+                sort_by: ListSort::SizeDesc,
+                max_entries: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(limited.entries.len(), 1);
+        assert_eq!(limited.entries[0].path, "src/nested/big.rs");
+        assert!(limited.truncated);
+
+        let target_logs = workspace
+            .list_dir(ListDirRequest {
+                glob: vec!["target/**/*.log".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(target_logs.entries.len(), 1);
+        assert_eq!(target_logs.entries[0].path, "target/logs/fail.log");
+
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let none_recent = workspace
+            .list_dir(ListDirRequest {
+                recursive: true,
+                modified_after: Some(future.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(none_recent.entries.is_empty());
+
+        let before_future = workspace
+            .list_dir(ListDirRequest {
+                glob: vec!["**/*.rs".to_string()],
+                modified_before: Some(future),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(before_future.entries.len(), 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_text_max_matches_per_file_keeps_other_files_visible() {
+        let root = temp_workspace("search_per_file_cap");
+        fs::write(root.join("a_noisy.log"), "hit 1\nhit 2\nhit 3\nhit 4\n").unwrap();
+        fs::write(root.join("b_signal.log"), "hit B1\nhit B2\n").unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+
+        let response = workspace
+            .search_text(SearchTextRequest {
+                query: "hit".to_string(),
+                max_matches: 10,
+                max_matches_per_file: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert!(response.truncated);
+        assert_eq!(response.matches.len(), 4);
+        assert_eq!(
+            response.matches.iter().filter(|m| m.path == "a_noisy.log").count(),
+            2
+        );
+        assert_eq!(
+            response.matches.iter().filter(|m| m.path == "b_signal.log").count(),
+            2
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn structured_git_tools_bound_status_diff_and_log() {
+        let root = temp_workspace("git_tools");
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&root).output().unwrap();
+            assert!(output.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "-qm", "initial"]);
+        fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        fs::write(root.join("scratch.txt"), "scratch\n").unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+        let status = workspace.git_status(GitStatusRequest::default()).unwrap();
+        assert!(!status.clean);
+        assert!(status.modified.iter().any(|path| path == "tracked.txt"));
+        assert!(status.untracked.iter().any(|path| path == "scratch.txt"));
+        let diff = workspace.git_diff(GitDiffRequest { stat_only: true, ..Default::default() }).unwrap();
+        assert!(diff.files.iter().any(|path| path == "tracked.txt"));
+        let log = workspace.git_log(GitLogRequest::default()).unwrap();
+        assert_eq!(log.commits.first().map(|commit| commit.subject.as_str()), Some("initial"));
+        git(&["mv", "tracked.txt", "renamed.txt"]);
+        let bounded = workspace.git_status(GitStatusRequest { max_entries: Some(1), ..Default::default() }).unwrap();
+        assert_eq!(bounded.total_entries, 2, "rename's old path must not be counted as a second entry");
+        assert!(bounded.truncated);
         let _ = fs::remove_dir_all(root);
     }
 }

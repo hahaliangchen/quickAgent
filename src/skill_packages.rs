@@ -95,7 +95,8 @@ fn load_with(root: &Path, origin: Origin, native: Option<NativeBackend>) -> Resu
         manifest
             .library
             .as_deref()
-            .is_none_or(crate::agent_program::libraries::valid_namespace),
+        .is_none_or(|library| crate::agent_program::libraries::valid_namespace(library)
+            || (origin == Origin::Builtin && crate::agent_program::libraries::builtin().contains_key(library))),
         "invalid or reserved plugin library namespace"
     );
     ensure!(
@@ -630,7 +631,8 @@ impl Plugin for PackagePlugin {
             .clone()
             .unwrap_or_else(|| crate::agent_program::libraries::namespace(&self.0.manifest.id));
         ensure!(
-            crate::agent_program::libraries::valid_namespace(&library),
+            crate::agent_program::libraries::valid_namespace(&library)
+                || (self.0.origin == Origin::Builtin && crate::agent_program::libraries::builtin().contains_key(&library)),
             "invalid or reserved plugin library namespace"
         );
         ensure!(

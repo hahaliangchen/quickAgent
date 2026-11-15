@@ -2,6 +2,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   height: 48px;
   padding: 0 16px;
   box-sizing: border-box;
@@ -20,8 +21,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 1 1 0;
   min-width: 0;
-  max-width: 320px;
 }
 
 .titleIcon {
@@ -47,16 +48,15 @@
 /* Center segmented tabs */
 .tabPillGroup {
   display: flex;
+  flex: none;
   align-items: center;
   background: transparent;
   gap: 16px;
-}
-
-:global(body[data-ds-dark-theme]) .tabPillGroup {
-  background: #242428;
+  white-space: nowrap;
 }
 
 .tabPill {
+  flex: none;
   padding: 14px 8px 12px;
   border-radius: 0;
   border: none;
@@ -64,9 +64,10 @@
   background: transparent;
   font-size: 12px;
   font-weight: 500;
+  white-space: nowrap;
   color: var(--codex-text-muted, #71717a);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: color 0.15s ease, border-color 0.15s ease;
 }
 
 :global(body[data-ds-dark-theme]) .tabPill {
@@ -89,20 +90,24 @@
 }
 
 :global(body[data-ds-dark-theme]) .tabPillActive {
-  background: #323238 !important;
+  background: transparent !important;
   color: #ffffff !important;
+  border-bottom-color: var(--codex-blue-primary, #1d9e75);
   box-shadow: none;
 }
 
 /* Right utilities */
 .rightUtils {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 8px;
+  white-space: nowrap;
 }
 
 .durationBadge {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 5px;
   padding: 3px 8px;
@@ -110,12 +115,13 @@
   background: transparent;
   font-size: 11px;
   font-weight: 500;
+  white-space: nowrap;
   color: var(--codex-text-secondary, #52525b);
 }
 
 :global(body[data-ds-dark-theme]) .durationBadge {
-  background: #27272a;
-  color: #d4d4d8;
+  background: transparent;
+  color: #a1a1aa;
 }
 
 .liveDot {

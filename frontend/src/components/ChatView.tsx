@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
+import clsx from 'clsx'
 import {
+  IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
   IconChevronRightOutlineRegular,
+  IconCopyOutlineRegular,
   StateDot,
   TextShimmer,
+  Tooltip,
   projectUserText,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useAgentApi } from '../cordis/react.tsx'
@@ -11,8 +15,10 @@ import type { AgentEvent, Task, ChangesSummary } from '../api.ts'
 import { changeSummaries } from '../changes.ts'
 import { ChangesCard } from './ChangesCard.tsx'
 import chatCss from '../dsh/chat/ChatView.module.css'
+import actionsCss from '../dsh/chat/MessageIconActions.module.css'
 import messageCss from '../dsh/chat/MessageItem.module.css'
 import { markdownLabels } from '../dsh/markdown-labels.ts'
+import { useCopyFeedback } from '../dsh/ui-primitives/use-copy-feedback.ts'
 import { t } from '../i18n.ts'
 import { awaitingModel, chatItems, failedToolNames, flattenItems, formatDuration, splitTurnItems, type ChatItem, type TurnEndReason } from '../model.ts'
 import { useTaskDuration } from '../useTaskDuration.ts'
@@ -40,6 +46,19 @@ function TurnErrorMessage({ message }: { message: string }) {
         {open ? '收起' : '展开详情'}
       </button>
     </span>
+  )
+}
+
+/** Copy action button for user messages, matching AssistantMessage's copy control. */
+function UserCopyButton({ text }: { text: string }) {
+  const { copied, onCopy } = useCopyFeedback(text)
+  const label = copied ? t('markdown.copied') : t('markdown.copy')
+  return (
+    <Tooltip label={label}>
+      <button type="button" className={actionsCss.action} aria-label={label} onClick={onCopy}>
+        {copied ? <IconCheckOutlineRegular size={15} /> : <IconCopyOutlineRegular size={15} />}
+      </button>
+    </Tooltip>
   )
 }
 
@@ -455,6 +474,8 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
 
             {nodes.map((node) => {
               if (node.kind === 'user') {
+                const canRewind = Boolean(task && !running && task.parent_task_id === null)
+                const hasText = node.item.text.trim() !== ''
                 return (
                   <div key={node.item.key} className={`${chatCss.flowItem} ${css.userWithRewind}`} data-chat-flow-kind="user">
                     <Item
@@ -463,7 +484,12 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
                       slashNames={slashNames}
                       onOpenTask={onOpenTask}
                     />
-                    {task && !running && task.parent_task_id === null && <RewindControl taskId={task.task_id} turn={node.turn} onRewound={() => onChangesUpdated?.()} />}
+                    {(hasText || canRewind) && (
+                      <div className={clsx(actionsCss.actions, css.userActions)}>
+                        {hasText && <UserCopyButton text={node.item.text} />}
+                        {canRewind && task && <RewindControl taskId={task.task_id} turn={node.turn} onRewound={() => onChangesUpdated?.()} />}
+                      </div>
+                    )}
                   </div>
                 )
               }

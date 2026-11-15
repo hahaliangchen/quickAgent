@@ -15,6 +15,7 @@ mod context_window;
 mod database;
 mod db_writer;
 mod file_edit;
+mod flow_libraries;
 mod flow_skills;
 mod workflow_drafts;
 mod frame_view;

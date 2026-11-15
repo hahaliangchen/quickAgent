@@ -249,6 +249,190 @@ pub(super) fn to_string(heap: &Heap, value: &VmValue) -> Result<String> {
     to_string_inner(heap, value, &mut BTreeSet::new())
 }
 
+/// Bounded Chrome-DevTools-style inspection options for `console.dir` and
+/// persistent Console binding previews.
+#[derive(Clone, Copy)]
+pub(super) struct InspectOptions {
+    pub max_depth: usize,
+    pub max_items: usize,
+    pub max_string_chars: usize,
+    pub max_total_chars: usize,
+}
+
+impl InspectOptions {
+    pub fn scope() -> Self {
+        Self { max_depth: 2, max_items: 5, max_string_chars: 48, max_total_chars: 280 }
+    }
+
+    pub fn dir() -> Self {
+        Self { max_depth: 3, max_items: 20, max_string_chars: 240, max_total_chars: 8_000 }
+    }
+}
+
+fn clamp_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut out = text.chars().take(keep).collect::<String>();
+    out.push_str("...");
+    out
+}
+
+fn preview_string(text: &str, max_chars: usize) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return serde_json::to_string(text).unwrap_or_else(|_| format!("{text:?}"));
+    }
+    let prefix = text.chars().take(max_chars).collect::<String>();
+    let quoted = serde_json::to_string(&prefix).unwrap_or_else(|_| format!("{prefix:?}"));
+    let body = quoted.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(&quoted);
+    format!("string({total_chars} chars: \"{body}...\")")
+}
+
+fn preview_inner(
+    heap: &Heap,
+    value: &VmValue,
+    opts: InspectOptions,
+    depth: usize,
+    active: &mut BTreeSet<HeapId>,
+) -> String {
+    if let VmValue::Reference(id) = value
+        && let Some(inner) = heap.boxed_value(*id)
+    {
+        return preview_inner(heap, inner, opts, depth, active);
+    }
+    match value {
+        VmValue::Undefined => "undefined".into(),
+        VmValue::Null => "null".into(),
+        VmValue::Symbol(_) => "Symbol()".into(),
+        VmValue::Boolean(b) => b.to_string(),
+        VmValue::Number(n) => number_to_string(n.get()),
+        VmValue::String(text) => preview_string(text, opts.max_string_chars),
+        VmValue::Utf16(units) => preview_string(&String::from_utf16_lossy(units), opts.max_string_chars),
+        VmValue::Promise(_) => "Promise".into(),
+        VmValue::Reference(id) => preview_reference(heap, *id, opts, depth, active),
+    }
+}
+
+fn preview_reference(
+    heap: &Heap,
+    id: HeapId,
+    opts: InspectOptions,
+    depth: usize,
+    active: &mut BTreeSet<HeapId>,
+) -> String {
+    let Ok(node) = heap.get(id) else {
+        return "[unknown]".into();
+    };
+    if !active.insert(id) {
+        return "[Circular]".into();
+    }
+    let rendered = match node {
+        HeapNode::Array(items) => {
+            if items.is_empty() {
+                "[]".into()
+            } else if depth >= opts.max_depth {
+                format!("Array({})", items.len())
+            } else {
+                let mut parts = Vec::new();
+                for (i, item) in items.iter().take(opts.max_items).enumerate() {
+                    if heap.has_array_index(id, i).unwrap_or(false) {
+                        parts.push(preview_inner(heap, item, opts, depth + 1, active));
+                    } else {
+                        parts.push("<empty>".into());
+                    }
+                    if parts.iter().map(String::len).sum::<usize>() > opts.max_total_chars {
+                        break;
+                    }
+                }
+                if items.len() > parts.len() {
+                    parts.push(format!("+{} more", items.len() - parts.len()));
+                }
+                format!("Array({}) [{}]", items.len(), parts.join(", "))
+            }
+        }
+        HeapNode::Object(props) => {
+            if let Some(ms) = heap.date_value(id) {
+                format!("Date({})", super::js_date::display(ms))
+            } else if let Ok(Some(err)) = error_string(heap, id) {
+                clamp_chars(&err, opts.max_string_chars + 32)
+            } else if let Some((pat, flags)) = heap.regex_parts(id) {
+                format!("/{pat}/{flags}")
+            } else if props.is_empty() {
+                "{}".into()
+            } else if depth >= opts.max_depth {
+                let keys = props.iter().take(opts.max_items).map(|(k, _)| k.as_str()).collect::<Vec<_>>();
+                let extra = props.len().saturating_sub(keys.len());
+                if extra > 0 {
+                    format!("Object({} keys: {}, +{extra} more)", props.len(), keys.join(", "))
+                } else {
+                    format!("Object({} keys: {})", props.len(), keys.join(", "))
+                }
+            } else {
+                let mut parts = Vec::new();
+                for (k, v) in props.iter().take(opts.max_items) {
+                    let val = preview_inner(heap, v, opts, depth + 1, active);
+                    parts.push(format!("{k}: {val}"));
+                    if parts.iter().map(String::len).sum::<usize>() > opts.max_total_chars {
+                        break;
+                    }
+                }
+                if props.len() > parts.len() {
+                    parts.push(format!("+{} more", props.len() - parts.len()));
+                }
+                format!("{{{}}}", parts.join(", "))
+            }
+        }
+        HeapNode::Collection(c) => {
+            let label = c.kind.name();
+            if c.size == 0 || depth >= opts.max_depth {
+                format!("{label}({})", c.size)
+            } else {
+                let mut parts = Vec::new();
+                for (k, v) in c.entries.iter().flatten().take(opts.max_items) {
+                    let ks = preview_inner(heap, k, opts, depth + 1, active);
+                    if c.kind.map() {
+                        let vs = preview_inner(heap, v, opts, depth + 1, active);
+                        parts.push(format!("{ks} => {vs}"));
+                    } else {
+                        parts.push(ks);
+                    }
+                    if parts.iter().map(String::len).sum::<usize>() > opts.max_total_chars {
+                        break;
+                    }
+                }
+                if c.size > parts.len() {
+                    parts.push(format!("+{} more", c.size - parts.len()));
+                }
+                format!("{label}({}) {{{}}}", c.size, parts.join(", "))
+            }
+        }
+        HeapNode::Iterator(it) => format!("[object {}]", it.tag),
+        HeapNode::Closure { function, .. } => {
+            let n = function_name(function);
+            if n.is_empty() { "[Function]".into() } else { format!("function {n}()") }
+        }
+        HeapNode::Native(name) => format!("function {}() {{ [native] }}", function_name(name)),
+        HeapNode::BoundFunction { name, .. } => {
+            if name.is_empty() { "function bound()".into() } else { format!("function bound {name}()") }
+        }
+        HeapNode::Promise { outcome, .. } => {
+            if outcome.is_some() { "Promise { <settled> }".into() } else { "Promise { <pending> }".into() }
+        }
+        HeapNode::PromiseCapability { .. } | HeapNode::PromiseResolver { .. } | HeapNode::Environment { .. } => {
+            "[object Object]".into()
+        }
+    };
+    active.remove(&id);
+    rendered
+}
+
+/// Produce a bounded Chrome-DevTools-style inspection preview of any VM value.
+pub(super) fn preview(heap: &Heap, value: &VmValue, opts: InspectOptions) -> String {
+    clamp_chars(&preview_inner(heap, value, opts, 0, &mut BTreeSet::new()), opts.max_total_chars)
+}
+
 /// ToPrimitive: objects and arrays become their string form, as for plain
 /// objects whose valueOf returns the object itself.
 pub(super) fn to_primitive(heap: &Heap, value: &VmValue) -> Result<VmValue> {

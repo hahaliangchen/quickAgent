@@ -89,9 +89,9 @@
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  padding-bottom: 10px;
+  padding-bottom: 4px;
   border-bottom: none;
-  margin-bottom: 16px;
+  margin-bottom: 6px;
 }
 
 :global(body[data-ds-dark-theme]) .processHeaderRow {
@@ -135,9 +135,9 @@
 .processContainer {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding: 4px 0 14px 0;
-  margin-bottom: 18px;
+  gap: 8px;
+  padding: 2px 0 10px 0;
+  margin-bottom: 12px;
   border-radius: 0;
   background: transparent !important;
   border: none !important;
@@ -230,14 +230,32 @@
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  gap: 4px;
 }
-.userWithRewind > button {
-  opacity: 0;
-  transition: opacity 0.15s ease;
+
+.userActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  height: auto;
+  min-height: calc(28px + var(--dsh-content-font-delta, 0px));
+  gap: 4px;
 }
-.userWithRewind:hover > button,
-.userWithRewind > button:focus-visible {
-  opacity: 1;
+
+.userActions > button {
+  margin-top: 0;
+}
+
+.userActions > button:not(:first-child) {
+  height: calc(28px + var(--dsh-content-font-delta, 0px));
+  padding: 0 8px;
+  border-radius: 28px;
+  display: inline-flex;
+  align-items: center;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.userActions > button:not(:first-child):hover {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 /* Garden code chat: the answer is a paper card with the sprout beside it. */

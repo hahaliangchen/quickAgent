@@ -116,16 +116,34 @@ fn render(name: &str, description: &str, body: &str) -> String {
     )
 }
 
-pub fn save(
+#[derive(Clone, Deserialize)]
+pub struct SaveModule {
+    pub file: String,
+    pub source: String,
+}
+
+pub fn save_with_modules(
     project: &FsPath,
     name: &str,
     description: &str,
     body: &str,
+    modules: &[SaveModule],
     overwrite: bool,
 ) -> Result<PathBuf> {
     ensure!(valid_name(name), "技能名称只能用小写英文字母、数字和连字符");
     ensure!(!description.trim().is_empty(), "请填写适用场景");
     ensure!(!body.trim().is_empty(), "技能步骤不能为空");
+    let validated = modules
+        .iter()
+        .map(|module| (module.file.clone(), module.source.clone()))
+        .collect::<Vec<_>>();
+    if !validated.is_empty() {
+        ensure!(
+            name != "host" && !crate::agent_program::libraries::builtin().contains_key(name),
+            "技能库名称不能占用宿主内置库 {name}"
+        );
+        crate::flow_libraries::validate_module_set(&validated)?;
+    }
     let dir = project.join(DIR).join(name);
     let path = dir.join("SKILL.md");
     ensure!(
@@ -135,7 +153,34 @@ pub fn save(
     std::fs::create_dir_all(&dir)?;
     std::fs::write(&path, render(name, description, body))
         .with_context(|| format!("无法写入 {}", path.display()))?;
+    if !validated.is_empty() {
+        let modules_dir = dir.join("modules");
+        if overwrite && modules_dir.is_dir() {
+            for entry in std::fs::read_dir(&modules_dir)?.flatten() {
+                if entry.path().is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "js")
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        std::fs::create_dir_all(&modules_dir)?;
+        for (file, source) in &validated {
+            std::fs::write(modules_dir.join(file), source)
+                .with_context(|| format!("无法写入模块 {file}"))?;
+        }
+    }
     Ok(path)
+}
+
+pub fn save(
+    project: &FsPath,
+    name: &str,
+    description: &str,
+    body: &str,
+    overwrite: bool,
+) -> Result<PathBuf> {
+    save_with_modules(project, name, description, body, &[], overwrite)
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -325,6 +370,8 @@ pub struct SaveInput {
     description: String,
     body: String,
     #[serde(default)]
+    modules: Vec<SaveModule>,
+    #[serde(default)]
     overwrite: bool,
 }
 /// Save a reviewed draft into the session's project.
@@ -336,14 +383,19 @@ pub async fn save_route(
     response((|| {
         let project = crate::project_notes::task_project(state.workspace.root(), &task)?
             .context("只有代码会话可以保存项目技能")?;
-        let path = save(
+        let path = save_with_modules(
             &project,
             input.name.trim(),
             &input.description,
             &input.body,
+            &input.modules,
             input.overwrite,
         )?;
-        Ok(json!({"name":input.name.trim(),"path":path}))
+        Ok(json!({
+            "name": input.name.trim(),
+            "path": path,
+            "modules": input.modules.iter().map(|m| m.file.clone()).collect::<Vec<_>>(),
+        }))
     })())
 }
 

@@ -35,6 +35,28 @@ mod task_frames;
 const INPUT_BUDGET: usize =
     crate::context_window::MAX_TOKENS - crate::model_settings::OUTPUT_RESERVE;
 const PAGE_CHARS: usize = 24_000;
+
+/// Soft ingestion ceilings for direct tool deliveries and `program_result`
+/// (`1/4` of `input_budget`), allowing large-context models to ingest sizable
+/// evidence in one pass while keeping room for prefix, reasoning, and output.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DeliverySoftLimits {
+    pub(super) single_chars: usize,
+    pub(super) single_tokens: usize,
+    pub(super) round_chars: usize,
+    pub(super) round_tokens: usize,
+}
+
+pub(super) fn delivery_soft_limits(input_budget: usize) -> DeliverySoftLimits {
+    let quarter_tokens = (input_budget / 4).max(32_000);
+    let quarter_chars = quarter_tokens.saturating_mul(3);
+    DeliverySoftLimits {
+        single_chars: quarter_chars,
+        single_tokens: quarter_tokens,
+        round_chars: quarter_chars,
+        round_tokens: quarter_tokens,
+    }
+}
 /// Tries of one model request that fails before any of its answer arrives.
 const MODEL_ATTEMPTS: u32 = 4;
 const MAIN_PROMPT: &str = include_str!("../prompts/single_agent.md");
@@ -50,7 +72,7 @@ const MAIN_PROMPT_LEAF: &str = concat!(include_str!("../prompts/single_agent.md"
 fn main_prompt() -> &'static str { if main_virtual_leaves() { MAIN_PROMPT_LEAF } else { MAIN_PROMPT } }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
-struct Window {
+pub(crate) struct Window {
     #[serde(default)]
     scope_values: BTreeMap<String, Value>,
     #[serde(default)]
@@ -79,7 +101,7 @@ struct Window {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     module_revisions: BTreeMap<String, modules::Revision>,
     #[serde(default)]
-    program_task: Option<Value>,
+    pub(crate) program_task: Option<Value>,
     #[serde(default)]
     parallel_root: Option<String>,
     // Failed bodies are evidence, not programs to automatically rerun.
@@ -103,6 +125,10 @@ struct Window {
     // The blocker the main AI was told to report, with its turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     blocked: Option<(usize, Value)>,
+    #[serde(skip)]
+    last_program_save: Option<std::time::Instant>,
+    #[serde(skip)]
+    unsaved_program_steps: u32,
 }
 impl Window {
     fn input_tokens(&self, s: &Session<'_>, body: &Value) -> usize {
@@ -116,12 +142,12 @@ fn calibration_route(s: &Session<'_>) -> String {
     )
 }
 #[derive(Clone)]
-struct Session<'a> {
+pub(crate) struct Session<'a> {
     agent_id: Option<String>,
     task_node_id: Option<String>,
-    plugin: Option<String>,
-    state: &'a AgentServiceState,
-    task: &'a str,
+    pub(crate) plugin: Option<String>,
+    pub(crate) state: &'a AgentServiceState,
+    pub(crate) task: &'a str,
     model: &'a str,
     turn: usize,
     cancel: &'a CancellationToken,
@@ -174,6 +200,8 @@ async fn db<T: Send + 'static>(
     })
     .await
 }
+const PROGRAM_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(3);
+
 async fn save(s: &Session<'_>, w: &Window) -> Result<()> {
     let (task, scope, text) = (
         s.task.to_owned(),
@@ -186,6 +214,22 @@ async fn save(s: &Session<'_>, w: &Window) -> Result<()> {
         tx.commit()?;
         Ok(())
     }).await
+}
+
+/// Throttle full `Window` persistence across fast, idempotent program steps so
+/// tight read-only loops do not re-serialize the entire JS heap on every call.
+async fn checkpoint_program(s: &Session<'_>, w: &mut Window, force: bool) -> Result<()> {
+    let due = w
+        .last_program_save
+        .is_none_or(|last| last.elapsed() >= PROGRAM_CHECKPOINT_INTERVAL);
+    if !force && !due {
+        w.unsaved_program_steps = w.unsaved_program_steps.saturating_add(1);
+        return Ok(());
+    }
+    save(s, w).await?;
+    w.last_program_save = Some(std::time::Instant::now());
+    w.unsaved_program_steps = 0;
+    Ok(())
 }
 async fn append(s: &Session<'_>, kind: &str, mut data: Value, surface: bool) -> Result<i64> {
     if data.get("task_node_id").is_none() {
@@ -238,6 +282,61 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
             }
             true // All available methods are published and compiled from one catalog.
         });
+    }
+    if let Some(task) = w.program_task.as_ref().filter(|t| t["js_context"].is_object()) {
+        if let Some(allowed_list) = task.get("js_tools").and_then(Value::as_array) {
+            let is_leaf = task["role"] != "implement";
+            if s.plugin.is_none() {
+                let mut existing: std::collections::BTreeSet<String> = definitions
+                    .iter()
+                    .filter_map(|d| d["function"]["name"].as_str().map(str::to_owned))
+                    .collect();
+                let mut extra = vec![program_flow::find_main_tool()];
+                if !is_leaf {
+                    extra.push(program_flow::write_program_tool(false));
+                }
+                extra.extend(project_flows::tools());
+                if read_only_shell(s) {
+                    extra.push(crate::shell_process::read_only_definition());
+                }
+                for tool in extra {
+                    if let Some(name) = tool["function"]["name"].as_str()
+                        && existing.insert(name.to_owned())
+                    {
+                        definitions.push(tool);
+                    }
+                }
+            }
+            let libraries = program_flow::library_catalog(s, &definitions);
+            let mut allowed: std::collections::BTreeSet<String> = allowed_list
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            for library in program_flow::leaf_libraries(w) {
+                allowed.extend(
+                    libraries
+                        .get(&library)
+                        .into_iter()
+                        .flat_map(|methods| methods.values().cloned()),
+                );
+            }
+            if let program_flow::Role::Leaf(leaf_scope) = program_flow::role(w) {
+                allowed.extend(leaf_scope);
+            }
+            if is_leaf {
+                allowed.remove(program_flow::WRITE_PROGRAM);
+            }
+            definitions.retain(|tool| {
+                tool["function"]["name"]
+                    .as_str()
+                    .is_some_and(|name| allowed.contains(name))
+            });
+            if task["js_custom_tools"] == true && !allowed.contains(program_flow::ASK) {
+                definitions.push(program_flow::ask_tool());
+            }
+            return definitions;
+        }
     }
     // A leaf sees only the tools its declaring code imported, the methods of
     // the libraries that code requires, and the ones it found itself.
@@ -362,18 +461,32 @@ fn available_tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     }
     tools.retain(|tool| page_allows(s, tool["function"]["name"].as_str().unwrap_or("")));
     // These serve the main conversation itself: its saved materials, task
-    // board, history and project notes. A virtual function has only its
-    // arguments, so they are no part of its libraries.
+    // board, history and project notes. A virtual function without explicit
+    // js_tools has only its arguments, so they are no part of its libraries.
     if program_flow::role(w) != program_flow::Role::Main {
-        tools.retain(|tool| {
-            !matches!(
-                tool["function"]["name"].as_str(),
-                Some("read_asset" | "release_assets" | "list_context_assets" | "refresh_asset"
-                    | "read_session_history" | "propose_project_note")
-            )
+        let has_js_tools = w
+            .program_task
+            .as_ref()
+            .is_some_and(|t| t["js_tools"].is_array());
+        tools.retain(|tool| match tool["function"]["name"].as_str() {
+            Some("propose_project_note") => false,
+            Some(
+                "read_asset"
+                | "release_assets"
+                | "list_context_assets"
+                | "refresh_asset"
+                | "read_session_history",
+            ) => has_js_tools,
+            _ => true,
         });
     }
     tools
+}
+pub(crate) fn library_compile_scope(
+    s: &Session<'_>,
+    w: &Window,
+) -> crate::agent_program::libraries::Libraries {
+    program_flow::compile_static_libraries(s, w, &available_tools(s, w), true)
 }
 /// What the main AI calls itself, outside its program: the conversation's own
 /// tools, reading this conversation's history and saved materials, and the
@@ -441,7 +554,7 @@ fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str)
             let library = method.split('.').next().unwrap_or_default();
             let load = library_load_example(library);
             anyhow::bail!(
-                "NOT_A_TOOL: {method} is a library method, not a tool. Call it in a program you hand over with write_program, such as\n{load}\nconst result = await {method}({{...}});\nread_tool_contracts gives its arguments and result."
+                "NOT_A_TOOL: {method} is a library method, not a tool. Call it in a program you hand over with write_program, such as\n{load}\nconst result = {method}({{...}});\nThe host suspends and resumes this statement if the operation needs time. Use the /promises variant and await only for deliberate asynchronous or concurrent work. read_tool_contracts gives its arguments and result."
             );
         }
         anyhow::bail!("PLUGIN_SCOPE_DENIED: tool {name} does not belong to this conversation's plugin");
@@ -699,8 +812,58 @@ fn asset_index(s: &Session<'_>, messages: &[Value]) -> Option<Value> {
     message[INDEXED] = json!(ids);
     Some(message)
 }
+fn host_context_snapshot(s: &Session<'_>, w: &Window, definitions: &[Value]) -> Value {
+    let req = request(s, &w.messages, definitions);
+    let cache_key = req["prompt_cache_key"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::model_transport::affinity(s.task, &s.scope));
+    let tools: Vec<String> = req["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d["function"]["name"].as_str().map(str::to_owned))
+        .collect();
+    let libraries: Vec<String> = program_flow::library_catalog(s, definitions)
+        .into_keys()
+        .collect();
+    let workspace_root = crate::session_browser::task_workspace(s.state.workspace.root(), s.task)
+        .unwrap_or_else(|_| s.state.workspace.root().to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    json!({
+        "messages": req["messages"],
+        "tools": tools,
+        "libraries": libraries,
+        "prompt_cache_key": cache_key,
+        "workspace_root": workspace_root,
+    })
+}
+
+fn host_tools_snapshot(s: &Session<'_>, definitions: &[Value]) -> Value {
+    let libraries = program_flow::library_catalog(s, definitions);
+    let tools: Vec<String> = definitions
+        .iter()
+        .filter_map(|d| d["function"]["name"].as_str().map(str::to_owned))
+        .collect();
+    json!({
+        "tools": tools,
+        "libraries": libraries,
+        "declarations": crate::agent_program::declarations::core_methods(&libraries, definitions),
+    })
+}
+
 fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value {
     let mut wire = messages.to_vec();
+    let js_meta = messages
+        .iter()
+        .rev()
+        .find(|m| m["name"] == "program_task_input")
+        .and_then(|m| m.get("_js_context_meta"))
+        .cloned();
+    let preserve_prefix = js_meta
+        .as_ref()
+        .is_some_and(|m| m["preserve_prefix"] == true);
     // A Messages route records the tools a scope activates in the conversation;
     // another route declares its tools outright and never shows those entries.
     if !records_activations(s) {
@@ -709,64 +872,74 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     // Restored frames must use the current host contract, not a retired prompt
     // saved before an upgrade. Keep all task inputs and plugin material intact.
     let role = program_flow::request_role(messages);
-    if let Some(first) = wire.first_mut()
-        && first["role"] == "system"
-        && first.get("name").is_none()
-    {
-        first["content"] = json!(program_flow::prompt(role));
-        #[cfg(test)]
-        if role == "main" {
-            first["content"] = json!(documented_examples::repository_review_main_prompt(s));
+    if !preserve_prefix {
+        if let Some(first) = wire.first_mut()
+            && first["role"] == "system"
+            && first.get("name").is_none()
+        {
+            first["content"] = json!(program_flow::prompt(role));
+            #[cfg(test)]
+            if role == "main" {
+                first["content"] = json!(documented_examples::repository_review_main_prompt(s));
+            }
         }
-    }
-    // Code writers get the language environment and the library index; a
-    // leaf only calls its tools.
-    if role != "leaf" {
-        if code_shell_context(s) {
-        let mut shell = crate::shell_environment::description();
-        // When the host last checked the shell means nothing to the model,
-        // and its changing value made the provider's prompt cache miss
-        // everything after this message.
-        if let Some(shell) = shell.as_object_mut() {
-            shell.remove("cache");
+        // Code writers get the language environment and the library index; a
+        // leaf only calls its tools.
+        if role != "leaf" {
+            if code_shell_context(s) {
+            let mut shell = crate::shell_environment::description();
+            // When the host last checked the shell means nothing to the model,
+            // and its changing value made the provider's prompt cache miss
+            // everything after this message.
+            if let Some(shell) = shell.as_object_mut() {
+                shell.remove("cache");
+            }
+            let project = crate::session_browser::task_workspace(s.state.workspace.root(), s.task)
+                .ok().and_then(|path| crate::tools::Workspace::new(path).ok());
+            let workspace = project.as_ref().unwrap_or(&s.state.workspace)
+                .workspace_info(crate::tools::WorkspaceInfoRequest { workspace_root:None }).ok();
+            let (access, own) = if role == "main" && read_only_shell(s) {
+                ("main_ai_read_only_commands_and_module_code",
+                    " Direct run_readonly_command is available for builds, tests, and small targeted checks; long output is a bounded preview with a saved asset for the complete result. Use git_status/git_diff/git_log or the git library for repository state/history, and list_dir/search_text/read_file_lines for file and log navigation; in a flow, delegate a step that needs shell as an empty @virtual function describing its result.")
+            } else { ("module_deterministic_code_only", "") };
+            wire.insert(1.min(wire.len()), json!({"role":"system","name":"shell_environment",
+                "content":json!({"shell":shell,"workspace":workspace,
+                    "access":access,
+                    "memory":{"ai_input_limit_tokens":s.input_budget,"program_shell_output_limit_bytes":crate::shell_process::PROGRAM_OUTPUT_LIMIT,
+                        "boundary":"Command output stays in code until logged with console.log or passed to a virtual helper."},
+                    "usage":format!("{}{own}", if cfg!(windows) { "Use PowerShell 7 with Windows paths. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or dump huge bulk text into chat. Prefer structured file APIs (list_dir, search_text, read_file_lines) or module code over find/grep/tail shell pipelines." } else { "Use Bash. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or dump huge bulk text into chat. Prefer structured file APIs (list_dir, search_text, read_file_lines) or module code over find/grep/tail shell pipelines." })}).to_string()}));
+            }
+            let environment = crate::agent_program::ENVIRONMENT;
+            #[cfg(test)]
+            let environment = if documented_examples::repository_review_naive(s) {
+                "Use advertised tools directly. program_tool_headers describes available libraries; read_tool_contracts and find_library_methods provide exact methods and callable tool names. Use tool results as evidence and deliver the final analysis directly."
+            } else { environment };
+            wire.insert(1.min(wire.len()),json!({"role":"system","name":"program_environment","content":environment}));
+            // Library categories are visible up front; method docs are read on demand.
+            let libraries = program_flow::static_libraries(s, definitions);
+            let mut headers = crate::agent_program::declarations::directory(&libraries);
+            headers.push_str(&crate::agent_program::declarations::core_methods(&libraries, definitions));
+            let requirable = program_flow::requirable(s, definitions);
+            headers.push_str(&crate::agent_program::declarations::third_party_index(&requirable));
+            for library in requirable.keys() {
+                if let Some(exports) = crate::flow_libraries::compact_exports(s, library) {
+                    headers.push_str(&format!(
+                        "// Library {}: {exports}\n",
+                        serde_json::to_string(library).unwrap()
+                    ));
+                }
+            }
+            for (library, note) in program_flow::setup_notes(libraries.keys().chain(requirable.keys())) {
+                headers.push_str(&format!("// Library {library}: {note}\n"));
+            }
+            for (skill, library) in program_flow::skill_library_names(s) {
+                headers.push_str(&format!("// Skill ID {}: use read_skill with this ID for instructions; library {} is used with require.\n", serde_json::to_string(&skill).unwrap(), serde_json::to_string(&library).unwrap()));
+            }
+            wire.insert(
+                2.min(wire.len()),
+                json!({"role":"system","name":"program_tool_headers","content":headers}),
+            );
         }
-        let project = crate::session_browser::task_workspace(s.state.workspace.root(), s.task)
-            .ok().and_then(|path| crate::tools::Workspace::new(path).ok());
-        let workspace = project.as_ref().unwrap_or(&s.state.workspace)
-            .workspace_info(crate::tools::WorkspaceInfoRequest { workspace_root:None }).ok();
-        let (access, own) = if role == "main" && read_only_shell(s) {
-            ("main_ai_read_only_commands_and_module_code",
-                " Direct run_readonly_command is available for individual reads, builds and tests. In a flow, delegate a step that needs shell as an empty @virtual function describing its result; the host arranges the implementation and its API discovery.")
-        } else { ("module_deterministic_code_only", "") };
-        wire.insert(1.min(wire.len()), json!({"role":"system","name":"shell_environment",
-            "content":json!({"shell":shell,"workspace":workspace,
-                "access":access,
-                "memory":{"ai_input_limit_tokens":s.input_budget,"program_shell_output_limit_bytes":crate::shell_process::PROGRAM_OUTPUT_LIMIT,
-                    "boundary":"Command output stays in code until logged with console.log or passed to a virtual helper."},
-                "usage":format!("{}{own}", if cfg!(windows) { "Use PowerShell 7 with Windows paths. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." } else { "Use Bash. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or truncate evidence. Prefer scoped rg searches. If shell.available=false, use its diagnostic or the structured file APIs." })}).to_string()}));
-        }
-        let environment = crate::agent_program::ENVIRONMENT;
-        #[cfg(test)]
-        let environment = if documented_examples::repository_review_naive(s) {
-            "Use advertised tools directly. program_tool_headers describes available libraries; read_tool_contracts and find_library_methods provide exact methods and callable tool names. Use tool results as evidence and deliver the final analysis directly."
-        } else { environment };
-        wire.insert(1.min(wire.len()),json!({"role":"system","name":"program_environment","content":environment}));
-        // Library categories are visible up front; method docs are read on demand.
-        let libraries = program_flow::static_libraries(s, definitions);
-        let mut headers = crate::agent_program::declarations::directory(&libraries);
-        headers.push_str(&crate::agent_program::declarations::core_methods(&libraries, definitions));
-        let requirable = program_flow::requirable(s, definitions);
-        headers.push_str(&crate::agent_program::declarations::third_party_index(&requirable));
-        for (library, note) in program_flow::setup_notes(libraries.keys().chain(requirable.keys())) {
-            headers.push_str(&format!("// Library {library}: {note}\n"));
-        }
-        for (skill, library) in program_flow::skill_library_names(s) {
-            headers.push_str(&format!("// Skill ID {}: use read_skill with this ID for instructions; library {} is used with require.\n", serde_json::to_string(&skill).unwrap(), serde_json::to_string(&library).unwrap()));
-        }
-        wire.insert(
-            2.min(wire.len()),
-            json!({"role":"system","name":"program_tool_headers","content":headers}),
-        );
     }
     // Plugin instructions are a session-owned system layer, rebuilt outside
     // compressible chat history. No plugin page means no automatic injection.
@@ -775,14 +948,19 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     // The conversation boundary and activation note are fixed for the session,
     // so they sit in this system layer rather than after the conversation,
     // where the provider's prompt cache missed them on every request.
-    let (plugin_error, skill) = match page_plugin_material(s) {
-        Ok(material) => (
-            None,
-            material.and_then(|m| m["content"].as_str().filter(|v| !v.trim().is_empty()).map(str::to_owned)),
-        ),
-        Err(error) => (Some(format!("PLUGIN_UNAVAILABLE: {error:#}")), None),
+    let (plugin_error, skill) = if preserve_prefix {
+        (None, None)
+    } else {
+        match page_plugin_material(s) {
+            Ok(material) => (
+                None,
+                material.and_then(|m| m["content"].as_str().filter(|v| !v.trim().is_empty()).map(str::to_owned)),
+            ),
+            Err(error) => (Some(format!("PLUGIN_UNAVAILABLE: {error:#}")), None),
+        }
     };
-    if role == "main"
+    if !preserve_prefix
+        && role == "main"
         && let Some(owner) = &s.plugin
     {
         let execution = if s.is_primary() { "MAIN Agent" } else { "task delegate" };
@@ -798,7 +976,8 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     }
     // Notes are re-read for every request rather than stored in the window, so
     // compression never drops them and edits apply on the next request.
-    if let Ok(Some(project)) = crate::project_notes::task_project(s.state.workspace.root(), s.task)
+    if !preserve_prefix
+        && let Ok(Some(project)) = crate::project_notes::task_project(s.state.workspace.root(), s.task)
     {
         // The list of project skills is for the AIs that can read them.
         let skills = matches!(role, "main" | "implement")
@@ -816,7 +995,8 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     // system messages; modules saved since are announced at the end of the
     // conversation (modules::announce), so the provider's prompt cache keeps
     // everything sent before.
-    if matches!(role, "main" | "implement")
+    if !preserve_prefix
+        && matches!(role, "main" | "implement")
         && let Some(message) = modules::system_message(s.state.workspace.root(), s.task, messages)
     {
         let after_system = wire.iter().take_while(|m| m["role"] == "system").count();
@@ -829,6 +1009,7 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
             object.remove(crate::context_assets::REFERENCE);
             object.remove("_asset_state");
             object.remove("_frame_input");
+            object.remove("_js_context_meta");
             object.remove("_pinned");
             object.remove("_step_fold");
             object.remove("_step_range");
@@ -851,7 +1032,8 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
         }
     }
     // Main capacity is monitored by the host, not a changing system prompt.
-    if s.state
+    if !preserve_prefix
+        && s.state
         .provider_routes
         .get(&s.state.provider_name)
         .is_some_and(|r| r.prefix_system_messages)
@@ -865,7 +1047,16 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
         wire.push(json!({"role":"user","name":"visual_job_status","content":json!({"host_status":true,"pending_visual_checks":pending,"not_a_user_request":true}).to_string()}));
     }
     let mut published = definitions.to_vec();
-    if role == "implement" {
+    if preserve_prefix {
+        if let Some(allowed) = js_meta.as_ref().and_then(|m| m["tools"].as_array()) {
+            let names: std::collections::BTreeSet<&str> = allowed.iter().filter_map(Value::as_str).collect();
+            published.retain(|d| {
+                d["function"]["name"]
+                    .as_str()
+                    .is_some_and(|name| names.contains(name))
+            });
+        }
+    } else if role == "implement" {
         // A module's author reads the skills its code will require.
         published.retain(|d| matches!(d["function"]["name"].as_str(), Some("read_tool_contracts" | "read_program_guide" | "read_skill" | "write_program")));
     } else if role == "fix" {
@@ -949,6 +1140,15 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
         // Thinking is never off: the lowest effort is low.
         let effort = if matches!(effort.as_str(), "none" | "minimal") { "low" } else { effort.as_str() };
         body["reasoning_effort"] = json!(effort);
+    }
+    if !messages_wire(s) {
+        let cache_key = js_meta
+            .as_ref()
+            .and_then(|m| m["cache_key"].as_str())
+            .filter(|k| !k.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::model_transport::affinity(s.task, &s.scope));
+        body["prompt_cache_key"] = json!(cache_key);
     }
     if s.state.fast_mode {
         body["service_tier"] = json!("fast");
@@ -1514,13 +1714,23 @@ async fn business_tool_inner(
         (tool_workspace, args, false)
     };
     let sandbox_boundary = crate::shell_process::boundary(s.state.permission_mode, s.ban_execution);
-    crate::process_sandbox::scope_tool_sandbox(sandbox_boundary, extra_roots, async {
     if crate::shell_process::is_tool(name) {
-        return crate::shell_process::execute_program(
-            s.state, &tool_workspace, s.task, s.turn, s.task_node_id.as_deref(),
-            name, &args, s.cancel, s.ban_execution,
-        ).await;
+        return Box::pin(execute_sandboxed_shell_tool(
+            sandbox_boundary,
+            extra_roots,
+            s.state,
+            &tool_workspace,
+            s.task,
+            s.turn,
+            s.task_node_id.as_deref(),
+            name,
+            &args,
+            s.cancel,
+            s.ban_execution,
+        ))
+        .await;
     }
+    crate::process_sandbox::scope_tool_sandbox(sandbox_boundary, extra_roots, async {
     if crate::workspace_changes::is_mutation(name) {
         crate::shell_process::ensure_idle(tool_workspace.root()).await?;
     }
@@ -1717,6 +1927,31 @@ async fn business_tool_inner(
     }
     result
     }).await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+async fn execute_sandboxed_shell_tool(
+    sandbox_boundary: crate::process_sandbox::ExecutionBoundary,
+    extra_roots: Vec<std::path::PathBuf>,
+    state: &AgentServiceState,
+    workspace: &crate::tools::Workspace,
+    task: &str,
+    turn: usize,
+    owner: Option<&str>,
+    name: &str,
+    args: &Value,
+    cancel: &CancellationToken,
+    ban_execution: bool,
+) -> Result<Value> {
+    crate::process_sandbox::scope_tool_sandbox(
+        sandbox_boundary,
+        extra_roots,
+        crate::shell_process::execute_program(
+            state, workspace, task, turn, owner, name, args, cancel, ban_execution,
+        ),
+    )
+    .await
 }
 
 /// What changed in the host since the previous turn started, said to the
@@ -1924,6 +2159,9 @@ fn outside_read_paths(
             | "read_git"
             | "read_code_flow"
             | "workspace_info"
+            | "git_status"
+            | "git_diff"
+            | "git_log"
             | "code_index__status"
             | "code_index__list"
             | "code_index__search"
@@ -1998,6 +2236,7 @@ fn material_over_capacity(
     delivery: &Value,
     event_seq: Option<i64>,
     required_input_tokens: usize,
+    by_soft_cap: bool,
 ) -> Value {
     let reference = &delivery["asset_reference"];
     let total_chars = delivery["total_chars"].as_u64().or_else(|| {
@@ -2005,13 +2244,26 @@ fn material_over_capacity(
             .get("original_result")
             .map(|v| v.to_string().chars().count() as u64)
     });
-    json!({"error_code":"MATERIAL_OVER_CAPACITY","event_seq":event_seq,"task_id":s.task,"original_saved":true,
+    let reason = if by_soft_cap {
+        "direct_delivery_soft_cap"
+    } else {
+        "remaining_context_budget"
+    };
+    let instruction = if by_soft_cap {
+        "The full output was saved as an asset rather than poured into chat context (single-result or per-round delivery cap reached). Read only the pages you need with read_asset, narrow the call (path, glob, max_matches_per_file, max_lines), or aggregate large datasets inside a JavaScript flow program instead."
+    } else {
+        "The original body was saved but not delivered. Read only the pages you need with read_asset, session.read_asset in a program (char_offset, max_chars up to 24000); the host does not load it automatically."
+    };
+    let limits = delivery_soft_limits(s.input_budget);
+    json!({"error_code":"MATERIAL_OVER_CAPACITY","reason":reason,"event_seq":event_seq,"task_id":s.task,"original_saved":true,
         "asset_reference":reference,"total_chars":total_chars,"bytes":reference["bytes"],
         "required_input_tokens":required_input_tokens,"input_budget":s.input_budget,
+        "single_result_soft_chars":limits.single_chars,"single_result_soft_tokens":limits.single_tokens,
+        "round_soft_chars":limits.round_chars,"round_soft_tokens":limits.round_tokens,
         "delivered":false,"loaded_assets_unchanged":true,
         "next_read":reference["asset_id"].as_str().map(|id|json!({"tool":"read_asset","arguments":{"asset_id":id,"char_offset":0,"max_chars":PAGE_CHARS}})),
         "history_reference":{"tool":"read_session_history","arguments":{"task_id":s.task,"event_seq":event_seq}},
-        "instruction":"The original body was saved but not delivered. Read only the pages you need with read_asset, session.read_asset in a program (char_offset, max_chars up to 24000); the host does not load it automatically."})
+        "instruction":instruction})
 }
 
 /// A result too large for what is left of a leaf's context. A leaf has no
@@ -2349,6 +2601,9 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
         // A call whose program ended with an error stops before its next
         // step; its own calls stop the same way, so wait for them.
         if !top && frame_interrupted(s, w).await? {
+            if w.unsaved_program_steps > 0 {
+                checkpoint_program(s, w, true).await?;
+            }
             while async_children.join_next().await.is_some() {}
             return Ok(LoopResult::Stopped);
         }
@@ -2394,12 +2649,17 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
         }
         step += 1;
         let definitions = tools(s, w);
-        ensure!(!s.cancel.is_cancelled(), "cancelled");
+        if s.cancel.is_cancelled() {
+            if w.unsaved_program_steps > 0 {
+                let _ = checkpoint_program(s, w, true).await;
+            }
+            anyhow::bail!("cancelled");
+        }
         // No context is folded: a result that does not fit is not delivered,
         // and a leaf that runs out ends with an error.
         let leaf = matches!(program_flow::role(w), program_flow::Role::Leaf(_));
         let (node, message, cut_off) = if w.program.is_some() {
-            match program_flow::next(s, w, step).await? {
+            match Box::pin(program_flow::next(s, w, step)).await? {
                 program_flow::Round::Exchange(node, message) => (node, message, false),
                 program_flow::Round::Rewrite | program_flow::Round::Continue => continue,
                 program_flow::Round::Entered(scope) => {
@@ -2440,13 +2700,16 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                 continue;
             }
             model_rounds += 1;
-            model_round(s, w, step, &definitions).await?
+            Box::pin(model_round(s, w, step, &definitions)).await?
         };
         let execution = s.clone();
         let s = &execution;
         let calls = crate::model_stream::tool_calls(&message);
         // The program stopped while this reply was on its way: run none of it.
         if !top && frame_interrupted(s, w).await? {
+            if w.unsaved_program_steps > 0 {
+                checkpoint_program(s, w, true).await?;
+            }
             while async_children.join_next().await.is_some() {}
             return Ok(LoopResult::Stopped);
         }
@@ -2484,7 +2747,7 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             && w.program.is_none()
             && w.program_value.is_none()
         {
-            submit_program(s, w, &message, call, &node, step).await?;
+            Box::pin(submit_program(s, w, &message, call, &node, step)).await?;
             continue;
         }
         if calls.is_empty() {
@@ -2612,6 +2875,8 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             "duplicate or missing tool call id"
         );
         let call_count = calls.len();
+        let round_base_tokens = w.input_tokens(s, &request(s, &w.messages, &definitions));
+        let mut round_added_chars = 0usize;
         let mut image_messages = Vec::new();
         let mut released_assets = None;
         let mut overflow = false;
@@ -2670,9 +2935,12 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             if blocked_here && w.program_task.is_some() {
                 delivery = blockers::paused_delivery(&result);
             }
+            let delivery_text = delivery.to_string();
+            let delivery_chars = delivery_text.chars().count();
+            let prev_tokens = w.input_tokens(s, &request(s, &w.messages, &definitions));
             let mut candidate = w.messages.clone();
             candidate.push(
-                json!({"role":"tool","tool_call_id":call.call_id,"content":delivery.to_string()}),
+                json!({"role":"tool","tool_call_id":call.call_id,"content":delivery_text}),
             );
             candidate.extend(image_messages.iter().cloned());
             if !is_error
@@ -2683,7 +2951,17 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             }
             let required_input_tokens =
                 w.input_tokens(s, &request(s, &candidate, &definitions));
-            let fits = required_input_tokens.saturating_add(4096) < s.input_budget;
+            let single_added_tokens = required_input_tokens.saturating_sub(prev_tokens);
+            let round_added_tokens = required_input_tokens.saturating_sub(round_base_tokens);
+            let fits_window = required_input_tokens.saturating_add(4096) < s.input_budget;
+            let enforce_soft_cap = !is_error && call.name != "read_asset";
+            let limits = delivery_soft_limits(s.input_budget);
+            let fits_soft_cap = !enforce_soft_cap
+                || (delivery_chars <= limits.single_chars
+                    && single_added_tokens <= limits.single_tokens
+                    && round_added_chars.saturating_add(delivery_chars) <= limits.round_chars
+                    && round_added_tokens <= limits.round_tokens);
+            let fits = fits_window && fits_soft_cap;
             if fits
                 && !is_error
                 && let Some((name, enable, scope)) = skill_change
@@ -2702,7 +2980,13 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                 delivery = if leaf {
                     leaf_over_capacity(s, &delivery, required_input_tokens)
                 } else {
-                    material_over_capacity(s, &delivery, Some(seq), required_input_tokens)
+                    material_over_capacity(
+                        s,
+                        &delivery,
+                        Some(seq),
+                        required_input_tokens,
+                        fits_window,
+                    )
                 };
                 // One result too large is not a function too large: a leaf
                 // goes on with the notice, and only a context that cannot take
@@ -2713,6 +2997,8 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                     withheld.extend(image_messages.iter().cloned());
                     overflow |= w.input_tokens(s, &request(s, &withheld, &definitions)).saturating_add(4096) >= s.input_budget;
                 }
+            } else {
+                round_added_chars = round_added_chars.saturating_add(delivery_chars);
             }
             let mut delivered_message = sourced(
                 json!({"role":"tool","tool_call_id":call.call_id,"content":delivery.to_string()}),
@@ -2969,17 +3255,26 @@ async fn submit_program(
             append(s, event, json!({"turn":s.turn,"receipt":receipt,"function":function,"source":source,
                 "path":path,"saved_flow":saved_flow,"source_resource":bundle_origin,"plan":plan.clone()}), false).await?;
             let plan_seq = append(s, "program/plan", json!({"turn":s.turn,"function":function,"plan":plan}), false).await?;
-            let plan_message = host_message(json!({
-                "name": "execution_plan",
-                "content": json!({"function":function,"plan":plan}).to_string(),
-            }));
-            w.messages.push(sourced(plan_message, s.task, plan_seq));
+            let has_plan_steps = plan["steps"].as_array().is_some_and(|steps| !steps.is_empty());
             if body && !w.module_probe {
                 // New and revised module code is saved for later calls of its contract.
                 modules::authored(s, w, source).await?;
+                program_flow::clear_failed_program_attempts(w, message, source);
             } else if !body && s.plugin.is_none() {
                 // Getting to know the task ends when the main script starts.
                 program_flow::end_familiarization(w, message, source);
+            }
+            if has_plan_steps {
+                let plan_message = sourced(host_message(json!({
+                    "name": "execution_plan",
+                    "content": json!({"function":function,"plan":plan}).to_string(),
+                })), s.task, plan_seq);
+                let at = w.messages.len().saturating_sub(1);
+                if w.messages.last().is_some_and(|m| m["role"] == "assistant") {
+                    w.messages.insert(at, plan_message);
+                } else {
+                    w.messages.push(plan_message);
+                }
             }
             let note = if w.module_probe {
                 "This probe runs once. Its observations return to you in module_probe_result."
@@ -3089,6 +3384,7 @@ async fn execute_call(
     append(s,"tool/call",json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,"callId":call.call_id,"name":call.name,"arguments":call.arguments,
         "program_location":at,"description":task_frames::tool_description(definitions,&call.name,&call.arguments)}),false).await?;
     let mut material_source: Option<(String, Value)> = None;
+    let mut pre_registered_asset: Option<Value> = None;
     let mut refreshed_from: Option<Value> = None;
     let output=async {
         let mut args:Value=serde_json::from_str(&call.arguments).context("invalid tool arguments JSON")?;
@@ -3101,7 +3397,7 @@ async fn execute_call(
         }
         if w.module_probe && call.name != "parallel_read_batch" {
             ensure!(program_flow::probe_read(&call.name),
-                "MODULE_PROBE_READ_ONLY: probe:true forbids shell and writes; {} cannot execute. Only io.read, io.read_lines, io.search, io.list and io.workspace_info may run. To use shell or other module capabilities, omit probe and submit the implementation with write_program({{source}}); normal permissions still apply. Changing import/require syntax will not change this permission.", call.name);
+                "MODULE_PROBE_READ_ONLY: probe:true forbids shell and writes; {} cannot execute. Only io.read, io.read_lines, io.search, io.list, io.workspace_info and git.status/git.diff/git.log may run. To use shell or other module capabilities, omit probe and submit the implementation with write_program({{source}}); normal permissions still apply. Changing import/require syntax will not change this permission.", call.name);
         }
         // Mode enforcement is independent of the model's advertised schema.
         if !program_flow::internal_call(w,call) {validate_tool(s,w,definitions,&call.name)?;}
@@ -3118,7 +3414,7 @@ async fn execute_call(
                 ensure!(operations.len() <= 32, "parallel read limit exceeded");
                 for operation in operations {
                     let name = operation["name"].as_str().context("read tool name required")?;
-                    ensure!(matches!(name,"read_file"|"read_file_lines"|"search_text"|"list_dir"), "only read-only file operations may run in parallel");
+                    ensure!(matches!(name,"read_file"|"read_file_lines"|"read_file_chunk"|"search_text"|"list_dir"|"git_status"|"git_diff"|"git_log"), "only read-only file and git operations may run in parallel");
                     ensure!(operation["args"].is_object(), "read arguments must be an object");
                     validate_tool(s,w,definitions,name)?;
                 }
@@ -3160,7 +3456,14 @@ async fn execute_call(
             },
             name if name == program_flow::FIND => program_flow::find(s, w, &args),
             crate::shell_process::READ_ONLY => {
-                ensure!(at.is_none() && program_flow::role(w) == program_flow::Role::Main && read_only_shell(s),
+                let js_allows_readonly = w
+                    .program_task
+                    .as_ref()
+                    .and_then(|t| t["js_tools"].as_array())
+                    .is_some_and(|tools| {
+                        tools.iter().any(|t| t.as_str() == Some(crate::shell_process::READ_ONLY))
+                    });
+                ensure!(at.is_none() && (program_flow::role(w) == program_flow::Role::Main || js_allows_readonly) && read_only_shell(s),
                     "TOOL_UNAVAILABLE: {}; only the main AI calls it directly. Program code runs commands in a module with process.exec_command", call.name);
                 material_source = Some((call.name.clone(), args.clone()));
                 let project = crate::tools::Workspace::new(crate::session_browser::task_workspace(s.state.workspace.root(), s.task)?)?;
@@ -3178,15 +3481,10 @@ async fn execute_call(
             },
             "read_program_guide" => { Ok(json!({"guide":crate::agent_program::CAPABILITIES,"builtin_contracts":crate::agent_program::BUILTIN_CONTRACTS})) },
             "read_tool_contracts" => {
-                use crate::agent_program::declarations;
                 let catalog = program_flow::library_catalog(s, definitions);
-                let selected = declarations::selected(&catalog, &args)?;
-                let mut result = if args["overview"] == true {
-                    json!({"overview":declarations::overview(&selected, definitions)})
-                } else {
-                    json!({"declarations":declarations::headers(&selected, definitions)})
-                };
-                let setup = program_flow::setup_notes(selected.keys());
+                let (mut result, native_keys) =
+                    crate::flow_libraries::read_contracts(s, &catalog, definitions, &args)?;
+                let setup = program_flow::setup_notes(native_keys.iter());
                 if !setup.is_empty() {
                     result["setup_needed"] = json!(setup);
                 }
@@ -3324,12 +3622,47 @@ async fn execute_call(
     }
     // A failure only the user can resolve is marked before it is recorded.
     blockers::mark(s, window, &call.name, &call.arguments, &mut result, is_error);
+    // run_readonly_command keeps the full process capture out of the event
+    // envelope. Persist it as a durable asset first, then retain only the
+    // head/tail preview plus a pointer for on-demand paging.
+    if call.name == crate::shell_process::READ_ONLY && !is_error && result["truncated"] == true {
+        let mut full = result.clone();
+        if let Some(stdout) = full.get("__full_stdout").cloned() { full["stdout"] = stdout; }
+        if let Some(stderr) = full.get("__full_stderr").cloned() { full["stderr"] = stderr; }
+        full.as_object_mut().map(|object| {
+            object.remove("__full_stdout");
+            object.remove("__full_stderr");
+            object.remove("preview_note");
+            object.remove("preview_limit_chars");
+        });
+        let root = s.state.workspace.root().to_path_buf();
+        let task = s.task.to_owned();
+        let args_for_asset = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
+        let reference = tokio::task::spawn_blocking(move || {
+            crate::context_assets::register_pending(&root, &task, crate::shell_process::READ_ONLY, &args_for_asset, &full)
+        }).await??;
+        result["output_asset"] = reference.clone();
+        result["read_output"] = json!({"tool":"read_asset","arguments":{"asset_id":result["output_asset"]["asset_id"]}});
+        result.as_object_mut().map(|object| {
+            object.remove("__full_stdout");
+            object.remove("__full_stderr");
+        });
+        pre_registered_asset = Some(reference);
+        material_source = None;
+    }
     let seq=append(s,"tool/result",json!({
         "actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
         "message":{"id":agent_service::uuid_like(),"role":"tool","toolCallId":call.call_id,"isError":is_error,
             "content":[{"type":"text","text":result.to_string()}]},"meta":{"result":result}}),true).await?;
     let asset_reference = if !is_error {
-        if let Some((name, args)) = material_source {
+        if let Some(reference) = pre_registered_asset {
+            let root = s.state.workspace.root().to_path_buf();
+            let task = s.task.to_owned();
+            let asset_id = reference["asset_id"].as_str().context("registered asset id missing")?.to_owned();
+            Some(tokio::task::spawn_blocking(move || {
+                crate::context_assets::rebind_history_reference(&root, &task, &asset_id, seq)
+            }).await??)
+        } else if let Some((name, args)) = material_source {
             let root = s.state.workspace.root().to_path_buf();
             let task = s.task.to_owned();
             let original = result.clone();
@@ -3359,7 +3692,9 @@ async fn execute_call(
         "tool_result_seq": seq,
         "program_location": at,
     }), false).await?;
-    window.messages.push(sourced(execution_ledger_message(call, &result, is_error, seq, at), s.task, ledger_seq));
+    if is_error && result["code"] == "REPEATED_NO_PROGRESS" {
+        window.messages.push(sourced(execution_ledger_message(call, &result, is_error, seq, at), s.task, ledger_seq));
+    }
     Ok(Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets })
 }
 
@@ -5362,5 +5697,192 @@ mod tests {
         let error = format!("{:#}", validate_tool(&s, &Window::default(), &definitions, "shell").unwrap_err());
         assert!(error.starts_with("PLUGIN_SCOPE_DENIED"), "{error}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn direct_tool_soft_cap_withholds_huge_result_and_saves_asset() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        std::fs::write(
+            root.path().join("big.txt"),
+            format!("needle {}\n", "x".repeat(250)).repeat(900),
+        )
+        .unwrap();
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let message = match step {
+                            0 => call(
+                                "search_text",
+                                json!({"path":"big.txt","query":"needle","max_matches":900}),
+                                step,
+                            ),
+                            1 => {
+                                let tool_msg = body["messages"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .rev()
+                                    .find(|m| m["role"] == "tool")
+                                    .unwrap();
+                                let notice: Value =
+                                    serde_json::from_str(tool_msg["content"].as_str().unwrap())
+                                        .unwrap();
+                                assert_eq!(notice["error_code"], "MATERIAL_OVER_CAPACITY");
+                                assert_eq!(notice["reason"], "direct_delivery_soft_cap");
+                                assert_eq!(notice["delivered"], false);
+                                let asset_id = notice["asset_reference"]["asset_id"]
+                                    .as_str()
+                                    .expect("oversized search saved as asset");
+                                call(
+                                    "read_asset",
+                                    json!({"asset_id":asset_id,"char_offset":0,"max_chars":4000}),
+                                    step,
+                                )
+                            }
+                            _ => {
+                                assert!(body.to_string().contains("needle xxx"));
+                                json!({"role":"assistant","content":"Paged safely from saved asset."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state,
+            "task".into(),
+            "fake".into(),
+            "Search big.txt safely".into(),
+            8,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            conn.query_row("SELECT status FROM agent_tasks WHERE id='task'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_burst_soft_cap_bounds_round_delivery() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        for i in 1..=5 {
+            std::fs::write(root.path().join(format!("p{i}.txt")), "a".repeat(50_000)).unwrap();
+        }
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let message = match step {
+                            0 => json!({
+                                "role": "assistant",
+                                "content": Value::Null,
+                                "tool_calls": (1..=5).map(|i| json!({
+                                    "id": format!("read-{i}"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": json!({"path":format!("p{i}.txt"),"max_chars":55_000}).to_string()
+                                    }
+                                })).collect::<Vec<_>>()
+                            }),
+                            _ => {
+                                let tools = body["messages"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .filter(|m| m["role"] == "tool")
+                                    .map(|m| serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap())
+                                    .collect::<Vec<_>>();
+                                assert_eq!(tools.len(), 5);
+                                let withheld = tools
+                                    .iter()
+                                    .filter(|t| t["error_code"] == "MATERIAL_OVER_CAPACITY")
+                                    .collect::<Vec<_>>();
+                                assert!(!withheld.is_empty(), "round burst beyond 1/4 budget must withhold excess deliveries");
+                                assert!(
+                                    tools.iter().any(|t| t["error_code"].is_null()),
+                                    "earlier calls in the batch still fit"
+                                );
+                                json!({"role":"assistant","content":"Handled parallel burst safely."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state,
+            "task".into(),
+            "fake".into(),
+            "Read five large files".into(),
+            8,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn delivery_soft_limits_scale_to_quarter_of_model_budget() {
+        let large = delivery_soft_limits(1_025_424);
+        assert_eq!(large.single_tokens, 256_356);
+        assert_eq!(large.round_tokens, 256_356);
+        assert_eq!(large.single_chars, 769_068);
+        assert_eq!(large.round_chars, 769_068);
+
+        let medium = delivery_soft_limits(INPUT_BUDGET);
+        assert_eq!(medium.round_tokens, INPUT_BUDGET / 4);
+        assert!(medium.round_chars >= 170_000);
+
+        let tiny = delivery_soft_limits(32_000);
+        assert_eq!(tiny.round_tokens, 32_000);
     }
 }

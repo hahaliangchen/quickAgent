@@ -8,9 +8,9 @@
 
 ## 运行方式与工具导入
 
-主任务的 AI 用 `write_program({source})` 提交下一个完整 JS cell，作为该条回复唯一的工具调用；宿主保存源码，编译通过后在同一持久 VM 中运行，结果回到主任务。回复正文中的代码只是展示，不会执行。cell 从顶层第一条语句开始顺序执行，没有入口函数，也不需要返回值；需要的数据写在代码里，或用导入的工具读取。编译失败不会改变已有 VM；运行时暂停、错误和已完成的副作用按当前状态保留。
+主任务的 AI 用 `write_program({source})` 提交下一个完整 JS cell，作为该条回复唯一的工具调用；宿主保存源码，编译通过后在同一持久 VM 中运行，结果回到主任务。回复正文中的代码只是展示，不会执行。cell 从顶层第一条语句开始顺序执行，没有入口函数，也不需要返回值；需要的数据写在代码里，或用导入的工具读取。VM 即使一次编译了多行源码，也按语句推进：普通语句立即完成，宿主能力在调用点挂起并在回执到达后恢复，返回值直接交给下一条语句；已完成的打印、宿主调用和错误边界会实时写入执行记录。编译失败不会改变已有 VM；运行时暂停、错误和已完成的副作用按当前状态保留。
 
-宿主 SDK 使用 import 或 require 加载：`import io from "io"`、`import * as io from "io"`、`import {read as load} from "io"`，或在函数里 `const io = require("io")`。`host:` 是兼容别名，import 和 require 都接受，例如 `require("host:process")` 与 `require("process")` 加载同一个库对象。默认导入绑定库的方法集合。`<library>/promises` 提供异步方法。没有 import 的程序里，宿主自带的库按名字就能用；程序自己声明了同名变量时，这个名字归程序自己。这里的 `io`、`process` 是宿主 SDK，方法以已发布的工具契约为准；VM 支持 `Buffer.byteLength(text)`、`Buffer.from(text, "utf8")`、`new URL(input, base)` 和 `path.isAbsolute(path)`，以及 `process.env.NAME` / `process.env["NAME"]` 读取单个非凭据环境变量。`globalThis` 可用于访问这些受支持的全局对象；不提供完整 Node process 对象。源码自己绑定 `process` 时，该名称以源码绑定为准。
+宿主 SDK 使用 import 或 require 加载：`import io from "io"`、`import * as io from "io"`、`import {read as load} from "io"`，或在函数里 `const io = require("io")`。这些默认库方法提供同步外观：代码直接取得返回值，VM 在宿主操作进行期间保存当前帧并在回执到达后从这条语句继续，不需要为了“等待宿主”额外写 `await`。`host:` 是兼容别名，import 和 require 都接受，例如 `require("host:process")` 与 `require("process")` 加载同一个库对象。`<library>/promises` 提供显式异步方法；只有需要独立工作并发、Promise 组合或接口明确返回 Promise 时才使用它们和 `await`。没有 import 的程序里，宿主自带的库按名字就能用；程序自己声明了同名变量时，这个名字归程序自己。这里的 `io`、`process` 是宿主 SDK，方法以已发布的工具契约为准；VM 支持 `Buffer.byteLength(text)`、`Buffer.from(text, "utf8")`、`new URL(input, base)` 和 `path.isAbsolute(path)`，以及 `process.env.NAME` / `process.env["NAME"]` 读取单个非凭据环境变量。`globalThis` 可用于访问这些受支持的全局对象；不提供完整 Node process 对象。源码自己绑定 `process` 时，该名称以源码绑定为准。
 
 插件和项目技能的库在用到的函数里用 `const ppt = require("ppt")` 加载；执行到这一行才链接，返回方法对象。同一次运行再次 require 同一库拿到同一个对象；找不到时抛出可捕获的 `MODULE_NOT_FOUND`。参数可以是字符串值。静态 import 仅绑定当前已发布的宿主 SDK；宿主注册的第三方插件和技能库通过 require 在运行时加载。两种写法都不加载 Node 内置模块、npm 包或工作区 node_modules。确需 Node/npm 时，由宿主提供的受限库运行独立工作区脚本，检查退出码和实际输出后把数据返回流程。工具以一个 JSON 对象传参，仍经过原权限检查。export、本地文件模块和动态 import 尚不支持。单个 cell 返回表示本次提交结束，不代表业务验收自动通过。
 

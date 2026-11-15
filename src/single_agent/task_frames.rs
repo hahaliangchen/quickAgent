@@ -220,13 +220,17 @@ pub(super) async fn open_main_task(s: &Session<'_>, w: &mut Window, request: &st
 pub(super) async fn start_parallel_function(
     s: &Session<'_>, parent_frame: &Window, action: &crate::agent_program::Action, step: usize,
 ) -> Result<(String, Window)> {
-    let crate::agent_program::runtime::ActionKind::Call { name, args, captured } = &action.kind else {
-        anyhow::bail!("parallel function requires an async virtual call");
-    };
+    ensure!(
+        matches!(
+            &action.kind,
+            crate::agent_program::runtime::ActionKind::Call { .. }
+                | crate::agent_program::runtime::ActionKind::LibraryCall { .. }
+        ),
+        "parallel function requires an async virtual or library call"
+    );
     let runtime = parent_frame.program.as_ref().context("parallel caller has no program")?;
     let snapshot = runtime.async_scope(&action.id).context("parallel call has no saved scope")?.clone();
-    let function = super::program_flow::scheduled_function_task(s, parent_frame, &runtime.program, name, args, captured)?;
-    let arguments = json!({"goal":name,"briefing":function["description"],"program_task":function,"call_site":action.at});
+    let arguments = super::program_flow::action_task_descriptor(s, parent_frame, Some(&runtime.program), action)?;
     let parent_id = frame_task(s, parent_frame);
     let conn = agent_service::open_db(s.state.workspace.root())?;
     let parent = tree::get(&conn, s.task, &parent_id)?;
@@ -395,21 +399,59 @@ fn temporary_frame(s: &Session<'_>, parent: &Window, node: &Node) -> Result<Wind
             task["revision"] = json!(revision);
         }
     }
-    let input = super::program_flow::call_view(&task)?;
-    let virtual_function = task["role"] != "body";
-    if virtual_function {
-        // A virtual function's context is its signature, contract and actual
-        // arguments: nothing of its caller's conversation, scope or skills
-        // comes along. The skills its own code or contract references are
-        // added to each of its requests.
-        child.messages = vec![json!({"role":"system","content":s.prompt()})];
+    let mut input = super::program_flow::call_view(&task)?;
+    let isolated_frame = task["role"] != "body" || task["library_module"] == true;
+    let js_prefix = task
+        .get("js_context")
+        .and_then(|ctx| ctx.get("messages"))
+        .and_then(Value::as_array)
+        .filter(|prefix| !prefix.is_empty());
+    let mut js_meta = None;
+    if isolated_frame {
+        // A virtual function gets its signature, contract, actual arguments
+        // and either its explicit JS context prefix or the compact host context.
+        if let Some(prefix) = js_prefix {
+            child.messages = prefix.to_vec();
+            js_meta = Some(json!({
+                "preserve_prefix": true,
+                "cache_key": task["js_context"].get("prompt_cache_key").cloned().unwrap_or(Value::Null),
+                "tools": task.get("js_tools").cloned().unwrap_or(Value::Null),
+                "custom_tools": task["js_custom_tools"] == true,
+            }));
+            if task["role"] == "leaf"
+                && let Some(obj) = input.as_object_mut()
+            {
+                let fn_name = task["name"].as_str().unwrap_or("virtual_function");
+                obj.insert(
+                    "role_override".into(),
+                    json!(format!(
+                        "VIRTUAL CALL BOUNDARY — OVERRIDE PRIOR SYSTEM PROMPT & USER GOAL: The preceding messages are a shared read-only background prefix (KV cache). Starting here, you are NOT the main orchestration AI; DO NOT execute the overall user request, global plan, or write_program. You are ONLY executing the single @virtual leaf call `{fn_name}` described in `description`/`scope`/`bindings` below. Complete ONLY `{fn_name}`, return one JSON value matching its contract immediately, and stop."
+                    )),
+                );
+                obj.insert(
+                    "leaf_instructions".into(),
+                    json!(super::program_flow::LEAF_PROMPT),
+                );
+            }
+        } else {
+            child.messages = vec![json!({"role":"system","content":s.prompt()})];
+        }
         child.scope_values.clear();
-        // Except what its contract names with @uses: its closure, as in JS.
+        // Capture lexical/local bindings plus explicit @uses closure variables, as in JS.
+        if let Some(scope) = task["scope"].as_object() {
+            child.scope_values.extend(scope.iter().map(|(name, value)| (name.clone(), value.clone())));
+        }
         if let Some(captured) = task["captured"].as_object() {
             child.scope_values.extend(captured.iter().map(|(name, value)| (name.clone(), value.clone())));
         }
+    } else if let Some(scope) = task["scope"].as_object() {
+        child.scope_values.extend(scope.iter().map(|(name, value)| (name.clone(), value.clone())));
     }
-    child.messages.push(json!({"role":"user","name":"program_task_input","content":input.to_string(),"_frame_input":true}));
+    let mut frame_input = json!({"role":"user","name":"program_task_input","content":input.to_string(),"_frame_input":true});
+    if let Some(meta) = js_meta {
+        frame_input["_js_context_meta"] = meta;
+    }
+    child.messages.push(frame_input);
     child.program = super::program_flow::task_runtime(&task)?;
     child.program_task = Some(task);
 
@@ -438,9 +480,12 @@ fn inherited_frame(s: &Session<'_>, parent: &Window, node: &Node) -> Window {
     }
 }
 
-/// What a returning task saved, as handles: the latest result per invocation
-/// in its scope, without the materials it was given or inherited.
-fn returned_assets(s: &Session<'_>, w: &Window, node: &str) -> Value {
+/// What a returning task explicitly passed back by asset reference: internal
+/// snapshots of a child scope stay private unless returned (and none on failure).
+fn returned_assets(s: &Session<'_>, w: &Window, node: &str, failed: bool, text: &str) -> Value {
+    if failed {
+        return json!([]);
+    }
     let given = w
         .messages
         .iter()
@@ -457,7 +502,7 @@ fn returned_assets(s: &Session<'_>, w: &Window, node: &str) -> Value {
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|a| a["asset_id"].as_str().is_some_and(|id| !given.contains(id)))
+            .filter(|a| a["asset_id"].as_str().is_some_and(|id| !given.contains(id) && text.contains(id)))
             .map(|a| {
                 let mut a = a.clone();
                 a.as_object_mut().unwrap().remove("in_context");
@@ -484,8 +529,10 @@ pub(super) async fn finish(
     // Calls waiting for this frame to write or fix a module may go on.
     super::modules::release_frame(w);
     let agent = s.delegate_id().map(str::to_owned);
-    let saved = returned_assets(s, w, &id);
     let text = message["content"].as_str().unwrap_or("").to_owned();
+    // A function that gave up returns $task_error: its frame failed.
+    let failed = serde_json::from_str::<Value>(&text).is_ok_and(|value| value.get("$task_error").is_some());
+    let saved = returned_assets(s, w, &id, failed, &text);
     let (task, turn, old_scope, frame) = (s.task.to_owned(), s.turn, s.scope.clone(), w.clone());
     let resumed=db(s.state.workspace.root(), move |conn| {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -502,8 +549,6 @@ pub(super) async fn finish(
         } else {
             (caller, Value::Null)
         };
-        // A function that gave up returns $task_error: its frame failed.
-        let failed = serde_json::from_str::<Value>(&text).is_ok_and(|value| value.get("$task_error").is_some());
         node.status = if failed { "failed" } else { "done" }.into();
         node.result = Some(summary);
         let returned = tree::emit(&tx, &task, "task/node_returned", &mut node, turn)?;
@@ -522,26 +567,14 @@ pub(super) async fn finish(
                 "return_event_seq": returned,
                 "program_location": concurrent_caller["call_site"],
             });
-            let ledger_seq = agent_service::append_event_tx(&tx, &task, "flow/ledger", &ledger, None)?;
-            let parent_scope = concurrent_caller["scope"].as_str().context("concurrent caller scope missing")?;
-            let raw: String = tx.query_row("SELECT state FROM agent_runtime_windows WHERE task_id=?1 AND scope=?2", params![task, parent_scope], |r| r.get(0))?;
-            let mut parent_window: Window = serde_json::from_str(&raw)?;
-            parent_window.messages.push(super::sourced(
-                super::execution_ledger_host_message(json!({
-                    "action": "virtual_call",
-                    "function": ledger["function"],
-                    "status": ledger["status"],
-                    "event_seq": returned,
-                    "return_event_seq": returned,
-                    "program_location": ledger["program_location"],
-                })),
-                &task,
-                ledger_seq,
-            ));
-            write_window(&tx, &task, parent_scope, &parent_window)?;
-            let mut frame = frame;
-            super::function_scope::release_finished(&mut frame);
-            write_window(&tx, &task, &old_scope, &frame)?;
+            agent_service::append_event_tx(&tx, &task, "flow/ledger", &ledger, None)?;
+            if tree::is_temp(&node) {
+                tx.execute("DELETE FROM agent_runtime_windows WHERE task_id=?1 AND scope=?2", params![task, old_scope])?;
+            } else {
+                let mut frame = frame;
+                super::function_scope::release_finished(&mut frame);
+                write_window(&tx, &task, &old_scope, &frame)?;
+            }
             tx.commit()?;
             return Ok(None);
         }
@@ -588,19 +621,7 @@ pub(super) async fn finish(
             "return_event_seq": returned,
             "program_location": serial_caller["call_site"],
         });
-        let ledger_seq = agent_service::append_event_tx(&tx, &task, "flow/ledger", &ledger, None)?;
-        resumed.messages.push(super::sourced(
-            super::execution_ledger_host_message(json!({
-                "action": "virtual_call",
-                "function": ledger["function"],
-                "status": ledger["status"],
-                "event_seq": returned,
-                "return_event_seq": returned,
-                "program_location": ledger["program_location"],
-            })),
-            &task,
-            ledger_seq,
-        ));
+        agent_service::append_event_tx(&tx, &task, "flow/ledger", &ledger, None)?;
         // What the user said meanwhile belongs to the whole main task.
         for original in frame.messages.iter().filter(|m| is_user_original(m)) {
             if !resumed.messages.iter().any(|m| m["source"]["seq"] == original["source"]["seq"] && m["content"] == original["content"]) {

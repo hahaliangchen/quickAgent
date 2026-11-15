@@ -27,7 +27,8 @@ use crate::rust_index::{
     SearchRustSymbolsRequest,
 };
 use crate::tools::{
-    EditFileRequest, ListDirRequest, ReadFileLinesRequest, ReadFileRequest, ReplaceRangeRequest,
+    EditFileRequest, GitDiffRequest, GitLogRequest, GitStatusRequest, ListDirRequest,
+    ReadFileChunkRequest, ReadFileLinesRequest, ReadFileRequest, ReplaceRangeRequest,
     SearchTextRequest, Workspace, WorkspaceInfoRequest, WriteFileRequest,
 };
 use crate::ts_index::{
@@ -976,7 +977,19 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
         "workspace_info" => serde_json::to_value(
             workspace.workspace_info(serde_json::from_value::<WorkspaceInfoRequest>(arguments)?)?,
         )?,
-        "list_dir" | "read_file" | "read_file_lines" | "search_text" => {
+        "git_status" | "git_diff" | "git_log" => {
+            let workspace = Workspace::new(workspace.root())?;
+            let name = name.to_owned();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+                Ok(match name.as_str() {
+                    "git_status" => serde_json::to_value(workspace.git_status(serde_json::from_value::<GitStatusRequest>(arguments)?)?)?,
+                    "git_diff" => serde_json::to_value(workspace.git_diff(serde_json::from_value::<GitDiffRequest>(arguments)?)?)?,
+                    "git_log" => serde_json::to_value(workspace.git_log(serde_json::from_value::<GitLogRequest>(arguments)?)?)?,
+                    _ => unreachable!(),
+                })
+            }).await??
+        },
+        "list_dir" | "read_file" | "read_file_lines" | "read_file_chunk" | "search_text" => {
             let workspace = Workspace::new(workspace.root())?;
             let name = name.to_owned();
             tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
@@ -984,6 +997,7 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
                     "list_dir" => serde_json::to_value(workspace.list_dir(serde_json::from_value::<ListDirRequest>(arguments)?)?)?,
                     "read_file" => serde_json::to_value(workspace.read_file(serde_json::from_value::<ReadFileRequest>(arguments)?)?)?,
                     "read_file_lines" => serde_json::to_value(workspace.read_file_lines(serde_json::from_value::<ReadFileLinesRequest>(arguments)?)?)?,
+                    "read_file_chunk" => serde_json::to_value(workspace.read_file_chunk(serde_json::from_value::<ReadFileChunkRequest>(arguments)?)?)?,
                     "search_text" => serde_json::to_value(workspace.search_text(serde_json::from_value::<SearchTextRequest>(arguments)?)?)?,
                     _ => unreachable!(),
                 })
@@ -1101,8 +1115,49 @@ pub fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "git_status",
+            "description": "Read the repository status as bounded structured data. This never writes the index or worktree.",
+            "inputSchema": {"type":"object","properties":{
+                "workspace_root":{"type":"string","description":"Optional absolute project directory."},
+                "paths":{"type":"array","items":{"type":"string"},"description":"Optional repository-relative path filters."},
+                "include_untracked":{"type":"boolean","default":true},
+                "max_entries":{"type":"integer","minimum":1,"maximum":1000,"default":200}
+            }},
+            "outputSchema":{"type":"object","required":["head","branch","clean","staged","modified","untracked","total_entries","truncated"],"properties":{
+                "head":{"type":["string","null"]},"branch":{"type":["string","null"]},"clean":{"type":"boolean"},
+                "staged":{"type":"array","items":{"type":"string"}},"modified":{"type":"array","items":{"type":"string"}},
+                "untracked":{"type":"array","items":{"type":"string"}},"total_entries":{"type":"integer"},"truncated":{"type":"boolean"}
+            }}
+        },
+        {
+            "name": "git_diff",
+            "description": "Read a bounded repository diff. Prefer stat_only first, then request a limited preview when details are needed.",
+            "inputSchema": {"type":"object","properties":{
+                "workspace_root":{"type":"string"},"rev_range":{"type":"string","description":"A git revision or revision range."},
+                "staged":{"type":"boolean","default":false},"paths":{"type":"array","items":{"type":"string"}},
+                "stat_only":{"type":"boolean","default":false},"unified":{"type":"integer","minimum":0,"maximum":100,"default":3},
+                "max_lines":{"type":"integer","minimum":1,"maximum":20000,"default":2000},"max_chars":{"type":"integer","minimum":256,"maximum":256000,"default":48000}
+            }},
+            "outputSchema":{"type":"object","required":["diff","files","truncated","stat_only"],"properties":{
+                "diff":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"truncated":{"type":"boolean"},"stat_only":{"type":"boolean"}
+            }}
+        },
+        {
+            "name": "git_log",
+            "description": "Read a bounded structured commit history without invoking a shell pipeline.",
+            "inputSchema": {"type":"object","properties":{
+                "workspace_root":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20},
+                "paths":{"type":"array","items":{"type":"string"}},"rev":{"type":"string"}
+            }},
+            "outputSchema":{"type":"object","required":["commits","truncated"],"properties":{
+                "commits":{"type":"array","items":{"type":"object","required":["commit","short_commit","author","date","subject"],"properties":{
+                    "commit":{"type":"string"},"short_commit":{"type":"string"},"author":{"type":"string"},"date":{"type":"string"},"subject":{"type":"string"}
+                }}},"truncated":{"type":"boolean"}
+            }}
+        },
+        {
             "name": "list_dir",
-            "description": "List a directory by relative workspace path or absolute filesystem path with optional recursion and filtering. By default this shows the real filesystem view, including gitignored files. Use to understand project layout or locate files by path.",
+            "description": "List or find files and directories by path, glob pattern, entry kind, modification time, size/mtime sort order, and limit. By default this shows the real filesystem view, including gitignored files.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1111,19 +1166,25 @@ pub fn tool_definitions() -> Value {
                         "description": "Optional absolute project directory to use for this call. Defaults to the server startup directory."
                     },
                     "path": { "type": "string", "default": "." },
-                    "recursive": { "type": "boolean", "default": false },
-                    "max_depth": { "type": "integer", "default": 1 },
+                    "recursive": { "type": "boolean", "default": false, "description": "When true, walk subdirectories recursively. Passing glob also searches subdirectories recursively unless max_depth is set." },
+                    "max_depth": { "type": "integer", "minimum": 0, "description": "Maximum subdirectory depth beneath path (default 1 when recursive is false and glob is empty; unbounded when recursive is true or glob is set)." },
                     "respect_gitignore": {
                         "type": "boolean",
                         "default": false,
                         "description": "When true, hide files ignored by .gitignore/.ignore. Defaults to false so logs and generated files remain visible."
-                    }
+                    },
+                    "glob": { "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Filter entries by glob pattern (\"*.rs\" matches at any depth; \"src/**/*.ts\" or \"target/**/*.log\" from workspace root; leading ! excludes). Explicitly naming an ignored/noise directory such as \"target/**\" traverses into it." },
+                    "kind": { "type": "string", "enum": ["file", "directory", "symlink", "other"], "description": "Return only entries of this kind." },
+                    "modified_after": { "type": "string", "description": "Keep entries modified at or after this time (RFC3339, YYYY-MM-DD in UTC, epoch seconds/ms, or relative duration like \"24h\" or \"7d\")." },
+                    "modified_before": { "type": "string", "description": "Keep entries modified at or before this time (same formats as modified_after)." },
+                    "sort_by": { "type": "string", "enum": ["path", "modified_desc", "modified_asc", "size_desc", "size_asc"], "default": "path", "description": "Sort entries before applying max_entries." },
+                    "max_entries": { "type": "integer", "minimum": 1, "description": "Maximum entries to return after filtering and sorting; limit and head_limit are accepted as aliases." }
                 }
             }
         },
         {
             "name": "read_file",
-            "description": "Read a UTF-8 file by path with a byte limit. For a known line range, use read_file_lines.",
+            "description": "Read a UTF-8 file by path with a byte limit (default 1 MiB, max 16 MiB). For line ranges or tail, use read_file_lines; for large files or chunk-by-chunk streaming, use read_file_chunk.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
@@ -1139,7 +1200,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "read_file_lines",
-            "description": "Read an inclusive 1-indexed line range. Use known locations directly. Choose text search for literals and symbol search for unknown definitions.",
+            "description": "Read an inclusive line range (positive 1-indexed from start, or negative from EOF such as start_line=-80, end_line=-1 for tail; streams files larger than 16 MiB). Choose text search for literals and symbol search for unknown definitions.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "start_line", "end_line"],
@@ -1149,8 +1210,27 @@ pub fn tool_definitions() -> Value {
                         "description": "Optional absolute project directory to use for this call. Defaults to the server startup directory."
                     },
                     "path": { "type": "string" },
-                    "start_line": { "type": "integer" },
-                    "end_line": { "type": "integer" }
+                    "start_line": { "type": "integer", "description": "1-based line from start (>0), or lines from end (<0, e.g. -80)." },
+                    "end_line": { "type": "integer", "default": -1, "description": "Inclusive end line (>0, or <0 from end such as -1 for last line)." }
+                }
+            }
+        },
+        {
+            "name": "read_file_chunk",
+            "description": "Stream a UTF-8 file in bounded byte/line chunks from byte_offset without loading the whole file into memory. Pass next_byte_offset (and next_line) from each response to continue until eof=true, summarizing or discarding each chunk as you go.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "workspace_root": {
+                        "type": "string",
+                        "description": "Optional absolute project directory to use for this call. Defaults to the server startup directory."
+                    },
+                    "path": { "type": "string" },
+                    "byte_offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Byte offset to resume streaming from (use previous next_byte_offset)." },
+                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based line number at byte_offset (pass previous next_line; defaults to 1 at byte_offset=0)." },
+                    "max_bytes": { "type": "integer", "minimum": 4, "maximum": 524288, "default": 65536, "description": "Maximum UTF-8 bytes per chunk (always cuts on a line boundary unless a single line exceeds max_bytes)." },
+                    "max_lines": { "type": "integer", "minimum": 1, "description": "Optional maximum lines to return in this chunk." }
                 }
             }
         },
@@ -1184,6 +1264,7 @@ pub fn tool_definitions() -> Value {
                         "description": "Skip files ignored by .gitignore/.ignore. Pass false to search logs, build output and other ignored files too."
                     },
                     "max_matches": { "type": "integer", "default": 100, "minimum": 1, "description": "Matching lines in content mode, files in files and count modes. limit is accepted as an alias." },
+                    "max_matches_per_file": { "type": "integer", "minimum": 1, "description": "In content mode, maximum matches to collect from any single file before moving on to the next file." },
                     "output_mode": { "type": "string", "enum": ["content", "files", "count"], "default": "content", "description": "content: matching lines. files: only the paths of matching files. count: matching lines per file, with their total." },
                     "glob": { "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }], "description": "Search only files matching these globs, as rg -g: \"*.rs\" matches at any depth, \"src/**/*.ts\" from the workspace root, a leading ! excludes." },
                     "context_lines": { "type": "integer", "minimum": 0, "maximum": 20, "default": 0, "description": "In content mode, lines before and after each match, returned as before and after." }

@@ -100,12 +100,18 @@ pub fn builtin() -> Libraries {
         ("io".into(), named(&[
             ("read", "read_file"),
             ("read_lines", "read_file_lines"),
+            ("read_chunk", "read_file_chunk"),
             ("write", "write_file"),
             ("list", "list_dir"),
             ("search", "search_text"),
             ("edit", "edit_file"),
             ("replace", "replace_range"),
             ("workspace_info", "workspace_info"),
+        ])),
+        ("git".into(), named(&[
+            ("status", "git_status"),
+            ("diff", "git_diff"),
+            ("log", "git_log"),
         ])),
         // Published only while a program the user's message paused can be resumed.
         ("previous".into(), named(&[("resume", "resume_previous_program")])),
@@ -182,7 +188,10 @@ pub fn catalog(definitions: &[Value], packages: &Value) -> Libraries {
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| namespace(id));
-        if !valid_namespace(&library) {
+        // First-party native packages may contribute methods to a host
+        // namespace, but external plugins cannot occupy a builtin namespace.
+        let first_party_builtin = package["origin"] == "builtin" && builtin().contains_key(&library);
+        if !valid_namespace(&library) && !first_party_builtin {
             continue;
         }
         let prefix = format!("{}__", id.replace('-', "_"));
@@ -203,7 +212,12 @@ pub fn catalog(definitions: &[Value], packages: &Value) -> Libraries {
     }
     for (name, mut methods) in candidates {
         if methods.len() == 1 {
-            result.insert(name, methods.remove(0));
+            let methods = methods.remove(0);
+            if let Some(existing) = result.get_mut(&name) {
+                existing.extend(methods);
+            } else {
+                result.insert(name, methods);
+            }
         }
     }
     result

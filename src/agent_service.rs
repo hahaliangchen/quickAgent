@@ -1655,6 +1655,15 @@ fn local_output_schema(name: &str) -> Option<Value> {
     };
     Some(match name {
         "exec_command" | "write_stdin" | "kill_session" => crate::shell_process::output_schema(),
+        "git_status" => json!({"type":"object","required":["head","branch","clean","staged","modified","untracked","total_entries","truncated"],"properties":{
+            "head":{"type":["string","null"]},"branch":{"type":["string","null"]},"clean":{"type":"boolean"},
+            "staged":{"type":"array","items":{"type":"string"}},"modified":{"type":"array","items":{"type":"string"}},"untracked":{"type":"array","items":{"type":"string"}},
+            "total_entries":{"type":"integer"},"truncated":{"type":"boolean"}}}),
+        "git_diff" => json!({"type":"object","required":["diff","files","truncated","stat_only"],"properties":{
+            "diff":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"truncated":{"type":"boolean"},"stat_only":{"type":"boolean"}}}),
+        "git_log" => json!({"type":"object","required":["commits","truncated"],"properties":{
+            "commits":{"type":"array","items":{"type":"object","required":["commit","short_commit","author","date","subject"],"properties":{
+                "commit":{"type":"string"},"short_commit":{"type":"string"},"author":{"type":"string"},"date":{"type":"string"},"subject":{"type":"string"}}}},"truncated":{"type":"boolean"}}}),
         "read_file" => json!({"type":"object","required":required,"properties":page}),
         "read_file_lines" => {
             let mut properties = page;
@@ -1663,12 +1672,30 @@ fn local_output_schema(name: &str) -> Option<Value> {
             required.as_array_mut().unwrap().push(json!("lines"));
             json!({"type":"object","required":required,"properties":properties})
         }
-        "list_dir" => json!({"type":"object","required":["root","entries"],"properties":{
+        "read_file_chunk" => json!({"type":"object","required":["path","file_bytes","start_byte","end_byte","next_byte_offset","start_line","end_line","next_line","eof","line_truncated","bytes","line_count","content","lines"],"properties":{
+            "path":{"type":"string"},
+            "file_bytes":{"type":"integer"},
+            "start_byte":{"type":"integer"},
+            "end_byte":{"type":"integer"},
+            "next_byte_offset":{"type":["integer","null"]},
+            "start_line":{"type":["integer","null"]},
+            "end_line":{"type":["integer","null"]},
+            "next_line":{"type":["integer","null"]},
+            "eof":{"type":"boolean"},
+            "line_truncated":{"type":"boolean"},
+            "bytes":{"type":"integer"},
+            "line_count":{"type":"integer"},
+            "content":{"type":"string"},
+            "lines":{"type":"array","items":{"type":"object","required":["line","text"],"properties":{"line":{"type":["integer","null"]},"text":{"type":"string"}}}}}}),
+        "list_dir" => json!({"type":"object","required":["root","entries","truncated"],"properties":{
             "root":{"type":"string"},
-            "entries":{"type":"array","items":{"type":"object","required":["path","kind","size_bytes"],"properties":{
+            "truncated":{"type":"boolean","description":"true when more matching entries existed than max_entries returned"},
+            "entries":{"type":"array","items":{"type":"object","required":["path","kind","size_bytes","modified_at","modified_ms"],"properties":{
                 "path":{"type":"string","description":"Workspace-relative path, usable as a read path"},
                 "kind":{"enum":["file","directory","symlink","other"]},
-                "size_bytes":{"type":["integer","null"]}}}}}}),
+                "size_bytes":{"type":["integer","null"]},
+                "modified_at":{"type":["string","null"],"description":"RFC3339 UTC modification timestamp"},
+                "modified_ms":{"type":["integer","null"],"description":"Modification time in Unix epoch milliseconds"}}}}}}),
         "search_text" => json!({"type":"object","required":["query","match_mode","output_mode","matches","truncated"],"properties":{
             "query":{"type":"string"},
             "match_mode":{"enum":["literal","regex"]},
@@ -1697,6 +1724,9 @@ pub(crate) fn local_tools(
         "write_stdin",
         "kill_session",
         "workspace_info",
+        "git_status",
+        "git_diff",
+        "git_log",
         "install_dependencies",
         "run_project_script",
         "get_project_process",
@@ -1716,6 +1746,7 @@ pub(crate) fn local_tools(
         "list_dir",
         "read_file",
         "read_file_lines",
+        "read_file_chunk",
         "search_text",
         "write_file",
         "replace_range",
@@ -2057,6 +2088,7 @@ mod output_contract_tests {
             ("list_dir", json!({"path":"docs"})),
             ("read_file", json!({"path":"docs/long.md"})),
             ("read_file_lines", json!({"path":"docs/long.md","start_line":1,"end_line":3})),
+            ("read_file_chunk", json!({"path":"docs/long.md","max_bytes":512})),
             ("search_text", json!({"query":"设计","path":"docs","max_matches":2})),
             ("write_file", json!({"path":"docs/new.md","content":"x"})),
             ("edit_file", json!({"path":"docs/new.md","edits":[{"old_text":"x","new_text":"y"}]})),

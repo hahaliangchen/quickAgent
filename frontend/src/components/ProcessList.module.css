@@ -52,22 +52,52 @@
 
 /* What the host recorded about a run: started, stopped, failed. */
 .event {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
   min-width: 0;
-  padding: 2px 0 2px 22px;
   font-size: var(--dsh-content-font-size-secondary, 13px);
   line-height: 20px;
   color: var(--codex-text-muted, #6b7280);
 }
 
-.event strong {
-  flex: none;
-  font-weight: 500;
+.eventRow {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
 }
 
-.event span {
+.eventLeading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  margin-top: 2px;
+}
+
+.eventBody {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.eventHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-height: calc(24px + var(--dsh-content-font-delta, 0px));
+  line-height: calc(24px + var(--dsh-content-font-delta, 0px));
+}
+
+.eventHeader > strong {
+  flex: none;
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--codex-text-primary, #111827);
+}
+
+:global(body[data-ds-dark-theme]) .eventHeader > strong {
+  color: #f4f4f5;
+}
+
+.eventHeader > span {
   min-width: 0;
   overflow: hidden;
   display: -webkit-box;
@@ -79,36 +109,72 @@
 
 .plan {
   flex-basis: 100%;
-  margin: 2px 0 2px 22px;
-  color: var(--codex-text-secondary, #4b5563);
-  font-size: 12px;
+  margin: 4px 0;
+  color: var(--codex-text-secondary, #374151);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: 20px;
 }
 
-.plan summary {
-  cursor: pointer;
-  color: var(--codex-text-muted, #6b7280);
+:global(body[data-ds-dark-theme]) .plan {
+  color: #d4d4d8;
 }
 
-.plan ol {
-  margin: 4px 0 0 18px;
+.planTitle {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--codex-text-primary, #111827);
+}
+
+:global(body[data-ds-dark-theme]) .planTitle,
+:global(body[data-ds-dark-theme]) .planStepTitle,
+:global(body[data-ds-dark-theme]) .planMetaLabel {
+  color: #f4f4f5;
+}
+
+.planList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 0;
   padding: 0;
+  list-style-position: inside;
 }
 
-.plan li {
+.planStep {
   padding: 2px 0;
 }
 
-.plan small {
-  display: block;
-  color: var(--codex-text-muted, #6b7280);
-  white-space: normal;
+.planStepTitle {
+  display: inline;
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--codex-text-primary, #111827);
 }
 
-.event[data-tone='warn'] strong {
+.planMeta {
+  margin-top: 2px;
+  color: var(--codex-text-secondary, #374151);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: 20px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+:global(body[data-ds-dark-theme]) .planMeta {
+  color: #d4d4d8;
+}
+
+.planMetaLabel {
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--codex-text-primary, #111827);
+}
+
+.event[data-event-tone='warn'] .eventHeader > strong {
   color: var(--dsw-alias-state-warn-label, #b45309);
 }
 
-.event[data-tone='error'] strong,
-.event[data-tone='error'] span {
+.event[data-event-tone='error'] .eventHeader > strong,
+.event[data-event-tone='error'] .eventHeader > span {
   color: var(--dsw-alias-state-error-primary, #d23c3c);
 }

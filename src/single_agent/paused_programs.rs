@@ -93,14 +93,22 @@ fn describe(conn: &rusqlite::Connection, task: &str, nodes: &[Node], w: &Window)
     Ok(steps.into_iter().map(|(_, step)| step).collect::<Vec<_>>().join("、"))
 }
 
+fn format_call_args(args: &[Value]) -> String {
+    let args = args.iter().map(Value::to_string).collect::<Vec<_>>().join(", ");
+    if args.chars().count() > 40 {
+        format!("{}…", args.chars().take(40).collect::<String>())
+    } else {
+        args
+    }
+}
+
 /// A step as the outcome names it: its line and what it calls. Arguments tell
 /// apart calls to one function made side by side.
 pub(super) fn step_label(action: &Action) -> String {
     let callee = match &action.kind {
-        ActionKind::Call { name, args, .. } => {
-            let args = args.iter().map(Value::to_string).collect::<Vec<_>>().join(", ");
-            let args = if args.chars().count() > 40 { format!("{}…", args.chars().take(40).collect::<String>()) } else { args };
-            format!("{name}({args})")
+        ActionKind::Call { name, args, .. } => format!("{name}({})", format_call_args(args)),
+        ActionKind::LibraryCall { library, method, args } => {
+            format!("{library}.{method}({})", format_call_args(args))
         }
         ActionKind::Tool { name, .. } if name == RESUME => "previous.resume()".into(),
         ActionKind::Task { name, .. } | ActionKind::Tool { name, .. } => name.clone(),

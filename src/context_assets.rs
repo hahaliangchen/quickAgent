@@ -171,9 +171,11 @@ pub fn is_material_tool(name: &str) -> bool {
     matches!(
         name,
         "read_attachment"
+            | "list_dir"
             | "read_file"
             | "parallel_read_batch"
             | "read_file_lines"
+            | "read_file_chunk"
             | "search_text"
             | "search_code_map"
             | "read_code_flow"
@@ -186,6 +188,9 @@ pub fn is_material_tool(name: &str) -> bool {
             | "run_program"
             | "exec_command"
             | "run_readonly_command"
+            | "git_status"
+            | "git_diff"
+            | "git_log"
             | "write_stdin"
             | "run_project_script"
             | "get_project_process"
@@ -337,6 +342,40 @@ pub fn register(
             json!({"tool":"refresh_asset","arguments":{"asset_id":id}});
     }
     save_reference(&mut conn, task, seq, tool, args, reference)
+}
+
+/// Register a payload before its tool/result event exists. The caller must
+/// rebind the returned asset to that result event once it has its final seq.
+pub fn register_pending(
+    root: &Path,
+    task: &str,
+    tool: &str,
+    args: &Value,
+    result: &Value,
+) -> Result<Value> {
+    register(root, task, -1, tool, args, result)
+}
+
+/// Reattach an asset created before its tool/result event was committed to
+/// the final result event. This keeps the durable reference's history lookup
+/// aligned with the event that actually delivered the tool result.
+pub fn rebind_history_reference(root: &Path, task: &str, asset_id: &str, seq: i64) -> Result<Value> {
+    let conn = connection(root)?;
+    let mut reference = reference(root, task, asset_id, None)?;
+    reference["history_reference"]["event_seq"] = json!(seq);
+    let owner: Option<String> = conn
+        .query_row(
+            "SELECT node_id FROM agent_task_events WHERE task_id=?1 AND seq=?2",
+            params![task, seq],
+            |row| row.get(0),
+        )
+        .optional()?;
+    reference["task_node_id"] = json!(owner);
+    conn.execute(
+        "UPDATE agent_context_assets SET reference_json=?3 WHERE task_id=?1 AND asset_id=?2",
+        params![task, asset_id, reference.to_string()],
+    )?;
+    Ok(reference)
 }
 
 /// Register an already completed UTF-8 JSON snapshot without loading its body.

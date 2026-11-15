@@ -18,6 +18,7 @@ use crate::{agent_service::AgentServiceState, process_sandbox::ExecutionBoundary
 
 pub const TOOLS: &[&str] = &["exec_command", "write_stdin", "kill_session"];
 pub const PROGRAM_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+const READ_ONLY_PREVIEW_CHARS: usize = 48 * 1024;
 #[derive(Debug)]
 pub struct OutputCapacityError(pub Value);
 impl std::fmt::Display for OutputCapacityError {
@@ -814,7 +815,7 @@ pub fn read_only_available() -> bool {
 
 pub fn read_only_definition() -> Value {
     json!({"type":"function","function":{"name":READ_ONLY,
-        "description":"Run one read-only Bash command directly, including builds and tests. This tool is available for individual operations; use JavaScript flow programs to express the evolving task, including exploration. For a flow step that needs shell, declare an empty @virtual for the result needed; its implementer handles the commands and API discovery. Examples: git status/log/diff/show, rg, ls, wc, sed -n, and builds and tests such as cargo build/test, npm test or pytest. The project's own files are read-only and there is no network; only its build-output folders (the ones git ignores, such as target/ or node_modules/; git status --ignored lists them) and a private /tmp are writable. That /tmp is emptied when the command ends: the next call cannot read anything written there, so a log or script a later call needs goes in a build-output folder. .git is read-only too, so git worktree, stash, checkout and commit fail: to build or test another commit, unpack it into a build-output folder (git archive <commit> | tar -x -C target/at-<commit>) and run there. So builds and tests run, but a command cannot change source files, install or fetch anything: make changes with the file-editing tools, and use module code for commands that must change project files or reach the network. Each call starts a fresh shell in workdir (default: the project root), without stdin, profile or PTY, and returns full stdout/stderr with exit_code once the command exits (rg: 0 matches, 1 none, 2 error). For a long build or test run, send its whole output to a file in one of this project's build-output folders once (cmd > target/run.log 2>&1 in a Rust project, cmd > node_modules/.cache/run.log 2>&1 in a Node one; never /tmp) and read what you need from that file with later commands; do not run it again to see another part. More than 8 MiB of delivered output fails without a prefix. A command still running at timeout_ms is stopped; give builds and test suites a longer timeout_ms.",
+        "description":"Run one read-only Bash command directly, mainly for builds, tests, and one-off diagnostics. Prefer git_status/git_diff/git_log or require(\"git\") for repository inspection, and use list_dir/search_text/read_file_lines for file and log navigation. Capture is capped at 8 MiB; long stdout/stderr is returned as a bounded head/tail preview with truncated:true and a durable output_asset/read_asset reference for the complete result. For a flow step that needs shell, declare an empty @virtual function describing the result needed; its implementer handles commands and API discovery. Project source and .git are read-only; build-output folders and a private /tmp are writable. Each call starts a fresh shell in workdir without stdin, profile or PTY. Save long build logs in a build-output folder and page them with read_file_lines/search_text instead of dumping raw output into context.",
         "parameters":{"type":"object","properties":{
             "cmd":{"type":"string","minLength":1},
             "workdir":{"type":"string","description":"Directory inside the project, relative to its root. Default: the root."},
@@ -917,12 +918,33 @@ async fn finish(exit_code: Option<i32>, stopped: Option<&str>, out: tokio::task:
     err: tokio::task::JoinHandle<Vec<u8>>, started: Instant) -> Result<Value> {
     let decode = |bytes: Vec<u8>| Decoder::default().decode(&bytes, true);
     let (stdout, stderr) = (decode(out.await?), decode(err.await?));
-    let mut result = json!({"exit_code":exit_code,"stdout":stdout,"stderr":stderr,"duration_ms":started.elapsed().as_millis() as u64});
+    let (stdout_preview, stdout_truncated) = preview_read_only(&stdout);
+    let (stderr_preview, stderr_truncated) = preview_read_only(&stderr);
+    let truncated = stdout_truncated || stderr_truncated;
+    let mut result = json!({"exit_code":exit_code,"stdout":stdout_preview,"stderr":stderr_preview,"duration_ms":started.elapsed().as_millis() as u64,
+        "stdout_bytes":stdout.len(),"stderr_bytes":stderr.len(),"truncated":truncated});
+    if truncated {
+        result["__full_stdout"] = json!(stdout);
+        result["__full_stderr"] = json!(stderr);
+        result["preview_limit_chars"] = json!(READ_ONLY_PREVIEW_CHARS);
+        result["preview_note"] = json!("stdout/stderr is a head/tail preview; the complete output is available through output_asset and read_asset.");
+    }
     if let Some(reason) = stopped {
         result["termination_reason"] = json!(reason);
         result["note"] = json!("The command did not finish within timeout_ms and was stopped; stdout/stderr hold what it wrote before that. Narrow the command or raise timeout_ms.");
     }
     Ok(result)
+}
+
+fn preview_read_only(text: &str) -> (String, bool) {
+    if text.chars().count() <= READ_ONLY_PREVIEW_CHARS {
+        return (text.to_owned(), false);
+    }
+    let head_chars = READ_ONLY_PREVIEW_CHARS / 2;
+    let tail_chars = READ_ONLY_PREVIEW_CHARS - head_chars;
+    let head = text.chars().take(head_chars).collect::<String>();
+    let tail = text.chars().rev().take(tail_chars).collect::<String>().chars().rev().collect::<String>();
+    (format!("{head}\n[… output truncated: {} chars total …]\n{tail}", text.chars().count()), true)
 }
 
 pub fn output_schema() -> Value {
@@ -1011,6 +1033,10 @@ mod tests {
         assert_eq!(slow["termination_reason"], "timeout", "{slow}");
         assert_eq!(slow["stdout"], "started\n");
         assert!(slow["duration_ms"].as_u64().unwrap() < 10_000, "{slow}");
+        let preview = run("head -c 60000 /dev/zero", 30_000).await?;
+        assert_eq!(preview["truncated"], true, "{preview}");
+        assert!(preview["stdout"].as_str().unwrap().contains("output truncated"), "{preview}");
+        assert_eq!(preview["__full_stdout"].as_str().unwrap().len(), 60000);
         let flood = run("head -c 9000000 /dev/zero", 30_000).await.unwrap_err();
         assert!(format!("{flood:#}").contains("SHELL_OUTPUT_OVER_CAPACITY"), "{flood:#}");
         let outside = run_read_only(workspace, &json!({"cmd":"pwd","workdir":".."}), cancel).await.unwrap_err();

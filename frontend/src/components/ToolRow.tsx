@@ -200,7 +200,7 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
   const { expanded, toggle } = useDisclosure()
   const args = useMemo(() => parse(rawArguments), [rawArguments])
   const visual = useMemo(() => toolVisual(name, args, result && !result.isError ? parse(result.text) : undefined), [name, args, result])
-  const isShellSession = name === 'exec_command' || name === 'write_stdin' || name === 'kill_session'
+  const isShellSession = name === 'exec_command' || name === 'write_stdin' || name === 'kill_session' || name === 'run_readonly_command'
   const shellParsed = isShellSession && result ? parse(result.text) : undefined
   const shellResult = typeof shellParsed === 'object' && shellParsed !== null && !Array.isArray(shellParsed)
     ? shellParsed as Record<string, unknown> : undefined
@@ -210,8 +210,10 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
     : shellResult?.running === true ? 'running'
     : isShellSession && shellExitCode !== null && shellExitCode !== 0 ? 'error' : 'ok'
   const running = state === 'running'
+  const shellTermination = typeof shellResult?.termination_reason === 'string' ? shellResult.termination_reason : undefined
   const shellStatus = running ? '运行中' : state === 'stopped' ? '已中断'
     : shellExitCode !== null ? `退出码 ${shellExitCode}`
+    : shellTermination !== undefined ? `已停止 · ${shellTermination}`
     : state === 'error' ? '失败' : '已结束（无退出码）'
   const nativeParsed = name === 'run_program' && result ? parse(result.text) : undefined
   const nativeResult = typeof nativeParsed === 'object' && nativeParsed !== null ? nativeParsed as Record<string, unknown> : undefined

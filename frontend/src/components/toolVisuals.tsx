@@ -107,10 +107,14 @@ const EXACT: Record<string, Omit<ToolVisual, 'summary'>> = {
   web__fetch: { tone: 'web', icon: <IconBrowseOutlineMedium />, title: '读取了网页' },
   run_program: { tone: 'run', icon: <TerminalIcon />, title: '运行了程序' },
   exec_command: { tone: 'run', icon: <TerminalIcon />, title: '运行了命令' },
+  run_readonly_command: { tone: 'run', icon: <TerminalIcon />, title: '运行了只读命令' },
   write_stdin: { tone: 'run', icon: <TerminalIcon />, title: '写入了命令输入' },
   kill_session: { tone: 'run', icon: <TerminalIcon />, title: '终止了命令会话' },
   // The host's own lookups while the AI gets to know the work.
   workspace_info: { tone: 'search', icon: <IconWorkspaceTreeOutlineMedium />, title: '查看了工作区' },
+  git_status: { tone: 'search', icon: <IconBranchOutlineMedium />, title: '查看了 Git 状态' },
+  git_diff: { tone: 'read', icon: <IconCompareSplitOutlineMedium />, title: '查看了 Git 变更' },
+  git_log: { tone: 'search', icon: <IconClockOutlineMedium />, title: '查看了 Git 提交历史' },
   read_tool_contracts: { tone: 'context', icon: <IconApiOutlineMedium />, title: '查看了库方法说明' },
   find_library_methods: { tone: 'context', icon: <IconSearchOutlineMedium />, title: '查找了库方法' },
   read_program_guide: { tone: 'context', icon: <IconChecklistOutlineMedium />, title: '查看了编程指南' },
@@ -127,7 +131,7 @@ const RETURNS: Record<string, Omit<ToolVisual, 'summary'>> = {
 }
 
 function fallback(name: string): Omit<ToolVisual, 'summary'> {
-  if (name === 'run_command' || /bash|shell|exec|powershell|cmd/.test(name)) return { tone: 'run', icon: <TerminalIcon />, title: '运行了命令' }
+  if (name === 'run_command' || /bash|shell|exec|powershell|cmd|command/.test(name)) return { tone: 'run', icon: <TerminalIcon />, title: '运行了命令' }
   if (/project_script/.test(name)) return { tone: 'run', icon: <TerminalIcon />, title: '运行了项目脚本' }
   if (/process/.test(name)) return { tone: 'run', icon: <TerminalIcon />, title: '查看了进程' }
   if (/^browser_/.test(name)) return { tone: 'web', icon: <IconBrowseOutlineMedium />, title: '操作了浏览器' }
@@ -150,6 +154,10 @@ function summaryFor(name: string, args: Record<string, unknown>): string | undef
     case 'web__search': return text(args.query)
     case 'web__fetch': return `${args.cursor ? '续读 · ' : ''}${text(args.url)}`
     case 'exec_command': return text(args.cmd)
+    case 'run_readonly_command': return text(args.cmd)
+    case 'git_status': return Array.isArray(args.paths) && args.paths.length > 0 ? `路径：${args.paths.map(value => text(value)).filter(Boolean).join('、')}` : '工作区状态'
+    case 'git_diff': return args.stat_only === true ? '变更统计' : [text(args.rev_range), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '工作区变更'].filter(Boolean).join(' · ')
+    case 'git_log': return [text(args.rev), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '提交历史'].filter(Boolean).join(' · ')
     case 'write_stdin': return `会话 ${String(args.session_id ?? '未知')} · ${typeof args.chars === 'string' && args.chars.length > 0 ? JSON.stringify(args.chars) : '等待输出'}`
     case 'kill_session': return `会话 ${String(args.session_id ?? '未知')}`
     case 'create_task': return [text(args.goal), text(args.reason) && `原因：${text(args.reason)}`].filter(Boolean).join(' · ')

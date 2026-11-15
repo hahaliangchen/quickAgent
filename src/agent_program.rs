@@ -74,11 +74,18 @@ pub struct Function {
     pub description: String,
     #[serde(default)]
     pub virtual_task: bool,
+    /// A `@virtual` function that contains real executable JavaScript before
+    /// its trailing AI fallback; enters its JS frame instead of short-circuiting.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial_virtual: bool,
     /// Host-resolved first virtual layer: author/reuse its code per contract.
     /// The @module source marker also sets this bit. The second layer
     /// runs a focused AI tool loop instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub module_task: bool,
+    /// True only when the source explicitly used `@module` (never `@virtual`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explicit_module: bool,
     /// Outer variables a virtual function's contract names with `@uses`: its
     /// closure, read in the scope where it is declared when it is called.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

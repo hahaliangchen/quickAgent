@@ -119,6 +119,9 @@ pub fn responses_request(chat: &Value) -> Value {
         reasoning["effort"] = effort.clone();
     }
     body["reasoning"] = reasoning;
+    if let Some(key) = chat.get("prompt_cache_key").filter(|key| !key.is_null()) {
+        body["prompt_cache_key"] = key.clone();
+    }
     if let Some(tier) = chat.get("service_tier").filter(|tier| !tier.is_null()) {
         body["service_tier"] = tier.clone();
     }
@@ -1117,7 +1120,7 @@ mod tests {
 
     #[test]
     fn a_chat_request_is_carried_over_to_the_responses_form() {
-        let chat = json!({"model":"gpt-6-luna","stream":true,"parallel_tool_calls":false,"max_tokens":4096,"reasoning_effort":"medium",
+        let chat = json!({"model":"gpt-6-luna","stream":true,"parallel_tool_calls":false,"max_tokens":4096,"reasoning_effort":"medium","prompt_cache_key":"cache-k1",
             "messages":[
                 {"role":"system","content":"You are the main AI."},
                 {"role":"system","name":"program_tool_headers","content":"declare namespace io {}"},
@@ -1134,6 +1137,7 @@ mod tests {
         assert_eq!(body["store"], false);
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["reasoning"], json!({"effort":"medium","summary":"auto"}));
+        assert_eq!(body["prompt_cache_key"], "cache-k1");
         assert!(body.get("max_output_tokens").is_none() && body.get("messages").is_none());
         assert_eq!(body["tools"], json!([{"type":"function","name":"read_file","description":"Read a file","parameters":{"type":"object"},"strict":false}]));
         let input = body["input"].as_array().unwrap();

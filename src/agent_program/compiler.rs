@@ -216,7 +216,7 @@ pub fn probe_as_entry(source: &str, entry: &str, params: &[String]) -> Option<St
 
 /// Global built-in functions that can be used as values, as in `.filter(Boolean)`.
 /// `console` methods: output for the AI that wrote the program to read.
-const CONSOLE_METHODS: [&str; 5] = ["log", "info", "warn", "error", "debug"];
+const CONSOLE_METHODS: [&str; 6] = ["log", "info", "warn", "error", "debug", "dir"];
 const NATIVE_GLOBALS: &[&str] = &[
     "String", "Number", "Boolean", "parseInt", "parseFloat", "isNaN", "isFinite",
     "Symbol", "Array", "Date", "encodeURI", "decodeURI", "encodeURIComponent", "decodeURIComponent", "structuredClone",
@@ -1025,26 +1025,32 @@ impl Compiler {
         let contract = source.name.as_ref().and_then(|_| self.contracts.get(&source.span.lo.0)).filter(|(v, _, _)| *v).cloned();
         let module_task = contract.as_ref().is_some_and(|(_, module, _)| *module);
         if source.is_generator && contract.is_some() { return c.error(source.span,"@module and @virtual must not be generators"); }
+        let mut uses = Vec::new();
+        let mut partial_virtual = false;
         match source.body {
             FunctionBody::Block(body) if contract.is_some() => {
                 let (_, _, description) = contract.clone().unwrap();
-                if !body.stmts.iter().all(|s| matches!(s, ast::Stmt::Empty(_))) {
-                    return c.error(body.span, "@virtual and @module declare AI work: the body holds only comments describing it");
-                }
+                let (empty, error_placeholder) = block_is_virtual_placeholder(&body);
                 if description.is_empty() {
                     return c.error(body.span, "@virtual and @module need a task description and return contract");
                 }
-                let uses = if module_task {
+                if module_task && !empty && !error_placeholder {
+                    return c.error(body.span, "@module declares reusable AI work: use an empty body or a sole throw new Error with a literal message");
+                }
+                uses = if module_task {
                     self.no_uses(&description, source.span)?;
                     Vec::new()
                 } else {
                     self.captures(&description, &params, source.span)?
                 };
-                // Captured variables join the input, read in this closure's scope.
-                let input = Expr::Object(params.iter().chain(&uses).map(|p| (p.clone(), Expr::Variable(p.clone()))).collect());
-                let dest = c.temp();
-                c.emit(body.span, Op::Effect(Some(dest.clone()), Effect::Task { name: id.clone(), description, input }));
-                c.emit(body.span, Op::Return(Expr::Variable(dest)));
+                partial_virtual = !module_task && !empty && !error_placeholder;
+                if partial_virtual {
+                    c.hoist_functions(&body.stmts)?;
+                    for s in &body.stmts {
+                        c.stmt(s)?;
+                    }
+                }
+                emit_virtual_task_tail(&mut c, body.span, &id, description, &params, &uses);
             }
             FunctionBody::Block(body) => {
                 c.hoist_functions(&body.stmts)?;
@@ -1063,13 +1069,14 @@ impl Compiler {
         self.nested.extend(c.nested);
         let virtual_task = contract.is_some();
         let description = contract.map(|(_, _, description)| description).unwrap_or_default();
-        let uses = if virtual_task && !module_task { self.captures(&description, &params, source.span)? } else { Vec::new() };
         self.nested.push((
             id.clone(),
             Function {
                 description,
                 virtual_task,
+                partial_virtual,
                 module_task,
+                explicit_module: module_task,
                 uses,
                 leaf_tools: if virtual_task && !module_task { self.leaf_tools.clone() } else { None },
                 leaf_libraries: if virtual_task && !module_task { self.leaf_libraries.clone() } else { Vec::new() },
@@ -3360,7 +3367,9 @@ fn compile_inner(
                 uses: Vec::new(),
                 description: String::new(),
                 virtual_task: false,
+                partial_virtual: false,
                 module_task: false,
+                explicit_module: false,
                 leaf_tools: None,
                 leaf_libraries: Vec::new(),
                 skills: Vec::new(),
@@ -3463,29 +3472,19 @@ fn compile_inner(
         for name in &vars { c.declare(name, true, body.span)?; }
         for (name, mutable) in &lexical { c.declare(name, *mutable, body.span)?; }
         if patterned { c.emit(body.span, Op::EnterFunctionBody); }
-        let empty = body.stmts.iter().all(|s| matches!(s, ast::Stmt::Empty(_)));
-        // A sole `throw new Error("literal")` is a conventional unavailable-implementation
-        // sentinel. Do not ignore arbitrary throws, expressions or side effects.
-        let executable = body
-            .stmts
-            .iter()
-            .filter(|s| !matches!(s, ast::Stmt::Empty(_)))
-            .collect::<Vec<_>>();
-        let error_placeholder = matches!(executable.as_slice(), [ast::Stmt::Throw(t)]
-            if matches!(&*t.arg, ast::Expr::New(n)
-                if matches!(&*n.callee, ast::Expr::Ident(i) if i.sym == *"Error")
-                    && n.args.as_ref().is_some_and(|args| args.len() == 1
-                        && args[0].spread.is_none()
-                        && matches!(&*args[0].expr, ast::Expr::Lit(ast::Lit::Str(_))))));
-        if virtual_task {
-            if !empty && !error_placeholder {
-                return c.error(body.span,
-                    "@virtual and @module declare AI work: use an empty body or a sole throw new Error with a literal message; executable work and placeholder returns are unsupported");
-            }
+        let (empty, error_placeholder) = block_is_virtual_placeholder(&body);
+        let partial_virtual = virtual_task && !module_task && !empty && !error_placeholder;
+        let uses = if virtual_task {
             if description.is_empty() {
                 return c.error(
                     body.span,
                     "@virtual and @module need a task description and return contract",
+                );
+            }
+            if module_task && !empty && !error_placeholder {
+                return c.error(
+                    body.span,
+                    "@module declares reusable AI work: use an empty body or a sole throw new Error with a literal message",
                 );
             }
             let uses = if module_task {
@@ -3494,41 +3493,38 @@ fn compile_inner(
             } else {
                 c.captures(&description, &params, f.function.span)?
             };
-            let input = Expr::Object(
-                params
-                    .iter()
-                    .chain(&uses)
-                    .map(|p| (p.clone(), Expr::Variable(p.clone())))
-                    .collect(),
-            );
-            let dest = c.temp();
-            c.emit(
+            if partial_virtual {
+                c.hoist_functions(&body.stmts)?;
+                for s in &body.stmts {
+                    c.stmt(s)?;
+                }
+            }
+            emit_virtual_task_tail(
+                &mut c,
                 body.span,
-                Op::Effect(
-                    Some(dest.clone()),
-                    Effect::Task {
-                        name: f.ident.sym.to_string(),
-                        description: description.clone(),
-                        input,
-                    },
-                ),
+                &f.ident.sym,
+                description.clone(),
+                &params,
+                &uses,
             );
-            c.emit(body.span, Op::Return(Expr::Variable(dest)));
+            uses
         } else {
             c.hoist_functions(&body.stmts)?;
             for s in &body.stmts {
                 c.stmt(s)?;
             }
             c.emit(body.span, Op::Return(Expr::Undefined));
-        }
+            Vec::new()
+        };
         functions.extend(std::mem::take(&mut c.nested));
-        let uses = if virtual_task && !module_task { c.captures(&description, &params, f.function.span)? } else { Vec::new() };
         functions.insert(
             f.ident.sym.to_string(),
             Function {
                 description,
                 virtual_task,
+                partial_virtual,
                 module_task,
+                explicit_module: module_task,
                 uses,
                 leaf_tools: if virtual_task && !module_task { leaf_tools.clone() } else { None },
                 leaf_libraries: if virtual_task && !module_task { leaf_libraries.clone() } else { Vec::new() },
@@ -3581,4 +3577,48 @@ fn link_prelude(mut program: Program) -> Result<Program> {
 
 pub(super) fn compile_prelude() -> Result<Program> {
     compile_inner(super::prelude::SOURCE, "$$map", false, super::libraries::Libraries::new(), BTreeSet::new(), true)
+}
+
+fn block_is_virtual_placeholder(body: &ast::BlockStmt) -> (bool, bool) {
+    let empty = body.stmts.iter().all(|s| matches!(s, ast::Stmt::Empty(_)));
+    // A sole `throw new Error("literal")` is a conventional unavailable-implementation
+    // sentinel for empty stubs.
+    let executable: Vec<_> = body.stmts.iter().filter(|s| !matches!(s, ast::Stmt::Empty(_))).collect();
+    let error_placeholder = matches!(executable.as_slice(), [ast::Stmt::Throw(t)]
+        if matches!(&*t.arg, ast::Expr::New(n)
+            if matches!(&*n.callee, ast::Expr::Ident(i) if i.sym == *"Error")
+                && n.args.as_ref().is_some_and(|args| args.len() == 1
+                    && args[0].spread.is_none()
+                    && matches!(&*args[0].expr, ast::Expr::Lit(ast::Lit::Str(_))))));
+    (empty, error_placeholder)
+}
+
+fn emit_virtual_task_tail(
+    c: &mut Compiler,
+    span: Span,
+    name: &str,
+    description: String,
+    params: &[String],
+    uses: &[String],
+) {
+    let input = Expr::Object(
+        params
+            .iter()
+            .chain(uses)
+            .map(|p| (p.clone(), Expr::Variable(p.clone())))
+            .collect(),
+    );
+    let dest = c.temp();
+    c.emit(
+        span,
+        Op::Effect(
+            Some(dest.clone()),
+            Effect::Task {
+                name: name.to_owned(),
+                description,
+                input,
+            },
+        ),
+    );
+    c.emit(span, Op::Return(Expr::Variable(dest)));
 }

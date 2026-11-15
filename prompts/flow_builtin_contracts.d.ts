@@ -27,3 +27,22 @@ interface FlowRegexMatch extends Array<string | undefined> {
   index: number;
   input: string;
 }
+
+// Host runtime snapshot & programmable context control: const host = require("host").
+// Messages hold compact summaries and saved asset references, so slice/filter/spread stays lightweight.
+interface HostContextSnapshot {
+  messages: Array<{role: string; content: unknown; name?: string; [k: string]: unknown}>;
+  tools: string[];
+  libraries: string[];
+  prompt_cache_key: string;
+  workspace_root: string;
+}
+interface HostToolsSnapshot {
+  tools: string[];
+  libraries: Record<string, Record<string, string>>;
+  declarations: string;
+}
+declare module "host" {
+  export function context(): HostContextSnapshot;
+  export function tools(): HostToolsSnapshot;
+}

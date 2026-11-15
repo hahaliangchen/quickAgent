@@ -62,6 +62,9 @@ impl PromiseScheduler {
         }
         Ok(true)
     }
+    pub(super) fn clear_pending_jobs(&mut self) {
+        self.jobs.clear();
+    }
     pub(super) fn roots(&self) -> Vec<VmValue> {
         self.promises
             .values()

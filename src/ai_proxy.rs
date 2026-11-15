@@ -2288,6 +2288,8 @@ pub async fn run(
         .route("/agent/workflow-drafts", get(crate::workflow_drafts::list))
         .route("/agent/workflow-drafts/{id}", get(crate::workflow_drafts::read))
         .route("/agent/workflow-drafts/{id}/chat", post(crate::workflow_drafts::chat))
+        .route("/agent/workflow-drafts/{id}/publish", post(crate::workflow_drafts::publish))
+        .route("/agent/tasks/{task_id}/flow-library", post(crate::workflow_drafts::publish_task))
         .route(
             "/agent/tasks/{task_id}/skills",
             post(crate::flow_skills::save_route),
