@@ -854,9 +854,6 @@ pub(super) async fn fresh_main_window(
     window.active_skills = previous.active_skills.clone();
     window.active_skill_scopes = previous.active_skill_scopes.clone();
     window.token_calibration = previous.token_calibration.clone();
-    window.console = previous.console.clone();
-    window.console_cell = previous.console_cell;
-    window.console_log_start = 0;
     for id in
         crate::context_assets::active_instruction_ids(&previous.messages, &previous.active_skills)
     {

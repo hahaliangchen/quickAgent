@@ -60,16 +60,7 @@ pub(super) fn delivery_soft_limits(input_budget: usize) -> DeliverySoftLimits {
 /// Tries of one model request that fails before any of its answer arrives.
 const MODEL_ATTEMPTS: u32 = 4;
 const MAIN_PROMPT: &str = include_str!("../prompts/single_agent.md");
-/// Experiment (GROW_MAIN_VIRTUAL_LEAF=1, off by default): a main program's
-/// @virtual runs directly as a terminal AI loop instead of being written as a
-/// saved implementation first. The default resolves first-layer @virtual
-/// declarations to code; this switch is an explicit alternative experiment.
-pub(crate) fn main_virtual_leaves() -> bool {
-    std::env::var("GROW_MAIN_VIRTUAL_LEAF").as_deref() == Ok("1")
-}
-const MAIN_PROMPT_LEAF: &str = concat!(include_str!("../prompts/single_agent.md"),
-    "\n\nExperimental override for this run: a main program's @virtual runs directly as a terminal AI capability on the arguments you pass. Use it for one judgment or one piece of generation whose materials you already prepared, such as one page or one verdict. Keep larger deterministic orchestration in ordinary JavaScript and declare each delegated capability with @virtual.\n");
-fn main_prompt() -> &'static str { if main_virtual_leaves() { MAIN_PROMPT_LEAF } else { MAIN_PROMPT } }
+fn main_prompt() -> &'static str { MAIN_PROMPT }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub(crate) struct Window {
@@ -85,9 +76,8 @@ pub(crate) struct Window {
     active_skill_scopes: BTreeMap<String, crate::plugin_runtime::ScopeId>,
     #[serde(default)]
     program: Option<crate::agent_program::Runtime>,
-    /// The persistent top-level JavaScript Console for the main task. A
-    /// running cell lives in `program`; completed cells return here so the
-    /// next write_program call continues in the same VM and module scope.
+    /// Deprecated serialized field kept only so old task windows deserialize.
+    /// New programs are one-shot runners and never write or restore it.
     #[serde(default)]
     console: Option<crate::agent_program::Runtime>,
     #[serde(default)]
@@ -129,6 +119,17 @@ pub(crate) struct Window {
     last_program_save: Option<std::time::Instant>,
     #[serde(skip)]
     unsaved_program_steps: u32,
+    /// Same-window contract results that can be referred to without replaying
+    /// the full declaration text. This is deliberately ephemeral: a rebuilt
+    /// or compacted window must perform a fresh, permission-checked lookup.
+    #[serde(skip)]
+    contract_reuse: BTreeMap<String, ContractReuse>,
+}
+
+#[derive(Clone)]
+struct ContractReuse {
+    environment: String,
+    event_seq: i64,
 }
 impl Window {
     fn input_tokens(&self, s: &Session<'_>, body: &Value) -> usize {
@@ -906,7 +907,7 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
                 "content":json!({"shell":shell,"workspace":workspace,
                     "access":access,
                     "memory":{"ai_input_limit_tokens":s.input_budget,"program_shell_output_limit_bytes":crate::shell_process::PROGRAM_OUTPUT_LIMIT,
-                        "boundary":"Command output stays in code until logged with console.log or passed to a virtual helper."},
+                        "boundary":"Command output stays in the program until returned in a bounded result or passed to a virtual helper."},
                     "usage":format!("{}{own}", if cfg!(windows) { "Use PowerShell 7 with Windows paths. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or dump huge bulk text into chat. Prefer structured file APIs (list_dir, search_text, read_file_lines) or module code over find/grep/tail shell pipelines." } else { "Use Bash. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or dump huge bulk text into chat. Prefer structured file APIs (list_dir, search_text, read_file_lines) or module code over find/grep/tail shell pipelines." })}).to_string()}));
             }
             let environment = crate::agent_program::ENVIRONMENT;
@@ -3279,7 +3280,7 @@ async fn submit_program(
             let note = if w.module_probe {
                 "This probe runs once. Its observations return to you in module_probe_result."
             } else {
-                "This JavaScript Console cell runs when the reply ends; its VM state remains available to the next cell and its outcome comes back to you."
+                "This one-shot JavaScript orchestration program runs when the reply ends; its top-level return value comes back to you."
             };
             (json!({"status":"running","path":path,"note":note}), false)
         }
@@ -3368,6 +3369,51 @@ fn unchanged_reread(w: &Window, name: &str, arguments: &str, result: &Value) -> 
         "note":"These lines, at this same file version, are already in your context from an earlier read (the asset named in in_context); read them there. Nothing changed since. Pass force_read:true only if you need the text again."}))
 }
 
+fn contract_reuse_key(args: &Value) -> Option<String> {
+    args.as_object()?;
+    serde_json::to_string(args).ok()
+}
+
+fn contract_environment(s: &Session<'_>, w: &Window, definitions: &[Value]) -> String {
+    let skills = w.active_skills.iter().cloned().collect::<Vec<_>>();
+    let scopes = w
+        .active_skill_scopes
+        .iter()
+        .map(|(name, scope)| json!([name, scope]))
+        .collect::<Vec<_>>();
+    let fingerprint = json!({
+        "definitions": definitions,
+        "plugin": s.plugin,
+        "skills": skills,
+        "skill_scopes": scopes,
+        "permission_mode": s.state.permission_mode.as_str(),
+        "ban_execution": s.ban_execution,
+        "scope": s.scope,
+    });
+    crate::visual_artifacts::hash(fingerprint.to_string().as_bytes())
+}
+
+fn contract_reuse_hit(w: &Window, key: &str, environment: &str) -> Option<Value> {
+    let entry = w.contract_reuse.get(key)?;
+    if entry.environment != environment {
+        return None;
+    }
+    let material = w.messages.iter().find(|message| {
+        message["role"] == "tool"
+            && message["source"]["seq"] == entry.event_seq
+            && serde_json::from_str::<Value>(message["content"].as_str().unwrap_or(""))
+                .is_ok_and(|value| {
+                    value["overview"].is_string() || value["declarations"].is_string()
+                })
+    })?;
+    Some(json!({
+        "unchanged": true,
+        "in_context": entry.event_seq,
+        "note": "This exact tool contract was already returned in the current window with the same tool environment; reuse it from the earlier tool result instead of requesting it again.",
+        "event_seq": material["source"]["seq"],
+    }))
+}
+
 async fn execute_call(
     s: &Session<'_>,
     window: &mut Window,
@@ -3386,6 +3432,7 @@ async fn execute_call(
     let mut material_source: Option<(String, Value)> = None;
     let mut pre_registered_asset: Option<Value> = None;
     let mut refreshed_from: Option<Value> = None;
+    let mut contract_reuse: Option<(String, String)> = None;
     let output=async {
         let mut args:Value=serde_json::from_str(&call.arguments).context("invalid tool arguments JSON")?;
         crate::source_read::unmark(&mut args);
@@ -3481,6 +3528,14 @@ async fn execute_call(
             },
             "read_program_guide" => { Ok(json!({"guide":crate::agent_program::CAPABILITIES,"builtin_contracts":crate::agent_program::BUILTIN_CONTRACTS})) },
             "read_tool_contracts" => {
+                let environment = contract_environment(s, w, definitions);
+                let key = contract_reuse_key(&args).context("read_tool_contracts arguments must be an object")?;
+                // This branch is reached only after probe and tool validation.
+                // Reuse therefore cannot widen the current window's access.
+                if let Some(pointer) = contract_reuse_hit(w, &key, &environment) {
+                    return Ok(pointer);
+                }
+                contract_reuse = Some((key, environment));
                 let catalog = program_flow::library_catalog(s, definitions);
                 let (mut result, native_keys) =
                     crate::flow_libraries::read_contracts(s, &catalog, definitions, &args)?;
@@ -3654,6 +3709,11 @@ async fn execute_call(
         "actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,
         "message":{"id":agent_service::uuid_like(),"role":"tool","toolCallId":call.call_id,"isError":is_error,
             "content":[{"type":"text","text":result.to_string()}]},"meta":{"result":result}}),true).await?;
+    if !is_error && result["unchanged"] != true
+        && let Some((key, environment)) = contract_reuse.take()
+    {
+        window.contract_reuse.insert(key, ContractReuse { environment, event_seq: seq });
+    }
     let asset_reference = if !is_error {
         if let Some(reference) = pre_registered_asset {
             let root = s.state.workspace.root().to_path_buf();
@@ -4051,6 +4111,27 @@ mod tests {
         assert!(tool_result_failed(&json!({"host_denied":true}), false));
         assert!(tool_result_failed(&json!({"error_code":"ASSET_CONFLICT"}), false));
     }
+
+    #[test]
+    fn contract_reuse_is_limited_to_material_in_the_same_window_environment() {
+        let mut window = Window::default();
+        window.messages.push(json!({
+            "role":"tool",
+            "source":{"seq":17},
+            "content":json!({"declarations":"io.read()"}).to_string()
+        }));
+        window.contract_reuse.insert(
+            "args".into(),
+            ContractReuse { environment: "env-a".into(), event_seq: 17 },
+        );
+        assert!(contract_reuse_hit(&window, "args", "env-a").is_some());
+        assert!(contract_reuse_hit(&window, "args", "env-b").is_none());
+        assert_ne!(
+            contract_reuse_key(&json!({"methods":["io.read"]})),
+            contract_reuse_key(&json!({"methods":["io.read"],"force_read":true}))
+        );
+    }
+
     use super::*;
     use axum::{Json, Router, extract::State, routing::post};
     use std::sync::{Arc, Mutex};
@@ -4684,9 +4765,9 @@ mod tests {
                 .map(|m| serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap()["role"].as_str().unwrap_or("").to_owned());
             let content = match role.as_deref() {
                 Some("leaf") => json!({"ok": true}).to_string(),
-                Some(_) => "```js\nasync function check(x) {\n  return await judge(x);\n}\n/** @virtual */\nasync function judge(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".to_owned(),
+                Some(other) => panic!("single-layer @virtual must not invoke {other}"),
                 None if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => "检查完成".to_owned(),
-                None => "```js\nconst verdict = await check(\"x\");\n\n/** @module */\nasync function check(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".to_owned(),
+                None => "```js\nconst verdict = await check(\"x\");\n\n/** @virtual */\nasync function check(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".to_owned(),
             };
             async move { Json(program_flow::fixture_completion(&content)) }
         }));
@@ -4704,7 +4785,7 @@ mod tests {
         let (hooks, main): (Vec<&Value>, Vec<&Value>) = requests.iter().partition(|body| body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_task_input"));
         let plugin = |body: &Value| body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "plugin_instructions" || m["content"].as_str().is_some_and(|text| text.contains("plugin's dedicated conversation")));
         assert!(!main.is_empty() && main.iter().all(|body| plugin(body)), "the page's conversation references its plugin");
-        assert_eq!(hooks.len(), 2, "the module's author and the hook its code declares");
+        assert_eq!(hooks.len(), 1, "the virtual leaf runs directly without a module author");
         assert!(hooks.iter().all(|body| !plugin(body)), "a function the program calls brings only what it references");
         runtime.shutdown().unwrap();
     }
@@ -4772,32 +4853,38 @@ mod tests {
     }
 
     #[test]
-    fn plugin_conversations_receive_builtin_methods_under_host_permissions() {
+    fn tool_catalog_publishes_builtin_git_methods_and_program_headers() {
         let root = TestRoot::new();
         let (runtime, catalog) = crate::skill_packages::test_runtime();
+        catalog.register(crate::builtin_plugins::FILE_TOOLS, Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) }))).unwrap();
         let parent = runtime.snapshot().into_iter().find(|p| p.id == "skill-packages").unwrap().scope;
         runtime.mount(parent, crate::skill_packages::PackagePlugin(crate::builtin_plugins::git::package().unwrap())).unwrap();
         let mut state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
         state.tool_catalog = Some(catalog);
         state.permission_mode = crate::agent_service::PermissionMode::ReadOnly;
         let cancel = CancellationToken::new();
-        let session = Session { agent_id:None, task_node_id:None, plugin:Some("code-flow".into()), state:&state, task:"task", model:"fake", turn:1, cancel:&cancel, ban_execution:false, scope:"main".into(), parent:None, input_budget:INPUT_BUDGET };
+        let session = Session { agent_id:None, task_node_id:None, plugin:None, state:&state, task:"task", model:"fake", turn:1, cancel:&cancel, ban_execution:false, scope:"main".into(), parent:None, input_budget:INPUT_BUDGET };
         let window = Window::default();
         let definitions = available_tools(&session, &window);
         let names: BTreeSet<_> = definitions.iter().filter_map(|t| t["function"]["name"].as_str()).collect();
-        assert!(names.contains("read_remote_git") && names.contains("read_git"), "built-in reads should be available");
+        for name in ["git_status", "git_diff", "git_log", "read_file_chunk"] {
+            assert!(names.contains(name), "ToolCatalog must expose {name}");
+        }
         assert!(!names.contains("sync_git"), "execution methods respect read-only mode");
-        assert!(page_allows(&session, "read_remote_git"));
-        assert!(page_allows(&session, "sync_git"), "scope permits built-in methods; permissions filter them separately");
-        assert!(validate_tool(&session, &window, &definitions, "read_remote_git").is_ok());
+        assert!(page_allows(&session, "git_status"));
         let libraries = program_flow::library_catalog(&session, &definitions);
-        assert_eq!(libraries["git"].get("read_remote_git").map(String::as_str), Some("read_remote_git"));
-        assert!(libraries["git"].contains_key("read_git") && !libraries["git"].contains_key("sync_git"));
+        assert_eq!(libraries["git"].get("status").map(String::as_str), Some("git_status"));
+        assert_eq!(libraries["git"].get("diff").map(String::as_str), Some("git_diff"));
+        assert_eq!(libraries["git"].get("log").map(String::as_str), Some("git_log"));
+        assert_eq!(libraries["io"].get("read_chunk").map(String::as_str), Some("read_file_chunk"));
         let body = request(&session, &[json!({"role":"system","content":""})], &definitions);
         let messages = body["messages"].as_array().unwrap();
         let headers = messages.iter().find(|m| m["name"] == "program_tool_headers").unwrap()["content"].as_str().unwrap();
-        assert!(headers.contains("declare module \"git\""));
-        assert!(messages.iter().any(|m| m["content"].as_str().is_some_and(|v| v.contains("shared capabilities made available"))));
+        assert!(headers.contains("- git —"), "program_tool_headers missing git library: {headers}");
+        for method in ["status", "diff", "log"] {
+            assert!(headers.contains(&format!("{method}(")), "program_tool_headers missing git.{method}: {headers}");
+        }
+        assert!(headers.contains("read_chunk("), "program_tool_headers missing io.read_chunk: {headers}");
         runtime.shutdown().unwrap();
     }
 

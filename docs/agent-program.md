@@ -1,18 +1,18 @@
-# Agent JavaScript 编排与持久化执行器
+# Agent JavaScript 编排执行器
 
 > 本手册描述当前 Rust JS 子集，不代表最终目标必须使用自建 VM。设计理念与待验证的 Node 方向见 [设计与实现入口](agent-design-guide.md)。
 
 当前语言版本 **14**。使用常见 JS 基础语法表达流程，由 SWC 解析、Rust 执行持久化指令。内部值使用虚拟机堆以保留对象引用，变量按 JS 的块级作用域和词法作用域存放；宿主工具和 AI 仍通过 JSON 交接。**普通表达式由宿主确定性求值，智能判断必须写成显式任务函数。** 相同程序、相同输入和相同工具／任务返回值产生相同控制流；AI 任务及外部操作本身不因此变成确定性的。
 
-编排使用 JavaScript Console cell，由宿主的可恢复 Rust VM 执行，使用已支持的 JS 内置能力和宿主发布的库。普通 JavaScript 表达过程、数据流和确定性检查；尚未实现的能力用 `@virtual` 空函数声明，宿主负责提供实现。每个 cell 继续使用同一任务的顶层环境，已有绑定、函数、闭包和状态可供后续 cell 使用；块和函数作用域仍按 JavaScript 规则结束。入口提示词聚焦这些职责，API 来自当前工具契约；运行时兼容性、预算和恢复细节按需查询。被处理项目的技术栈由实际输入确定。
+编排使用 JavaScript 一次性 Runner，由宿主的 Rust VM 执行，使用已支持的 JS 内置能力和宿主发布的库。普通 JavaScript 表达控制流、数据流和确定性检查；尚未实现的能力用 `@virtual` 空函数声明，宿主负责提供实现。每次 `write_program` 都从新的顶层环境开始，阶段之间只通过顶层 `return` 的结构化结果和工作区文件交接；没有跨提交的 Console 堆、绑定或中间变量预览。入口提示词聚焦这些职责，API 来自当前工具契约；运行时兼容性、预算和恢复细节按需查询。被处理项目的技术栈由实际输入确定。
 
 ## 运行方式与工具导入
 
-主任务的 AI 用 `write_program({source})` 提交下一个完整 JS cell，作为该条回复唯一的工具调用；宿主保存源码，编译通过后在同一持久 VM 中运行，结果回到主任务。回复正文中的代码只是展示，不会执行。cell 从顶层第一条语句开始顺序执行，没有入口函数，也不需要返回值；需要的数据写在代码里，或用导入的工具读取。VM 即使一次编译了多行源码，也按语句推进：普通语句立即完成，宿主能力在调用点挂起并在回执到达后恢复，返回值直接交给下一条语句；已完成的打印、宿主调用和错误边界会实时写入执行记录。编译失败不会改变已有 VM；运行时暂停、错误和已完成的副作用按当前状态保留。
+主任务的 AI 用 `write_program({source})` 提交一整段 JS 编排程序，作为该条回复唯一的工具调用；宿主保存源码，编译通过后在新的 Runner 中执行，顶层 `return` 的结果回到主任务。回复正文中的代码只是展示，不会执行。程序从第一条顶层语句开始顺序执行，没有隐含入口函数；需要的数据写在代码里，或用导入的工具读取。普通语句立即完成，宿主能力在调用点挂起并在回执到达后恢复，返回值交给下一条语句；运行记录只保留实际调用和结果。编译或运行失败不会留下可依赖的跨提交状态，下一轮应提交从头开始的完整修正版。
 
 宿主 SDK 使用 import 或 require 加载：`import io from "io"`、`import * as io from "io"`、`import {read as load} from "io"`，或在函数里 `const io = require("io")`。这些默认库方法提供同步外观：代码直接取得返回值，VM 在宿主操作进行期间保存当前帧并在回执到达后从这条语句继续，不需要为了“等待宿主”额外写 `await`。`host:` 是兼容别名，import 和 require 都接受，例如 `require("host:process")` 与 `require("process")` 加载同一个库对象。`<library>/promises` 提供显式异步方法；只有需要独立工作并发、Promise 组合或接口明确返回 Promise 时才使用它们和 `await`。没有 import 的程序里，宿主自带的库按名字就能用；程序自己声明了同名变量时，这个名字归程序自己。这里的 `io`、`process` 是宿主 SDK，方法以已发布的工具契约为准；VM 支持 `Buffer.byteLength(text)`、`Buffer.from(text, "utf8")`、`new URL(input, base)` 和 `path.isAbsolute(path)`，以及 `process.env.NAME` / `process.env["NAME"]` 读取单个非凭据环境变量。`globalThis` 可用于访问这些受支持的全局对象；不提供完整 Node process 对象。源码自己绑定 `process` 时，该名称以源码绑定为准。
 
-插件和项目技能的库在用到的函数里用 `const ppt = require("ppt")` 加载；执行到这一行才链接，返回方法对象。同一次运行再次 require 同一库拿到同一个对象；找不到时抛出可捕获的 `MODULE_NOT_FOUND`。参数可以是字符串值。静态 import 仅绑定当前已发布的宿主 SDK；宿主注册的第三方插件和技能库通过 require 在运行时加载。两种写法都不加载 Node 内置模块、npm 包或工作区 node_modules。确需 Node/npm 时，由宿主提供的受限库运行独立工作区脚本，检查退出码和实际输出后把数据返回流程。工具以一个 JSON 对象传参，仍经过原权限检查。export、本地文件模块和动态 import 尚不支持。单个 cell 返回表示本次提交结束，不代表业务验收自动通过。
+插件和项目技能的库在用到的函数里用 `const ppt = require("ppt")` 加载；执行到这一行才链接，返回方法对象。同一次运行再次 require 同一库拿到同一个对象；找不到时抛出可捕获的 `MODULE_NOT_FOUND`。参数可以是字符串值。静态 import 仅绑定当前已发布的宿主 SDK；宿主注册的第三方插件和技能库通过 require 在运行时加载。两种写法都不加载 Node 内置模块、npm 包或工作区 node_modules。确需 Node/npm 时，由宿主提供的受限库运行独立工作区脚本，检查退出码和实际输出后把数据返回流程。工具以一个 JSON 对象传参，仍经过原权限检查。export、本地文件模块和动态 import 尚不支持。单次程序返回表示本次提交结束，不代表业务验收自动通过。
 
 `program_tool_headers` 是按用途组织的库目录。读代码时，用 `io.search` 在相关目录找定义或文本，再用 `io.read_lines` 查原文。`io.search` 像 grep：写成正则的查询按正则匹配，`output_mode` 可只列文件（`files`）或计数（`count`），`glob` 过滤文件，`context_lines` 带上下文行。用 `read_tool_contracts({libraries:["io"],overview:true})` 看该库的当前方法和用途，再用 `read_tool_contracts({methods:["io.read_lines"]})` 读单个方法的参数和返回字段。宿主也在目录下列出常用源码方法的短签名，字段来自工具契约。程序代码里的 `io.read` 和 `io.read_lines` 把内容交给 JS heap 而不是 AI 上下文：不传 `max_chars` 时一次返回整个文件或整个请求范围（`complete:true`），上限 200 万字符，超过才用 `next_start_line` 续读；`read_tool_contracts` 给程序作者看的契约按这个口径写。AI 直接调用同一工具时仍是默认 24000、最多 60000 字符一页。主 AI 可直接使用文件搜索和读取工具，模块作者的探路使用 `io` 的只读方法。
 
@@ -72,21 +72,15 @@ Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`�
 
 普通函数按词法作用域执行。第一层 `@virtual` 通过参数获得输入；第二层虚函数看到参数和契约里用 `@uses` 点名的词法变量，值在调用时读取。async 虚函数发起后，父流程变量的变化不会同步过去。
 
-## 模块：AI 写成的代码
+## 虚函数与可选模块（单层 AI 边界）
 
-主编排里的第一层 `@virtual` 声明一项能力。第一次调用时，宿主把它的签名、契约注释和这次调用的实参交给一个 AI，由它回复这个函数的完整代码；编译通过后存成这个聊天的模块文件再运行。之后对同一契约（函数名、签名和注释原文完全一样）的调用直接运行这份代码，不再请求 AI，实现满足当前契约和实际输入即可，不提前设计通用框架；分析结论也不应硬编码。同一契约的几个调用同时第一次运行时，只写一次。示例见 [module-notes.js](../skills/task-program/examples/module-notes.js)。
+主编排里的 `/** @virtual */` 声明单层终端 AI 能力：调用时直接进入终端 AI 工具循环（`ai_layer = 1`），不能再提交 `write_program` 或派生第二层 `@virtual`（去掉双层虚函数嵌套）。仅在需要显式缓存纯参数确定性 JS 实现时才使用 `/** @module */`：模块代码由实现 AI 编写并保存复用，但模块内部只写确定性 JS 与宿主库调用，同样不再派生嵌套 `@virtual` 虚函数。
 
-宿主按签名和契约链接实现，不要求编排代码指定实现文件或 import。`chat_modules` 展示可复用的契约；声明同一契约即可复用。需要改进实现时才读取其文件和版本。保持契约不变的实现改进可在提交主程序时加 `revise_modules: {模块名: {version, reason}}`。模块作者在实际调用时读取旧实现和修改目标，提交编译通过的新版本。签名、返回形状或承诺行为变化时使用独立契约。
+宿主管理器在同步和并发调度前沿持久化调用链检查 AI 层级：主编排为入口，单层 `@virtual`（`ai_layer = 1`）是唯一且终端的 AI 叶子循环；普通 JS helper 不增加层数，缓存加载、修复和恢复也不重置层级。调用描述和模型输入包含 `ai_layer`。终端叶节点和 `@module` 实现都禁止再派生第二层 AI；越层报 `VIRTUAL_LAYER_LIMIT`，旧模块标记不能用于嵌套（`SECOND_LAYER_VIRTUAL_REQUIRED`）。`@module` 不捕获调用方变量，输入须作参数，错误使用 `@uses` 报 `FIRST_LAYER_ARGUMENTS_REQUIRED`；单层 `@virtual` 可自然引用词法捕获、局部作用域或显式 `host.context()`。
 
-实现可以包含 import、函数声明、顶层常量和 require；每次调用使用新的模块作用域，await 写在函数内部。实现入口已有真实函数体时，可以保留入口的 `/** @virtual */` 注释；宿主在实现和修复上下文中把它视为普通代码。其他 AI 声明仍须使用空函数体，避免把声明误当实现。
+模块作者可用 `write_program({probe:true,source})` 运行小型只读探测。探测与正式实现使用同一套 SDK 名称和加载语法，权限在实际调用时检查：仅允许 `io.read`、`io.read_lines`、`io.search`、`io.list`、`io.workspace_info`。即使 process 库成功加载，shell 和写入仍返回 `MODULE_PROBE_READ_ONLY`。
 
-模块作者可用 `write_program({probe:true,source})` 运行小型只读探测。探测与正式实现使用同一套 SDK 名称和加载语法，权限在实际调用时检查：仅允许 `io.read`、`io.read_lines`、`io.search`、`io.list`、`io.workspace_info`。即使 process 库成功加载，shell 和写入仍返回 `MODULE_PROBE_READ_ONLY`，诊断明确指出 probe:true 的限制并要求去掉 probe 后提交正式实现；更换 import/require 不改变权限。探测结果只回到当前作者，不保存为复用模块，也不能调用 AI 函数。正式实现按当前任务权限执行。
-
-分析代码应采集和整理证据，需要判断时把相关源码交给聚焦的 `@virtual`；不要把本次仓库的报告和结论硬编码成所谓通用分析算法。每层不重复采集同一材料，按工具已发布的结果结构编写。引用校验要确认原文及完整控制路径支持对应结论，仅检查文件或行号存在并不构成验证。
-
-需要 AI 的部分声明成第二层虚函数；更大的实现继续拆普通代码步骤和聚焦的判断，不再创建另一层代码实现。模块不捕获调用方的变量，在模块上写 `@uses` 会编译报错；写模块的 AI 也看不到调用方读过的技能，要用哪个技能，自己用 `read_skill` 读。模块出错时交给修复者，见“失败与恢复”。
-
-宿主管理器在同步和并发调度前沿持久化调用链检查 AI 层级。主编排是入口，第一层 `@virtual` 获得代码实现，第二层 `@virtual` 是终端 AI 工具循环。普通 JS helper 不增加层数，缓存加载、修复和恢复也不重置层级。调用描述和模型输入包含 `ai_layer`。第二层没有提交程序或继续派生 AI 的权限；越层报 `VIRTUAL_LAYER_LIMIT`，旧模块标记不能用于第二层（`SECOND_LAYER_VIRTUAL_REQUIRED`）。第一层不捕获调用方变量，输入须作参数，错误使用 @uses 报 `FIRST_LAYER_ARGUMENTS_REQUIRED`。
+主流程本身推荐“先探索、后按中间件 `mainContext` 编排”的顺序：面对未知情况先跑轻量 ReAct 工具摸清目标，信息齐备后再提交一次性 `write_program`，用共享 `mainContext` 对象串联各阶段并直接 `return mainContext` 回传主 AI 总结（避免把几百 KB 原始材料硬塞给 `@virtual`）。
 
 ## 失败与恢复
 
@@ -430,7 +424,7 @@ class DetailedResult extends Result {
   summary() { return { ...super.summary(), detail: true }; }
 }
 const result = new DetailedResult(7);
-console.log(result.summary());
+return result.summary();
 ```
 
 派生构造器在 super() 成功返回之前访问 this 会抛 ReferenceError；重复初始化也抛 ReferenceError。派生构造器可直接返回对象；返回非 undefined 的原始值抛 TypeError，正常结束或 return undefined 则要求 this 已初始化。super() 使用实际父构造器；super 属性从方法定义时的 home object 的原型查找，用实际 this 调用 getter/setter/方法，提取方法或在箭头函数中使用也成立。支持计算访问、赋值、复合赋值和更新。计算名称与类型转换的顺序保留，不能用动态 this 的原型代替 home object。
@@ -461,7 +455,7 @@ next 返回 {value,done}；return 和 throw 可进入 finally，finally 内再�
 function* chunks(items, size) {
   for (let i = 0; i < items.length; i += size) yield items.slice(i, i + size);
 }
-for (const batch of chunks([1, 2, 3], 2)) console.log(batch);
+return Array.from(chunks([1, 2, 3], 2));
 ```
 
 生成器的开始前状态、yield 暂停点、委托状态、finally 中待完成的返回/异常，以及执行到宿主调用时的全部调用帧，都参与 GC 和 Runtime 存盘恢复；恢复后继续执行，不重新创建生成器或重放已完成的副作用。JSON.stringify 只序列化可枚举数据，不保存生成器执行状态；structuredClone 不支持生成器，跨宿主边界请先物化需要的数据。异步生成器和 for-await 已在阶段 7 接通；动态 GeneratorFunction/AsyncGeneratorFunction 构造仍未开放。

@@ -12,6 +12,6 @@ function author_pages(args) {
   }
   return {owner:args.owner, files:files, issues:issues};
 }
-/** @virtual */
+// deterministic helper
 function compose_pages(args) {
-  // 为传入的专属页面制作高质量中文独立专题网页。严格遵守 args.common 与每个 page 的 focus、requiredFacts、excludeOverlap；依据 source 核实事实，不混淆历史/当前设计及测试适用范围。返回 {pages:[{path,title,content}]}，每份 content 是完整可离线打开的 HTML5，内嵌响应式 CSS、中文语义结构、页内导航、分层章节、醒目重点框与页脚来源说明；无外部资源。三个文件内容互补但独立，避免重复成通用泛文。
+  return {pages: []}; // 为传入的专属页面制作高质量中文独立专题网页。严格遵守 args.common 与每个 page 的 focus、requiredFacts、excludeOverlap；依据 source 核实事实，不混淆历史/当前设计及测试适用范围。返回 {pages:[{path,title,content}]}，每份 content 是完整可离线打开的 HTML5，内嵌响应式 CSS、中文语义结构、页内导航、分层章节、醒目重点框与页脚来源说明；无外部资源。三个文件内容互补但独立，避免重复成通用泛文。

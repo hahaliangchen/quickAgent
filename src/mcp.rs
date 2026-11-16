@@ -1184,7 +1184,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "read_file",
-            "description": "Read a UTF-8 file by path with a byte limit (default 1 MiB, max 16 MiB). For line ranges or tail, use read_file_lines; for large files or chunk-by-chunk streaming, use read_file_chunk.",
+            "description": "Read a UTF-8 file by path. max_bytes is a file-size admission limit (default 1 MiB, hard maximum 16 MiB): if the file is larger than that limit, the call is rejected; it never truncates a prefix. To limit returned text, use max_chars and normally omit max_bytes instead of deriving a smaller byte limit. max_chars does not bypass the admission limit; for files beyond it, use read_file_lines or read_file_chunk.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
@@ -1194,7 +1194,7 @@ pub fn tool_definitions() -> Value {
                         "description": "Optional absolute project directory to use for this call. Defaults to the server startup directory."
                     },
                     "path": { "type": "string" },
-                    "max_bytes": { "type": "integer", "default": 1048576 }
+                    "max_bytes": { "type": "integer", "default": 1048576, "description": "Maximum file size admitted for this call. A file larger than this value is rejected; it is not truncated. Omit to use the 1 MiB default." }
                 }
             }
         },
@@ -1511,8 +1511,8 @@ pub fn tool_definitions() -> Value {
         .unwrap()
         .extend(crate::browser_control::definitions());
     for tool in definitions.as_array_mut().into_iter().flatten() {
-        let name = tool["name"].as_str().unwrap_or("");
-        if crate::source_read::is_source_read(name) {
+        let name = tool["name"].as_str().unwrap_or("").to_owned();
+        if crate::source_read::is_source_read(&name) {
             tool["description"] = json!(format!(
                 "{} Source pages preserve original bytes and line delimiters; complete/next_start_line identify pagination. {} Reads are bounded to 16 MiB; force_read bypasses snapshot caching.",
                 tool["description"].as_str().unwrap_or(""),
@@ -1521,7 +1521,12 @@ pub fn tool_definitions() -> Value {
             let props = tool["inputSchema"]["properties"].as_object_mut().unwrap();
             props.insert(
                 "max_chars".into(),
-                json!({"type":"integer","minimum":1000,"maximum":crate::source_read::PAGE_CHARS,"default":24000}),
+                json!({"type":"integer","minimum":1000,"maximum":crate::source_read::PAGE_CHARS,"default":24000,
+                    "description": if name == "read_file" {
+                        "Maximum characters to return. This limits the returned text, not file admission; leave max_bytes omitted rather than setting it to max_chars multiplied by an estimate."
+                    } else {
+                        "Maximum characters to return in this page."
+                    }}),
             );
             props.entry("start_line").or_insert(json!({"type":"integer","minimum":1,"description":"Optional page start within this file/definition. Use next_start_line to continue."}));
             props
@@ -1537,6 +1542,25 @@ pub fn tool_definitions() -> Value {
 #[cfg(test)]
 mod native_tool_tests {
     use super::*;
+
+    #[test]
+    fn read_file_contract_distinguishes_admission_and_return_limits() {
+        let definitions = tool_definitions();
+        let definition = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "read_file")
+            .unwrap();
+        let description = definition["description"].as_str().unwrap();
+        assert!(description.contains("file-size admission limit"), "{description}");
+        assert!(description.contains("rejected; it never truncates"), "{description}");
+        assert!(description.contains("use max_chars and normally omit max_bytes"), "{description}");
+        assert!(definition["inputSchema"]["properties"]["max_bytes"]["description"]
+            .as_str().unwrap().contains("rejected; it is not truncated"));
+        assert!(definition["inputSchema"]["properties"]["max_chars"]["description"]
+            .as_str().unwrap().contains("limits the returned text"));
+    }
 
     struct TestMcpSession {
         id: String,

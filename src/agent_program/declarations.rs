@@ -340,7 +340,7 @@ pub fn core_methods(libraries: &Libraries, definitions: &[Value]) -> String {
                 "read_file" => (
                     &["path", "max_bytes", "max_chars"],
                     &["content", "complete", "bytes", "total_lines"],
-                    "Read a small/bounded UTF-8 file (max_bytes defaults to 1 MiB, max 16 MiB); for large logs, tail, or chunked streaming, prefer read_lines or read_chunk.",
+                    "Read a UTF-8 file. max_bytes is a file-size admission limit (default 1 MiB, hard maximum 16 MiB): files larger than it are rejected, never prefix-truncated. To limit returned text, use max_chars and normally omit max_bytes; max_chars does not bypass the admission limit. For larger files, use read_lines or read_chunk.",
                 ),
                 "read_file_lines" => (
                     &["path", "start_line", "end_line", "max_chars"],
@@ -716,7 +716,7 @@ mod tests {
     /// paging loops, though program code may read a whole file.
     #[test]
     fn program_declarations_state_the_whole_file_read() {
-        let description = format!("Read a file. {} Reads are bounded.", crate::source_read::page_note(false));
+        let description = format!("Read a file. max_bytes is a file-size admission limit: oversized files are rejected, never prefix-truncated. To limit returned text, use max_chars and normally omit max_bytes. {} Reads are bounded.", crate::source_read::page_note(false));
         let defs = [json!({"function":{"name":"read_file","description":description,"parameters":{"type":"object","required":["path"],
             "properties":{"path":{"type":"string"},"max_chars":{"type":"integer","minimum":1000,"maximum":60000,"default":24000}}}}})];
         let libs = libraries::catalog(&defs, &json!([]));
@@ -724,6 +724,7 @@ mod tests {
         let signature = headers(&chosen, &defs);
         assert!(signature.contains("whole file") && signature.contains("2000000"), "{signature}");
         assert!(!signature.contains("60000") && !signature.contains("24000"), "{signature}");
+        assert!(signature.contains("file-size admission limit") && signature.contains("omit max_bytes"), "{signature}");
         assert!(signature.contains("Reads are bounded."), "the rest of the contract stays: {signature}");
     }
     #[test]

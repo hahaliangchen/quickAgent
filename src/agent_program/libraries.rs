@@ -265,7 +265,7 @@ pub fn third_party(libraries: &Libraries, packages: &Value) -> BTreeSet<String> 
                 .map(str::to_owned)
                 .or_else(|| package["id"].as_str().map(namespace))
         })
-        .filter(|name| libraries.contains_key(name))
+        .filter(|name| libraries.contains_key(name) && !builtin().contains_key(name))
         .collect()
 }
 /// Host-owned namespaces cannot be claimed by plugins: the host's own

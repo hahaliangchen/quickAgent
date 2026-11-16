@@ -543,27 +543,6 @@ impl Heap {
         }
         Ok(false)
     }
-    pub(super) fn ensure_inherited_writable(&self, id: HeapId, key: &str) -> Result<()> {
-        if self.own_property(id, key)?.is_some() {
-            return Ok(());
-        }
-        let mut at = self.prototype_of(id);
-        while let Some(owner) = at {
-            if self.own_property(owner, key)?.is_some() {
-                ensure!(
-                    !self.frozen.contains(&owner)
-                        && !self
-                            .builtin_getters
-                            .get(&owner)
-                            .is_some_and(|p| p.contains_key(key)),
-                    "TypeError: Cannot set read-only inherited property {key}"
-                );
-                break;
-            }
-            at = self.prototype_of(owner);
-        }
-        Ok(())
-    }
     pub(crate) fn enumerable(&self, id: HeapId, key: &str) -> bool {
         if key=="length" && self.boxed.get(&id).is_some_and(|v|matches!(v,VmValue::String(_)|VmValue::Utf16(_))){return false;}
         if let Some(d)=self.descriptors.get(&id).and_then(|m|m.get(key)){return d.enumerable;}

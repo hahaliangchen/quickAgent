@@ -198,6 +198,31 @@ fn link(s: &Session<'_>, definitions: &[Value], spec: &str) -> (Value, bool) {
     }
     let catalog = library_catalog(s, definitions);
     let native_methods = catalog.get(name);
+    if name == "git" {
+        let missing = ["status", "diff", "log"]
+            .into_iter()
+            .filter(|method| native_methods.is_none_or(|methods| !methods.contains_key(*method)))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let available = native_methods
+                .into_iter()
+                .flat_map(|methods| methods.keys().map(String::as_str))
+                .collect::<Vec<_>>();
+            return (
+                json!({
+                    "code": "GIT_CONTRACT_MISMATCH",
+                    "message": format!(
+                        "The local git library is missing structured methods: {}. Available methods: {}. Restart the agent host after updating the tool registry, then retry with git.status/git.diff/git.log.",
+                        missing.join(", "),
+                        if available.is_empty() { "none".into() } else { available.join(", ") }
+                    ),
+                    "missing": missing,
+                    "available": available,
+                }),
+                true,
+            );
+        }
+    }
     let js_methods = crate::flow_libraries::public_method_names(s, name);
     if native_methods.is_some() || js_methods.is_some() {
         let mut linked = json!({"library": spec, "methods": native_methods.cloned().unwrap_or_default()});
@@ -301,10 +326,8 @@ pub(super) fn function_task(
     Ok(task)
 }
 fn task_ai_layer(task: &Value) -> usize {
-    if task["role"] == "leaf" {
-        2
-    } else if task["module"] == true
-        || task["library_module"] == true
+    if task["role"] == "leaf"
+        || task["module"] == true
         || task["role"] == "implement"
     {
         1
@@ -360,21 +383,16 @@ pub(super) fn scheduled_function_task_with_scope(
     let mut task = function_task(program, name, arguments, captured)?;
     let function = &program.functions[name];
     let js_context = extract_js_context(arguments, action_scope);
-    let context_or_partial = function.partial_virtual
-        || !captured.is_empty()
-        || js_context.is_some()
-        || !action_libraries.is_empty();
-    let leaf_promoted_virtual = !function.explicit_module && context_or_partial;
     let parent_layer = current_ai_layer(s, w)?;
     let layer = parent_layer + usize::from(function.virtual_task);
-    ensure!(layer <= 2,
-        "VIRTUAL_LAYER_LIMIT: {name} would enter AI layer {layer}; layer 2 is a terminal judgment/tool loop and cannot create more AI work. Ordinary JS helpers do not add a layer.");
+    ensure!(layer <= 1,
+        "VIRTUAL_LAYER_LIMIT: {name} would enter AI layer {layer}; only a single virtual AI layer is supported (layer 1 runs directly as a terminal AI tool loop and cannot create more AI work). Ordinary JS helpers do not add a layer.");
     if function.virtual_task {
-        if layer == 1 && (!function.module_task || leaf_promoted_virtual) && (super::main_virtual_leaves() || context_or_partial) {
+        if !function.module_task {
             task["role"] = json!("leaf");
             task["module"] = json!(false);
-        } else if layer == 1 {
-            ensure!(captured.is_empty(), "FIRST_LAYER_ARGUMENTS_REQUIRED: pass inputs to {name} as parameters; first-layer implementations do not capture caller variables");
+        } else {
+            ensure!(captured.is_empty(), "FIRST_LAYER_ARGUMENTS_REQUIRED: pass inputs to {name} as parameters; @module implementations do not capture caller variables");
             task["role"] = json!("implement");
             task["module"] = json!(true);
             task["leaf_tools"] = Value::Null;
@@ -382,11 +400,6 @@ pub(super) fn scheduled_function_task_with_scope(
                 o.remove("leaf_libraries");
                 o.remove("skills");
             });
-        } else {
-            ensure!(!function.module_task,
-                "SECOND_LAYER_VIRTUAL_REQUIRED: @module belongs to layer 1; use @virtual for {name} inside an implementation");
-            task["role"] = json!("leaf");
-            task["module"] = json!(false);
         }
     }
     if !action_scope.is_empty() {
@@ -433,7 +446,7 @@ pub(super) fn scheduled_function_task_with_scope(
                 custom_tools = true;
             }
         }
-        // A leaf child waiting on an active parent Console cell can never call write_program
+        // A leaf child waiting on an active parent program can never call write_program
         // (doing so always fails with PROGRAM_NOT_RUN and tricks it into taking over main).
         resolved_tools.retain(|tool| tool != WRITE_PROGRAM);
         if !resolved_tools.is_empty() || custom_tools || js_ctx.get("tools").is_some_and(Value::is_array) {
@@ -476,7 +489,7 @@ fn library_module_task(
         "library_module": true,
         "library_contract": spec.contract_key,
         "async": spec.is_async,
-        "ai_layer": 1,
+        "ai_layer": 0,
         "body": {"compiled": compiled},
     });
     task["context"] = execution_context(s, w, &task)?;
@@ -542,8 +555,8 @@ pub(super) fn action_task_descriptor(
         }
         ActionKind::LibraryCall { library, method, args } => {
             ensure!(
-                current_ai_layer(s, w)? < 2,
-                "VIRTUAL_LAYER_LIMIT: {library}.{method} cannot run inside a layer-2 leaf"
+                current_ai_layer(s, w)? < 1,
+                "VIRTUAL_LAYER_LIMIT: {library}.{method} cannot run inside a virtual AI leaf"
             );
             let static_libs = crate::flow_libraries::compile_static_libraries(s, w, library, method);
             let (spec, compiled) = crate::flow_libraries::compile_entry(s, library, method, args, static_libs)?;
@@ -688,23 +701,23 @@ pub(super) fn find_tool() -> Value {
         json!({"query":{"type":"string","minLength":1}}), json!(["query"]))
 }
 /// The main AI's finding, while it gets to know the task.
-/// How the main AI and a module's author hand over code: the host writes it
-/// to the chat's file, compiles it and runs the next Console cell when the
-/// reply ends.
+/// How the main AI and a module's author hand over code: the host writes the
+/// complete source to the chat's file, compiles it and runs the one-shot
+/// program when the reply ends.
 pub(super) fn write_program_tool(module: bool) -> Value {
     let mut properties = json!({"source":{"type":"string","minLength":1,"description":"The complete source for this submission."}});
     let description = if module {
-        properties["probe"] = json!({"type":"boolean","description":"If true, run a small probe with the current arguments. Only read_file, read_file_lines, search_text, list_dir and workspace_info may execute: shell and writes are forbidden even if their libraries import successfully. Omit probe to save and run the reusable module with its normal permissions."});
-        "Submit the code implementation of the requested virtual function, or run a read-only probe with probe:true. The final implementation must define the called entry and must not call it at top level. A probe may instead be a plain script: the host wraps its top-level statements in the called async entry, so top-level await and return are valid; its parameters are bound to this call's arguments. A probe returns its actual result to this same author; the final implementation is saved and returns to the caller. Call it as the only call in its reply. Code in reply text is never run."
+        properties["probe"] = json!({"type":"boolean","description":"If true, run a small probe with the current arguments. Only read_file, read_file_lines, search_text, list_dir and workspace_info may execute: shell and writes are forbidden even if their libraries import successfully. Omit probe to save and run the reusable deterministic module with its normal permissions."});
+        "Submit the deterministic code implementation of the requested @module function, or run a read-only probe with probe:true. The final implementation must define the called entry using ordinary JS/host libraries (nested @virtual or @module helpers are not allowed) and must not call the entry at top level. Call it as the only call in its reply. Code in reply text is never run."
     } else {
         properties["name"] = json!({"type":"string","maxLength":80,"description":"The program's file name, as you would name a code file in a project: a few English words in kebab-case saying what it does, e.g. save-permission-per-chat. The host adds .js, and -2 when the name is taken."});
         properties["resource"] = json!({"type":"string","description":"For a plugin-owned fixed program, the skill: path of its version-1 program bundle manifest. Omit source: the host fetches, verifies and executes the plugin's exact main/module sources, without AI transcription. Available only in this plugin's own session."});
-        properties["revise_modules"] = json!({"type":"object","description":"Optional improvements to saved first-layer implementations, keyed by the top-level @virtual name. Use this only while the saved declaration still matches the caller; if inputs, outputs or the contract change, declare a new function and implementation instead.",
+        properties["revise_modules"] = json!({"type":"object","description":"Optional improvements to saved @module implementations, keyed by the top-level @module name. Use this only while the saved declaration still matches the caller; if inputs, outputs or the contract change, declare a new function instead.",
             "additionalProperties":{"type":"object","properties":{
                 "version":{"type":"integer","minimum":1,"description":"Current saved version from the module directory."},
                 "reason":{"type":"string","minLength":1,"maxLength":2000,"description":"Concrete improvement and existing behavior to preserve."}
             },"required":["version","reason"],"additionalProperties":false}});
-        "Append the next JavaScript Console cell to the current task and run it in the same persistent VM. Top-level bindings, functions, @virtual capabilities, closures and completed state from earlier cells remain available; ordinary block and function scopes keep their normal JavaScript lifetime. Express AI-assisted stages as @virtual functions (empty or partial JS ahead of a trailing intent comment; lexical closures and require(\"host\") context/tools work naturally) or standalone @module contracts for reusable parameter-only modules. Compile errors do not change the existing VM. Runtime pauses preserve it; runtime errors preserve completed effects and the current state. Call write_program as the only call in the reply. Code in reply text is never run: write code there only to show it to the user."
+        "Submit one complete JavaScript orchestration program for a fresh one-shot Runner once key targets, sizes, and commands are known (explore with direct tools first when unknowns remain). Express steps cleanly in middleware pipeline style passing a shared `mainContext` object, and use top-level `return` for the final distilled result. `@virtual` functions always run directly as a single-layer terminal AI leaf (no nested virtual layers; great for uniform parallel fan-out via Promise.all, not for dumping giant raw evidence blobs). Pass data across steps via `mainContext` or workspace files; there is no persistent Console heap. Call write_program as the only call in the reply. Code in reply text is never run: write code there only to show it to the user."
     };
     let mut tool = function(WRITE_PROGRAM, description, properties, if module { json!(["source"]) } else { json!([]) });
     if !module { tool["function"]["parameters"]["oneOf"] = json!([{"required":["source"]},{"required":["resource"]}]); }
@@ -1272,26 +1285,14 @@ fn install_with(
         "model-defined libraries are unsupported"
     );
     let source = args["source"].as_str().context("source is required")?;
-    let cell_entry = if w.program_task.is_none() {
-        Some(format!("$$cell/{}", w.console_cell))
-    } else {
-        None
-    };
-    let mut program = if let Some(entry) = cell_entry.as_deref() {
-        let names = w.console.as_ref().map(Runtime::module_names).unwrap_or_default();
-        agent_program::compile_cell_with_scope(source, entry, libraries, names)?
-    } else {
-        agent_program::compile_with_libraries(source, libraries)?
-    };
-    // A persistent Console cell may intentionally define a helper or virtual
-    // capability for a later cell; only standalone programs require every
-    // declared function to be used immediately.
-    if cell_entry.is_none() {
-        agent_program::uncalled_functions(source, None)?;
-    }
-    // Pure empty @module / @virtual contracts at layer 1 link via reusable module
-    // implementations; partial @virtual functions and closure-bound @virtuals run
-    // directly with their live JS scope and explicit context.
+    let mut program = agent_program::compile_with_libraries(source, libraries)?;
+    // Every main submission is a complete one-shot orchestration program.
+    // Top-level return is its structured hand-off to the caller, while the
+    // ordinary-function and missing-@virtual checks still apply.
+    agent_program::uncalled_functions(source, None)?;
+    // Explicit @module contracts link via reusable deterministic module
+    // implementations; all @virtual functions run directly as single-layer
+    // terminal AI leaves with their live JS scope and optional context.
     for (name, function) in &mut program.functions {
         if !function.virtual_task {
             continue;
@@ -1304,10 +1305,6 @@ fn install_with(
             function.leaf_tools = None;
             function.leaf_libraries.clear();
             function.skills.clear();
-            continue;
-        }
-        if !function.partial_virtual && function.uses.is_empty() && !super::main_virtual_leaves() {
-            function.module_task = true;
         }
     }
     ensure!(
@@ -1318,30 +1315,11 @@ fn install_with(
         Some(requests) => super::modules::revisions(session.context("module revisions need a session")?, &program, requests)?,
         None => BTreeMap::new(),
     };
-    let entry = if let Some(entry) = cell_entry.as_deref() {
-        entry.to_owned()
-    } else {
-        agent_program::ENTRY.to_owned()
-    };
-    if let Some(mut console) = w.console.take() {
-        let prev_log_start = w.console_log_start;
-        w.console_log_start = console.logs().len();
-        if let Err(error) = console.append_cell(program, &entry) {
-            w.console = Some(console);
-            w.console_log_start = prev_log_start;
-            return Err(error);
-        }
-        w.program = Some(console);
-        w.console_cell = w.console_cell.saturating_add(1);
-    } else {
-        let runtime = Runtime::task_program(program, &entry, vec![])?;
-        w.console_log_start = 0;
-        w.program = Some(runtime);
-        w.console_cell = w.console_cell.saturating_add(1);
-    }
+    let entry = agent_program::ENTRY.to_owned();
+    w.program = Some(Runtime::task_program(program, &entry, vec![])?);
     w.program_value = None;
     w.module_revisions = revisions;
-    let mut receipt = json!({"status":"started","entry":entry,"version":agent_program::VERSION,"source_hash":crate::visual_artifacts::hash(source.as_bytes()),"persistent_console":w.program_task.is_none()});
+    let mut receipt = json!({"status":"started","entry":entry,"version":agent_program::VERSION,"source_hash":crate::visual_artifacts::hash(source.as_bytes()),"persistent_console":false});
     if !w.module_revisions.is_empty() {
         receipt["revise_modules"] = args["revise_modules"].clone();
     }
@@ -1426,8 +1404,14 @@ pub(super) fn install_body_with(
     )
 }
 pub(super) fn validate_implementation(program: &agent_program::Program) -> Result<()> {
-    ensure!(!program.functions.values().any(|function| function.virtual_task && function.module_task),
-        "SECOND_LAYER_VIRTUAL_REQUIRED: declare judgment helpers with @virtual inside the implementation; @module is a first-layer module, not another implementation layer");
+    ensure!(
+        !program.functions.values().any(|function| function.virtual_task && function.module_task),
+        "SECOND_LAYER_VIRTUAL_REQUIRED: @module belongs to layer 1; nested @module is not allowed inside an implementation"
+    );
+    ensure!(
+        !program.functions.values().any(|function| function.virtual_task),
+        "VIRTUAL_LAYER_LIMIT: only a single virtual AI layer is supported; @module implementations run deterministic JavaScript and cannot declare nested @virtual helpers"
+    );
     Ok(())
 }
 pub(super) fn compiled_runtime(args: &Value) -> Result<Runtime> {
@@ -1628,59 +1612,8 @@ fn turn_writes(s: &Session<'_>) -> Result<Vec<String>> {
 fn printed(w: &Window) -> Vec<String> {
     w.program
         .as_ref()
-        .or(w.console.as_ref())
-        .map(|program| program.logs().iter().skip(w.console_log_start).cloned().collect())
+        .map(|program| program.logs().to_vec())
         .unwrap_or_default()
-}
-
-/// Move a completed main Console cell back into the persistent VM slot. A
-/// running cell remains in `program` so the scheduler can resume it; once it
-/// has returned or failed, the next write_program cell continues from here.
-fn retain_console(w: &mut Window) {
-    if w.program_task.is_none() {
-        if let Some(runtime) = w.program.take() {
-            w.console = Some(runtime);
-        }
-    }
-}
-
-fn console_bindings(w: &Window) -> Vec<String> {
-    w.console
-        .as_ref()
-        .map(Runtime::module_names)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|name| Runtime::is_visible_console_binding(name))
-        .collect()
-}
-
-fn console_binding_previews(w: &Window) -> BTreeMap<String, String> {
-    const MAX_ENTRIES: usize = 24;
-    const MAX_TOTAL_CHARS: usize = 4_000;
-    let raw = w.console.as_ref().map(Runtime::module_binding_previews).unwrap_or_default();
-    let mut bounded = BTreeMap::new();
-    let mut total_chars = 0usize;
-    for (name, preview) in raw.into_iter().take(MAX_ENTRIES) {
-        let len = name.chars().count() + preview.chars().count();
-        if !bounded.is_empty() && total_chars + len > MAX_TOTAL_CHARS {
-            break;
-        }
-        total_chars += len;
-        bounded.insert(name, preview);
-    }
-    bounded
-}
-
-fn format_console_scope(previews: &BTreeMap<String, String>, total_bindings: usize) -> String {
-    let mut lines = previews
-        .iter()
-        .map(|(name, preview)| format!("{name}: {preview}"))
-        .collect::<Vec<_>>();
-    let omitted = total_bindings.saturating_sub(lines.len());
-    if omitted > 0 {
-        lines.push(format!("... (+{omitted} more bindings)"));
-    }
-    format!("[console_scope]\n{}", lines.join("\n"))
 }
 
 fn console_chars(records: &[String]) -> Vec<usize> {
@@ -1717,7 +1650,7 @@ async fn archive_program_output(s: &Session<'_>, w: &Window, result: &Value) -> 
 fn output_capacity_error(s: &Session<'_>, required: usize, reference: Value, record_chars: &[usize]) -> Value {
     let limits = super::delivery_soft_limits(s.input_budget);
     let mut error = json!({"name":"ResourceLimitError","code":"OUTPUT_OVER_CAPACITY","boundary":"ai_context",
-        "message":"This delivery exceeds the 1/4-window soft delivery cap or remaining AI context. The program stopped; no prefix or shortened result was substituted. Full output is saved. Check console_binding_previews for each variable's type/size/keys, inspect nested values safely with console.dir(value, {depth: 2}), or read saved output via read_output instead of printing huge dumps with console.log; do not repeat completed commands or writes.",
+        "message":"This delivery exceeds the 1/4-window soft delivery cap or remaining AI context. The one-shot program stopped; no prefix or shortened result was substituted. Full output is saved. Read the saved output reference or submit a smaller program result; do not repeat completed commands or writes.",
         "required_input_tokens":required,"input_budget":s.input_budget,
         "soft_delivery_chars":limits.round_chars,"soft_delivery_tokens":limits.round_tokens,
         "delivered":false,"original_saved":true,
@@ -1962,20 +1895,14 @@ async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value
             let reference = archive_program_output(s,w,&value).await?;
             return Box::pin(failed_program(s,w,step,output_capacity_error(s,required,reference,&chars))).await;
         }
-        retain_console(w);
         record_end(s, w, "completed", json!({"result":value})).await?;
+        // A completed main program must not be scheduled again. The old
+        // persistent-console handoff used `take()` here; one-shot runners
+        // clear the active runtime explicitly before returning to the model.
+        w.program = None;
         w.program_value = None;
         let seq = append(s, "program/result", json!({"turn":s.turn,"step":step,"task_node_id":w.task_node_id,"result":value,"output":text}), false).await?;
-        let bindings = console_bindings(w);
-        let previews = console_binding_previews(w);
-        let ai_text = if bindings.is_empty() {
-            text
-        } else if previews.is_empty() {
-            format!("{text}\n[console_bindings: {}]", bindings.join(", "))
-        } else {
-            format!("{text}\n[console_bindings: {}]\n{}", bindings.join(", "), format_console_scope(&previews, bindings.len()))
-        };
-        w.messages.push(sourced(json!({"role":"user","name":"program_result","content":ai_text}), s.task, seq));
+        w.messages.push(sourced(json!({"role":"user","name":"program_result","content":text}), s.task, seq));
         save(s, w).await?;
         return Ok(Round::Continue);
     }
@@ -2091,24 +2018,19 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         // main AI gets the error and the files already written, and can keep
         // fixing, switch approaches, or explain in plain text why to stop.
         record_end(s, w, "error", json!({"error":error})).await?;
-        retain_console(w);
         let mut diagnostic = json!({"code":"PROGRAM_RUNTIME_ERROR","executed":true,"program":main_program(s)?,"error":error,
             "completed_writes":turn_writes(s)?,"console":console,
             "instruction":"Your program stopped with this error. Call write_program with the corrected complete program; it runs from its start, so do not redo the listed writes unless the task needs them redone. If the task cannot be done, tell the user why in plain text instead."});
-        let bindings = console_bindings(w);
-        if !bindings.is_empty() {
-            diagnostic["console_bindings"] = json!(bindings);
-        }
-        let previews = console_binding_previews(w);
-        if !previews.is_empty() {
-            diagnostic["console_binding_previews"] = json!(previews);
-        }
         if !stopped.is_empty() {
             diagnostic["stopped_calls"] = json!(stopped);
             diagnostic["stopped_note"] = json!("These calls were still running when the program stopped; they were stopped before their next step and returned nothing.");
         }
         let seq = append(s, "program/runtime_error", json!({"diagnostic":diagnostic,"turn":s.turn,"main":true}), false).await?;
         w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
+        // The failed main runtime is terminal for this round. Leaving it in
+        // the window makes run_rounds call `next` forever without asking the
+        // model for a rewrite.
+        w.program = None;
         save(s, w).await?;
         Ok(Round::Rewrite)
     } else {
@@ -2118,7 +2040,6 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         let ended = if waiting { "question" } else if blocked { "needs_user" } else if error["code"] == UNAVAILABLE { "unavailable" } else { "error" };
         record_end(s, w, ended, json!({"error":error})).await?;
         let (text, shown) = (outcome(s, &console, Err(&error))?, outcome(s, &[], Err(&error))?);
-        retain_console(w);
         end_program(s, w, step, Value::Null, text, Some(shown)).await
     }
 }
@@ -2649,33 +2570,30 @@ mod tests {
         let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
         let cancel = CancellationToken::new();
         let s = execution_test_session(&state, &cancel);
-        execution_frame(root.path(), "implementation", crate::function_frames::ROOT,
-            json!({"name":"work","module":true,"role":"implement","ai_layer":1}));
-        execution_frame(root.path(), "helper-a", "implementation", json!({"role":"body"}));
-        execution_frame(root.path(), "helper-b", "helper-a", json!({"role":"body","ai_layer":0}));
-        let mut w = Window { task_node_id:Some("helper-b".into()), program_task:Some(json!({"role":"body"})), ..Default::default() };
         let program = agent_program::compile_body_with_scope(
             "function work(){return judge();}\n/** @virtual Return one judgment. */ function judge(){}",
             "work", agent_program::libraries::builtin(), Default::default()).unwrap();
-        let task = scheduled_function_task(&s, &w, &program, "judge", &[], &Default::default()).unwrap();
-        assert_eq!(task["ai_layer"], 2);
+        let mut main_w = Window::default();
+        let task = scheduled_function_task(&s, &main_w, &program, "judge", &[], &Default::default()).unwrap();
+        assert_eq!(task["ai_layer"], 1);
         assert_eq!(task["role"], "leaf");
         assert_eq!(task["module"], false);
         assert_eq!(task["context"]["task_id"], "task");
         assert_eq!(task["context"]["function"], "judge");
-        assert_eq!(task["context"]["ai_layer"], 2);
+        assert_eq!(task["context"]["ai_layer"], 1);
         assert!(task["context"].get("messages").is_none(), "context is compact and does not copy the caller chat");
         assert_eq!(call_view(&task).unwrap()["context"], task["context"]);
-        execution_frame(root.path(), "judgment", "helper-b", task);
-        execution_frame(root.path(), "leaf-helper", "judgment", json!({"role":"body","ai_layer":0}));
-        w.task_node_id = Some("leaf-helper".into());
+        execution_frame(root.path(), "leaf", crate::function_frames::ROOT, task);
+        execution_frame(root.path(), "leaf-helper", "leaf", json!({"role":"body","ai_layer":0}));
+        main_w.task_node_id = Some("leaf-helper".into());
+        main_w.program_task = Some(json!({"role":"body","ai_layer":0}));
         // A persisted/restored window has the same boundary. A bogus layer
-        // field on an ordinary helper cannot erase its two AI ancestors.
-        let w: Window = serde_json::from_value(serde_json::to_value(w).unwrap()).unwrap();
+        // field on an ordinary helper cannot erase its virtual AI ancestor.
+        let w: Window = serde_json::from_value(serde_json::to_value(main_w).unwrap()).unwrap();
         let error = scheduled_function_task(&s, &w, &program, "judge", &[], &Default::default()).unwrap_err();
-        assert!(error.to_string().contains("VIRTUAL_LAYER_LIMIT"));
+        assert!(error.to_string().contains("VIRTUAL_LAYER_LIMIT"), "{error:#}");
         let ordinary = scheduled_function_task(&s, &w, &program, "work", &[], &Default::default()).unwrap();
-        assert_eq!(ordinary["ai_layer"], 2);
+        assert_eq!(ordinary["ai_layer"], 1);
         assert_eq!(ordinary["role"], "body");
     }
 
@@ -2685,12 +2603,10 @@ mod tests {
         let mut first = Window::default();
         install(&mut first, &json!({"source":source})).unwrap();
         let program = &first.program.as_ref().unwrap().program;
-        assert!(program.functions["increment"].module_task);
-        let first = function_task(program, "increment", &[json!(1)], &Default::default()).unwrap();
-        let mut old = Window::default();
-        install(&mut old, &json!({"source":source.replace("@virtual", "@module")})).unwrap();
-        let old = function_task(&old.program.as_ref().unwrap().program, "increment", &[json!(1)], &Default::default()).unwrap();
-        assert_eq!(super::super::modules::contract(&first).unwrap().key, super::super::modules::contract(&old).unwrap().key);
+        assert!(!program.functions["increment"].module_task, "@virtual runs directly as a single-layer leaf, never promoted to @module");
+        let mut explicit = Window::default();
+        install(&mut explicit, &json!({"source":source.replace("@virtual", "@module")})).unwrap();
+        assert!(explicit.program.as_ref().unwrap().program.functions["increment"].module_task);
         let mut module_with_uses = Window::default();
         let error = install(&mut module_with_uses, &json!({"source":"const hidden=1;\n/** @module Read hidden.\n * @uses hidden\n */ function work(){} work();"})).unwrap_err();
         assert!(error.to_string().contains("a @module takes what it needs as parameters"), "{error:#}");
@@ -2701,6 +2617,9 @@ mod tests {
         let mut implementation = Window { program_task:Some(json!({"name":"work","parameters":[],"arguments":[],"module":true,"role":"implement"})), ..Default::default() };
         let error = install_body(&mut implementation, &json!({"source":"function work(){return nested();}\n/** @module More implementation. */ function nested(){}"})).unwrap_err();
         assert!(error.to_string().contains("SECOND_LAYER_VIRTUAL_REQUIRED"));
+        assert!(implementation.program.is_none());
+        let error = install_body(&mut implementation, &json!({"source":"function work(){return nested();}\n/** @virtual More AI work. */ function nested(){}"})).unwrap_err();
+        assert!(error.to_string().contains("VIRTUAL_LAYER_LIMIT"), "{error:#}");
         assert!(implementation.program.is_none());
     }
 
@@ -2961,7 +2880,7 @@ mod tests {
     fn reply(content: String) -> Value {
         fixture_completion(&content)
     }
-    const TWO_LEVEL_MAIN: &str = "```js\nimport * as io from \"host:io\";\nconst result = await summarize([\"a.txt\", \"b.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n\n/** @module */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}\n```";
+    const TWO_LEVEL_MAIN: &str = "```js\nimport * as io from \"host:io\";\nconst result = await summarize([\"a.txt\", \"b.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n\n/** @virtual */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}\n```";
 
     #[tokio::test]
     async fn a_main_module_is_written_as_code_and_its_virtual_loops_with_imported_tools() {
@@ -2976,15 +2895,6 @@ mod tests {
             let prompt = body["messages"][0]["content"].as_str().unwrap_or("").to_owned();
             let text = body.to_string();
             assert!(!text.contains("\"task_status\"") && !text.contains("read_scope"), "no task-tree status or scope reads reach the model");
-            if role == "implement" {
-                let headers = body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "program_tool_headers").unwrap()["content"].as_str().unwrap().to_owned();
-                for main_only in ["read_asset(", "read_task_board(", "list_context_assets(", "read_session_history("] {
-                    assert!(!headers.contains(main_only), "an implementation's libraries hold no {main_only}");
-                }
-                let input = body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "program_task_input").unwrap();
-                let input: Value = serde_json::from_str(input["content"].as_str().unwrap()).unwrap();
-                assert_eq!(input["signature"], "async function summarize(paths)", "the declared async is shown");
-            }
             if role != "main" {
                 for message in body["messages"].as_array().unwrap() {
                     assert!(message["role"] != "user" || message["name"] == "program_task_input",
@@ -2995,11 +2905,11 @@ mod tests {
             let answer = match role.as_str() {
                 "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
                 "main" => reply(TWO_LEVEL_MAIN.into()),
-                "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  const texts = [];\n  for (const path of paths) { texts.push(io.read({path: path}).content); }\n  return judge(texts);\n}\n/** @virtual */\nfunction judge(texts) {\n  // Join the texts into one summary. Returns {summary:string}.\n}\n```".into()),
                 "leaf" => {
                     let input = body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "program_task_input").unwrap();
                     let input: Value = serde_json::from_str(input["content"].as_str().unwrap()).unwrap();
-                    assert_eq!(input["bindings"]["texts"], json!(["alpha", "beta"]));
+                    assert_eq!(input["bindings"]["paths"], json!(["a.txt", "b.txt"]));
+                    assert_eq!(input["ai_layer"], 1);
                     reply(json!({"summary":"alpha+beta"}).to_string())
                 }
                 other => panic!("unexpected role {other}"),
@@ -3014,39 +2924,23 @@ mod tests {
         run_task(state, "task".into(), "fake".into(), "Summarize a and b".into(), 10, CancellationToken::new(), 1, false).await.unwrap();
         server.abort();
         assert_eq!(std::fs::read_to_string(root.path().join("out.txt")).unwrap(), "alpha+beta");
-        // The program's reads and writes ran as its own steps: no AI window holds them.
         let conn = agent_service::open_db(root.path()).unwrap();
-        let windows = conn.prepare("SELECT state FROM agent_runtime_windows WHERE task_id='task'").unwrap()
-            .query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        for window in windows {
-            let window: Value = serde_json::from_str(&window).unwrap();
-            // Only the AIs' own hand-overs of code are exchanges in a window.
-            let messages = window["messages"].as_array().unwrap();
-            let handed = messages.iter().flat_map(|m| m["tool_calls"].as_array().cloned().unwrap_or_default())
-                .inspect(|call| assert_eq!(call["function"]["name"], WRITE_PROGRAM, "no synthesized program exchange in {window}"))
-                .map(|call| call["id"].clone()).collect::<Vec<_>>();
-            assert!(messages.iter().filter(|m| m["role"] == "tool").all(|m| handed.contains(&m["tool_call_id"])),
-                "no synthesized program exchange in {window}");
-        }
         let program_steps: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='tool/call' AND json_extract(data,'$.program_location') IS NOT NULL", [], |r| r.get(0)).unwrap();
-        assert!(program_steps >= 3, "the program's steps are still recorded, with their source location");
+        assert!(program_steps >= 1, "the program's steps are recorded with their source location");
         let virtual_ledger: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='flow/ledger' AND json_extract(data,'$.action')='virtual_call'", [], |r| r.get(0)).unwrap();
         assert!(virtual_ledger >= 1, "virtual function returns pass through the shared execution ledger");
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.iter().map(|(role, _, _)| role.as_str()).collect::<Vec<_>>(), ["main", "implement", "leaf", "main"]);
-        let (_, implement, prompt) = &seen[1];
-        assert_eq!(implement, &["read_tool_contracts", "read_program_guide", "read_skill", "write_program"], "an implementation is code: it reads contracts, the guide and the skills its code will require, and hands its code over");
-        assert!(prompt.as_str().unwrap().starts_with("You are implementing an abstract `@virtual` capability"));
-        let (_, leaf, prompt) = &seen[2];
+        assert_eq!(seen.iter().map(|(role, _, _)| role.as_str()).collect::<Vec<_>>(), ["main", "leaf", "main"]);
+        let (_, leaf, prompt) = &seen[1];
         assert!(prompt.as_str().unwrap().starts_with("Perform the supplied abstract `@virtual` capability"));
         assert!(leaf.contains(&"read_file".to_owned()) && leaf.contains(&FIND.to_owned()));
-        for retired in ["read_tool_contracts", "define_task_body", "invoke_library", "create_task", "read_scope", "read_asset"] {
+        for retired in ["read_tool_contracts", "define_task_body", "invoke_library", "create_task", "read_scope", "read_asset", WRITE_PROGRAM] {
             assert!(!leaf.contains(&retired.to_owned()), "leaf must not see {retired}");
         }
         let definitions = crate::agent_service::local_tools(&crate::tools::Workspace::new(root.path().to_path_buf()).unwrap(), None, false);
         let io = agent_program::libraries::catalog(&definitions, &json!([]))["io"].values().cloned().collect::<BTreeSet<_>>();
         assert_eq!(leaf.iter().filter(|name| *name != FIND && *name != ASK).cloned().collect::<BTreeSet<_>>(), io,
-            "leaf tools are exactly the implementation's io import, plus finding methods and asking the user");
+            "leaf tools are exactly the caller's io import, plus finding methods and asking the user");
     }
 
     #[tokio::test]
@@ -3058,8 +2952,8 @@ mod tests {
         let rounds = leaf_rounds.clone();
         let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
             let answer = match role_of(&body).as_str() {
-                "main" => reply(TWO_LEVEL_MAIN.into()),
-                "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  try {\n    return judge(paths);\n  } catch (error) {\n    return {summary: error.code + \":\" + error.completed_writes.length};\n  }\n}\n/** @virtual */\nfunction judge(paths) {\n  // Read every file at paths and summarize them. Returns {summary:string}.\n}\n```".into()),
+                "main" if has_program_result(&body) => reply("Done.".into()),
+                "main" => reply("```js\nimport * as io from \"host:io\";\ntry {\n  await judge([\"a.txt\", \"b.txt\"]);\n} catch (error) {\n  io.write({path: \"out.txt\", content: error.code + \":\" + error.completed_writes.length});\n}\n/** @virtual */\nfunction judge(paths) {\n  // Read every file at paths and summarize them. Returns {summary:string}.\n}\n```".into()),
                 "leaf" => {
                     let n = rounds.fetch_add(1, Ordering::SeqCst);
                     assert!(n < 40, "the host must end the leaf instead of folding its context");
@@ -3156,27 +3050,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_capacity_soft_limit_blocks_huge_dump_even_in_large_budget_and_retains_bindings() {
+    async fn output_capacity_soft_limit_blocks_huge_return_without_console_state() {
         let root=TestRoot::new();
         let state=agent_service::tests::test_state(root.path(),"127.0.0.1:9".parse().unwrap());
         let cancel=CancellationToken::new();
         let s=execution_test_session(&state,&cancel);
         agent_service::open_db(root.path()).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",[]).unwrap();
         let mut w=Window::default();
-        install(&mut w,&json!({"source":"const evidence = { ok: 42, items: [1, 2, 3] }; console.log('D'.repeat(200000));"})).unwrap();
+        install(&mut w,&json!({"source":"return { evidence: 'D'.repeat(200000) };"})).unwrap();
         assert!(matches!(next(&s,&mut w,1).await.unwrap(),Round::Rewrite));
         let diagnostic:Value=serde_json::from_str(w.messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
         assert_eq!(diagnostic["error"]["code"],"OUTPUT_OVER_CAPACITY");
-        assert_eq!(diagnostic["error"]["console_record_chars"],json!([200000]));
-        assert_eq!(diagnostic["console_bindings"],json!(["evidence"]));
-        let preview=diagnostic["console_binding_previews"]["evidence"].as_str().expect("binding preview");
-        assert!(preview.contains("ok: 42") && preview.contains("Array(3)"),"{preview}");
-        install(&mut w,&json!({"source":"console.log(evidence.ok, evidence.items.length);"})).unwrap();
-        assert!(matches!(next(&s,&mut w,2).await.unwrap(),Round::Continue));
-        let delivered=w.messages.last().unwrap()["content"].as_str().unwrap();
-        assert!(delivered.contains("42 3"),"{delivered}");
-        assert!(delivered.contains("[console_bindings: evidence]"),"{delivered}");
-        assert!(delivered.contains("[console_scope]") && delivered.contains("evidence: {ok: 42"),"{delivered}");
+        assert!(diagnostic.get("console_bindings").is_none());
+        assert!(diagnostic.get("console_binding_previews").is_none());
+        assert!(diagnostic.get("console_scope").is_none());
+        let reference=&diagnostic["error"]["program_output_asset"];
+        assert_eq!(diagnostic["error"]["read_output"]["tool"],"read_asset");
+        let page=crate::context_assets::read(root.path(),"task",&json!({"asset_id":reference["asset_id"],"max_chars":200}),None).unwrap();
+        assert!(page.to_string().contains("evidence"),"saved output is recoverable: {page}");
     }
 
     #[tokio::test]
@@ -3254,15 +3145,14 @@ mod tests {
         assert_eq!(conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind IN ('program/error','program/runtime_error')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     }
 
-    /// A turn with a main program stopped in its second-layer function; the
-    /// answer of each later main request is chosen by `next_turn`.
+    /// A turn with a main program stopped in its virtual leaf; the answer of
+    /// each later main request is chosen by `next_turn`.
     async fn stopped_then(root: &std::path::Path, next_turn: &'static str, next_answer: fn(&str) -> Option<String>)
         -> (Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<Value>>>) {
-        const IMPLEMENT: &str = "```js\nasync function summarize(paths) {\n  return judge(paths);\n}\n/** @virtual */\nfunction judge(paths) {\n  // Decide which files to keep. Returns {summary:string}.\n}\n```";
         let (implement, leaf) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let mains = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let cancel = CancellationToken::new();
-        let (implements, leaves, log, stop) = (implement.clone(), leaf.clone(), mains.clone(), cancel.clone());
+        let (leaves, log, stop) = (leaf.clone(), mains.clone(), cancel.clone());
         let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
             let answer = match role_of(&body).as_str() {
                 "main" => {
@@ -3270,7 +3160,7 @@ mod tests {
                     let messages = body["messages"].to_string();
                     reply(next_answer(&messages).filter(|_| messages.contains("The user stopped the turn")).unwrap_or_else(|| TWO_LEVEL_MAIN.into()))
                 }
-                "implement" => { implements.fetch_add(1, Ordering::SeqCst); reply(IMPLEMENT.into()) }
+                "implement" => panic!("single-layer @virtual must not spawn implement author"),
                 _ => match leaves.fetch_add(1, Ordering::SeqCst) {
                     // The user stops the turn while the function's AI works.
                     0 => { stop.cancel(); find_call() }
@@ -3307,7 +3197,7 @@ mod tests {
             "```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()
         })).await;
         assert_eq!(std::fs::read_to_string(root.path().join("out.txt")).unwrap(), "kept both");
-        assert_eq!(implement.load(Ordering::SeqCst), 1, "the module written before the stop is not written again");
+        assert_eq!(implement.load(Ordering::SeqCst), 0, "single-layer @virtual invokes no module author");
         assert_eq!(leaf.load(Ordering::SeqCst), 2, "only the function that was cut off works again");
         let first = mains.lock().unwrap().iter().find(|body| body["messages"].to_string().contains("The user stopped the turn")).cloned().unwrap();
         assert!(library_index(&first).contains("previous"), "the kept program is resumable: {}", library_index(&first));
@@ -3474,9 +3364,8 @@ mod tests {
         let root = TestRoot::new();
         std::fs::write(root.path().join("a.txt"), "blue").unwrap();
         std::fs::write(root.path().join("b.txt"), "green").unwrap();
-        let authors = Arc::new(AtomicUsize::new(0));
         let leaves = Arc::new(AtomicUsize::new(0));
-        let (written, judged) = (authors.clone(), leaves.clone());
+        let judged = leaves.clone();
         run_scripted(root.path(), move |body| {
             let messages = body["messages"].as_array().unwrap();
             match role_of(body).as_str() {
@@ -3485,33 +3374,26 @@ mod tests {
                     assert!(transcript.contains("BLUE") && transcript.contains("GREEN"));
                     reply("Done.".into())
                 }
-                "main" => reply("```js\nconsole.log(await Promise.all([summarize('a.txt'),summarize('b.txt')]));\n/** @module Read path and return its uppercase contents. */\nasync function summarize(path){}\n```".into()),
-                "implement" => {
-                    written.fetch_add(1, Ordering::SeqCst);
-                    let input: Value = serde_json::from_str(messages.iter().find(|m| m["name"] == "program_task_input").unwrap()["content"].as_str().unwrap()).unwrap();
-                    assert_eq!(input["ai_layer"], 1);
-                    reply("```js\nimport io from 'io';\n/** @module Read path and return its uppercase contents. */\nasync function summarize(path){return await collect(path);}\nasync function collect(path){const evidence=io.read({path}).content;return await judge(evidence);}\n/** @virtual Return evidence uppercased as a JSON string. */\nasync function judge(evidence){}\n```".into())
-                }
+                "main" => reply("```js\nimport io from 'io';\nconsole.log(await Promise.all([judge(io.read({path:'a.txt'}).content), judge(io.read({path:'b.txt'}).content)]));\n/** @virtual Return evidence uppercased as a JSON string. */\nasync function judge(evidence){}\n```".into()),
                 "leaf" => {
                     judged.fetch_add(1, Ordering::SeqCst);
                     let input: Value = serde_json::from_str(messages.iter().find(|m| m["name"] == "program_task_input").unwrap()["content"].as_str().unwrap()).unwrap();
-                    assert_eq!(input["ai_layer"], 2);
+                    assert_eq!(input["ai_layer"], 1);
                     assert!(!tool_names(body).contains(&WRITE_PROGRAM.to_owned()));
                     reply(json!(input["bindings"]["evidence"].as_str().unwrap().to_uppercase()).to_string())
                 }
                 role => panic!("unexpected role {role}"),
             }
         }).await;
-        assert_eq!(authors.load(Ordering::SeqCst), 1, "host links one implementation for concurrent calls");
         assert_eq!(leaves.load(Ordering::SeqCst), 2);
         let conn = agent_service::open_db(root.path()).unwrap();
         let saved: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE kind='module/saved'", [], |r| r.get(0)).unwrap();
-        assert_eq!(saved, 1);
+        assert_eq!(saved, 0, "single-layer @virtual leaves run directly without module authoring");
     }
 
     #[test]
     fn second_virtual_layer_cannot_submit_more_ai_work() {
-        let mut leaf = Window { program_task:Some(json!({"name":"judge","parameters":[],"arguments":[],"role":"leaf","ai_layer":2})), ..Default::default() };
+        let mut leaf = Window { program_task:Some(json!({"name":"judge","parameters":[],"arguments":[],"role":"leaf","ai_layer":1})), ..Default::default() };
         let error = install_body(&mut leaf, &json!({"source":"function judge(){return again();}\n/** @virtual More AI work. */ function again(){}"})).unwrap_err();
         assert!(error.to_string().contains("VIRTUAL_LAYER_LIMIT"), "{error:#}");
         assert!(leaf.program.is_none());
@@ -3664,7 +3546,6 @@ mod tests {
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
             "main" if has_program_result(body) => reply("Done.".into()),
             "main" => reply(TWO_LEVEL_MAIN.into()),
-            "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) { return judge(paths[0]); }\n/** @virtual */\nfunction judge(path) {\n  // Find a match in the file. Returns {summary:string}.\n}\n```".into()),
             "leaf" => {
                 let step = leaf.fetch_add(1, Ordering::SeqCst);
                 let result = body["messages"].as_array().unwrap().iter().rev().find(|message| message["role"] == "tool");
@@ -3728,25 +3609,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successive_main_cells_share_the_persistent_console_scope() {
+    async fn successive_main_programs_are_isolated_and_return_values() {
         let root = TestRoot::new();
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
         run_scripted(root.path(), move |body| {
             match count.fetch_add(1, Ordering::SeqCst) {
-                0 => reply("```js\nconst base = 7; function add(n) { return base + n; }\n```".into()),
+                0 => reply("```js\nreturn { value: 7 };\n```".into()),
                 1 => {
-                    assert!(body["messages"].to_string().contains("program_result"));
-                    reply("```js\nconsole.log(add(5));\n```".into())
+                    let delivered = body["messages"].as_array().unwrap().iter().any(|message|
+                        message["name"] == "program_result"
+                            && message["content"].as_str().is_some_and(|text| text.contains("\"value\":7")));
+                    assert!(delivered, "first result is delivered: {}", body["messages"]);
+                    reply("```js\nreturn { value: 12 };\n```".into())
                 }
                 2 => {
-                    assert!(body["messages"].to_string().contains("12"));
+                    let delivered = body["messages"].as_array().unwrap().iter().any(|message|
+                        message["name"] == "program_result"
+                            && message["content"].as_str().is_some_and(|text| text.contains("\"value\":12")));
+                    assert!(delivered, "second result is delivered: {}", body["messages"]);
                     reply("Done.".into())
                 }
                 _ => panic!("unexpected additional request"),
             }
-        })
-        .await;
+        }).await;
         assert_eq!(requests.load(Ordering::SeqCst), 3);
     }
 
@@ -3820,8 +3706,7 @@ mod tests {
                         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                         reply("Stopped.".into())
                     }
-                    "main" => reply("```js\nawait work('warm');\nconst pending = work('slow');\nawait work('fast');\nthrow new Error('stop now');\n/** @module */\nasync function work(input) {\n  // Handle input and return a boolean.\n}\n```".into()),
-                    "implement" => reply("```js\nimport * as io from 'host:io';\nasync function work(input) { return await check(input); }\n/** @virtual */\nasync function check(input) {\n  // Return a boolean for input.\n}\n```".into()),
+                    "main" => reply("```js\nawait work('warm');\nconst pending = work('slow');\nawait work('fast');\nthrow new Error('stop now');\n/** @virtual */\nasync function work(input) {\n  // Handle input and return a boolean.\n}\n```".into()),
                     "leaf" if messages.contains("\\\"slow\\\"") => {
                         slow_started.notify_one();
                         release_slow.notified().await;
@@ -3892,8 +3777,7 @@ mod tests {
         let leaf_tools = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
         let log = leaf_tools.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" => reply(TWO_LEVEL_MAIN.into()),
-            "implement" => reply("```js\nasync function summarize(paths) {\n  return judge(paths[0]);\n}\n/** @virtual */\nfunction judge(path) {\n  // Read the file at path. Returns {summary:string} with its text.\n}\n```".into()),
+            "main" => reply("```js\nconst result = await summarize([\"a.txt\"]);\nreturn result;\n/** @virtual */\nasync function summarize(paths) {\n  // Read the file at paths[0]. Returns {summary:string} with its text.\n}\n```".into()),
             _ => {
                 let tools = tool_names(body);
                 let mut log = log.lock().unwrap();
@@ -3910,7 +3794,9 @@ mod tests {
         let leaf_tools = leaf_tools.lock().unwrap();
         assert_eq!(leaf_tools[0], [FIND, ASK], "nothing imported: only finding methods and asking the user");
         assert!(leaf_tools[1].contains(&"read_file".to_owned()), "a found method becomes callable");
-        assert_eq!(std::fs::read_to_string(root.path().join("out.txt")).unwrap(), "alpha");
+        let conn = agent_service::open_db(root.path()).unwrap();
+        let out: String = conn.query_row("SELECT json_extract(data,'$.output') FROM agent_task_events WHERE kind='program/result' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert!(out.contains("alpha"), "{out}");
     }
 
     #[test]
@@ -4222,7 +4108,6 @@ mod tests {
     /// same way; resumed, the function's AI is told to make the call again.
     #[tokio::test]
     async fn a_function_blocked_by_a_tool_resumes_and_calls_it_again() {
-        const IMPLEMENT: &str = "```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  return await judge(paths);\n}\n/** @virtual */\nasync function judge(paths) {\n  // Read missing.txt with io and return {summary: its content}.\n}\n```";
         let root = TestRoot::new();
         let leaf_requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let log = leaf_requests.clone();
@@ -4231,8 +4116,7 @@ mod tests {
             let answer = match role_of(&body).as_str() {
                 "main" if has_program_result(&body) => reply("Done.".into()),
                 "main" if messages.contains("I fixed it, continue") => reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()),
-                "main" => reply(TWO_LEVEL_MAIN.into()),
-                "implement" => reply(IMPLEMENT.into()),
+                "main" => reply("```js\nimport * as io from \"host:io\";\nconst result = await judge([\"missing.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n/** @virtual */\nasync function judge(paths) {\n  // Read missing.txt with io and return {summary: its content}.\n}\n```".into()),
                 _ => {
                     log.lock().unwrap().push(messages.clone());
                     if messages.contains("here-content") {
@@ -4261,8 +4145,6 @@ mod tests {
         let requests = leaf_requests.lock().unwrap();
         assert!(requests[3].contains("PAUSED_FOR_USER") && !requests[3].contains("STOP."), "resumed, the leaf is told to call again: {}", requests[3]);
         assert_eq!(std::fs::read_to_string(root.path().join("out.txt")).unwrap(), "here-content", "the paused program finished as planned");
-        let modules: i64 = conn.query_row("SELECT count(*) FROM agent_modules", [], |r| r.get(0)).unwrap();
-        assert_eq!(modules, 1, "the module was not written again");
     }
 
     /// The 2026-11-02 Qwen run: a write_program call cut off mid-string, with
@@ -4444,7 +4326,7 @@ mod tests {
         let messages = |n: usize| bodies[n]["messages"].as_array().unwrap().clone();
         let (first, second, third) = (messages(0), messages(1), messages(2));
         let listed = first.iter().find(|m| m["name"] == "chat_modules").expect("the window lists the chat's modules");
-        assert!(listed["content"].as_str().unwrap().contains("(version 1)\n/** @virtual */\nasync function shout(word)"), "{listed}");
+        assert!(listed["content"].as_str().unwrap().contains("(version 1)\n/** @module */\nasync function shout(word)"), "{listed}");
         assert_eq!(&second[..first.len()], &first[..], "new modules leave everything already sent as it was");
         assert_eq!(&third[..second.len()], &second[..], "and the announcement stays where it was made");
         let updates = |messages: &[Value]| messages.iter().filter(|m| m["name"] == "chat_modules_update").cloned().collect::<Vec<_>>();
@@ -4458,8 +4340,8 @@ mod tests {
         let said = serde_json::from_str::<Value>(update["content"].as_str().unwrap()).unwrap();
         assert_eq!(said["not_a_user_request"], true);
         let text = said["content"].as_str().unwrap();
-        assert!(text.contains("(version 1)\n/** @virtual */\nasync function whisper(word)"), "{text}");
-        assert!(text.contains("(version 2)\n/** @virtual */\nasync function shout(word)"), "{text}");
+        assert!(text.contains("(version 1)\n/** @module */\nasync function whisper(word)"), "{text}");
+        assert!(text.contains("(version 2)\n/** @module */\nasync function shout(word)"), "{text}");
         assert!(update.get("_modules").is_none() && first[0].get("_chat_modules").is_none(), "host bookkeeping stays off the wire");
         assert_eq!(updates(&third).len(), 1, "a module is announced once");
     }
@@ -5138,13 +5020,12 @@ mod tests {
         let log = leaf_names.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
             "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
-                "main" => reply(TWO_LEVEL_MAIN.into()),
-            "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  /** @virtual */\n  function join(texts) {\n    // Join the texts. Returns {summary:string}.\n  }\n  const texts = [];\n  for (const path of paths) { texts.push(io.read({path: path}).content); }\n  return join(texts);\n}\n```".into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  /** @virtual */\n  function join(texts) {\n    // Join the texts. Returns {summary:string}.\n  }\n  const texts = [];\n  for (const path of paths) { texts.push(io.read({path: path}).content); }\n  return join(texts);\n}\nconst result = await summarize([\"a.txt\", \"b.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n```".into()),
             _ => {
                 let input = body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "program_task_input").unwrap();
                 let input: Value = serde_json::from_str(input["content"].as_str().unwrap()).unwrap();
                 log.lock().unwrap().push(input["name"].as_str().unwrap().to_owned());
-                assert!(tool_names(body).contains(&"read_file".to_owned()), "the implementation's io import");
+                assert!(tool_names(body).contains(&"read_file".to_owned()), "the caller's io import");
                 reply(json!({"summary":input["bindings"]["texts"].as_array().unwrap().iter().map(|t| t.as_str().unwrap()).collect::<Vec<_>>().join("+")}).to_string())
             }
         }).await;
@@ -5180,7 +5061,7 @@ mod tests {
             let turn2 = body["messages"].to_string().contains("What did the last program do");
             let answer = match role_of(&body).as_str() {
                 "main" if !turn2 && has_program_result(&body) => reply("Done.".into()),
-                "main" if !turn2 => reply(TWO_LEVEL_MAIN.into()),
+                "main" if !turn2 => reply("```js\nimport * as io from \"host:io\";\nconst result = await summarize([\"a.txt\", \"b.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n\n/** @module */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}\n```".into()),
                 "main" => {
                     let messages = body["messages"].as_array().unwrap();
                     match messages.iter().rev().find(|m| m["role"] == "tool") {
@@ -5191,7 +5072,7 @@ mod tests {
                             assert!(text.contains("await summarize("), "the earlier main program is in the new turn's memory: {text}");
                             assert!(!text.contains("texts.push(io.read"), "no earlier implementation sits in the new turn's context");
                             let listed = messages.iter().find(|m| m["name"] == "chat_modules").expect("the chat's modules are listed");
-                            assert!(listed["content"].as_str().unwrap().contains("/** @virtual */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}"), "{listed}");
+                            assert!(listed["content"].as_str().unwrap().contains("/** @module */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}"), "{listed}");
                             assert!(tool_names(&body).contains(&"read_session_history".to_owned()), "the main AI reads history itself");
                             json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
                                 "tool_calls":[{"id":"history","type":"function","function":{"name":"read_session_history","arguments":json!({"programs":true,"directory":".","turn":1}).to_string()}}]}}]})
@@ -5202,7 +5083,7 @@ mod tests {
                         }
                     }
                 }
-                "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  const texts = [];\n  for (const path of paths) { texts.push(io.read({path: path}).content); }\n  return judge(texts);\n}\n/** @virtual */\nfunction judge(texts) {\n  // Join the texts into one summary. Returns {summary:string}.\n}\n```".into()),
+                "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function summarize(paths) {\n  const texts = [];\n  for (const path of paths) { texts.push(io.read({path: path}).content); }\n  return judge(texts);\n}\n\nfunction judge(texts) {\n  return {summary: texts.join(\"+\")};\n}\n```".into()),
                 _ => reply(json!({"summary":"alpha+beta"}).to_string()),
             };
             async move { Json(answer) }
@@ -5341,8 +5222,6 @@ mod tests {
     #[tokio::test]
     async fn a_leaf_question_stops_the_program_and_the_answer_starts_a_new_turn() {
         let root = TestRoot::new();
-        let implement = Arc::new(AtomicUsize::new(0));
-        let rounds = implement.clone();
         let memory = Arc::new(std::sync::Mutex::new(None::<Value>));
         let log = memory.clone();
         let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
@@ -5352,10 +5231,7 @@ mod tests {
                     reply("Keeping both.".into())
                 }
                 "main" => reply(TWO_LEVEL_MAIN.into()),
-                "implement" => {
-                    assert_eq!(rounds.fetch_add(1, Ordering::SeqCst), 0, "a question is not handed back to the author as a bug");
-                    reply("```js\nasync function summarize(paths) {\n  return judge(paths);\n}\n/** @virtual */\nfunction judge(paths) {\n  // Decide which files to keep. Returns {summary:string}.\n}\n```".into())
-                }
+                "implement" => panic!("single-layer @virtual must not spawn implement author"),
                 _ => {
                     assert!(tool_names(&body).contains(&ASK.to_owned()), "a leaf can ask the user");
                     json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
@@ -5371,7 +5247,7 @@ mod tests {
         conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
         run_task(state.clone(), "task".into(), "fake".into(), "Summarize a and b".into(), 20, CancellationToken::new(), 1, false).await.unwrap();
         let shown: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.actor')='program' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(shown, "第 1 段程序（summarize-a-and-b.js）停在 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 2 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。");
+        assert_eq!(shown, "第 1 段程序（summarize-a-and-b.js）停在 第 2 行 summarize([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。");
         assert!(!root.path().join("out.txt").exists(), "nothing after the question ran");
         run_task(state, "task".into(), "fake".into(), "Yes, keep both".into(), 10, CancellationToken::new(), 2, false).await.unwrap();
         server.abort();
@@ -5383,20 +5259,18 @@ mod tests {
     async fn code_that_catches_errors_can_tell_a_question_apart_and_rethrow_it() {
         let root = TestRoot::new();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" => reply(TWO_LEVEL_MAIN.into()),
-            "implement" => reply("```js\nasync function summarize(paths) {\n  try {\n    return judge(paths);\n  } catch (error) {\n    if (error.name === \"WaitingForUser\") throw error;\n    return {summary: \"fallback\"};\n  }\n}\n/** @virtual */\nfunction judge(paths) {\n  // Decide which files to keep. Returns {summary:string}.\n}\n```".into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\ntry {\n  const result = await judge([\"a.txt\", \"b.txt\"]);\n  io.write({path: \"out.txt\", content: result.summary});\n} catch (error) {\n  if (error.name === \"WaitingForUser\") throw error;\n  io.write({path: \"out.txt\", content: \"fallback\"});\n}\n/** @virtual */\nasync function judge(paths) {\n  // Decide which files to keep. Returns {summary:string}.\n}\n```".into()),
             _ => json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
                 "tool_calls":[{"id":"ask","type":"function","function":{"name":ASK,"arguments":json!({"question":"Keep both files?"}).to_string()}}]}}]}),
         }).await;
         let conn = agent_service::open_db(root.path()).unwrap();
         let shown: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE kind='assistant/message' AND json_extract(data,'$.actor')='program' ORDER BY seq DESC LIMIT 1", [], |r| r.get(0)).unwrap();
-        assert_eq!(shown, "第 1 段程序（summarize-a-and-b.js）停在 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 3 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。", "the catch-all let the question through");
+        assert_eq!(shown, "第 1 段程序（summarize-a-and-b.js）停在 第 3 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。", "the catch-all let the question through");
         assert!(!root.path().join("out.txt").exists(), "the fallback did not run");
     }
 
-    const PAUSED_AT: &str = "第 1 段程序（summarize-a-and-b.js）被你的新消息暂停，停在 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 3 行 judge([\"a.txt\",\"b.txt\"])（AI 处理中），这一步还没完成。";
+    const PAUSED_AT: &str = "第 1 段程序（summarize-a-and-b.js）被你的新消息暂停，停在 第 2 行 summarize([\"a.txt\",\"b.txt\"])（AI 处理中），这一步还没完成。";
     const RESUMING_MAIN: &str = "```js\nimport * as io from \"host:io\";\nimport * as previous from \"host:previous/promises\";\nconst old = previous.resume();\nio.write({path: \"extra.txt\", content: \"extra\"});\nawait old;\n```";
-    const CATCHING_IMPLEMENT: &str = "```js\nasync function summarize(paths) {\n  try {\n    return judge(paths);\n  } catch (error) {\n    return {summary: \"fallback\"};\n  }\n}\n/** @virtual */\nfunction judge(paths) {\n  // Decide which files to keep. Returns {summary:string}.\n}\n```";
     fn has_tool_result(body: &Value) -> bool {
         body["messages"].as_array().is_some_and(|messages| messages.iter().any(|m| m["role"] == "tool"))
     }
@@ -5427,7 +5301,6 @@ mod tests {
                 reply(RESUMING_MAIN.into())
             }
             "main" => reply(TWO_LEVEL_MAIN.into()),
-            "implement" => reply(CATCHING_IMPLEMENT.into()),
             _ if has_tool_result(body) => {
                 leaf_rounds.fetch_add(1, Ordering::SeqCst);
                 assert!(!body["messages"].to_string().contains("Also write extra"), "the leaf sees only its own arguments");
@@ -5454,7 +5327,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_resumed_program_can_rewrite_a_file_it_wrote_before_the_pause() {
-        const DRAFTING_MAIN: &str = "```js\nimport * as io from \"host:io\";\nio.write({path: \"out.txt\", content: \"draft\"});\nconst result = await summarize([\"a.txt\", \"b.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n\n/** @module */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}\n```";
+        const DRAFTING_MAIN: &str = "```js\nimport * as io from \"host:io\";\nio.write({path: \"out.txt\", content: \"draft\"});\nconst result = await summarize([\"a.txt\", \"b.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n\n/** @virtual */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}\n```";
         const WRITE_THEN_RESUME: &str = "```js\nimport * as io from \"host:io\";\nimport * as previous from \"host:previous/promises\";\nio.write({path: \"extra.txt\", content: \"extra\"});\nawait previous.resume();\n```";
         let root = TestRoot::new();
         let path = root.path().to_owned();
@@ -5462,7 +5335,6 @@ mod tests {
             "main" if std::fs::read_to_string(path.join("out.txt")).ok().as_deref() == Some("kept both") => reply("Done.".into()),
             "main" if body["messages"].to_string().contains("被你的新消息暂停") => reply(WRITE_THEN_RESUME.into()),
             "main" => reply(DRAFTING_MAIN.into()),
-            "implement" => reply(CATCHING_IMPLEMENT.into()),
             _ if has_tool_result(body) => reply(json!({"summary":"kept both"}).to_string()),
             _ => {
                 crate::interjections::submit(&path, "task", "Also write extra").unwrap();
@@ -5493,8 +5365,7 @@ mod tests {
                 // resuming its stale leaf or running its initial writes again.
                 reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"revised.txt\", content: \"new ending\"});\n```".into())
             }
-            "main" => reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"saved.txt\", content: \"already saved\"});\nawait summarize([\"a.txt\"]);\nio.write({path: \"obsolete.txt\", content: \"old ending\"});\n/** @module */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}\n```".into()),
-            "implement" => reply(CATCHING_IMPLEMENT.into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\nio.write({path: \"saved.txt\", content: \"already saved\"});\nawait summarize([\"a.txt\"]);\nio.write({path: \"obsolete.txt\", content: \"old ending\"});\n/** @virtual */\nasync function summarize(paths) {\n  // Summarize the files at paths. Returns {summary:string}.\n}\n```".into()),
             _ => {
                 assert_eq!(calls.fetch_add(1, Ordering::SeqCst), 0, "the obsolete leaf must not resume");
                 crate::interjections::submit(&path, "task", "Use the revised ending").unwrap();
@@ -5523,7 +5394,6 @@ mod tests {
                 reply("Stopped as you asked.".into())
             }
             "main" => reply(TWO_LEVEL_MAIN.into()),
-            "implement" => reply(CATCHING_IMPLEMENT.into()),
             _ => {
                 assert!(!has_tool_result(body), "a discarded leaf does not run on");
                 crate::interjections::submit(&path, "task", "Stop").unwrap();
@@ -5542,7 +5412,7 @@ mod tests {
         assert!(told.contains("previous.resume()") && told.contains("host:previous/promises"), "the main AI's copy says how to resume");
         assert_eq!(paused_nodes(&conn), 0, "the paused frames were discarded");
         let discarded: i64 = conn.query_row("SELECT count(*) FROM agent_task_nodes WHERE task_id='task' AND status='interrupted'", [], |r| r.get(0)).unwrap();
-        assert!(discarded >= 3, "the paused program, its function and its leaf: {discarded}");
+        assert!(discarded >= 2, "the paused program and its leaf: {discarded}");
         assert_eq!(conn.query_row("SELECT status FROM agent_tasks WHERE id='task'", [], |r| r.get::<_, String>(0)).unwrap(), "completed");
     }
 
@@ -5553,8 +5423,7 @@ mod tests {
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
             "main" if body["messages"].to_string().contains("被你的新消息暂停") =>
                 reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()),
-            "main" => reply("```js\nimport * as io from \"host:io\";\nconst kept = await Promise.all([judge(\"a.txt\"), judge(\"b.txt\")]);\nio.write({path: \"out.txt\", content: JSON.stringify(kept)});\n\n/** @module */\nasync function judge(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
-            "implement" => reply("```js\nasync function judge(path) {\n  return decide(path);\n}\n/** @virtual */\nfunction decide(path) {\n  // Decide whether to keep the file. Returns {keep:boolean}.\n}\n```".into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\nconst kept = await Promise.all([judge(\"a.txt\"), judge(\"b.txt\")]);\nio.write({path: \"out.txt\", content: JSON.stringify(kept)});\n\n/** @virtual */\nasync function judge(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
             _ if has_tool_result(body) => reply(json!({"keep":true}).to_string()),
             _ => {
                 crate::interjections::submit(&path, "task", "Carry on").unwrap();
@@ -5563,7 +5432,7 @@ mod tests {
         }).await;
         let conn = agent_service::open_db(root.path()).unwrap();
         let lines = program_lines(&conn);
-        assert!(lines.iter().any(|line| line.starts_with("第 1 段程序（summarize-a-and-b.js）被你的新消息暂停，停在 第 2 行 judge(\"a.txt\") → 第 2 行 decide(\"a.txt\")（AI 处理中）、第 2 行 judge(\"b.txt\") → 第 2 行 decide(\"b.txt\")（AI 处理中），这一步还没完成。")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("第 1 段程序（summarize-a-and-b.js）被你的新消息暂停，停在 第 2 行 judge(\"a.txt\")（AI 处理中）、第 2 行 judge(\"b.txt\")（AI 处理中），这一步还没完成。")), "{lines:?}");
         let concurrent: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE data LIKE '%parallel_call_id%'", [], |r| r.get(0)).unwrap();
         assert!(concurrent > 0, "the calls ran concurrently");
         assert_eq!(std::fs::read_to_string(root.path().join("out.txt")).unwrap(), r#"[{"keep":true},{"keep":true}]"#, "{lines:?}");
@@ -5582,7 +5451,6 @@ mod tests {
                 reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()),
             "main" if body["messages"].to_string().contains("被你的新消息暂停") => reply(RESUMING_MAIN.into()),
             "main" => reply(TWO_LEVEL_MAIN.into()),
-            "implement" => reply(CATCHING_IMPLEMENT.into()),
             _ => match leaf_rounds.fetch_add(1, Ordering::SeqCst) {
                 0 => { crate::interjections::submit(&path, "task", "Also write extra").unwrap(); find_call() }
                 1 => { crate::interjections::submit(&path, "task", "Keep going").unwrap(); find_call() }
@@ -5595,7 +5463,7 @@ mod tests {
         let conn = agent_service::open_db(root.path()).unwrap();
         let lines = program_lines(&conn);
         assert_eq!(lines.iter().filter(|line| line.contains("被你的新消息暂停")).count(), 2, "{lines:?}");
-        assert!(lines.iter().any(|line| line.starts_with("第 2 段程序（summarize-a-and-b-2.js）被你的新消息暂停，停在 第 3 行 previous.resume() → 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 3 行 judge([\"a.txt\",\"b.txt\"])（AI 处理中），这一步还没完成。")), "the second pause is in the new program: {lines:?}");
+        assert!(lines.iter().any(|line| line.starts_with("第 2 段程序（summarize-a-and-b-2.js）被你的新消息暂停，停在 第 3 行 previous.resume() → 第 2 行 summarize([\"a.txt\",\"b.txt\"])（AI 处理中），这一步还没完成。")), "the second pause is in the new program: {lines:?}");
         assert_eq!(paused_nodes(&conn), 0);
     }
 
@@ -5609,7 +5477,6 @@ mod tests {
             "main" if body["messages"].to_string().contains("被你的新消息暂停") =>
                 reply("```js\nimport * as previous from \"host:previous/promises\";\nawait previous.resume();\n```".into()),
             "main" => reply(TWO_LEVEL_MAIN.into()),
-            "implement" => reply("```js\nasync function summarize(paths) {\n  return judge(paths);\n}\n/** @virtual */\nfunction judge(paths) {\n  // Decide which files to keep. Returns {summary:string}.\n}\n```".into()),
             _ => match leaf_rounds.fetch_add(1, Ordering::SeqCst) {
                 0 => { crate::interjections::submit(&path, "task", "Carry on").unwrap(); find_call() }
                 _ => json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
@@ -5618,7 +5485,7 @@ mod tests {
         }).await;
         let conn = agent_service::open_db(root.path()).unwrap();
         let lines = program_lines(&conn);
-        assert_eq!(lines.last().unwrap(), "第 2 段程序（summarize-a-and-b-2.js）停在 第 2 行 previous.resume() → 第 2 行 summarize([\"a.txt\",\"b.txt\"]) → 第 2 行 judge([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。", "{lines:?}");
+        assert_eq!(lines.last().unwrap(), "第 2 段程序（summarize-a-and-b-2.js）停在 第 2 行 previous.resume() → 第 2 行 summarize([\"a.txt\",\"b.txt\"])，等你回答：Keep both files?\n之后的步骤没有执行。", "{lines:?}");
         assert!(!root.path().join("out.txt").exists());
         assert_eq!(paused_nodes(&conn), 0);
     }
@@ -5633,8 +5500,7 @@ mod tests {
             async move {
                 Json(match role_of(&body).as_str() {
                     "main" if body["messages"].to_string().contains("PROGRAM_RUNTIME_ERROR") => reply("Noted.".into()),
-                    "main" => reply("```js\nconst kept = await Promise.all([judge(\"a.txt\"), judge(\"b.txt\")]);\n\n/** @module */\nasync function judge(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
-                    "implement" => reply("```js\nasync function judge(path) {\n  return decide(path);\n}\n/** @virtual */\nfunction decide(path) {\n  // Decide whether to keep the file. Returns {keep:boolean}.\n}\n```".into()),
+                    "main" => reply("```js\nconst kept = await Promise.all([judge(\"a.txt\"), judge(\"b.txt\")]);\n\n/** @virtual */\nasync function judge(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
                     _ => {
                         // The process dies while the leaves wait for the model.
                         leaf_requests.fetch_add(1, Ordering::SeqCst);
@@ -5667,15 +5533,14 @@ mod tests {
     async fn a_question_from_a_concurrent_call_says_where_it_stopped() {
         let root = TestRoot::new();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
-            "main" => reply("```js\nimport * as io from \"host:io\";\nconst kept = await Promise.all([judge(\"a.txt\"), judge(\"b.txt\")]);\nio.write({path: \"out.txt\", content: JSON.stringify(kept)});\n\n/** @module */\nasync function judge(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
-            "implement" => reply("```js\nasync function judge(path) {\n  return decide(path);\n}\n/** @virtual */\nfunction decide(path) {\n  // Decide whether to keep the file. Returns {keep:boolean}.\n}\n```".into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\nconst kept = await Promise.all([judge(\"a.txt\"), judge(\"b.txt\")]);\nio.write({path: \"out.txt\", content: JSON.stringify(kept)});\n\n/** @virtual */\nasync function judge(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
             _ if body["messages"].to_string().contains("a.txt") => json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
                 "tool_calls":[{"id":"ask","type":"function","function":{"name":ASK,"arguments":json!({"question":"Keep a.txt?"}).to_string()}}]}}]}),
             _ => reply(json!({"keep":true}).to_string()),
         }).await;
         let conn = agent_service::open_db(root.path()).unwrap();
         let lines = program_lines(&conn);
-        assert_eq!(lines.last().unwrap(), "第 1 段程序（summarize-a-and-b.js）停在 第 2 行 judge(\"a.txt\") → 第 2 行 decide(\"a.txt\")，等你回答：Keep a.txt?\n之后的步骤没有执行。", "{lines:?}");
+        assert_eq!(lines.last().unwrap(), "第 1 段程序（summarize-a-and-b.js）停在 第 2 行 judge(\"a.txt\")，等你回答：Keep a.txt?\n之后的步骤没有执行。", "{lines:?}");
         assert!(!root.path().join("out.txt").exists());
     }
 
@@ -5708,10 +5573,9 @@ mod tests {
         let log = seen.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
             "main" if has_program_result(body) => reply("Done.".into()),
-            "main" => reply("```js\nimport * as io from \"host:io\";\nconst result = await summarizeAs(\"Only summarize a\", [\"a.txt\", \"b.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n\n/** @module */\nasync function summarizeAs(brief, paths) {\n  // Summarize the files at paths as brief asks. Returns {summary:string}.\n}\n```".into()),
-            "implement" => reply("```js\nasync function summarizeAs(brief, paths) {\n  /**\n   * @virtual\n   * Summarize the files at paths as the brief asks.\n   * @uses brief the user's request, verbatim\n   * Returns {summary:string}.\n   */\n  async function summarize(paths) {}\n  return await summarize(paths);\n}\n```".into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\nasync function summarizeAs(brief, paths) {\n  /**\n   * @virtual\n   * Summarize the files at paths as the brief asks.\n   * @uses brief the user's request, verbatim\n   * Returns {summary:string}.\n   */\n  async function summarize(paths) {}\n  return await summarize(paths);\n}\nconst result = await summarizeAs(\"Only summarize a\", [\"a.txt\", \"b.txt\"]);\nio.write({path: \"out.txt\", content: result.summary});\n```".into()),
             role => {
-                assert_eq!(role, "leaf", "a @virtual in a module's code is a hook");
+                assert_eq!(role, "leaf", "a @virtual in a program's code is a leaf");
                 *log.lock().unwrap() = Some(body["messages"].to_string());
                 reply(json!({"summary":"Only summarize a: a.txt"}).to_string())
             }
@@ -5868,7 +5732,7 @@ mod tests {
             "main" => {
                 let messages = body["messages"].as_array().unwrap();
                 match mains.fetch_add(1, Ordering::SeqCst) {
-                    0 => reply("```js\nconst a = await shout(\"a\");\nconsole.log(a.text);\n\n/**\n * @virtual\n * Return {text:string}: word in capitals.\n */\nasync function shout(word) {}\n```".into()),
+                    0 => reply(format!("```js\nconst a = await shout(\"a\");\nconsole.log(a.text);\n\n{SHOUT}\n```")),
                     1 => reply("```js\nconst b = await shout(\"b\");\nconsole.log(b.text);\n```".into()),
                     2 => {
                         let result = messages.iter().rev().find(|m| m["role"] == "tool").unwrap()["content"].as_str().unwrap();
@@ -5969,8 +5833,7 @@ mod tests {
         let log = seen.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
             "main" if has_program_result(body) => reply("Done.".into()),
-            "main" => reply("```js\nimport * as io from \"host:io\";\nimport * as process from \"host:process\";\nconst result = await check(\"a.txt\");\nio.write({path: \"out.txt\", content: String(result.keep)});\n\n/** @module */\nasync function check(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
-            "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function check(path) {\n  return await judge(path);\n}\n/** @virtual */\nasync function judge(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\n```".into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\nasync function check(path) {\n  return await judge(path);\n}\n/** @virtual */\nasync function judge(path) {\n  // Decide whether to keep the file at path. Returns {keep:boolean}.\n}\nconst result = await check(\"a.txt\");\nio.write({path: \"out.txt\", content: String(result.keep)});\n```".into()),
             "leaf" => {
                 log.lock().unwrap().push(tool_names(body));
                 reply(json!({"keep":true}).to_string())
@@ -5982,9 +5845,9 @@ mod tests {
         let definitions = crate::agent_service::local_tools(&crate::tools::Workspace::new(root.path().to_path_buf()).unwrap(), None, false);
         let io = agent_program::libraries::catalog(&definitions, &json!([]))["io"].values().cloned().collect::<BTreeSet<_>>();
         assert_eq!(seen[0].iter().filter(|name| *name != FIND && *name != ASK).cloned().collect::<BTreeSet<_>>(), io,
-            "the module's io import, not the main program's process import");
+            "the caller's io import");
         assert!(seen[0].contains(&FIND.to_owned()) && seen[0].contains(&ASK.to_owned()));
-        assert_eq!(module_files(root.path()).len(), 1, "the module is a file; its hook is not");
+        assert_eq!(module_files(root.path()).len(), 0, "single-layer @virtual runs directly without creating module files");
     }
 
     #[tokio::test]
@@ -5995,8 +5858,7 @@ mod tests {
         let log = prompts.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
             "main" if has_program_result(body) => reply("Done.".into()),
-            "main" => reply("```js\nimport * as io from \"host:io\";\nconst changed = await polishFile(\"a.txt\");\nio.write({path: \"out.txt\", content: String(changed === null) + \":\" + io.read({path: \"a.txt\"}).content});\n\n/** @module */\nasync function polishFile(path) {\n  // Rewrite the file at path in its final form. Changes the file; returns nothing.\n}\n```".into()),
-            "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function polishFile(path) {\n  return await polish(path);\n}\n/** @virtual */\nasync function polish(path) {\n  // Rewrite the file at path in its final form. Changes the file; returns nothing.\n}\n```".into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\nconst changed = await polish(\"a.txt\");\nio.write({path: \"out.txt\", content: String(changed === null) + \":\" + io.read({path: \"a.txt\"}).content});\n\n/** @virtual */\nasync function polish(path) {\n  // Rewrite the file at path in its final form. Changes the file; returns nothing.\n}\n```".into()),
             "leaf" => {
                 log.lock().unwrap().push(body["messages"][0]["content"].as_str().unwrap_or("").to_owned());
                 if body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool") {
@@ -6069,8 +5931,7 @@ mod tests {
         let log = seen.clone();
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
             "main" if has_program_result(body) => reply("Done.".into()),
-            "main" => reply("```js\nimport * as io from \"host:io\";\nconst result = await check(\"a.txt\");\nio.write({path: \"out.txt\", content: String(result.keep)});\n\n/** @module */\nasync function check(path) {\n  // Run the project's checks on the file at path. Returns {keep:boolean}.\n}\n```".into()),
-            "implement" => reply("```js\nimport * as io from \"host:io\";\nimport * as process from \"host:process\";\nasync function check(path) {\n  return await judge(path);\n}\n/** @virtual */\nasync function judge(path) {\n  // Run the project's checks on the file at path. Returns {keep:boolean}.\n}\n```".into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\nimport * as process from \"host:process\";\nconst result = await judge(\"a.txt\");\nio.write({path: \"out.txt\", content: String(result.keep)});\n\n/** @virtual */\nasync function judge(path) {\n  // Run the project's checks on the file at path. Returns {keep:boolean}.\n}\n```".into()),
             "leaf" => {
                 log.lock().unwrap().push(tool_names(body));
                 reply(json!({"keep":true}).to_string())
@@ -6099,8 +5960,7 @@ mod tests {
                 *log.lock().unwrap() = Some(body.clone());
                 reply("Done.".into())
             }
-            "main" => reply("```js\nconst res = await inspect('top');\nconsole.log(JSON.stringify(res));\n/** @module */\nasync function inspect(tag) {\n  // Check files and return {results:any}.\n}\n```".into()),
-            "implement" => reply("```js\nimport * as io from \"host:io\";\nasync function inspect(tag) {\n  const [a, b] = await Promise.all([judge('x'), judge('y')]);\n  return {results: [a, b]};\n}\n/** @virtual */\nasync function judge(part) {\n  // Read files with io and return {ok:boolean}.\n}\n```".into()),
+            "main" => reply("```js\nimport * as io from \"host:io\";\nconst [a, b] = await Promise.all([judge('x'), judge('y')]);\nconsole.log(JSON.stringify({results: [a, b]}));\n/** @virtual */\nasync function judge(part) {\n  // Read files with io and return {ok:boolean}.\n}\n```".into()),
             "leaf" => {
                 let tools_done = body["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool").count();
                 match tools_done {
@@ -6172,14 +6032,14 @@ mod tests {
                     return Json(reply(json!({"ok":true}).to_string())).into_response();
                 }
                 if role_of(&body) == "implement" {
-                    return Json(reply("```js\nasync function check(x) {\n  return await judge(x);\n}\n/** @virtual */\nasync function judge(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".into())).into_response();
+                    panic!("single-layer @virtual must not invoke implement author");
                 }
                 let finished = has_program_result(&body);
                 log.lock().unwrap().push(body);
                 if finished {
                     return Json(reply("Done.".into())).into_response();
                 }
-                Json(reply("```js\nimport * as io from \"host:io\";\nconst verdict = await check(\"x\");\nio.write({path: \"out.txt\", content: String(verdict.ok)});\n\n/** @module */\nasync function check(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".into())).into_response()
+                Json(reply("```js\nimport * as io from \"host:io\";\nconst verdict = await check(\"x\");\nio.write({path: \"out.txt\", content: String(verdict.ok)});\n\n/** @virtual */\nasync function check(x) {\n  // Decide whether x is fine. Returns {ok:boolean}.\n}\n```".into())).into_response()
             }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -6228,7 +6088,6 @@ mod tests {
         run_scripted(root.path(), move |body| match role_of(body).as_str() {
             "main" if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == "program_result") => reply("Done.".into()),
                 "main" => reply("```js\nconst io = require(\"io\");\nconst { write } = require(\"io\");\nwrite({path: \"out.txt\", content: \"hello\"});\nconst back = io.read({path: \"out.txt\"});\nconst verdict = await judge(back.content);\nio.write({path: \"verdict.txt\", content: String(verdict.ok) + \" \" + String(require(\"io\") === io)});\n\n/** @virtual */\nasync function judge(text) {\n  // Decide whether text says hello. Returns {ok:boolean}.\n}\n```".into()),
-            "implement" => reply("```js\nconst io = require(\"io\");\nasync function judge(text) { return await decide(text); }\n/** @virtual Decide whether text says hello; return {ok:boolean}. */\nasync function decide(text) {}\n```".into()),
             "leaf" => {
                 log.lock().unwrap().push(tool_names(body));
                 reply(json!({"ok":true}).to_string())
@@ -6240,7 +6099,7 @@ mod tests {
         let conn = agent_service::open_db(root.path()).unwrap();
         let links = conn.prepare("SELECT data FROM agent_task_events WHERE task_id='task' AND kind='program/require'").unwrap()
             .query_map([], |r| r.get::<_, String>(0)).unwrap().map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap()).collect::<Vec<_>>();
-        assert_eq!(links.len(), 2, "main and implementation each link the library once: {links:?}");
+        assert_eq!(links.len(), 1, "main links the library once: {links:?}");
         assert_eq!((links[0]["failed"].as_bool(), links[0]["result"]["methods"]["read"].as_str()), (Some(false), Some("read_file")), "the host's io, not the project skill: {links:?}");
         let leaf_tools = leaf_tools.lock().unwrap();
         assert_eq!(leaf_tools.len(), 1, "the terminal judgment runs once");
@@ -6262,7 +6121,6 @@ mod tests {
                 // A static import of a plugin library is refused before it runs.
                 "main" if !body["messages"].to_string().contains("PROGRAM_SOURCE_INVALID") => reply("```js\nimport * as flow from \"host:flow\";\nflow.read_code_flow({});\n```".into()),
                 "main" => reply("```js\nconst flow = require(\"flow\");\nconst graph = flow.read_code_flow({});\nlet missing = \"\";\ntry { require(\"absent\"); } catch (error) { missing = error.code; }\nconst verdict = await check(graph);\nconsole.log(missing, verdict.ok);\n\n/** @virtual */\nasync function check(graph) {\n  // Look at the code flow graph. Returns {ok:boolean}.\n}\n```".into()),
-                "implement" => reply("```js\nconst flow = require(\"flow\");\nasync function check(graph) { return await judge(graph); }\n/** @virtual Look at the code flow graph; return {ok:boolean}. */\nasync function judge(graph) {}\n```".into()),
                 "leaf" if !body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool") =>
                     json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
                         "tool_calls":[{"id":"find","type":"function","function":{"name":FIND,"arguments":json!({"query":"code flow"}).to_string()}}]}}]}),
@@ -6295,7 +6153,7 @@ mod tests {
         assert!(found.contains("\"method\":\"flow.read_code_flow\""), "finding methods searches third-party libraries too: {found}");
         let links = conn.prepare("SELECT data FROM agent_task_events WHERE task_id='task' AND kind='program/require' ORDER BY seq").unwrap()
             .query_map([], |r| r.get::<_, String>(0)).unwrap().map(|row| serde_json::from_str::<Value>(&row.unwrap()).unwrap()).collect::<Vec<_>>();
-        assert_eq!(links.len(), 3, "{links:?}");
+        assert_eq!(links.len(), 2, "{links:?}");
         assert_eq!(links[0]["library"], "flow");
         assert_eq!(links[0]["result"]["methods"], json!({"read_code_flow":"read_code_flow"}));
         assert_eq!(links[1]["library"], "absent");
@@ -6655,38 +6513,21 @@ async function runBuild(target) {
     }
 
     #[test]
-    fn persistent_console_preserves_bindings_when_append_fails_after_runtime_error() {
+    fn successive_one_shot_installations_replace_the_runtime() {
         let root = TestRoot::new();
         let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
         let cancel = CancellationToken::new();
         let session = execution_test_session(&state, &cancel);
         let mut window = Window::default();
 
-        // Cell 0 establishes `kept` in the persistent Console.
-        install_scoped(&session, &mut window, &json!({"source": "const kept = 41;"}), false).unwrap();
-        let mut runtime = window.program.take().unwrap();
-        assert!(matches!(runtime.next(), agent_program::runtime::State::Returned(_)));
-        window.program = Some(runtime);
-        retain_console(&mut window);
+        install_scoped(&session, &mut window, &json!({"source": "return { kept: 41 };"}), false).unwrap();
+        let mut first = window.program.take().unwrap();
+        assert!(matches!(first.next(), agent_program::runtime::State::Returned(value) if value["kept"] == 41));
 
-        // Cell 1 fails with an uncaught runtime error.
-        install_scoped(&session, &mut window, &json!({"source": "throw new Error('cell1 failed');"}), false).unwrap();
-        let mut runtime = window.program.take().unwrap();
-        assert!(matches!(runtime.next(), agent_program::runtime::State::Failed(_)));
-        window.program = Some(runtime);
-        retain_console(&mut window);
-
-        // Cell 2 submits a bad redeclaration (`const kept = 99`): append_cell rejects it,
-        // yet `window.console` must NOT be dropped.
-        let err = install_scoped(&session, &mut window, &json!({"source": "const kept = 99;"}), false).unwrap_err();
-        assert!(err.to_string().contains("kept"), "{err:#}");
-        assert!(window.console.is_some(), "failed append_cell must restore w.console");
-
-        // Cell 3 continues cleanly in the same Console and still sees `kept`.
-        install_scoped(&session, &mut window, &json!({"source": "console.log(kept + 1);"}), false).unwrap();
-        let mut runtime = window.program.take().unwrap();
-        assert!(matches!(runtime.next(), agent_program::runtime::State::Returned(_)));
-        assert_eq!(runtime.logs(), &["42"]);
+        install_scoped(&session, &mut window, &json!({"source": "return { fresh: 42 };"}), false).unwrap();
+        let mut second = window.program.take().unwrap();
+        assert!(matches!(second.next(), agent_program::runtime::State::Returned(value) if value["fresh"] == 42));
+        assert!(second.logs().is_empty());
     }
 
     #[tokio::test]

@@ -343,16 +343,6 @@ impl Heap {
         Ok(())
     }
 
-    /// Add a top-level lexical binding to an already-live environment. This
-    /// is used by persistent Console cells before their declaration executes.
-    pub(super) fn declare_uninitialized(&mut self, environment: HeapId, name: &str) -> Result<()> {
-        let (bindings, uninitialized) = self.environment_mut(environment)?;
-        ensure!(!bindings.contains_key(name), "Identifier '{name}' has already been declared");
-        bindings.insert(name.to_owned(), VmValue::Undefined);
-        uninitialized.insert(name.to_owned());
-        Ok(())
-    }
-
     fn export_json(
         &self,
         value: &VmValue,

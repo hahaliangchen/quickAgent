@@ -67,7 +67,7 @@ pub(super) fn revisions(
     let mut revisions = BTreeMap::new();
     for (name, revision) in requests {
         let function = program.functions.get(&name).filter(|function| function.module_task)
-            .with_context(|| format!("revise_modules requires a top-level @virtual named {name}"))?;
+            .with_context(|| format!("revise_modules requires a top-level @module named {name}"))?;
         ensure!(!revision.reason.trim().is_empty() && revision.reason.chars().count() <= 2000,
             "give a concrete reason of up to 2000 characters to revise {name}");
         let args = vec![Value::Null; function.params.len()];
@@ -116,7 +116,7 @@ fn unmatched_declaration(root: &Path, task: &str, contract: &Contract) -> Result
 /// signature and comment lines give the same contract and reuse its code.
 fn declaration(signature: &str, description: &str) -> String {
     let lines = description.lines().map(|line| format!(" * {line}")).collect::<Vec<_>>().join("\n");
-    format!("/**\n * @virtual\n{lines}\n */\n{signature} {{}}")
+    format!("/**\n * @module\n{lines}\n */\n{signature} {{}}")
 }
 
 /// A main program called `name` without declaring it. When this chat saved an
@@ -220,7 +220,7 @@ fn declarations<'a>(modules: impl Iterator<Item = &'a Row>) -> String {
         .map(|(key, name, signature, description, version, _)| {
             let comment = description.lines().map(|line| format!("  // {line}")).collect::<Vec<_>>().join("\n");
             let path = file_name(name, key);
-            format!("modules/{path} (version {version})\n/** @virtual */\n{signature} {{\n{comment}\n}}")
+            format!("modules/{path} (version {version})\n/** @module */\n{signature} {{\n{comment}\n}}")
         })
         .collect::<Vec<_>>()
         .join("\n\n")

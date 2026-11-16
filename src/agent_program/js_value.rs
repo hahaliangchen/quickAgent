@@ -249,8 +249,8 @@ pub(super) fn to_string(heap: &Heap, value: &VmValue) -> Result<String> {
     to_string_inner(heap, value, &mut BTreeSet::new())
 }
 
-/// Bounded Chrome-DevTools-style inspection options for `console.dir` and
-/// persistent Console binding previews.
+/// Bounded inspection options for the ordinary `console.dir` compatibility
+/// method. These options are never used as a VM state or context protocol.
 #[derive(Clone, Copy)]
 pub(super) struct InspectOptions {
     pub max_depth: usize,
@@ -260,10 +260,6 @@ pub(super) struct InspectOptions {
 }
 
 impl InspectOptions {
-    pub fn scope() -> Self {
-        Self { max_depth: 2, max_items: 5, max_string_chars: 48, max_total_chars: 280 }
-    }
-
     pub fn dir() -> Self {
         Self { max_depth: 3, max_items: 20, max_string_chars: 240, max_total_chars: 8_000 }
     }

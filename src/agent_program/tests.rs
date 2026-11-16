@@ -1,6 +1,5 @@
 use super::*;
 use runtime::ActionKind;
-use std::collections::BTreeSet;
 
 #[test]
 fn binary_chains_compile_and_run_on_a_runtime_worker_stack() {
@@ -950,113 +949,25 @@ fn top_level_task(program: Program) -> Runtime {
 }
 
 #[test]
-fn persistent_console_cells_share_top_level_bindings_and_functions() {
-    let first = compile_cell_with_scope(
-        "const base = 7; function add(n) { return base + n; }",
-        "$$cell/0",
-        libraries::builtin(),
-        BTreeSet::new(),
-    )
-    .unwrap();
-    let mut run = Runtime::task_program(first, "$$cell/0", vec![]).unwrap();
-    assert!(matches!(run.next(), State::Returned(Value::Null)));
+fn one_shot_program_supports_top_level_return_and_uncalled_checks() {
+    let source = "const result = { ok: true, count: 3 }; return result;";
+    let program = compile_with_libraries(source, libraries::builtin()).unwrap();
+    let value = returned(top_level_task(program));
+    assert_eq!(value, json!({"ok": true, "count": 3}));
 
-    let second = compile_cell_with_scope(
-        "console.log(add(5));",
-        "$$cell/1",
-        libraries::builtin(),
-        ["base".to_owned(), "add".to_owned()].into_iter().collect(),
-    )
-    .unwrap();
-    run.append_cell(second, "$$cell/1").unwrap();
-    assert!(matches!(run.next(), State::Returned(Value::Null)));
-    assert_eq!(run.logs(), &["12"]);
-
-    let duplicate = compile_cell_with_scope(
-        "const base = 8;",
-        "$$cell/2",
-        libraries::builtin(),
-        run.module_names(),
-    )
-    .unwrap();
-    assert!(run.append_cell(duplicate, "$$cell/2").is_err());
-
-    let third = compile_cell_with_scope(
-        "console.log(add(6));",
-        "$$cell/3",
-        libraries::builtin(),
-        run.module_names(),
-    )
-    .unwrap();
-    run.append_cell(third, "$$cell/3").unwrap();
-    assert!(matches!(run.next(), State::Returned(Value::Null)));
-    assert_eq!(run.logs(), &["12", "13"]);
+    assert!(uncalled_functions("return {ok:true};", None).is_ok());
+    assert!(uncalled_functions("function unused() {} return 1;", None).is_err());
 }
 
 #[test]
-fn persistent_console_recovers_after_uncaught_runtime_error() {
-    let first = compile_cell_with_scope(
-        "const base = 7; function explode() { throw new Error('boom'); }",
-        "$$cell/0",
-        libraries::builtin(),
-        BTreeSet::new(),
-    )
-    .unwrap();
-    let mut run = Runtime::task_program(first, "$$cell/0", vec![]).unwrap();
-    assert!(matches!(run.next(), State::Returned(Value::Null)));
-
-    let failing = compile_cell_with_scope(
-        "const x = explode();",
-        "$$cell/1",
-        libraries::builtin(),
-        run.module_names(),
-    )
-    .unwrap();
-    run.append_cell(failing, "$$cell/1").unwrap();
-    assert!(matches!(run.next(), State::Failed(_)), "uncaught throw fails the cell while leaving error frames");
-
-    let next_cell = compile_cell_with_scope(
-        "console.log(base + 3);",
-        "$$cell/2",
-        libraries::builtin(),
-        run.module_names(),
-    )
-    .unwrap();
-    run.append_cell(next_cell, "$$cell/2")
-        .expect("append_cell succeeds after an earlier errored Console cell");
-    assert!(matches!(run.next(), State::Returned(Value::Null)));
-    assert_eq!(run.logs(), &["10"]);
-}
-
-#[test]
-fn console_dir_and_binding_previews_inspect_nested_large_values() {
-    let source = r#"
-        const huge = { complete: true, content: 'A'.repeat(120000) };
-        const records = [{ cmd: 'git status', stdout: 'B'.repeat(50000), exit_code: 0 }];
-        const ring = { name: 'self' };
-        ring.self = ring;
-        const bag = new Map([['first', 'alpha'], ['second', 'beta']]);
-        const deep = { outer: { nested: { a: 1, b: 2, c: 3 } } };
-        console.dir(records, { depth: 2, maxStringLength: 16 });
-        console.dir(ring);
-        console.dir(bag);
-    "#;
-    let cell = compile_cell_with_scope(source, "$$cell/0", libraries::builtin(), BTreeSet::new()).unwrap();
-    let mut run = Runtime::task_program(cell, "$$cell/0", vec![]).unwrap();
-    assert!(matches!(run.next(), State::Returned(Value::Null)));
-    assert_eq!(run.logs().len(), 3);
-    assert!(run.logs()[0].contains("Array(1)") && run.logs()[0].contains("string(50000 chars:"), "{}", run.logs()[0]);
-    assert!(run.logs()[0].len() < 1000, "dir preview must remain bounded: {}", run.logs()[0].len());
-    assert!(run.logs()[1].contains("[Circular]"), "{}", run.logs()[1]);
-    assert!(run.logs()[2].contains("Map(2)"), "{}", run.logs()[2]);
-
-    let previews = run.module_binding_previews();
-    let huge_preview = previews.get("huge").expect("huge preview");
-    assert!(huge_preview.contains("complete: true") && huge_preview.contains("string(120000 chars:"), "{huge_preview}");
-    let rec_preview = previews.get("records").expect("records preview");
-    assert!(rec_preview.contains("Array(1)") && rec_preview.contains("stdout: string(50000 chars:"), "{rec_preview}");
-    let deep_preview = previews.get("deep").expect("deep preview");
-    assert!(deep_preview.contains("Object(3 keys: a, b, c)"), "{deep_preview}");
+fn console_methods_remain_ordinary_runtime_logging_only() {
+    let source = r#"console.dir({ nested: { value: 1 } }); return {done:true};"#;
+    let program = compile_with_libraries(source, libraries::builtin()).unwrap();
+    let mut run = top_level_task(program);
+    assert_eq!(run.logs().len(), 0);
+    assert!(matches!(run.next(), State::Returned(value) if value == json!({"done": true})));
+    assert_eq!(run.logs().len(), 1);
+    assert!(run.logs()[0].contains("nested"));
 }
 
 fn returned(mut r: Runtime) -> Value {

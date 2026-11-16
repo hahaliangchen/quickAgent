@@ -181,14 +181,18 @@ impl Plugin for ToolCatalogPlugin {
     }
 }
 
-const FILE_TOOLS: &[&str] = &[
+pub(crate) const FILE_TOOLS: &[&str] = &[
     "exec_command",
     "write_stdin",
     "kill_session",
     "workspace_info",
+    "git_status",
+    "git_diff",
+    "git_log",
     "list_dir",
     "read_file",
     "read_file_lines",
+    "read_file_chunk",
     "search_text",
     "write_file",
     "replace_range",

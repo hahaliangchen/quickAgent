@@ -2803,25 +2803,14 @@ pub fn compile_with_libraries(
     link_prelude(compile_inner(source, super::ENTRY, false, libraries, BTreeSet::new(), false)?)
 }
 
-/// Compile one top-level Console cell. The unique entry lets the cell be
-/// appended to an existing Runtime without recompiling or replaying earlier
-/// cells.
-pub fn compile_cell_with_scope(
-    source: &str,
-    entry: &str,
-    libraries: super::libraries::Libraries,
-    external_names: BTreeSet<String>,
-) -> Result<Program> {
-    ensure!(entry.starts_with("$$cell/"), "invalid Console cell entry");
-    link_prelude(compile_inner(source, entry, false, libraries, external_names, false)?)
-}
 /// A declared function nothing calls or passes on is work the author meant to
-/// run: the host calls no ordinary function for a Console cell, only its cell
-/// entry (or a declared capability entry). Name
-/// it instead of letting the program end having done nothing (2026-11-11: a
+/// run: a one-shot program executes its top-level statements, while a module
+/// implementation is entered by its declared capability entry. Name an
+/// otherwise unused helper instead of letting the program end having done
+/// nothing (2026-11-11: a
 /// main() that was never called made eighteen programs finish silently).
-/// The host checks what an AI submits; the VM's own tests keep their main()
-/// entry convention.
+/// The host checks what an AI submits; one-shot programs execute their
+/// top-level statements directly and return their final value.
 ///
 /// It also names a called function whose body is empty and which carries a
 /// contract comment but no @virtual or @module tag: that is AI work with its
@@ -2833,7 +2822,12 @@ pub fn uncalled_functions(source: &str, entry: Option<&str>) -> Result<()> {
     let map: Lrc<SourceMap> = Default::default();
     let file = map.new_source_file(FileName::Custom("agent-program.js".into()).into(), source.to_owned());
     let comments = SingleThreadedComments::default();
-    let mut parser = Parser::new_from(Lexer::new(Syntax::Es(EsSyntax::default()), Default::default(), StringInput::from(&*file), Some(&comments)));
+    let mut parser = Parser::new_from(Lexer::new(
+        Syntax::Es(EsSyntax { allow_return_outside_function: true, ..Default::default() }),
+        Default::default(),
+        StringInput::from(&*file),
+        Some(&comments),
+    ));
     let Ok(module) = parser.parse_module() else { return Ok(()) };
     /// Name, function span and body span of a declaration whose body holds no statement.
     type Empty = (String, Span, Span);
@@ -2954,7 +2948,7 @@ fn compile_inner(
     );
     let comments = SingleThreadedComments::default();
     let lexer = Lexer::new(
-        Syntax::Es(EsSyntax::default()),
+        Syntax::Es(EsSyntax { allow_return_outside_function: !refinement, ..Default::default() }),
         Default::default(),
         StringInput::from(&*file),
         Some(&comments),
@@ -2966,7 +2960,7 @@ fn compile_inner(
             "ReturnNotAllowed" if refinement => format!(
                 "return is only allowed inside a function; the host calls {entry} itself with this call's arguments, so put this code inside {entry}"
             ),
-            "ReturnNotAllowed" => "return is only allowed inside a function; a program ends after its last statement, so log what it found with console.log".to_owned(),
+            "ReturnNotAllowed" => "top-level return is supported only by a one-shot program; use it to deliver the final structured result".to_owned(),
             _ => kind,
         }
     };
@@ -3037,8 +3031,9 @@ fn compile_inner(
         external.insert("module".into());
         external.insert("exports".into());
     }
-    // A Console cell is a top-level program with a unique synthetic entry.
-    let implicit_entry = !refinement && (entry == super::ENTRY || entry.starts_with("$$cell/"));
+    // Main programs are one-shot top-level scripts. Module implementations
+    // still compile against their named entry function.
+    let implicit_entry = !refinement && entry == super::ENTRY;
     for item in module.body {
         match item {
             ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {

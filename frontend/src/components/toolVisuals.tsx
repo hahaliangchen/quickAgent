@@ -115,6 +115,7 @@ const EXACT: Record<string, Omit<ToolVisual, 'summary'>> = {
   git_status: { tone: 'search', icon: <IconBranchOutlineMedium />, title: '查看了 Git 状态' },
   git_diff: { tone: 'read', icon: <IconCompareSplitOutlineMedium />, title: '查看了 Git 变更' },
   git_log: { tone: 'search', icon: <IconClockOutlineMedium />, title: '查看了 Git 提交历史' },
+  read_git: { tone: 'search', icon: <IconBranchOutlineMedium />, title: '读取了 Git 证据' },
   read_tool_contracts: { tone: 'context', icon: <IconApiOutlineMedium />, title: '查看了库方法说明' },
   find_library_methods: { tone: 'context', icon: <IconSearchOutlineMedium />, title: '查找了库方法' },
   read_program_guide: { tone: 'context', icon: <IconChecklistOutlineMedium />, title: '查看了编程指南' },
@@ -158,6 +159,7 @@ function summaryFor(name: string, args: Record<string, unknown>): string | undef
     case 'git_status': return Array.isArray(args.paths) && args.paths.length > 0 ? `路径：${args.paths.map(value => text(value)).filter(Boolean).join('、')}` : '工作区状态'
     case 'git_diff': return args.stat_only === true ? '变更统计' : [text(args.rev_range), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '工作区变更'].filter(Boolean).join(' · ')
     case 'git_log': return [text(args.rev), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '提交历史'].filter(Boolean).join(' · ')
+    case 'read_git': return [text(args.view), text(args.path ?? args.file ?? args.ref)].filter(Boolean).join(' · ') || 'Git 证据'
     case 'write_stdin': return `会话 ${String(args.session_id ?? '未知')} · ${typeof args.chars === 'string' && args.chars.length > 0 ? JSON.stringify(args.chars) : '等待输出'}`
     case 'kill_session': return `会话 ${String(args.session_id ?? '未知')}`
     case 'create_task': return [text(args.goal), text(args.reason) && `原因：${text(args.reason)}`].filter(Boolean).join(' · ')
