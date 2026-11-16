@@ -124,6 +124,53 @@ pub(crate) struct Window {
     /// or compacted window must perform a fresh, permission-checked lookup.
     #[serde(skip)]
     contract_reuse: BTreeMap<String, ContractReuse>,
+    /// Shared compact state passed explicitly across lightweight virtual steps
+    /// and across user turns without keeping bulky exploration tool dumps.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub(super) main_context: serde_json::Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) step_trail: Vec<StepSummary>,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub(super) step_handoffs_in_turn: usize,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub(super) step_rounds_in_scope: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(super) step_handoff_required: bool,
+}
+
+pub(super) const HANDOFF_STEP: &str = "handoff_step";
+pub(super) const SET_NEXT_STEP: &str = "set_next_step";
+pub(super) const VIRTUAL_STEP_HANDOFF: &str = "virtual_step_handoff";
+const VIRTUAL_STEP_WRAP_DIRECTIVE: &str = "virtual_step_wrap_required";
+const MAIN_CONTEXT_PATCH_LIMIT_BYTES: usize = 32 * 1024;
+const MAIN_CONTEXT_TOTAL_LIMIT_BYTES: usize = 64 * 1024;
+const MAX_STEP_HANDOFFS_PER_TURN: usize = 12;
+const STEP_WRAP_ROUND_CHARS: usize = 120_000;
+const STEP_WRAP_WINDOW_TOKENS: usize = 120_000;
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub(super) struct StepSummary {
+    pub(super) step: String,
+    pub(super) purpose: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) updated_keys: Vec<String>,
+}
+
+#[derive(Clone)]
+struct StepHandoff {
+    next_context: serde_json::Map<String, Value>,
+    entry: StepSummary,
+    next_step: String,
+    next_goal: String,
+    main_context_bytes: usize,
 }
 
 #[derive(Clone)]
@@ -362,6 +409,10 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
         _ => {}
     }
     // The main AI finds methods to read and run with while it gets to know the task.
+    if program_flow::role(w) == program_flow::Role::Main && s.is_primary() {
+        definitions.push(handoff_step_tool());
+        definitions.push(set_next_step_tool());
+    }
     if program_flow::role(w) == program_flow::Role::Main && s.plugin.is_none() {
         definitions.push(program_flow::find_main_tool());
         definitions.extend(project_flows::tools());
@@ -371,9 +422,320 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     }
     #[cfg(test)]
     if documented_examples::repository_review_naive(s) {
-        definitions.retain(|tool| tool["function"]["name"] != "write_program");
+        definitions.retain(|tool| !matches!(tool["function"]["name"].as_str(), Some("write_program" | HANDOFF_STEP | SET_NEXT_STEP)));
     }
     definitions
+}
+
+fn set_next_step_tool() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": SET_NEXT_STEP,
+            "description": "Declare what this exploration round is doing (current_step) and what you plan to do next (next_step). Can be called in parallel alongside read/search/command tools in the same reply with zero extra round latency.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "current_step": {
+                        "type": "string",
+                        "description": "Concise 1-sentence purpose of the tool calls in this round."
+                    },
+                    "next_step": {
+                        "type": "string",
+                        "description": "Concise 1-sentence plan for what to do next once this round completes (usable later as a virtual method/goal boundary)."
+                    },
+                    "context_keys": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional short key/path names expected to feed the next step."
+                    }
+                },
+                "required": ["current_step", "next_step"]
+            }
+        }
+    })
+}
+
+fn prepare_next_step(args: &Value) -> Result<Value> {
+    let current_step = required_trimmed_str(args, "current_step")?;
+    let next_step = required_trimmed_str(args, "next_step")?;
+    let context_keys: Vec<String> = args
+        .get("context_keys")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "recorded": true,
+        "current_step": current_step,
+        "next_step": next_step,
+        "context_keys": context_keys,
+    }))
+}
+
+fn ensure_primary_main_react(s: &Session<'_>, w: &Window, tool: &str) -> Result<()> {
+    ensure!(
+        program_flow::role(w) == program_flow::Role::Main
+            && s.is_primary()
+            && w.program.is_none()
+            && w.program_task.is_none(),
+        "MAIN_REACT_ONLY: {tool} is available only in the primary main ReAct loop"
+    );
+    Ok(())
+}
+
+fn handoff_step_tool() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": HANDOFF_STEP,
+            "description": "Finish the current virtual exploration/work step, merge compact verified facts into shared mainContext, clear transient tool outputs, and enter a clean next virtual step. Must be called alone. Rejects main_context_patch > 32 KiB or total mainContext > 64 KiB.",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "step_name": {
+                        "type": "string",
+                        "description": "Short camelCase or snake_case virtual method name for the step just completed (e.g. 'inventoryLogs' or 'inspect_api')."
+                    },
+                    "completed": {
+                        "type": "string",
+                        "description": "Concise 1-2 sentence summary of verified findings or work completed in this step."
+                    },
+                    "main_context_patch": {
+                        "type": "object",
+                        "description": "Compact key/value updates to merge into shared mainContext (exact file paths, symbols, commands, counts, structured status; never raw file bodies or logs). Use null to delete a stale key."
+                    },
+                    "next_step": {
+                        "type": "string",
+                        "description": "Short virtual method name for the next clean step (e.g. 'verifyWorkflows' or 'implement_fix')."
+                    },
+                    "next_goal": {
+                        "type": "string",
+                        "description": "Explicit task boundary and deliverables for the next virtual method: which inputs in mainContext it owns and what it must produce."
+                    }
+                },
+                "required": ["step_name", "completed", "next_step", "next_goal"]
+            }
+        }
+    })
+}
+
+fn required_trimmed_str<'a>(args: &'a Value, field: &str) -> Result<&'a str> {
+    let text = args[field]
+        .as_str()
+        .with_context(|| format!("{field} is required"))?
+        .trim();
+    ensure!(!text.is_empty(), "{field} must not be empty");
+    Ok(text)
+}
+
+fn prepare_handoff_step(w: &Window, args: &Value) -> Result<(Value, StepHandoff)> {
+    ensure!(
+        w.step_handoffs_in_turn < MAX_STEP_HANDOFFS_PER_TURN,
+        "STEP_HANDOFF_LIMIT: reached {MAX_STEP_HANDOFFS_PER_TURN} virtual step handoffs in one turn; answer directly or run a program."
+    );
+    let step_name = required_trimmed_str(args, "step_name")?.to_owned();
+    let completed = required_trimmed_str(args, "completed")?.to_owned();
+    let next_step = required_trimmed_str(args, "next_step")?.to_owned();
+    let next_goal = required_trimmed_str(args, "next_goal")?.to_owned();
+
+    let empty_patch = serde_json::Map::new();
+    let patch = match args.get("main_context_patch") {
+        None | Some(Value::Null) => &empty_patch,
+        Some(value) => value
+            .as_object()
+            .context("main_context_patch must be a JSON object")?,
+    };
+    let patch_bytes = serde_json::to_vec(patch)?.len();
+    ensure!(
+        patch_bytes <= MAIN_CONTEXT_PATCH_LIMIT_BYTES,
+        "MAIN_CONTEXT_OVER_LIMIT: main_context_patch is {patch_bytes} bytes (max {MAIN_CONTEXT_PATCH_LIMIT_BYTES}). Store only compact verified facts, paths, commands, and structured status — never raw logs or file bodies."
+    );
+
+    let mut next_context = w.main_context.clone();
+    let mut updated_keys = Vec::with_capacity(patch.len());
+    for (key, value) in patch {
+        updated_keys.push(key.clone());
+        if value.is_null() {
+            next_context.remove(key);
+        } else {
+            next_context.insert(key.clone(), value.clone());
+        }
+    }
+    let main_context_bytes = serde_json::to_vec(&next_context)?.len();
+    ensure!(
+        main_context_bytes <= MAIN_CONTEXT_TOTAL_LIMIT_BYTES,
+        "MAIN_CONTEXT_OVER_LIMIT: merged mainContext is {main_context_bytes} bytes (max {MAIN_CONTEXT_TOTAL_LIMIT_BYTES}). Delete stale keys with null in main_context_patch or keep only compact structured facts."
+    );
+
+    let receipt = json!({
+        "status": "handed_off",
+        "step": step_name,
+        "next_step": next_step,
+        "main_context_bytes": main_context_bytes,
+        "step_count": w.step_trail.len() + 1,
+    });
+    let handoff = StepHandoff {
+        next_context,
+        entry: StepSummary {
+            step: step_name,
+            purpose: completed,
+            updated_keys,
+        },
+        next_step,
+        next_goal,
+        main_context_bytes,
+    };
+    Ok((receipt, handoff))
+}
+
+pub(super) fn virtual_step_handoff_message(
+    w: &Window,
+    next_step: Option<(&str, &str)>,
+    carried_across_turns: bool,
+) -> Value {
+    let previous_steps: Vec<Value> = w
+        .step_trail
+        .iter()
+        .enumerate()
+        .map(|(idx, entry)| {
+            json!({
+                "index": idx + 1,
+                "step": entry.step,
+                "purpose": entry.purpose,
+                "updated_keys": entry.updated_keys,
+            })
+        })
+        .collect();
+    let mut payload = json!({
+        "type": VIRTUAL_STEP_HANDOFF,
+        "previous_steps": previous_steps,
+        "mainContext": w.main_context,
+    });
+    if let Some((name, goal)) = next_step {
+        payload["current_step"] = json!({"name": name, "goal": goal});
+        payload["instruction"] = json!(
+            "Clean virtual step scope. Earlier exploration tool dumps were cleared; original user constraints above and mainContext here remain authoritative. Continue from current_step.goal using direct ReAct tools (check search_text/list_dir or recorded line counts instead of guessing start_line), call handoff_step when ready to hand off a stage, or use write_program only when multi-step orchestration/parallel fan-out is needed."
+        );
+    } else if carried_across_turns {
+        payload["carried_across_turns"] = json!(true);
+        payload["instruction"] = json!(
+            "Previous turns left verified facts in mainContext and step summaries in previous_steps. Re-verify volatile workspace files/status before acting on stale assumptions."
+        );
+    }
+    json!({
+        "role": "user",
+        "name": VIRTUAL_STEP_HANDOFF,
+        "_frame_input": true,
+        "content": serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()),
+    })
+}
+
+fn reset_messages_for_virtual_step(w: &mut Window, handoff: &StepHandoff) {
+    let prefix_end = w
+        .messages
+        .iter()
+        .position(task_frames::is_user_original)
+        .unwrap_or_else(|| w.messages.iter().take_while(|m| m["role"] == "system").count());
+    let mut kept = Vec::new();
+    for (idx, mut message) in w.messages.drain(..).enumerate() {
+        if idx < prefix_end {
+            if message["name"].as_str() != Some(VIRTUAL_STEP_HANDOFF) {
+                kept.push(message);
+            }
+            continue;
+        }
+        if task_frames::is_user_original(&message) {
+            kept.push(message);
+        } else if message["_pinned"].as_bool() == Some(true) {
+            if message["role"] == "tool" {
+                message["role"] = json!("user");
+                message["name"] = json!("saved_asset");
+                if let Some(object) = message.as_object_mut() {
+                    object.remove("tool_call_id");
+                }
+            }
+            kept.push(message);
+        }
+    }
+    kept.push(virtual_step_handoff_message(
+        w,
+        Some((&handoff.next_step, &handoff.next_goal)),
+        false,
+    ));
+    w.messages = kept;
+}
+
+async fn maybe_require_step_wrap(
+    s: &Session<'_>,
+    w: &mut Window,
+    definitions: &[Value],
+    step: usize,
+    node: &str,
+    round_added_chars: usize,
+) -> Result<()> {
+    if program_flow::role(w) != program_flow::Role::Main
+        || !s.is_primary()
+        || w.program.is_some()
+        || w.program_task.is_some()
+        || w.blocked.is_some()
+    {
+        return Ok(());
+    }
+    w.step_rounds_in_scope += 1;
+    if w.step_handoff_required
+        || w.step_handoffs_in_turn >= MAX_STEP_HANDOFFS_PER_TURN
+        || !definitions
+            .iter()
+            .any(|tool| tool["function"]["name"] == HANDOFF_STEP)
+    {
+        return Ok(());
+    }
+    let current_tokens = w.input_tokens(s, &request(s, &w.messages, definitions));
+    let token_threshold = STEP_WRAP_WINDOW_TOKENS.min((s.input_budget / 2).max(1));
+    let bloated = round_added_chars >= STEP_WRAP_ROUND_CHARS
+        || (w.step_rounds_in_scope >= 2 && current_tokens >= token_threshold);
+    if !bloated {
+        return Ok(());
+    }
+    w.step_handoff_required = true;
+    append(
+        s,
+        "flow/step_wrap_requested",
+        json!({
+            "actor": s.actor(),
+            "turn": s.turn,
+            "step": step,
+            "flowNodeId": node,
+            "estimatedTokens": current_tokens,
+            "roundAddedChars": round_added_chars,
+            "stepRoundsInScope": w.step_rounds_in_scope,
+        }),
+        true,
+    )
+    .await?;
+    let payload = json!({
+        "type": VIRTUAL_STEP_WRAP_DIRECTIVE,
+        "reason": format!(
+            "Host closed this exploration scope because the current virtual step reached ~{} tokens ({} chars delivered in the last round).",
+            current_tokens,
+            round_added_chars
+        ),
+        "required_action": "Choose one clean exit now before calling more read/search/command tools: (1) call handoff_step({step_name, completed, main_context_patch, next_step, next_goal}) to name this virtual method, distill compact verified facts into mainContext (<= 32 KiB patch / 64 KiB total), name the next virtual method, and draw its exact task boundary; (2) submit write_program if targets/rules are ready to orchestrate; or (3) reply in plain text if the task is already settled.",
+    });
+    w.messages.push(json!({
+        "role": "user",
+        "name": VIRTUAL_STEP_WRAP_DIRECTIVE,
+        "_frame_input": true,
+        "content": serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()),
+    }));
+    save(s, w).await
 }
 
 /// The main AI of a code session runs read-only commands itself where the
@@ -527,6 +889,8 @@ fn page_allows(s: &Session<'_>, name: &str) -> bool {
             | "release_assets"
             | "list_context_assets"
             | "write_program"
+            | "handoff_step"
+            | "set_next_step"
     ) || crate::function_frames::is_tool(name)
         || s.state
             .tool_catalog
@@ -2749,6 +3113,10 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             && w.program_value.is_none()
         {
             Box::pin(submit_program(s, w, &message, call, &node, step)).await?;
+            if w.program.is_some() {
+                w.step_rounds_in_scope = 0;
+                w.step_handoff_required = false;
+            }
             continue;
         }
         if calls.is_empty() {
@@ -2880,6 +3248,7 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
         let mut round_added_chars = 0usize;
         let mut image_messages = Vec::new();
         let mut released_assets = None;
+        let mut step_handoff = None;
         let mut overflow = false;
         let mut asked = None;
         let mut blocker = None;
@@ -2894,7 +3263,10 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                     }
                 }
             } else {execute_call(s,w,&definitions,&node,step,&call,call_count,None).await?};
-            let Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets: released }=executed;
+            let Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets: released, step_handoff: handoff }=executed;
+            if handoff.is_some() {
+                step_handoff = handoff;
+            }
             if call.name == program_flow::ASK && !is_error {
                 asked = result["question"].as_str().map(str::to_owned);
             }
@@ -3039,6 +3411,37 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             crate::context_assets::release(&mut w.messages, &ids)?;
             save(s, w).await?;
         }
+        if !overflow && let Some(handoff) = step_handoff {
+            w.main_context = handoff.next_context.clone();
+            w.step_trail.push(handoff.entry.clone());
+            w.step_handoffs_in_turn += 1;
+            append(
+                s,
+                "flow/step_handoff",
+                json!({
+                    "actor": s.actor(),
+                    "turn": s.turn,
+                    "step": step,
+                    "flowNodeId": node,
+                    "completedStep": handoff.entry.step,
+                    "completedPurpose": handoff.entry.purpose,
+                    "updatedKeys": handoff.entry.updated_keys,
+                    "nextStep": handoff.next_step,
+                    "nextGoal": handoff.next_goal,
+                    "mainContextBytes": handoff.main_context_bytes,
+                    "stepCount": w.step_trail.len(),
+                }),
+                true,
+            )
+            .await?;
+            reset_messages_for_virtual_step(w, &handoff);
+            w.step_rounds_in_scope = 0;
+            w.step_handoff_required = false;
+            w.contract_reuse.clear();
+            w.failures.clear();
+            save(s, w).await?;
+            continue 'round;
+        }
         // A leaf that outgrew its context throws to its coded caller, which
         // can split the work; nothing is compressed.
         // A leaf ends early when it asked the user or outgrew its context.
@@ -3079,6 +3482,7 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             }
             return Ok(LoopResult::Answer);
         }
+        maybe_require_step_wrap(s, w, &definitions, step, &node, round_added_chars).await?;
     }
     Ok(LoopResult::Limit)
     })
@@ -3336,6 +3740,7 @@ struct Executed {
     skill_change: Option<(String, bool, Option<u64>)>,
     refreshed_from: Option<Value>,
     released_assets: Option<Vec<String>>,
+    step_handoff: Option<StepHandoff>,
 }
 
 /// Run one call, made by the AI or by the program, and record it in the event
@@ -3427,6 +3832,7 @@ async fn execute_call(
     let w: &Window = window;
     let mut skill_change = None;
     let mut released_assets = None;
+    let mut step_handoff = None;
     append(s,"tool/call",json!({"actor":s.actor(),"turn":s.turn,"step":step,"flowNodeId":node,"callId":call.call_id,"name":call.name,"arguments":call.arguments,
         "program_location":at,"description":task_frames::tool_description(definitions,&call.name,&call.arguments)}),false).await?;
     let mut material_source: Option<(String, Value)> = None;
@@ -3448,7 +3854,16 @@ async fn execute_call(
         }
         // Mode enforcement is independent of the model's advertised schema.
         if !program_flow::internal_call(w,call) {validate_tool(s,w,definitions,&call.name)?;}
-        if crate::function_frames::is_tool(&call.name) || matches!(call.name.as_str(),"release_assets"|"read_skill"|"unload_skill") {
+        if w.step_handoff_required
+            && program_flow::role(w) == program_flow::Role::Main
+            && s.is_primary()
+            && !matches!(call.name.as_str(), HANDOFF_STEP | program_flow::WRITE_PROGRAM)
+        {
+            anyhow::bail!(
+                "VIRTUAL_STEP_WRAP_REQUIRED: Host wrapped this bloated virtual step. Call handoff_step({{step_name, completed, main_context_patch, next_step, next_goal}}) to name this virtual method, save compact facts to mainContext, name the next method and define its task boundary — or call write_program / reply directly."
+            );
+        }
+        if crate::function_frames::is_tool(&call.name) || matches!(call.name.as_str(),"release_assets"|"unload_skill"|HANDOFF_STEP) {
             ensure!(call_count==1,"context-changing tools must be called alone so every read result reaches a subsequent AI request");
         }
         match call.name.as_str() {
@@ -3631,6 +4046,32 @@ async fn execute_call(
             },
             // A fixer edits its own module file, not the workspace.
             "edit_file" if program_flow::role(w) == program_flow::Role::Fix => modules::edit(s, w, &args),
+            name if name == HANDOFF_STEP => {
+                ensure_primary_main_react(s, w, HANDOFF_STEP)?;
+                let (receipt, handoff) = prepare_handoff_step(w, &args)?;
+                step_handoff = Some(handoff);
+                Ok(receipt)
+            }
+            name if name == SET_NEXT_STEP => {
+                ensure_primary_main_react(s, w, SET_NEXT_STEP)?;
+                let receipt = prepare_next_step(&args)?;
+                append(
+                    s,
+                    "flow/next_step_declared",
+                    json!({
+                        "actor": s.actor(),
+                        "turn": s.turn,
+                        "step": step,
+                        "flowNodeId": node,
+                        "currentStep": receipt["current_step"],
+                        "nextStep": receipt["next_step"],
+                        "contextKeys": receipt["context_keys"],
+                    }),
+                    false,
+                )
+                .await?;
+                Ok(receipt)
+            }
             "refresh_asset" => {
                 let id=args["asset_id"].as_str().context("asset_id is required")?.to_owned();
                 let root=s.state.workspace.root().to_path_buf(); let task=s.task.to_owned();
@@ -3755,7 +4196,7 @@ async fn execute_call(
     if is_error && result["code"] == "REPEATED_NO_PROGRESS" {
         window.messages.push(sourced(execution_ledger_message(call, &result, is_error, seq, at), s.task, ledger_seq));
     }
-    Ok(Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets })
+    Ok(Executed { result, is_error, seq, asset_reference, skill_change, refreshed_from, released_assets, step_handoff })
 }
 
 /// Recover a completed result that was committed before the window update.
@@ -5971,5 +6412,586 @@ mod tests {
 
         let tiny = delivery_soft_limits(32_000);
         assert_eq!(tiny.round_tokens, 32_000);
+    }
+
+    #[tokio::test]
+    async fn handoff_step_clears_step_noise_enforces_budget_and_keeps_constraints() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        std::fs::write(
+            root.path().join("big_exploration.txt"),
+            format!("SECRET_EXPLORATION_NOISE_MARKER\n{}", "x".repeat(4000)),
+        )
+        .unwrap();
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let msgs = body["messages"].as_array().unwrap();
+                        let joined = serde_json::to_string(msgs).unwrap();
+                        let message = match step {
+                            0 => json!({
+                                "role": "assistant",
+                                "content": Value::Null,
+                                "tool_calls": [{
+                                    "id": "call_read",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": json!({"path": "big_exploration.txt"}).to_string()
+                                    }
+                                }]
+                            }),
+                            1 => {
+                                assert!(joined.contains("SECRET_EXPLORATION_NOISE_MARKER"));
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "call_oversized_handoff",
+                                        "type": "function",
+                                        "function": {
+                                            "name": HANDOFF_STEP,
+                                            "arguments": json!({
+                                                "step_name": "explore_files",
+                                                "completed": "Read big_exploration.txt",
+                                                "main_context_patch": {"dump": "z".repeat(34_000)},
+                                                "next_step": "finalize",
+                                                "next_goal": "Answer concisely"
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            2 => {
+                                let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool").unwrap();
+                                assert!(
+                                    last_tool["content"].as_str().unwrap().contains("MAIN_CONTEXT_OVER_LIMIT"),
+                                    "oversized patch must be rejected cleanly: {last_tool}"
+                                );
+                                assert!(
+                                    joined.contains("SECRET_EXPLORATION_NOISE_MARKER"),
+                                    "failed handoff must not wipe the current window"
+                                );
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "call_valid_handoff",
+                                        "type": "function",
+                                        "function": {
+                                            "name": HANDOFF_STEP,
+                                            "arguments": json!({
+                                                "step_name": "explore_files",
+                                                "completed": "Verified target_file=big_exploration.txt",
+                                                "main_context_patch": {"target_file": "big_exploration.txt", "verified_count": 1},
+                                                "next_step": "finalize",
+                                                "next_goal": "Deliver concise answer"
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            _ => {
+                                assert!(
+                                    !joined.contains("SECRET_EXPLORATION_NOISE_MARKER"),
+                                    "successful handoff must clear step exploration tool dumps"
+                                );
+                                assert!(
+                                    joined.contains("Keep constraint: do not modify code."),
+                                    "original user hard constraint must survive handoff"
+                                );
+                                let handoff_msg = msgs
+                                    .iter()
+                                    .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+                                    .expect("virtual_step_handoff frame must be present");
+                                let frame: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
+                                assert_eq!(frame["previous_steps"][0]["step"], "explore_files");
+                                assert_eq!(frame["current_step"]["name"], "finalize");
+                                assert_eq!(frame["mainContext"]["target_file"], "big_exploration.txt");
+                                assert_eq!(frame["mainContext"]["verified_count"], 1);
+                                json!({"role": "assistant", "content": "Done cleanly."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state.clone(),
+            "task".into(),
+            "fake".into(),
+            "Keep constraint: do not modify code.".into(),
+            8,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 4);
+        let handoff_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_task_events WHERE task_id='task' AND kind='flow/step_handoff'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(handoff_events, 1);
+        let raw_window: String = conn
+            .query_row(
+                "SELECT state FROM agent_runtime_windows WHERE task_id='task' AND scope='main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let persisted: Window = serde_json::from_str(&raw_window).unwrap();
+        assert_eq!(persisted.main_context.get("target_file"), Some(&json!("big_exploration.txt")));
+        assert_eq!(persisted.step_trail.len(), 1);
+        assert_eq!(persisted.step_handoffs_in_turn, 1);
+    }
+
+    #[tokio::test]
+    async fn handoff_step_preserves_pinned_assets_and_carries_across_turns() {
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let session = Session {
+            agent_id: None,
+            task_node_id: None,
+            plugin: None,
+            state: &state,
+            task: "task",
+            model: "fake",
+            turn: 2,
+            cancel: &cancel,
+            ban_execution: false,
+            scope: "main".into(),
+            parent: None,
+            input_budget: INPUT_BUDGET,
+        };
+
+        let mut w = Window {
+            messages: vec![
+                json!({"role": "system", "content": MAIN_PROMPT}),
+                json!({"role": "user", "name": VIRTUAL_STEP_HANDOFF, "content": "{\"stale\":true}"}),
+                json!({"role": "user", "content": "Follow strict constraint X."}),
+                json!({"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]}),
+                json!({"role": "tool", "tool_call_id": "c1", "content": "NOISY_TOOL_DUMP"}),
+                json!({"role": "tool", "tool_call_id": "c_pin", "_pinned": true, "content": "PINNED_SKILL_BODY"}),
+            ],
+            ..Default::default()
+        };
+
+        let (_, h1) = prepare_handoff_step(
+            &w,
+            &json!({
+                "step_name": "step_one",
+                "completed": "Stored first large summary",
+                "main_context_patch": {"heavy": "a".repeat(30_000), "keep": "ok"},
+                "next_step": "step_two",
+                "next_goal": "Test total cap"
+            }),
+        )
+        .unwrap();
+        w.main_context = h1.next_context.clone();
+        w.step_trail.push(h1.entry.clone());
+        w.step_handoffs_in_turn = 1;
+
+        let (_, h2) = prepare_handoff_step(
+            &w,
+            &json!({
+                "step_name": "step_two",
+                "completed": "Add second chunk within 64K",
+                "main_context_patch": {"more": "b".repeat(25_000)},
+                "next_step": "step_three",
+                "next_goal": "Trigger total cap next"
+            }),
+        )
+        .unwrap();
+        w.main_context = h2.next_context.clone();
+        w.step_trail.push(h2.entry.clone());
+
+        let over_total = prepare_handoff_step(
+            &w,
+            &json!({
+                "step_name": "step_three",
+                "completed": "Exceed total 64K limit",
+                "main_context_patch": {"overflow": "c".repeat(15_000)},
+                "next_step": "step_four",
+                "next_goal": "Should fail"
+            }),
+        );
+        assert!(over_total.is_err());
+
+        let (_, h3) = prepare_handoff_step(
+            &w,
+            &json!({
+                "step_name": "step_three",
+                "completed": "Compact stale keys with null and update",
+                "main_context_patch": {"heavy": null, "more": null, "head": "abc123"},
+                "next_step": "verify",
+                "next_goal": "Run verification"
+            }),
+        )
+        .unwrap();
+        w.main_context = h3.next_context.clone();
+        w.step_trail.push(h3.entry.clone());
+        reset_messages_for_virtual_step(&mut w, &h3);
+
+        let serialized = serde_json::to_string(&w.messages).unwrap();
+        assert!(!serialized.contains("NOISY_TOOL_DUMP"));
+        assert!(!serialized.contains("\"stale\":true"));
+        assert!(serialized.contains("Follow strict constraint X."));
+        let pinned = w
+            .messages
+            .iter()
+            .find(|m| m["content"] == "PINNED_SKILL_BODY")
+            .expect("pinned skill must survive");
+        assert_eq!(pinned["role"], "user");
+        assert_eq!(pinned["name"], "saved_asset");
+        assert!(pinned.get("tool_call_id").is_none());
+
+        let turn2 = task_frames::fresh_main_window(&session, Some(&w), vec![])
+            .await
+            .unwrap();
+        assert_eq!(turn2.step_handoffs_in_turn, 0);
+        assert_eq!(turn2.main_context.get("keep"), Some(&json!("ok")));
+        assert_eq!(turn2.main_context.get("head"), Some(&json!("abc123")));
+        assert!(!turn2.main_context.contains_key("heavy"));
+        assert_eq!(turn2.step_trail.len(), 3);
+        let carried = turn2
+            .messages
+            .iter()
+            .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+            .expect("turn 2 window must carry virtual_step_handoff frame");
+        assert!(carried["content"].as_str().unwrap().contains("abc123"));
+        assert!(carried["content"].as_str().unwrap().contains("carried_across_turns"));
+    }
+
+    #[tokio::test]
+    async fn read_skill_allows_parallel_calls_alongside_other_tools() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        for (name, rule) in [("skill-alpha", "ALPHA_SKILL_RULE"), ("skill-beta", "BETA_SKILL_RULE")] {
+            let dir = root.path().join(".agents/skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Test {name}\n---\n{rule}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(root.path().join("README.md"), "repo").unwrap();
+
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let msgs = body["messages"].as_array().unwrap();
+                        let joined = serde_json::to_string(msgs).unwrap();
+                        let message = match step {
+                            0 => json!({
+                                "role": "assistant",
+                                "content": Value::Null,
+                                "tool_calls": [
+                                    {"id": "s1", "type": "function", "function": {"name": "read_skill", "arguments": json!({"name": "skill-alpha"}).to_string()}},
+                                    {"id": "s2", "type": "function", "function": {"name": "read_skill", "arguments": json!({"name": "skill-beta"}).to_string()}},
+                                    {"id": "d1", "type": "function", "function": {"name": "list_dir", "arguments": json!({"path": "."}).to_string()}},
+                                ]
+                            }),
+                            _ => {
+                                assert!(joined.contains("ALPHA_SKILL_RULE"));
+                                assert!(joined.contains("BETA_SKILL_RULE"));
+                                assert!(joined.contains("README.md"));
+                                let tool_errors: Vec<_> = msgs
+                                    .iter()
+                                    .filter(|m| m["role"] == "tool" && m["content"].as_str().unwrap_or("").contains("error"))
+                                    .collect();
+                                assert!(tool_errors.is_empty(), "parallel read_skill + list_dir must not error: {tool_errors:?}");
+                                json!({"role": "assistant", "content": "Both skills loaded in parallel."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state,
+            "task".into(),
+            "fake".into(),
+            "Load both skills and list dir".into(),
+            6,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn host_forces_virtual_step_wrap_when_round_bloats_and_blocks_more_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        for i in 1..=3 {
+            std::fs::write(
+                root.path().join(format!("chunk{i}.txt")),
+                format!("BLOATED_DUMP_MARKER_{i}\n{}", "d".repeat(50_000)),
+            )
+            .unwrap();
+        }
+        std::fs::write(root.path().join("clean_target.txt"), "CLEAN_STEP_TARGET_OK").unwrap();
+
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let msgs = body["messages"].as_array().unwrap();
+                        let joined = serde_json::to_string(msgs).unwrap();
+                        let message = match step {
+                            0 => json!({
+                                "role": "assistant",
+                                "content": Value::Null,
+                                "tool_calls": (1..=3).map(|i| json!({
+                                    "id": format!("read_{i}"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": json!({"path": format!("chunk{i}.txt"), "max_chars": 55_000}).to_string()
+                                    }
+                                })).collect::<Vec<_>>()
+                            }),
+                            1 => {
+                                assert!(
+                                    msgs.iter().any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_WRAP_DIRECTIVE)),
+                                    "host must notify AI of forced virtual step wrap after heavy round"
+                                );
+                                // Simulate AI ignoring wrap directive and trying another exploration call.
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "blocked_read",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json!({"path": "clean_target.txt"}).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            2 => {
+                                let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool").unwrap();
+                                assert!(
+                                    last_tool["content"].as_str().unwrap().contains("VIRTUAL_STEP_WRAP_REQUIRED"),
+                                    "host must reject more exploration reads before handoff_step: {last_tool}"
+                                );
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "wrap_handoff",
+                                        "type": "function",
+                                        "function": {
+                                            "name": HANDOFF_STEP,
+                                            "arguments": json!({
+                                                "step_name": "scanLargeChunks",
+                                                "completed": "Read chunk1..chunk3 and distilled next file target",
+                                                "main_context_patch": {"next_file": "clean_target.txt"},
+                                                "next_step": "verifyCleanTarget",
+                                                "next_goal": "Read clean_target.txt and report its marker"
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            3 => {
+                                assert!(!joined.contains("BLOATED_DUMP_MARKER_1"));
+                                assert!(joined.contains("verifyCleanTarget"));
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "clean_read",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json!({"path": "clean_target.txt"}).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            _ => {
+                                assert!(joined.contains("CLEAN_STEP_TARGET_OK"));
+                                json!({"role": "assistant", "content": "Wrapped cleanly and verified."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state,
+            "task".into(),
+            "fake".into(),
+            "Scan chunks then verify clean target.".into(),
+            8,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 5);
+        let wrap_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_task_events WHERE task_id='task' AND kind='flow/step_wrap_requested'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(wrap_events, 1);
+    }
+
+    #[tokio::test]
+    async fn set_next_step_runs_in_parallel_with_exploration_tools() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("notes.txt"), "TARGET_FACT_LINE").unwrap();
+
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let msgs = body["messages"].as_array().unwrap();
+                        let joined = serde_json::to_string(msgs).unwrap();
+                        let message = match step {
+                            0 => json!({
+                                "role": "assistant",
+                                "content": Value::Null,
+                                "tool_calls": [
+                                    {
+                                        "id": "declare_next",
+                                        "type": "function",
+                                        "function": {
+                                            "name": SET_NEXT_STEP,
+                                            "arguments": json!({
+                                                "current_step": "Read notes.txt for target fact",
+                                                "next_step": "Verify and summarize findings",
+                                                "context_keys": ["notes.txt"]
+                                            }).to_string()
+                                        }
+                                    },
+                                    {
+                                        "id": "read_notes",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json!({"path": "notes.txt"}).to_string()
+                                        }
+                                    }
+                                ]
+                            }),
+                            _ => {
+                                assert!(joined.contains("TARGET_FACT_LINE"));
+                                assert!(joined.contains("Verify and summarize findings"));
+                                json!({"role": "assistant", "content": "Declared next step and read file."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state,
+            "task".into(),
+            "fake".into(),
+            "Inspect notes and plan next step".into(),
+            6,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 2);
+        let declared_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_task_events WHERE task_id='task' AND kind='flow/next_step_declared'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(declared_events, 1);
     }
 }

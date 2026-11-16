@@ -623,7 +623,25 @@ pub(crate) fn read_contracts(
                 entry.push(spec);
             }
         } else {
-            bail!("unknown or unavailable method {name}");
+            let available: Vec<String> = if let Some(native) = catalog.get(group) {
+                native.keys().cloned().collect()
+            } else if let Some(specs) = methods_of(s, group) {
+                specs.into_iter().map(|spec| spec.name).collect()
+            } else {
+                Vec::new()
+            };
+            let hint = if group == "process" && !available.iter().any(|m| m == "exec_command") {
+                " (main-loop shell checks run via direct run_readonly_command; process.exec_command/run_program run inside @virtual/module implementations)"
+            } else {
+                ""
+            };
+            if available.is_empty() {
+                bail!("unknown or unavailable method {name}{hint}");
+            }
+            bail!(
+                "unknown or unavailable method {name}; available in {group}: [{}]{hint}",
+                available.join(", ")
+            );
         }
     }
 

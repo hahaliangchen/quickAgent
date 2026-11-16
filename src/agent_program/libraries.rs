@@ -289,6 +289,8 @@ pub fn control(name: &str) -> bool {
             | "find_library_methods"
             | "ask_user"
             | "write_program"
+            | "handoff_step"
+            | "set_next_step"
             // The main AI's own look at the project; programs use process.
             | "run_readonly_command"
     )

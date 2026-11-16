@@ -446,9 +446,8 @@ pub(super) fn scheduled_function_task_with_scope(
                 custom_tools = true;
             }
         }
-        // A leaf child waiting on an active parent program can never call write_program
-        // (doing so always fails with PROGRAM_NOT_RUN and tricks it into taking over main).
-        resolved_tools.retain(|tool| tool != WRITE_PROGRAM);
+        // A leaf child waiting on an active parent program can never call main-only loop controls.
+        resolved_tools.retain(|tool| !matches!(tool.as_str(), WRITE_PROGRAM | super::HANDOFF_STEP | super::SET_NEXT_STEP));
         if !resolved_tools.is_empty() || custom_tools || js_ctx.get("tools").is_some_and(Value::is_array) {
             task["js_tools"] = json!(resolved_tools);
             task["js_custom_tools"] = json!(custom_tools);
@@ -6780,8 +6779,14 @@ console.log(JSON.stringify(res));
         assert!(leaf_list.contains(&"read_asset".to_owned()), "inherited js_tools must keep read_asset: {leaf_list:?}");
         assert!(leaf_list.contains(&"read_session_history".to_owned()), "inherited js_tools must keep read_session_history: {leaf_list:?}");
         assert!(!leaf_list.contains(&WRITE_PROGRAM.to_owned()), "leaf child must never receive write_program: {leaf_list:?}");
-        let expected_leaf_tools: Vec<String> = main_list.iter().filter(|t| t.as_str() != WRITE_PROGRAM).cloned().collect();
-        assert_eq!(*leaf_list, expected_leaf_tools, "passing host.context() directly must align tools with main minus write_program");
+        assert!(!leaf_list.contains(&super::HANDOFF_STEP.to_owned()), "leaf child must never receive handoff_step: {leaf_list:?}");
+        assert!(!leaf_list.contains(&super::SET_NEXT_STEP.to_owned()), "leaf child must never receive set_next_step: {leaf_list:?}");
+        let expected_leaf_tools: Vec<String> = main_list
+            .iter()
+            .filter(|t| !matches!(t.as_str(), WRITE_PROGRAM | super::HANDOFF_STEP | super::SET_NEXT_STEP))
+            .cloned()
+            .collect();
+        assert_eq!(*leaf_list, expected_leaf_tools, "passing host.context() directly must align tools with main minus main-only controls");
     }
 
     #[test]
@@ -6817,5 +6822,26 @@ console.log(JSON.stringify(res));
         assert_eq!(scope["huge_guide"]["bytes"], 60_002);
         let scope_json_len = serde_json::to_string(scope).unwrap().len();
         assert!(scope_json_len <= 17_000, "compacted scope view exceeded budget: {scope_json_len}");
+    }
+
+    #[test]
+    fn read_tool_contracts_guides_unknown_process_method_to_real_methods() {
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let s = execution_test_session(&state, &cancel);
+        let definitions = execution_test_definitions();
+        let catalog = library_catalog(&s, &definitions);
+        let err = crate::flow_libraries::read_contracts(
+            &s,
+            &catalog,
+            &definitions,
+            &json!({"methods": ["process.run"]}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown or unavailable method process.run"), "{err}");
+        assert!(err.contains("available in process: [get_project_process]"), "{err}");
+        assert!(err.contains("run_readonly_command"), "{err}");
     }
 }

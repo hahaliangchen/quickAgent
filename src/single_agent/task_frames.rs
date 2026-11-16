@@ -854,6 +854,8 @@ pub(super) async fn fresh_main_window(
     window.active_skills = previous.active_skills.clone();
     window.active_skill_scopes = previous.active_skill_scopes.clone();
     window.token_calibration = previous.token_calibration.clone();
+    window.main_context = previous.main_context.clone();
+    window.step_trail = previous.step_trail.clone();
     for id in
         crate::context_assets::active_instruction_ids(&previous.messages, &previous.active_skills)
     {
@@ -881,6 +883,11 @@ pub(super) async fn fresh_main_window(
         };
         message["_pinned"] = json!(true);
         window.messages.push(message);
+    }
+    if !window.main_context.is_empty() || !window.step_trail.is_empty() {
+        window
+            .messages
+            .push(super::virtual_step_handoff_message(&window, None, true));
     }
     Ok(window)
 }
