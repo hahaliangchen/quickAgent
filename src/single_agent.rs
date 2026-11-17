@@ -124,12 +124,10 @@ pub(crate) struct Window {
     /// or compacted window must perform a fresh, permission-checked lookup.
     #[serde(skip)]
     contract_reuse: BTreeMap<String, ContractReuse>,
-    /// Shared compact state passed explicitly across fallback exploration
-    /// handoffs and across user turns without keeping bulky exploration dumps.
-    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub(super) main_context: serde_json::Map<String, Value>,
+    /// Append-only handoff return records (`mainContext += selfContext.slice(...)`)
+    /// carried across fallback exploration resets and user turns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(super) step_trail: Vec<StepSummary>,
+    pub(super) handoff_entries: Vec<Value>,
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub(super) step_handoffs_in_turn: usize,
     #[serde(default, skip_serializing_if = "is_zero_usize")]
@@ -141,7 +139,6 @@ pub(crate) struct Window {
 pub(super) const HANDOFF_STEP: &str = "handoff_step";
 pub(super) const VIRTUAL_STEP_HANDOFF: &str = "virtual_step_handoff";
 const VIRTUAL_STEP_WRAP_DIRECTIVE: &str = "virtual_step_wrap_required";
-const MAIN_CONTEXT_PATCH_LIMIT_BYTES: usize = 32 * 1024;
 const MAIN_CONTEXT_TOTAL_LIMIT_BYTES: usize = 64 * 1024;
 const MAX_HANDOFF_SLICES: usize = 24;
 const MAX_SLICE_DEFAULT_LINES: usize = 80;
@@ -160,22 +157,9 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
-pub(super) struct StepSummary {
-    pub(super) step: String,
-    pub(super) purpose: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(super) updated_keys: Vec<String>,
-}
-
 #[derive(Clone)]
 struct StepHandoff {
-    next_context: serde_json::Map<String, Value>,
-    entry: StepSummary,
-    next_step: String,
-    next_goal: String,
-    context_slices: Vec<Value>,
-    main_context_bytes: usize,
+    entry: Value,
 }
 
 #[derive(Clone)]
@@ -456,19 +440,23 @@ fn handoff_step_tool() -> Value {
         "type": "function",
         "function": {
             "name": HANDOFF_STEP,
-            "description": "Fallback exploration reset: carry exact excerpts from earlier tool results via `slices` (event_seq coordinates, avoiding expensive summary generation), optionally patch compact keys into mainContext, clear bulky exploration dumps, and continue with a clean window. Call alone only after heavy exploration or when virtual_step_wrap_required triggers; prefer write_program for multi-step work.",
+            "description": "Fallback exploration reset: append an immutable return record (`mainContext += selfContext.slice(...)`) onto the outer window, copy exact coordinate excerpts via `slices` from prior tool `event_seq` records, clear bulky exploration dumps from this function scope, and continue cleanly. Call alone only after heavy exploration or when virtual_step_wrap_required triggers.",
             "parameters": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
                     "next_goal": {
                         "type": "string",
-                        "description": "Short explicit objective and next deliverable."
+                        "description": "Short explicit objective for the next stage."
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Optional compact directory/index note of key findings, file coordinates, or ruled-out paths from this function scope (avoid prose dumps)."
                     },
                     "slices": {
                         "type": "array",
                         "maxItems": MAX_HANDOFF_SLICES,
-                        "description": "Zero-rewrite coordinate excerpts copied directly by the host from prior tool event_seq records into context_slices. Prefer this over re-typing summaries or file/log excerpts.",
+                        "description": "Zero-rewrite coordinate excerpts copied directly by the host from prior tool event_seq records into slices. Prefer this over re-typing raw file/log excerpts.",
                         "items": {
                             "type": "object",
                             "additionalProperties": false,
@@ -522,23 +510,11 @@ fn handoff_step_tool() -> Value {
                     },
                     "step_name": {
                         "type": "string",
-                        "description": "Optional short label for the stage just finished."
-                    },
-                    "situation": {
-                        "type": "string",
-                        "description": "Optional 1-sentence note when slices/main_context_patch alone do not convey state (avoid verbose summaries)."
-                    },
-                    "completed": {
-                        "type": "string",
-                        "description": "Backward-compatible optional alias for situation."
+                        "description": "Optional name for the finishing virtual function (default \"(anonymous)\" or \"step_N\")."
                     },
                     "next_step": {
                         "type": "string",
-                        "description": "Optional short label for the next stage."
-                    },
-                    "main_context_patch": {
-                        "type": "object",
-                        "description": "Optional compact key/value state updates merged into mainContext (up to 32 KiB/patch, 64 KiB total; use null to delete stale keys; prefer slices for file/log/command excerpts)."
+                        "description": "Optional name for the next chained top-level virtual function (e.g. \"continueInspection\")."
                     }
                 },
                 "required": ["next_goal"]
@@ -871,6 +847,18 @@ fn build_handoff_slices(root: &Path, task: &str, args: &Value) -> Result<Vec<Val
     Ok(out)
 }
 
+fn push_handoff_entry(entries: &mut Vec<Value>, entry: Value) -> Result<(usize, usize)> {
+    entries.push(entry);
+    let mut dropped = 0usize;
+    let mut total_bytes = serde_json::to_vec(entries)?.len();
+    while total_bytes > MAIN_CONTEXT_TOTAL_LIMIT_BYTES && entries.len() > 1 {
+        entries.remove(0);
+        dropped += 1;
+        total_bytes = serde_json::to_vec(entries)?.len();
+    }
+    Ok((total_bytes, dropped))
+}
+
 fn prepare_handoff_step(
     root: &Path,
     task: &str,
@@ -882,127 +870,75 @@ fn prepare_handoff_step(
         "STEP_HANDOFF_LIMIT: reached {MAX_STEP_HANDOFFS_PER_TURN} virtual step handoffs in one turn; answer directly or run a program."
     );
     let next_goal = required_trimmed_str(args, "next_goal")?.to_owned();
-    let step_idx = w.step_trail.len() + 1;
-    let step_name =
-        optional_trimmed_str(args, "step_name").unwrap_or_else(|| format!("step_{step_idx}"));
-    let situation = optional_trimmed_str(args, "situation")
+    let step_idx = w
+        .handoff_entries
+        .last()
+        .and_then(|e| e["step"].as_u64())
+        .map(|n| n as usize + 1)
+        .unwrap_or(1);
+    let fn_name = optional_trimmed_str(args, "step_name").unwrap_or_else(|| {
+        if step_idx == 1 {
+            "(anonymous)".to_owned()
+        } else {
+            format!("step_{step_idx}")
+        }
+    });
+    let summary = optional_trimmed_str(args, "summary")
+        .or_else(|| optional_trimmed_str(args, "situation"))
         .or_else(|| optional_trimmed_str(args, "completed"))
         .unwrap_or_default();
-    let next_step =
+    let next_fn =
         optional_trimmed_str(args, "next_step").unwrap_or_else(|| format!("step_{}", step_idx + 1));
 
     let context_slices = build_handoff_slices(root, task, args)?;
+    let slice_count = context_slices.len();
 
-    let empty_patch = serde_json::Map::new();
-    let patch = match args.get("main_context_patch") {
-        None | Some(Value::Null) => &empty_patch,
-        Some(value) => value
-            .as_object()
-            .context("main_context_patch must be a JSON object")?,
-    };
-    let patch_bytes = serde_json::to_vec(patch)?.len();
-    ensure!(
-        patch_bytes <= MAIN_CONTEXT_PATCH_LIMIT_BYTES,
-        "MAIN_CONTEXT_OVER_LIMIT: main_context_patch is {patch_bytes} bytes (max {MAIN_CONTEXT_PATCH_LIMIT_BYTES}). Store only compact state — prefer `slices` to carry file/log/command excerpts without re-typing."
-    );
-
-    let mut next_context = w.main_context.clone();
-    let mut updated_keys = Vec::with_capacity(patch.len());
-    for (key, value) in patch {
-        updated_keys.push(key.clone());
-        if value.is_null() {
-            next_context.remove(key);
-        } else {
-            next_context.insert(key.clone(), value.clone());
-        }
+    let mut entry = json!({
+        "type": VIRTUAL_STEP_HANDOFF,
+        "step": step_idx,
+        "fn": fn_name,
+    });
+    if !summary.is_empty() {
+        entry["summary"] = json!(summary);
     }
-    let main_context_bytes = serde_json::to_vec(&next_context)?.len();
+    if !context_slices.is_empty() {
+        entry["slices"] = json!(context_slices);
+    }
+    entry["next_fn"] = json!(next_fn);
+    entry["next_goal"] = json!(next_goal);
+
+    let single_bytes = serde_json::to_vec(std::slice::from_ref(&entry))?.len();
     ensure!(
-        main_context_bytes <= MAIN_CONTEXT_TOTAL_LIMIT_BYTES,
-        "MAIN_CONTEXT_OVER_LIMIT: merged mainContext is {main_context_bytes} bytes (max {MAIN_CONTEXT_TOTAL_LIMIT_BYTES}). Delete stale keys with null in main_context_patch or use `slices`."
+        single_bytes <= MAIN_CONTEXT_TOTAL_LIMIT_BYTES,
+        "HANDOFF_OVER_LIMIT: handoff entry is {single_bytes} bytes (max {MAIN_CONTEXT_TOTAL_LIMIT_BYTES}). Keep summary compact and narrow slices with lines/grep/head/tail."
     );
+    let mut preview = w.handoff_entries.clone();
+    let (total_bytes, dropped_entries) = push_handoff_entry(&mut preview, entry.clone())?;
 
     let mut receipt = json!({
         "status": "handed_off",
-        "step": step_name,
-        "next_step": next_step,
-        "slice_count": context_slices.len(),
-        "main_context_bytes": main_context_bytes,
-        "step_count": step_idx,
+        "step": step_idx,
+        "fn": entry["fn"],
+        "next_fn": entry["next_fn"],
+        "slice_count": slice_count,
+        "handoff_bytes": total_bytes,
+        "entry_count": preview.len(),
     });
-    if !situation.is_empty() {
-        receipt["situation"] = json!(situation);
+    if dropped_entries > 0 {
+        receipt["dropped_entries"] = json!(dropped_entries);
     }
-    let handoff = StepHandoff {
-        next_context,
-        entry: StepSummary {
-            step: step_name,
-            purpose: situation,
-            updated_keys,
-        },
-        next_step,
-        next_goal,
-        context_slices,
-        main_context_bytes,
-    };
-    Ok((receipt, handoff))
+    if !summary.is_empty() {
+        receipt["summary"] = json!(summary);
+    }
+    Ok((receipt, StepHandoff { entry }))
 }
 
-pub(super) fn virtual_step_handoff_message(
-    w: &Window,
-    next_step: Option<(&str, &str)>,
-    context_slices: &[Value],
-    carried_across_turns: bool,
-) -> Value {
-    let previous_steps: Vec<Value> = w
-        .step_trail
-        .iter()
-        .enumerate()
-        .map(|(idx, entry)| {
-            let mut item = json!({
-                "index": idx + 1,
-                "step": entry.step,
-                "updated_keys": entry.updated_keys,
-            });
-            if !entry.purpose.is_empty() {
-                item["situation"] = json!(entry.purpose);
-                item["purpose"] = json!(entry.purpose);
-            }
-            item
-        })
-        .collect();
-    let mut payload = json!({
-        "type": VIRTUAL_STEP_HANDOFF,
-        "previous_steps": previous_steps,
-        "mainContext": w.main_context,
-    });
-    if !context_slices.is_empty() {
-        payload["context_slices"] = json!(context_slices);
-    }
-    if let Some((name, goal)) = next_step {
-        let mut current = json!({
-            "index": w.step_trail.len() + 1,
-            "name": name,
-            "goal": goal,
-        });
-        if let Some(sit) = w.step_trail.last().map(|e| e.purpose.as_str()).filter(|s| !s.is_empty()) {
-            current["situation"] = json!(sit);
-        }
-        payload["current_step"] = current;
-        payload["instruction"] = json!(
-            "Clean exploration scope. Prior exploration tool dumps were cleared; original user constraints above, mainContext, and any context_slices here remain authoritative. Continue from current_step.goal, prefer write_program (with JS functions, @virtual leaves, and process.run_readonly/process.exec_command) for multi-step checks or bulk reads, or answer once settled."
-        );
-    } else if carried_across_turns {
-        payload["carried_across_turns"] = json!(true);
-        payload["instruction"] = json!(
-            "Previous turns left verified state in mainContext and previous_steps. Re-verify volatile workspace files/status before acting on stale assumptions."
-        );
-    }
+pub(super) fn virtual_step_handoff_message(entry: &Value) -> Value {
     json!({
         "role": "user",
         "name": VIRTUAL_STEP_HANDOFF,
         "_frame_input": true,
-        "content": serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string()),
+        "content": serde_json::to_string_pretty(entry).unwrap_or_else(|_| entry.to_string()),
     })
 }
 
@@ -1020,16 +956,14 @@ pub(super) fn retain_pinned_message(mut message: Value) -> Option<Value> {
     Some(message)
 }
 
-/// Shared anchor retention for both `end_familiarization` and `handoff_step`
+/// Anchor retention for `handoff_step` (`reset_messages_for_virtual_step`)
 /// so user prompts, finished program results, host-delivered skills/modules,
-/// pinned assets, and active handoff state stay consistent.
-pub(super) fn retain_turn_anchor_message(mut message: Value, keep_handoff: bool) -> Option<Value> {
+/// and pinned assets survive exploration resets.
+fn retain_turn_anchor_message(mut message: Value) -> Option<Value> {
     if task_frames::is_user_original(&message) {
         return Some(message);
     }
-    if matches!(message["name"].as_str(), Some("program_result" | "program_record"))
-        || (keep_handoff && message["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
-    {
+    if matches!(message["name"].as_str(), Some("program_result" | "program_record")) {
         return Some(message);
     }
     if message.get(skill_scope::DELIVERED).is_some()
@@ -1048,7 +982,7 @@ pub(super) fn retain_turn_anchor_message(mut message: Value, keep_handoff: bool)
     retain_pinned_message(message)
 }
 
-fn reset_messages_for_virtual_step(w: &mut Window, handoff: &StepHandoff) {
+fn reset_messages_for_virtual_step(w: &mut Window) {
     let prefix_end = w
         .messages
         .iter()
@@ -1062,16 +996,13 @@ fn reset_messages_for_virtual_step(w: &mut Window, handoff: &StepHandoff) {
             }
             continue;
         }
-        if let Some(retained) = retain_turn_anchor_message(message, false) {
+        if let Some(retained) = retain_turn_anchor_message(message) {
             kept.push(retained);
         }
     }
-    kept.push(virtual_step_handoff_message(
-        w,
-        Some((&handoff.next_step, &handoff.next_goal)),
-        &handoff.context_slices,
-        false,
-    ));
+    for entry in &w.handoff_entries {
+        kept.push(virtual_step_handoff_message(entry));
+    }
     w.messages = kept;
 }
 
@@ -1132,7 +1063,7 @@ async fn maybe_require_step_wrap(
             current_tokens,
             w.step_rounds_in_scope
         ),
-        "required_action": "Choose one clean exit now before calling more read/search/command tools: (1) submit write_program to move remaining multi-step checks/work into JS functions and @virtual leaves (clears exploration dumps automatically); (2) call handoff_step({next_goal, slices?: [{seq, lines?, grep?, head?, tail?}], main_context_patch?}) to carry exact coordinate excerpts at zero rewrite cost and reset exploration dumps; or (3) reply in plain text if already settled.",
+        "required_action": "Choose one clean exit now before running more tools (write_program appends to the current window rather than clearing it): (1) call handoff_step({next_goal, summary?, slices?: [{seq, lines?, grep?, head?, tail?, keys?, label?}], step_name?, next_step?}) to append compact findings onto mainContext and reset this scope; or (2) reply directly in plain text if already settled.",
     });
     w.messages.push(json!({
         "role": "user",
@@ -1928,8 +1859,12 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     }
     body["max_tokens"] = json!(output_tokens(s, &body));
     if let Some(effort) = &s.state.reasoning_effort {
-        // Thinking is never off: the lowest effort is low.
-        let effort = if matches!(effort.as_str(), "none" | "minimal") { "low" } else { effort.as_str() };
+        // Map `minimal` to `low`, while allowing explicit `none` / `off` through.
+        let effort = match effort.as_str() {
+            "minimal" => "low",
+            "off" => "none",
+            other => other,
+        };
         body["reasoning_effort"] = json!(effort);
     }
     if !messages_wire(s) {
@@ -3488,7 +3423,7 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
         // No context is folded: a result that does not fit is not delivered,
         // and a leaf that runs out ends with an error.
         let leaf = matches!(program_flow::role(w), program_flow::Role::Leaf(_));
-        let (node, message, cut_off) = if w.program.is_some() {
+        let (node, mut message, cut_off) = if w.program.is_some() {
             match Box::pin(program_flow::next(s, w, step)).await? {
                 program_flow::Round::Exchange(node, message) => (node, message, false),
                 program_flow::Round::Rewrite | program_flow::Round::Continue => continue,
@@ -3574,14 +3509,11 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
         if let [call] = calls.as_slice()
             && call.name == program_flow::WRITE_PROGRAM
             && matches!(program_flow::role(w), program_flow::Role::Main | program_flow::Role::Implement)
+            && !(w.step_handoff_required && program_flow::role(w) == program_flow::Role::Main && s.is_primary())
             && w.program.is_none()
             && w.program_value.is_none()
         {
             Box::pin(submit_program(s, w, &message, call, &node, step)).await?;
-            if w.program.is_some() {
-                w.step_rounds_in_scope = 0;
-                w.step_handoff_required = false;
-            }
             continue;
         }
         if calls.is_empty() {
@@ -3649,29 +3581,54 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                         .as_str()
                         .context("current function returned no text")
                         .and_then(|text| {
-                            let value = serde_json::from_str::<Value>(text)
+                            let mut value = serde_json::from_str::<Value>(text)
                                 .context("current function must return one JSON value")?;
-                            ensure!(!modules::revision_pending(w) || value["$task_error"].is_object(),
-                                "this call requests a saved module revision; submit the complete implementation with write_program");
-                            Ok(value)
+                            ensure!(
+                                !modules::revision_pending(w) || value["$task_error"].is_object(),
+                                "this call requests a saved module revision; submit the complete implementation with write_program"
+                            );
+                            if leaf
+                                && value.get("$task_error").is_none()
+                                && let Some(obj) = value.as_object_mut()
+                                && let Some(raw_slices) = obj.remove("$slices")
+                            {
+                                ensure!(
+                                    raw_slices.is_array(),
+                                    "HANDOFF_SLICE_INVALID: $slices must be an array"
+                                );
+                                let resolved = build_handoff_slices(
+                                    s.state.workspace.root(),
+                                    s.task,
+                                    &json!({ "slices": raw_slices }),
+                                )?;
+                                obj.insert("slices".to_owned(), Value::Array(resolved));
+                                return Ok(Some(value.to_string()));
+                            }
+                            Ok(None)
                         });
-                    if let Err(error) = parsed {
-                        let diagnostic = json!({"code":"FUNCTION_RESULT_INVALID","error":format!("{error:#}"),
-                            "instruction":if modules::revision_pending(w) {
-                                "Submit the complete revised implementation with write_program. If unable to finish, return a JSON object with $task_error and a concrete cause."
-                            } else {
-                                "Continue in this same function and return one valid JSON value matching its original contract, without Markdown fences. The prior steps and tool results remain in this context; do not repeat completed or uncertain operations. If unable to finish, return a JSON object with $task_error and a concrete cause."
-                            }});
-                        let seq = append(
-                            s,
-                            "program/result_invalid",
-                            json!({"diagnostic":diagnostic}),
-                            false,
-                        )
-                        .await?;
-                        w.messages.push(sourced(json!({"role":"user","name":"function_result_diagnostic","content":diagnostic.to_string()}), s.task, seq));
-                        save(s, w).await?;
-                        continue;
+                    match parsed {
+                        Ok(Some(updated)) => {
+                            message["content"] = json!(updated);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let diagnostic = json!({"code":"FUNCTION_RESULT_INVALID","error":format!("{error:#}"),
+                                "instruction":if modules::revision_pending(w) {
+                                    "Submit the complete revised implementation with write_program. If unable to finish, return a JSON object with $task_error and a concrete cause."
+                                } else {
+                                    "Continue in this same function and return one valid JSON value matching its original contract, without Markdown fences. The prior steps and tool results remain in this context; do not repeat completed or uncertain operations. If unable to finish, return a JSON object with $task_error and a concrete cause."
+                                }});
+                            let seq = append(
+                                s,
+                                "program/result_invalid",
+                                json!({"diagnostic":diagnostic}),
+                                false,
+                            )
+                            .await?;
+                            w.messages.push(sourced(json!({"role":"user","name":"function_result_diagnostic","content":diagnostic.to_string()}), s.task, seq));
+                            save(s, w).await?;
+                            continue;
+                        }
                     }
                 }
                 ensure!(
@@ -3750,11 +3707,12 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                     .map(|reference| crate::context_assets::delivered(&result, reference))
                     .unwrap_or_else(|| result.clone())
             };
-            // Child leaf/implement functions and finding/asking return their
-            // plain results; main ReAct object results always carry event_seq.
-            let plain_leaf_result = w.program_task.is_some()
+            // Implement frames and finding/asking return their plain results;
+            // main ReAct and @virtual leaf tool results expose event_seq so
+            // leaves can cite coordinates in "$slices".
+            let plain_result = (w.program_task.is_some() && !leaf)
                 || matches!(call.name.as_str(), program_flow::FIND | program_flow::ASK);
-            if !plain_leaf_result {
+            if !plain_result {
                 attach_event_seq(&mut delivery, json!(seq));
             }
             if let (Some(previous), Some(current)) = (&refreshed_from, &asset_reference) {
@@ -3873,8 +3831,8 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             save(s, w).await?;
         }
         if !overflow && let Some(handoff) = step_handoff {
-            w.main_context = handoff.next_context.clone();
-            w.step_trail.push(handoff.entry.clone());
+            let (handoff_bytes, dropped_entries) =
+                push_handoff_entry(&mut w.handoff_entries, handoff.entry.clone())?;
             w.step_handoffs_in_turn += 1;
             append(
                 s,
@@ -3884,20 +3842,20 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                     "turn": s.turn,
                     "step": step,
                     "flowNodeId": node,
-                    "completedStep": handoff.entry.step,
-                    "completedPurpose": handoff.entry.purpose,
-                    "situation": handoff.entry.purpose,
-                    "updatedKeys": handoff.entry.updated_keys,
-                    "sliceCount": handoff.context_slices.len(),
-                    "nextStep": handoff.next_step,
-                    "nextGoal": handoff.next_goal,
-                    "mainContextBytes": handoff.main_context_bytes,
-                    "stepCount": w.step_trail.len(),
+                    "completedStep": handoff.entry["step"],
+                    "fn": handoff.entry["fn"],
+                    "summary": handoff.entry.get("summary").cloned().unwrap_or(Value::Null),
+                    "sliceCount": handoff.entry.get("slices").and_then(Value::as_array).map_or(0, Vec::len),
+                    "nextFn": handoff.entry["next_fn"],
+                    "nextGoal": handoff.entry["next_goal"],
+                    "handoffBytes": handoff_bytes,
+                    "entryCount": w.handoff_entries.len(),
+                    "droppedEntries": dropped_entries,
                 }),
                 true,
             )
             .await?;
-            reset_messages_for_virtual_step(w, &handoff);
+            reset_messages_for_virtual_step(w);
             w.step_rounds_in_scope = 0;
             w.step_handoff_required = false;
             w.contract_reuse.clear();
@@ -4131,9 +4089,6 @@ async fn submit_program(
                 // New and revised module code is saved for later calls of its contract.
                 modules::authored(s, w, source).await?;
                 program_flow::clear_failed_program_attempts(w, message, source);
-            } else if !body && s.plugin.is_none() {
-                // Getting to know the task ends when the main script starts.
-                program_flow::end_familiarization(w, message, source);
             }
             if has_plan_steps {
                 let plan_message = sourced(host_message(json!({
@@ -4323,10 +4278,10 @@ async fn execute_call(
         if w.step_handoff_required
             && program_flow::role(w) == program_flow::Role::Main
             && s.is_primary()
-            && !matches!(call.name.as_str(), HANDOFF_STEP | program_flow::WRITE_PROGRAM)
+            && call.name != HANDOFF_STEP
         {
             anyhow::bail!(
-                "VIRTUAL_STEP_WRAP_REQUIRED: Exploration reached the high-water wrap threshold. Call write_program to orchestrate, reply in plain text if settled, or call handoff_step({{next_goal, slices?: [{{seq, lines?, grep?, head?, tail?}}], main_context_patch?}}) to carry exact excerpts and reset exploration dumps."
+                "VIRTUAL_STEP_WRAP_REQUIRED: Exploration reached the high-water wrap threshold. Call handoff_step({{next_goal, summary?, slices?: [{{seq, lines?, grep?, head?, tail?, keys?, label?}}], step_name?, next_step?}}) first to append compact findings onto mainContext and reset this scope (before running write_program), or reply directly in plain text if already settled."
             );
         }
         if crate::function_frames::is_tool(&call.name) || matches!(call.name.as_str(),"release_assets"|"unload_skill"|HANDOFF_STEP) {
@@ -6914,8 +6869,7 @@ mod tests {
                                             "name": HANDOFF_STEP,
                                             "arguments": json!({
                                                 "step_name": "explore_files",
-                                                "completed": "Read big_exploration.txt",
-                                                "main_context_patch": {"dump": "z".repeat(34_000)},
+                                                "summary": "z".repeat(66_000),
                                                 "next_step": "finalize",
                                                 "next_goal": "Answer concisely"
                                             }).to_string()
@@ -6926,8 +6880,8 @@ mod tests {
                             2 => {
                                 let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool").unwrap();
                                 assert!(
-                                    last_tool["content"].as_str().unwrap().contains("MAIN_CONTEXT_OVER_LIMIT"),
-                                    "oversized patch must be rejected cleanly: {last_tool}"
+                                    last_tool["content"].as_str().unwrap().contains("HANDOFF_OVER_LIMIT"),
+                                    "oversized entry must be rejected cleanly: {last_tool}"
                                 );
                                 assert!(
                                     joined.contains("SECRET_EXPLORATION_NOISE_MARKER"),
@@ -6943,8 +6897,7 @@ mod tests {
                                             "name": HANDOFF_STEP,
                                             "arguments": json!({
                                                 "step_name": "explore_files",
-                                                "completed": "Verified target_file=big_exploration.txt",
-                                                "main_context_patch": {"target_file": "big_exploration.txt", "verified_count": 1},
+                                                "summary": "Verified target_file=big_exploration.txt (verified_count=1)",
                                                 "next_step": "finalize",
                                                 "next_goal": "Deliver concise answer"
                                             }).to_string()
@@ -6965,11 +6918,12 @@ mod tests {
                                     .iter()
                                     .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
                                     .expect("virtual_step_handoff frame must be present");
-                                let frame: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
-                                assert_eq!(frame["previous_steps"][0]["step"], "explore_files");
-                                assert_eq!(frame["current_step"]["name"], "finalize");
-                                assert_eq!(frame["mainContext"]["target_file"], "big_exploration.txt");
-                                assert_eq!(frame["mainContext"]["verified_count"], 1);
+                                let entry: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
+                                assert_eq!(entry["type"], VIRTUAL_STEP_HANDOFF);
+                                assert_eq!(entry["step"], 1);
+                                assert_eq!(entry["fn"], "explore_files");
+                                assert_eq!(entry["next_fn"], "finalize");
+                                assert!(entry["summary"].as_str().unwrap().contains("big_exploration.txt"));
                                 json!({"role": "assistant", "content": "Done cleanly."})
                             }
                         };
@@ -7018,8 +6972,9 @@ mod tests {
             )
             .unwrap();
         let persisted: Window = serde_json::from_str(&raw_window).unwrap();
-        assert_eq!(persisted.main_context.get("target_file"), Some(&json!("big_exploration.txt")));
-        assert_eq!(persisted.step_trail.len(), 1);
+        assert_eq!(persisted.handoff_entries.len(), 1);
+        assert_eq!(persisted.handoff_entries[0]["fn"], "explore_files");
+        assert!(persisted.handoff_entries[0]["summary"].as_str().unwrap().contains("big_exploration.txt"));
         assert_eq!(persisted.step_handoffs_in_turn, 1);
     }
 
@@ -7061,16 +7016,25 @@ mod tests {
             &w,
             &json!({
                 "step_name": "step_one",
-                "completed": "Stored first large summary",
-                "main_context_patch": {"heavy": "a".repeat(30_000), "keep": "ok"},
+                "summary": format!("ENTRY_ONE_KEEP {}", "a".repeat(30_000)),
                 "next_step": "step_two",
-                "next_goal": "Test total cap"
+                "next_goal": "Store second entry"
             }),
         )
         .unwrap();
-        w.main_context = h1.next_context.clone();
-        w.step_trail.push(h1.entry.clone());
+        let (bytes1, dropped1) = push_handoff_entry(&mut w.handoff_entries, h1.entry).unwrap();
+        assert_eq!(dropped1, 0);
+        assert!(bytes1 > 30_000);
         w.step_handoffs_in_turn = 1;
+        reset_messages_for_virtual_step(&mut w);
+        let msg1_after_step1 = w
+            .messages
+            .iter()
+            .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+            .unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
         let (_, h2) = prepare_handoff_step(
             root.path(),
@@ -7078,50 +7042,66 @@ mod tests {
             &w,
             &json!({
                 "step_name": "step_two",
-                "completed": "Add second chunk within 64K",
-                "main_context_patch": {"more": "b".repeat(25_000)},
+                "summary": format!("ENTRY_TWO_KEEP {}", "b".repeat(25_000)),
                 "next_step": "step_three",
-                "next_goal": "Trigger total cap next"
+                "next_goal": "Keep total within 64K"
             }),
         )
         .unwrap();
-        w.main_context = h2.next_context.clone();
-        w.step_trail.push(h2.entry.clone());
+        let (_, dropped2) = push_handoff_entry(&mut w.handoff_entries, h2.entry).unwrap();
+        assert_eq!(dropped2, 0);
+        reset_messages_for_virtual_step(&mut w);
+        let handoffs_after_step2: Vec<&str> = w
+            .messages
+            .iter()
+            .filter(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(handoffs_after_step2.len(), 2);
+        assert_eq!(
+            handoffs_after_step2[0], msg1_after_step1,
+            "append-only handoff must keep earlier step message byte-for-byte identical for KV cache"
+        );
+        assert!(handoffs_after_step2[1].contains("ENTRY_TWO_KEEP"));
 
-        let over_total = prepare_handoff_step(
+        // Oversized single entry (>64 KiB) fails cleanly without mutating w.handoff_entries.
+        let over_single = prepare_handoff_step(
             root.path(),
             "task",
             &w,
             &json!({
-                "step_name": "step_three",
-                "completed": "Exceed total 64K limit",
-                "main_context_patch": {"overflow": "c".repeat(15_000)},
-                "next_step": "step_four",
+                "step_name": "too_big",
+                "summary": "c".repeat(66_000),
                 "next_goal": "Should fail"
             }),
         );
-        assert!(over_total.is_err());
+        assert!(over_single.is_err());
+        assert_eq!(w.handoff_entries.len(), 2);
 
-        let (_, h3) = prepare_handoff_step(
+        // Appending a valid third entry that pushes total > 64 KiB FIFO-drops the oldest entry.
+        let (r3, h3) = prepare_handoff_step(
             root.path(),
             "task",
             &w,
             &json!({
                 "step_name": "step_three",
-                "completed": "Compact stale keys with null and update",
-                "main_context_patch": {"heavy": null, "more": null, "head": "abc123"},
+                "summary": format!("ENTRY_THREE_HEAD_ABC123 {}", "d".repeat(20_000)),
                 "next_step": "verify",
                 "next_goal": "Run verification"
             }),
         )
         .unwrap();
-        w.main_context = h3.next_context.clone();
-        w.step_trail.push(h3.entry.clone());
-        reset_messages_for_virtual_step(&mut w, &h3);
+        assert_eq!(r3["dropped_entries"], 1);
+        let (_, dropped3) = push_handoff_entry(&mut w.handoff_entries, h3.entry).unwrap();
+        assert_eq!(dropped3, 1);
+        reset_messages_for_virtual_step(&mut w);
 
         let serialized = serde_json::to_string(&w.messages).unwrap();
         assert!(!serialized.contains("NOISY_TOOL_DUMP"));
         assert!(!serialized.contains("\"stale\":true"));
+        assert!(!serialized.contains("ENTRY_ONE_KEEP"), "FIFO rollover must drop oldest entry");
+        assert!(serialized.contains("ENTRY_TWO_KEEP"));
+        assert!(serialized.contains("ENTRY_THREE_HEAD_ABC123"));
         assert!(serialized.contains("Follow strict constraint X."));
         let pinned = w
             .messages
@@ -7136,17 +7116,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(turn2.step_handoffs_in_turn, 0);
-        assert_eq!(turn2.main_context.get("keep"), Some(&json!("ok")));
-        assert_eq!(turn2.main_context.get("head"), Some(&json!("abc123")));
-        assert!(!turn2.main_context.contains_key("heavy"));
-        assert_eq!(turn2.step_trail.len(), 3);
-        let carried = turn2
+        assert_eq!(turn2.handoff_entries.len(), 2);
+        let carried: Vec<&str> = turn2
             .messages
             .iter()
-            .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
-            .expect("turn 2 window must carry virtual_step_handoff frame");
-        assert!(carried["content"].as_str().unwrap().contains("abc123"));
-        assert!(carried["content"].as_str().unwrap().contains("carried_across_turns"));
+            .filter(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(carried.len(), 2);
+        assert!(carried[0].contains("ENTRY_TWO_KEEP"));
+        assert!(carried[1].contains("ENTRY_THREE_HEAD_ABC123"));
     }
 
     #[tokio::test]
@@ -7330,6 +7309,29 @@ mod tests {
                                     last_tool["content"].as_str().unwrap().contains("VIRTUAL_STEP_WRAP_REQUIRED"),
                                     "host must reject more exploration reads before handoff_step: {last_tool}"
                                 );
+                                // Also verify write_program is blocked by step_handoff_required before handoff_step.
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "blocked_wp",
+                                        "type": "function",
+                                        "function": {
+                                            "name": program_flow::WRITE_PROGRAM,
+                                            "arguments": json!({
+                                                "name": "blocked-before-handoff",
+                                                "source": "return { skipped: true };"
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            6 => {
+                                let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool").unwrap();
+                                assert!(
+                                    last_tool["content"].as_str().unwrap().contains("VIRTUAL_STEP_WRAP_REQUIRED"),
+                                    "host must also reject write_program when step_handoff_required is active: {last_tool}"
+                                );
                                 json!({
                                     "role": "assistant",
                                     "content": Value::Null,
@@ -7340,8 +7342,7 @@ mod tests {
                                             "name": HANDOFF_STEP,
                                             "arguments": json!({
                                                 "step_name": "scanLargeChunks",
-                                                "completed": "Read chunk1..chunk16 and distilled next file target",
-                                                "main_context_patch": {"next_file": "clean_target.txt"},
+                                                "summary": "Read chunk1..chunk16; next_file=clean_target.txt",
                                                 "next_step": "verifyCleanTarget",
                                                 "next_goal": "Read clean_target.txt and report its marker"
                                             }).to_string()
@@ -7349,7 +7350,7 @@ mod tests {
                                     }]
                                 })
                             }
-                            6 => {
+                            7 => {
                                 assert!(!joined.contains("BLOATED_DUMP_MARKER_1"));
                                 assert!(joined.contains("verifyCleanTarget"));
                                 json!({
@@ -7365,8 +7366,31 @@ mod tests {
                                     }]
                                 })
                             }
-                            _ => {
+                            8 => {
                                 assert!(joined.contains("CLEAN_STEP_TARGET_OK"));
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "post_handoff_wp",
+                                        "type": "function",
+                                        "function": {
+                                            "name": program_flow::WRITE_PROGRAM,
+                                            "arguments": json!({
+                                                "name": "verify-clean-after-handoff",
+                                                "source": "const io = require(\"io\"); return { ok: io.read({ path: \"clean_target.txt\" }).content.includes(\"CLEAN_STEP_TARGET_OK\") };"
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            _ => {
+                                let prog_msg = msgs
+                                    .iter()
+                                    .rev()
+                                    .find(|m| m["name"].as_str() == Some("program_result"))
+                                    .expect("write_program after handoff_step must succeed");
+                                assert!(prog_msg["content"].as_str().unwrap().contains("\"ok\":true"), "{prog_msg}");
                                 json!({"role": "assistant", "content": "Wrapped cleanly and verified."})
                             }
                         };
@@ -7398,7 +7422,7 @@ mod tests {
         .await
         .unwrap();
         server.abort();
-        assert_eq!(rounds.load(Ordering::SeqCst), 8);
+        assert_eq!(rounds.load(Ordering::SeqCst), 10);
         let wrap_events: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM agent_task_events WHERE task_id='task' AND kind='flow/step_wrap_requested'",
@@ -7428,26 +7452,15 @@ mod tests {
 
         let rounds = Arc::new(AtomicUsize::new(0));
         let search_seq_cell = Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let table_payload = json!({
-            "locked_target": "sample.rs",
-            "verdict_table": (0..40).map(|i| json!({
-                "log": format!("target/logs/run-{i:02}.log"),
-                "status": if i % 2 == 0 { "valid" } else { "superseded" },
-                "evidence": "src/single_agent.rs:701-850",
-            })).collect::<Vec<_>>()
-        });
-        let table_clone = table_payload.clone();
 
         let app = Router::new().route(
             "/v1/chat/completions",
             post({
                 let rounds = rounds.clone();
                 let search_seq_cell = search_seq_cell.clone();
-                let table_clone = table_clone.clone();
                 move |Json(body): Json<Value>| {
                     let rounds = rounds.clone();
                     let search_seq_cell = search_seq_cell.clone();
-                    let table_clone = table_clone.clone();
                     async move {
                         let step = rounds.fetch_add(1, Ordering::SeqCst);
                         let msgs = body["messages"].as_array().unwrap();
@@ -7508,7 +7521,14 @@ mod tests {
                                 assert!(err_tool["content"].as_str().unwrap().contains("HANDOFF_SLICE_INVALID"), "{err_tool}");
                                 assert!(joined.contains("PINNED_AUDIT_RULE_KEEP"), "failed slice handoff must not wipe window");
                                 let search_seq = search_seq_cell.load(Ordering::SeqCst);
-                                // Minimal zero-rewrite handoff: only next_goal + coordinate slices (+ optional patch).
+                                let table_rows: Vec<Value> = (0..40)
+                                    .map(|idx| json!({"item": format!("item_{idx}"), "verdict": "ok"}))
+                                    .collect();
+                                let table_summary = serde_json::to_string(&json!({
+                                    "locked_target": "sample.rs",
+                                    "verdict_table": table_rows
+                                })).unwrap();
+                                // Minimal zero-rewrite handoff: only next_goal + coordinate slices (+ optional summary).
                                 json!({
                                     "role": "assistant",
                                     "content": Value::Null,
@@ -7520,7 +7540,7 @@ mod tests {
                                             "arguments": json!({
                                                 "next_goal": "Confirm minimal slices and saved_asset survive handoff",
                                                 "slices": [{"seq": search_seq, "grep": "TARGET_RULE_9", "label": "search_hit"}],
-                                                "main_context_patch": table_clone
+                                                "summary": table_summary
                                             }).to_string()
                                         }
                                     }]
@@ -7533,9 +7553,9 @@ mod tests {
                                     .iter()
                                     .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
                                     .expect("virtual_step_handoff must exist");
-                                let frame: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
-                                assert_eq!(frame["context_slices"].as_array().unwrap().len(), 1);
-                                assert!(frame["context_slices"][0]["excerpt"].as_str().unwrap().contains("TARGET_RULE_9"));
+                                let entry: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
+                                assert_eq!(entry["slices"].as_array().unwrap().len(), 1);
+                                assert!(entry["slices"][0]["excerpt"].as_str().unwrap().contains("TARGET_RULE_9"));
                                 let search_seq = search_seq_cell.load(Ordering::SeqCst);
                                 // Second handoff tests already-normalized role=="user" saved_asset survival.
                                 json!({
@@ -7549,7 +7569,7 @@ mod tests {
                                             "arguments": json!({
                                                 "next_goal": "Run top-level write_program and continue",
                                                 "slices": [{"seq": search_seq, "grep": "TARGET_RULE_9"}],
-                                                "main_context_patch": {"phase": "orchestrate"}
+                                                "summary": "phase=orchestrate"
                                             }).to_string()
                                         }
                                     }]
@@ -7582,18 +7602,19 @@ return { has_rule: r.content.includes("TARGET_RULE_9") };
                                 );
                                 assert!(
                                     joined.contains("PINNED_AUDIT_RULE_KEEP"),
-                                    "pinned saved_asset MUST survive end_familiarization + write_program"
+                                    "pinned saved_asset MUST survive write_program"
                                 );
-                                let handoff_msg = msgs
+                                let handoff_msgs: Vec<Value> = msgs
                                     .iter()
-                                    .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
-                                    .expect("virtual_step_handoff MUST survive end_familiarization + write_program");
-                                let frame: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
-                                assert_eq!(frame["mainContext"]["locked_target"], "sample.rs");
-                                assert_eq!(frame["mainContext"]["phase"], "orchestrate");
-                                assert_eq!(frame["mainContext"]["verdict_table"].as_array().unwrap().len(), 40);
-                                assert_eq!(frame["context_slices"].as_array().unwrap().len(), 1);
-                                assert!(frame["context_slices"][0]["excerpt"].as_str().unwrap().contains("TARGET_RULE_9"));
+                                    .filter(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+                                    .map(|m| serde_json::from_str(m["content"].as_str().unwrap()).unwrap())
+                                    .collect();
+                                assert_eq!(handoff_msgs.len(), 2, "both append-only virtual_step_handoff entries MUST survive write_program");
+                                assert!(handoff_msgs[0]["summary"].as_str().unwrap().contains("sample.rs"));
+                                assert!(handoff_msgs[0]["summary"].as_str().unwrap().contains("item_39"));
+                                assert_eq!(handoff_msgs[1]["summary"], "phase=orchestrate");
+                                assert_eq!(handoff_msgs[1]["slices"].as_array().unwrap().len(), 1);
+                                assert!(handoff_msgs[1]["slices"][0]["excerpt"].as_str().unwrap().contains("TARGET_RULE_9"));
                                 // Do one follow-up direct read after write_program to confirm seamless continuation.
                                 json!({
                                     "role": "assistant",
@@ -7788,8 +7809,8 @@ return { has_rule: r.content.includes("TARGET_RULE_9") };
                                     .iter()
                                     .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
                                     .expect("virtual_step_handoff must exist");
-                                let frame: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
-                                let slices = frame["context_slices"].as_array().unwrap();
+                                let entry: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
+                                let slices = entry["slices"].as_array().unwrap();
                                 assert_eq!(slices.len(), 7, "all 7 slices must succeed: {slices:?}");
                                 for slice in slices {
                                     let excerpt = slice["excerpt"].as_str().unwrap();
@@ -7985,5 +8006,239 @@ return summarizeLeaf("check");
         .unwrap();
         server.abort();
         assert_eq!(rounds.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn request_allows_explicit_none_and_off_while_clamping_minimal_to_low() {
+        let root = TestRoot::new();
+        let cancel = CancellationToken::new();
+        for (configured, expected) in [("none", "none"), ("off", "none"), ("minimal", "low"), ("high", "high")] {
+            let mut state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+            state.reasoning_effort = Some(configured.to_string());
+            let s = Session {
+                agent_id: None,
+                task_node_id: None,
+                plugin: None,
+                state: &state,
+                task: "t",
+                model: "m",
+                turn: 1,
+                cancel: &cancel,
+                ban_execution: false,
+                scope: "main".into(),
+                parent: None,
+                input_budget: INPUT_BUDGET,
+            };
+            let body = request(&s, &[json!({"role":"user","content":"hi"})], &[]);
+            assert_eq!(body["reasoning_effort"], expected, "configured={configured}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_main_window_carries_only_nonempty_handoff_entries() {
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let session = Session {
+            agent_id: None,
+            task_node_id: None,
+            plugin: None,
+            state: &state,
+            task: "task",
+            model: "fake",
+            turn: 2,
+            cancel: &cancel,
+            ban_execution: false,
+            scope: "main".into(),
+            parent: None,
+            input_budget: INPUT_BUDGET,
+        };
+
+        let prev_empty = Window::default();
+        let turn2_empty = task_frames::fresh_main_window(&session, Some(&prev_empty), vec![])
+            .await
+            .unwrap();
+        assert!(turn2_empty.handoff_entries.is_empty());
+        assert!(!turn2_empty
+            .messages
+            .iter()
+            .any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF)));
+
+        let mut prev_with_entries = Window::default();
+        prev_with_entries.handoff_entries = vec![
+            json!({"type": VIRTUAL_STEP_HANDOFF, "step": 1, "fn": "s1", "next_fn": "s2", "next_goal": "g1"}),
+            json!({"type": VIRTUAL_STEP_HANDOFF, "step": 2, "fn": "s2", "next_fn": "s3", "next_goal": "g2"}),
+        ];
+        let turn2_carried = task_frames::fresh_main_window(&session, Some(&prev_with_entries), vec![])
+            .await
+            .unwrap();
+        assert_eq!(turn2_carried.handoff_entries.len(), 2);
+        let injected: Vec<&str> = turn2_carried
+            .messages
+            .iter()
+            .filter(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+            .map(|m| m["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(injected.len(), 2);
+        assert!(injected[0].contains("\"step\": 1"));
+        assert!(injected[1].contains("\"step\": 2"));
+    }
+
+    #[tokio::test]
+    async fn virtual_leaf_exposes_event_seq_and_resolves_dollar_slices() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        std::fs::write(
+            root.path().join("leaf_target.txt"),
+            "line_one_filler\nline_two_IMPORTANT_ALPHA\nline_three_IMPORTANT_BETA\nline_four_filler\n",
+        )
+        .unwrap();
+
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let leaf_seq = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                let leaf_seq = leaf_seq.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    let leaf_seq = leaf_seq.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let msgs = body["messages"].as_array().unwrap();
+                        let message = match step {
+                            0 => {
+                                let src = r#"
+const io = require("io");
+const report = inspectLeaf("leaf_target.txt");
+return report;
+
+/**
+ * Read target and return matching lines via $slices.
+ * @virtual Returns {ok:boolean, slices:Array}.
+ */
+function inspectLeaf(path) {}
+"#;
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "call_wp",
+                                        "type": "function",
+                                        "function": {
+                                            "name": program_flow::WRITE_PROGRAM,
+                                            "arguments": json!({"name": "leaf-slices", "source": src}).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            1 => {
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "leaf_read",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json!({"path": "leaf_target.txt"}).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            2 => {
+                                let tool_msg = msgs
+                                    .iter()
+                                    .find(|m| m["role"] == "tool" && m["tool_call_id"] == "leaf_read")
+                                    .expect("leaf read_file result must exist");
+                                let tool_val: Value = serde_json::from_str(tool_msg["content"].as_str().unwrap()).unwrap();
+                                let seq = tool_val["event_seq"]
+                                    .as_i64()
+                                    .expect("@virtual leaf tool delivery must expose event_seq");
+                                leaf_seq.store(seq, Ordering::SeqCst);
+                                // First intentionally return invalid $slices to verify FUNCTION_RESULT_INVALID recovery.
+                                json!({
+                                    "role": "assistant",
+                                    "content": json!({
+                                        "ok": true,
+                                        "$slices": [{"seq": seq, "grep": "NO_SUCH_NEEDLE_XYZ"}]
+                                    }).to_string()
+                                })
+                            }
+                            3 => {
+                                let diag = msgs
+                                    .iter()
+                                    .find(|m| m["name"].as_str() == Some("function_result_diagnostic"))
+                                    .expect("invalid $slices must trigger FUNCTION_RESULT_INVALID");
+                                assert!(diag["content"].as_str().unwrap().contains("HANDOFF_SLICE_INVALID"));
+                                let seq = leaf_seq.load(Ordering::SeqCst);
+                                json!({
+                                    "role": "assistant",
+                                    "content": json!({
+                                        "ok": true,
+                                        "$slices": [{"seq": seq, "lines": [2, 3], "label": "hit"}]
+                                    }).to_string()
+                                })
+                            }
+                            _ => {
+                                assert!(
+                                    !msgs.iter().any(|m| m["role"] == "tool" && m["tool_call_id"] == "leaf_read"),
+                                    "main window must not receive leaf's internal read_file message"
+                                );
+                                let program_msg = msgs
+                                    .iter()
+                                    .find(|m| m["name"].as_str() == Some("program_result"))
+                                    .expect("main must receive program_result");
+                                let content = program_msg["content"].as_str().unwrap();
+                                let json_str = content
+                                    .split_once("返回：")
+                                    .map(|(_, rest)| rest.trim())
+                                    .unwrap_or(content);
+                                let val: Value = serde_json::from_str(json_str)
+                                    .unwrap_or_else(|err| panic!("unexpected program_result content: {content} ({err})"));
+                                assert_eq!(val["ok"], true);
+                                assert!(val.get("$slices").is_none(), "raw $slices marker must be removed");
+                                let slices = val["slices"].as_array().expect("resolved slices array");
+                                assert_eq!(slices.len(), 1);
+                                assert_eq!(slices[0]["label"], "hit");
+                                assert_eq!(slices[0]["tool"], "read_file");
+                                assert_eq!(slices[0]["sliced_range"], json!([2, 3]));
+                                let excerpt = slices[0]["excerpt"].as_str().unwrap();
+                                assert!(excerpt.contains("line_two_IMPORTANT_ALPHA"));
+                                assert!(excerpt.contains("line_three_IMPORTANT_BETA"));
+                                assert!(!excerpt.contains("line_one_filler"));
+                                json!({"role": "assistant", "content": "Leaf slices verified."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state,
+            "task".into(),
+            "fake".into(),
+            "Verify @virtual leaf event_seq and $slices resolution".into(),
+            10,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 5);
     }
 }

@@ -453,11 +453,11 @@ fn wire_tool(definition: &Value) -> Value {
 }
 
 /// Thinking settings for the effort a Chat Completions body names. Thinking is
-/// on unless the effort is explicitly `off`: an unset effort is high, as
+/// on unless the effort is explicitly `off` or `none`: an unset effort is high, as
 /// `serialize.ts` resolves it.
 fn thinking(effort: Option<&str>) -> (Value, Option<Value>) {
     match effort {
-        Some("off") => (json!({"type":"disabled"}), None),
+        Some("off" | "none") => (json!({"type":"disabled"}), None),
         Some("low") => (json!({"type":"enabled"}), Some(json!({"effort":"low"}))),
         Some("max" | "xhigh") => (json!({"type":"enabled"}), Some(json!({"effort":"max"}))),
         _ => (json!({"type":"enabled"}), Some(json!({"effort":"high"}))),
@@ -771,12 +771,14 @@ mod tests {
             assert_eq!(wire["thinking"], json!({"type":"enabled"}), "{effort}");
             assert_eq!(wire["output_config"], json!({"effort":expected}), "{effort}");
         }
-        // Only an explicit off turns thinking off.
-        let mut off = unset.clone();
-        off["reasoning_effort"] = json!("off");
-        let wire = body_(&off, Capabilities::default());
-        assert_eq!(wire["thinking"], json!({"type":"disabled"}));
-        assert!(wire.get("output_config").is_none());
+        // Only an explicit off or none turns thinking off.
+        for level in ["off", "none"] {
+            let mut off = unset.clone();
+            off["reasoning_effort"] = json!(level);
+            let wire = body_(&off, Capabilities::default());
+            assert_eq!(wire["thinking"], json!({"type":"disabled"}), "{level}");
+            assert!(wire.get("output_config").is_none(), "{level}");
+        }
     }
 
     #[test]

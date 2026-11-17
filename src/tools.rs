@@ -4,6 +4,10 @@ use std::{
     io::{BufRead, BufReader, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use ignore::WalkBuilder;
@@ -39,6 +43,9 @@ const DEFAULT_MAX_MATCHES: usize = 100;
 const MAX_CONTEXT_LINES: usize = 20;
 const DEFAULT_WRITE_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SEARCH_FILE_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
+/// Inline byte budget for `search_text` matches/counts so responses stay well below
+/// the 96 KiB direct-tool delivery soft cap and remain in-context.
+const MAX_SEARCH_RESPONSE_BYTES: usize = 48 * 1024;
 /// A matched line longer than this comes back as an excerpt around the match.
 const MATCH_TEXT_CHARS: usize = 400;
 /// How much of a long line before the match its excerpt keeps.
@@ -47,6 +54,7 @@ const NOISE_DIRS: &[&str] = &[
     ".git",
     ".hg",
     ".svn",
+    ".swarm",
     "node_modules",
     "target",
     "dist",
@@ -226,9 +234,13 @@ pub struct ListDirRequest {
     pub respect_gitignore: bool,
     /// Only entries whose path matches one of these globs, as in `rg -g`:
     /// `*.rs` matches at any depth, `src/**/*.ts` from the workspace root,
-    /// and a leading `!` excludes.
+    /// `|` separates alternatives outside `{...}`, and a leading `!` excludes.
     #[serde(default, alias = "globs", deserialize_with = "one_or_many")]
     pub glob: Vec<String>,
+    /// Exclude files or directories matching these patterns (`|` separates
+    /// alternatives outside `{...}`).
+    #[serde(default, alias = "excludes", alias = "ignore", deserialize_with = "one_or_many")]
+    pub exclude: Vec<String>,
     #[serde(default)]
     pub kind: Option<EntryKind>,
     /// Keep entries modified at or after this time (RFC3339, `YYYY-MM-DD`,
@@ -253,6 +265,7 @@ impl Default for ListDirRequest {
             max_depth: None,
             respect_gitignore: false,
             glob: Vec::new(),
+            exclude: Vec::new(),
             kind: None,
             modified_after: None,
             modified_before: None,
@@ -266,6 +279,10 @@ impl Default for ListDirRequest {
 pub struct ListDirResponse {
     pub root: String,
     pub entries: Vec<DirEntryInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unexpanded_dirs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
     pub truncated: bool,
 }
 
@@ -419,9 +436,13 @@ pub struct SearchTextRequest {
     pub output_mode: SearchOutput,
     /// Only files whose path matches one of these globs, as in `rg -g`:
     /// `*.rs` matches at any depth, `src/**/*.ts` from the workspace root,
-    /// and a leading `!` excludes.
+    /// `|` separates alternatives outside `{...}`, and a leading `!` excludes.
     #[serde(default, alias = "globs", deserialize_with = "one_or_many")]
     pub glob: Vec<String>,
+    /// Exclude files or directories matching these patterns (`|` separates
+    /// alternatives outside `{...}`).
+    #[serde(default, alias = "excludes", alias = "ignore", deserialize_with = "one_or_many")]
+    pub exclude: Vec<String>,
     /// Lines before and after each match, in content mode.
     #[serde(default, alias = "context")]
     pub context_lines: usize,
@@ -761,11 +782,8 @@ impl Workspace {
     pub fn list_dir(&self, request: ListDirRequest) -> Result<ListDirResponse> {
         let workspace = self.with_root(request.workspace_root.as_deref())?;
         let root = workspace.resolve_existing(&request.path)?;
-        if !root.is_dir() {
-            return Err(ToolError::NotDirectory(request.path));
-        }
 
-        let globs = search_globs(&workspace.root, &request.glob)?;
+        let globs = search_globs(&workspace.root, &request.glob, &request.exclude)?;
         let allowed_noise = allowed_noise_dirs(&request.glob);
         let modified_after = request
             .modified_after
@@ -780,6 +798,28 @@ impl Workspace {
             .map(|s| parse_timestamp_ms(s, true))
             .transpose()?;
 
+        let filter = DirEntryFilter {
+            workspace: &workspace,
+            kind: request.kind,
+            globs: globs.as_ref(),
+            modified_after,
+            modified_before,
+        };
+        if !root.is_dir() {
+            let mut entries = Vec::new();
+            push_matching_dir_entry(&filter, &root, &mut entries)?;
+            return Ok(ListDirResponse {
+                root: workspace.relative_display(&root)?,
+                entries,
+                unexpanded_dirs: Vec::new(),
+                hints: Vec::new(),
+                truncated: false,
+            });
+        }
+
+        let unexpanded_noise = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let unexpanded_collector = Arc::clone(&unexpanded_noise);
+        let filter_globs = globs.clone();
         let mut builder = WalkBuilder::new(&root);
         builder
             .hidden(false)
@@ -788,14 +828,21 @@ impl Workspace {
             .git_exclude(request.respect_gitignore)
             .parents(request.respect_gitignore)
             .filter_entry(move |entry| {
-                if entry.depth() == 0 {
-                    return true;
+                if filter_globs.as_ref().is_some_and(|g| {
+                    g.is_excluded(
+                        entry.path(),
+                        entry.file_type().is_some_and(|ft| ft.is_dir()),
+                    )
+                }) {
+                    return false;
                 }
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(|name| !NOISE_DIRS.contains(&name) || allowed_noise.contains(name))
-                    .unwrap_or(true)
+                if is_skipped_noise_dir(entry, &allowed_noise) {
+                    if let Ok(mut list) = unexpanded_collector.lock() {
+                        list.push(entry.path().to_path_buf());
+                    }
+                    return false;
+                }
+                true
             });
         if !request.recursive && request.glob.is_empty() {
             builder.max_depth(Some(1));
@@ -805,43 +852,24 @@ impl Workspace {
 
         let mut entries = Vec::new();
         for item in builder.build().skip(1) {
-            let entry = match item {
-                Ok(entry) => entry,
-                Err(_) => continue,
+            let Ok(entry) = item else {
+                continue;
             };
-            let path = entry.path();
-            let metadata = match fs::symlink_metadata(path) {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-            let kind = entry_kind(&metadata);
-            if request.kind.is_some_and(|want| want != kind) {
-                continue;
-            }
-            if let Some(globs) = &globs
-                && !globs.matched(path, metadata.is_dir()).is_whitelist()
-            {
-                continue;
-            }
-            let (modified_at, modified_ms) = format_modified(&metadata);
-            if let Some(after) = modified_after
-                && !modified_ms.is_some_and(|ms| ms >= after)
-            {
-                continue;
-            }
-            if let Some(before) = modified_before
-                && !modified_ms.is_some_and(|ms| ms <= before)
-            {
-                continue;
-            }
-            entries.push(DirEntryInfo {
-                path: workspace.relative_display(path)?,
-                kind,
-                size_bytes: metadata.is_file().then_some(metadata.len()),
-                modified_at,
-                modified_ms,
-            });
+            push_matching_dir_entry(&filter, entry.path(), &mut entries)?;
         }
+
+        let skipped_paths = unexpanded_noise
+            .lock()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default();
+        let mut unexpanded_dirs = Vec::with_capacity(skipped_paths.len());
+        for path in skipped_paths {
+            push_matching_dir_entry(&filter, &path, &mut entries)?;
+            unexpanded_dirs.push(workspace.relative_display(&path)?);
+        }
+        unexpanded_dirs.sort();
+        unexpanded_dirs.dedup();
+        let hints = list_dir_hints(&unexpanded_dirs);
 
         match request.sort_by {
             ListSort::Path => entries.sort_by(|a, b| a.path.cmp(&b.path)),
@@ -878,6 +906,8 @@ impl Workspace {
         Ok(ListDirResponse {
             root: workspace.relative_display(&root)?,
             entries,
+            unexpanded_dirs,
+            hints,
             truncated,
         })
     }
@@ -1005,7 +1035,8 @@ impl Workspace {
         let workspace = self.with_root(request.workspace_root.as_deref())?;
         let roots = workspace.resolve_search_roots(&request)?;
         let root_filters = workspace.search_root_filters(&roots)?;
-        let globs = search_globs(&workspace.root, &request.glob)?;
+        let globs = search_globs(&workspace.root, &request.glob, &request.exclude)?;
+        let allowed_noise = allowed_noise_dirs(&request.glob);
         let max_matches = request.max_matches.max(1);
         let scan = ScanOptions {
             mode: request.output_mode,
@@ -1014,6 +1045,7 @@ impl Workspace {
             max_matches_per_file: request.max_matches_per_file.map(|n| n.max(1)),
             context_lines: request.context_lines.min(MAX_CONTEXT_LINES),
             globs,
+            allowed_noise,
         };
         let mut matches = Vec::new();
         let mut truncated = false;
@@ -1067,6 +1099,13 @@ impl Workspace {
         // 2. 如果置顶的符号匹配项未把配额占满，继续进行常规全文 Walk 扫描匹配
         let mut text_scan_used = false;
         let mut skipped_ignored = false;
+        let mut skipped_noise = false;
+        let mut truncated_by_bytes = false;
+        let mut match_bytes: usize = matches
+            .iter()
+            .map(|m| serde_json::to_vec(m).map(|v| v.len()).unwrap_or(0))
+            .sum();
+        let mut count_bytes: usize = 0;
         let mut files = Vec::new();
         let mut counts = Vec::new();
         if !truncated {
@@ -1093,6 +1132,7 @@ impl Workspace {
                     continue;
                 };
                 truncated |= found.truncated;
+                skipped_noise |= found.skipped_noise;
                 for item in found.matches {
                     let line_key = (item.path.clone(), item.line);
                     if seen_symbols.contains(&line_key) {
@@ -1102,6 +1142,15 @@ impl Workspace {
                         truncated = true;
                         break 'outer;
                     }
+                    let item_bytes = serde_json::to_vec(&item).map(|v| v.len()).unwrap_or(0);
+                    if !matches.is_empty()
+                        && match_bytes.saturating_add(item_bytes) > MAX_SEARCH_RESPONSE_BYTES
+                    {
+                        truncated = true;
+                        truncated_by_bytes = true;
+                        break 'outer;
+                    }
+                    match_bytes = match_bytes.saturating_add(item_bytes);
                     matches.push(item);
                 }
                 for item in found.counts {
@@ -1109,6 +1158,15 @@ impl Workspace {
                         truncated = true;
                         break 'outer;
                     }
+                    let item_bytes = serde_json::to_vec(&item).map(|v| v.len()).unwrap_or(0);
+                    if !counts.is_empty()
+                        && count_bytes.saturating_add(item_bytes) > MAX_SEARCH_RESPONSE_BYTES
+                    {
+                        truncated = true;
+                        truncated_by_bytes = true;
+                        break 'outer;
+                    }
+                    count_bytes = count_bytes.saturating_add(item_bytes);
                     files.push(item.path.clone());
                     counts.push(item);
                 }
@@ -1116,6 +1174,9 @@ impl Workspace {
         }
 
         let mut hints = Vec::new();
+        if truncated_by_bytes {
+            hints.push("Search output capped at ~48 KiB inline budget; narrow path/query/exclude/context_lines or read specific line ranges.");
+        }
         if explicit.is_none() && regex {
             hints.push("regex was not given and the query is written as a regular expression, so it was matched as one. Pass regex:false to match the text literally.");
         } else if !regex && request.query.contains('|') {
@@ -1123,6 +1184,9 @@ impl Workspace {
         }
         if skipped_ignored && matches.is_empty() && files.is_empty() && counts.is_empty() {
             hints.push("Files that .gitignore or .ignore excludes were not searched. Pass respect_gitignore:false to search them too.");
+        }
+        if skipped_noise && matches.is_empty() && files.is_empty() && counts.is_empty() {
+            hints.push("Default noise/dependency directories (such as node_modules, target, dist, .git) were not searched inside. Only search inside them if the user explicitly specified them or the task genuinely requires it (pass their path or name them in glob).");
         }
         let (files, total, counts) = match scan.mode {
             SearchOutput::Content => (None, None, None),
@@ -2132,10 +2196,42 @@ fn default_max_matches() -> usize {
     DEFAULT_MAX_MATCHES
 }
 
+fn split_pipe_patterns(patterns: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in patterns {
+        let mut start = 0usize;
+        let mut brace_depth = 0usize;
+        let mut escaped = false;
+        for (idx, ch) in raw.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '{' => brace_depth += 1,
+                '}' => brace_depth = brace_depth.saturating_sub(1),
+                '|' if brace_depth == 0 => {
+                    let part = raw[start..idx].trim();
+                    if !part.is_empty() {
+                        out.push(part.to_owned());
+                    }
+                    start = idx + 1;
+                }
+                _ => {}
+            }
+        }
+        let tail = raw[start..].trim();
+        if !tail.is_empty() {
+            out.push(tail.to_owned());
+        }
+    }
+    out
+}
+
 fn allowed_noise_dirs(globs: &[String]) -> std::collections::HashSet<&'static str> {
     let mut allowed = std::collections::HashSet::new();
-    for raw in globs {
-        let trimmed = raw.trim();
+    for trimmed in split_pipe_patterns(globs) {
         if trimmed.is_empty() || trimmed.starts_with('!') {
             continue;
         }
@@ -2239,6 +2335,88 @@ fn map_memory_error(error: memory::MemoryError) -> ToolError {
     ))
 }
 
+struct DirEntryFilter<'a> {
+    workspace: &'a Workspace,
+    kind: Option<EntryKind>,
+    globs: Option<&'a CompiledGlobs>,
+    modified_after: Option<i64>,
+    modified_before: Option<i64>,
+}
+
+/// Applies caller filters to a path and records matching metadata in `entries`.
+fn push_matching_dir_entry(
+    filter: &DirEntryFilter<'_>,
+    path: &Path,
+    entries: &mut Vec<DirEntryInfo>,
+) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    let kind = entry_kind(&metadata);
+    if filter.kind.is_some_and(|want| want != kind) {
+        return Ok(());
+    }
+    if let Some(globs) = filter.globs
+        && !globs.matches(path, metadata.is_dir())
+    {
+        return Ok(());
+    }
+    let (modified_at, modified_ms) = format_modified(&metadata);
+    if let Some(after) = filter.modified_after
+        && !modified_ms.is_some_and(|ms| ms >= after)
+    {
+        return Ok(());
+    }
+    if let Some(before) = filter.modified_before
+        && !modified_ms.is_some_and(|ms| ms <= before)
+    {
+        return Ok(());
+    }
+    entries.push(DirEntryInfo {
+        path: filter.workspace.relative_display(path)?,
+        kind,
+        size_bytes: metadata.is_file().then_some(metadata.len()),
+        modified_at,
+        modified_ms,
+    });
+    Ok(())
+}
+
+/// Returns `true` when `entry` is a nested default noise directory whose subtree should stay unexpanded.
+fn is_skipped_noise_dir(
+    entry: &ignore::DirEntry,
+    allowed_noise: &std::collections::HashSet<&'static str>,
+) -> bool {
+    if entry.depth() == 0 || !entry.file_type().is_some_and(|ft| ft.is_dir()) {
+        return false;
+    }
+    entry
+        .file_name()
+        .to_str()
+        .is_some_and(|name| NOISE_DIRS.contains(&name) && !allowed_noise.contains(name))
+}
+
+fn list_dir_hints(unexpanded_dirs: &[String]) -> Vec<String> {
+    if unexpanded_dirs.is_empty() {
+        return Vec::new();
+    }
+    let preview = unexpanded_dirs
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let extra = unexpanded_dirs.len().saturating_sub(5);
+    let suffix = if extra > 0 {
+        format!(" (+{extra} more in unexpanded_dirs)")
+    } else {
+        String::new()
+    };
+    vec![format!(
+        "Default noise/dependency directories were not traversed inside: {preview}{suffix} (directory entries remain visible when matched). Do not inspect inside these directories unless the user explicitly specified them or the task genuinely requires it (if needed, pass the directory path or name it in glob)."
+    )]
+}
+
 #[derive(Clone)]
 struct ScanOptions {
     mode: SearchOutput,
@@ -2247,7 +2425,8 @@ struct ScanOptions {
     limit: usize,
     max_matches_per_file: Option<usize>,
     context_lines: usize,
-    globs: Option<ignore::overrides::Override>,
+    globs: Option<CompiledGlobs>,
+    allowed_noise: std::collections::HashSet<&'static str>,
 }
 
 #[derive(Default)]
@@ -2256,21 +2435,98 @@ struct ScanFound {
     /// Files and counts modes: every matching file with its matching lines.
     counts: Vec<FileCount>,
     truncated: bool,
+    skipped_noise: bool,
+}
+
+#[derive(Clone)]
+struct CompiledGlobs {
+    workspace_root: PathBuf,
+    include: Option<ignore::overrides::Override>,
+    exclude: Option<ignore::overrides::Override>,
+}
+
+impl CompiledGlobs {
+    fn is_excluded(&self, path: &Path, is_dir: bool) -> bool {
+        let Some(exclude) = &self.exclude else {
+            return false;
+        };
+        if exclude.matched(path, is_dir).is_whitelist() {
+            return true;
+        }
+        let mut cursor = path.parent();
+        while let Some(dir) = cursor {
+            if dir == self.workspace_root || !dir.starts_with(&self.workspace_root) {
+                break;
+            }
+            if exclude.matched(dir, true).is_whitelist() {
+                return true;
+            }
+            cursor = dir.parent();
+        }
+        false
+    }
+
+    fn matches(&self, path: &Path, is_dir: bool) -> bool {
+        if self.is_excluded(path, is_dir) {
+            return false;
+        }
+        match &self.include {
+            Some(include) => include.matched(path, is_dir).is_whitelist(),
+            None => true,
+        }
+    }
 }
 
 /// Globs as `rg -g` reads them, rooted at the workspace so `src/**/*.ts`
-/// means the same from any search path.
-fn search_globs(root: &Path, globs: &[String]) -> Result<Option<ignore::overrides::Override>> {
-    if globs.iter().all(|glob| glob.trim().is_empty()) {
+/// means the same from any search path, with `|` splitting outside `{...}`
+/// and explicit `exclude` patterns taking strict priority over `glob`.
+fn search_globs(
+    root: &Path,
+    globs: &[String],
+    excludes: &[String],
+) -> Result<Option<CompiledGlobs>> {
+    let mut include_patterns = Vec::new();
+    let mut exclude_patterns = Vec::new();
+    for pattern in split_pipe_patterns(globs) {
+        if let Some(neg) = pattern.strip_prefix('!') {
+            let neg = neg.trim();
+            if !neg.is_empty() {
+                exclude_patterns.push(neg.to_owned());
+            }
+        } else {
+            include_patterns.push(pattern);
+        }
+    }
+    for pattern in split_pipe_patterns(excludes) {
+        let pat = pattern.strip_prefix('!').unwrap_or(&pattern).trim();
+        if !pat.is_empty() {
+            exclude_patterns.push(pat.to_owned());
+        }
+    }
+    if include_patterns.is_empty() && exclude_patterns.is_empty() {
         return Ok(None);
     }
-    let mut builder = ignore::overrides::OverrideBuilder::new(root);
-    for glob in globs.iter().map(|glob| glob.trim()).filter(|glob| !glob.is_empty()) {
-        builder
-            .add(glob)
-            .map_err(|error| ToolError::InvalidSearchPattern(format!("glob {glob}: {error}")))?;
-    }
-    Ok(Some(builder.build().map_err(|error| ToolError::InvalidSearchPattern(error.to_string()))?))
+    let build_override = |patterns: &[String]| -> Result<Option<ignore::overrides::Override>> {
+        if patterns.is_empty() {
+            return Ok(None);
+        }
+        let mut builder = ignore::overrides::OverrideBuilder::new(root);
+        for pat in patterns {
+            builder
+                .add(pat)
+                .map_err(|error| ToolError::InvalidSearchPattern(format!("glob {pat}: {error}")))?;
+        }
+        Ok(Some(
+            builder
+                .build()
+                .map_err(|error| ToolError::InvalidSearchPattern(error.to_string()))?,
+        ))
+    };
+    Ok(Some(CompiledGlobs {
+        workspace_root: root.to_path_buf(),
+        include: build_override(&include_patterns)?,
+        exclude: build_override(&exclude_patterns)?,
+    }))
 }
 
 /// Whether a path being searched is itself excluded by the workspace's
@@ -2296,6 +2552,10 @@ fn scan_text_root(
     scan: &ScanOptions,
 ) -> ScanFound {
     let mut found = ScanFound::default();
+    let skipped_noise = Arc::new(AtomicBool::new(false));
+    let skipped_noise_flag = Arc::clone(&skipped_noise);
+    let allowed_noise = scan.allowed_noise.clone();
+    let filter_globs = scan.globs.clone();
 
     let mut builder = WalkBuilder::new(root);
     builder
@@ -2304,12 +2564,20 @@ fn scan_text_root(
         .git_ignore(scan.respect_gitignore)
         .git_exclude(scan.respect_gitignore)
         .parents(scan.respect_gitignore)
-        .filter_entry(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .map(|name| !NOISE_DIRS.contains(&name))
-                .unwrap_or(true)
+        .filter_entry(move |entry| {
+            if filter_globs.as_ref().is_some_and(|g| {
+                g.is_excluded(
+                    entry.path(),
+                    entry.file_type().is_some_and(|ft| ft.is_dir()),
+                )
+            }) {
+                return false;
+            }
+            if is_skipped_noise_dir(entry, &allowed_noise) {
+                skipped_noise_flag.store(true, Ordering::Relaxed);
+                return false;
+            }
+            true
         });
 
     'outer: for item in builder.build() {
@@ -2322,7 +2590,7 @@ fn scan_text_root(
         }
         let path = entry.path();
         if let Some(globs) = &scan.globs
-            && !globs.matched(path, false).is_whitelist()
+            && !globs.matches(path, false)
         {
             continue;
         }
@@ -2392,6 +2660,7 @@ fn scan_text_root(
         }
     }
 
+    found.skipped_noise = skipped_noise.load(Ordering::Relaxed);
     found
 }
 
@@ -2830,7 +3099,7 @@ mod tests {
     }
 
     fn plain_scan() -> ScanOptions {
-        ScanOptions { mode: SearchOutput::Content, respect_gitignore: false, limit: 100, max_matches_per_file: None, context_lines: 0, globs: None }
+        ScanOptions { mode: SearchOutput::Content, respect_gitignore: false, limit: 100, max_matches_per_file: None, context_lines: 0, globs: None, allowed_noise: std::collections::HashSet::new() }
     }
 
     #[test]
@@ -3341,6 +3610,335 @@ mod tests {
         let bounded = workspace.git_status(GitStatusRequest { max_entries: Some(1), ..Default::default() }).unwrap();
         assert_eq!(bounded.total_entries, 2, "rename's old path must not be counted as a second entry");
         assert!(bounded.truncated);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_dir_shows_noise_dirs_without_traversing_inside_by_default() {
+        let root = temp_workspace("list_dir_visible_noise_dirs");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::create_dir_all(root.join("target/sub/node_modules/nwsapi/dist")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join(".git/HEAD"), "ref: refs/heads/master\n").unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "module.exports = 1;\n").unwrap();
+        fs::write(root.join("target/debug/app.log"), "ok\n").unwrap();
+        fs::write(root.join("target/sub/node_modules/nwsapi/dist/lint.log"), "noise\n").unwrap();
+
+        let workspace = Workspace::new(&root).unwrap();
+
+        let top = workspace.list_dir(ListDirRequest::default()).unwrap();
+        let top_paths = top.entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>();
+        assert!(top_paths.contains(&".git"));
+        assert!(top_paths.contains(&"node_modules"));
+        assert!(top_paths.contains(&"target"));
+        assert!(top_paths.contains(&"src"));
+        assert_eq!(top.unexpanded_dirs, vec![".git", "node_modules", "target"]);
+        assert!(!top.hints.is_empty());
+
+        let target_logs = workspace
+            .list_dir(ListDirRequest {
+                path: "target".to_string(),
+                recursive: true,
+                glob: vec!["*.log".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        let log_paths = target_logs
+            .entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(log_paths, vec!["target/debug/app.log"]);
+        assert_eq!(target_logs.unexpanded_dirs, vec!["target/sub/node_modules"]);
+        assert!(!target_logs.hints.is_empty());
+
+        let target_all = workspace
+            .list_dir(ListDirRequest {
+                path: "target".to_string(),
+                recursive: true,
+                ..Default::default()
+            })
+            .unwrap();
+        let all_paths = target_all
+            .entries
+            .iter()
+            .map(|e| e.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(all_paths.contains(&"target/sub/node_modules"));
+        assert!(!all_paths.contains(&"target/sub/node_modules/nwsapi/dist/lint.log"));
+        assert_eq!(target_all.unexpanded_dirs, vec!["target/sub/node_modules"]);
+
+        let clean_src = workspace
+            .list_dir(ListDirRequest {
+                path: "src".to_string(),
+                recursive: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(clean_src.unexpanded_dirs.is_empty());
+        assert!(clean_src.hints.is_empty());
+
+        let explicit_dir = workspace
+            .list_dir(ListDirRequest {
+                path: "node_modules".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(explicit_dir.entries.iter().any(|e| e.path == "node_modules/pkg"));
+
+        let explicit_glob = workspace
+            .list_dir(ListDirRequest {
+                glob: vec!["node_modules/**".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(explicit_glob.entries.iter().any(|e| e.path == "node_modules/pkg/index.js"));
+        assert!(!explicit_glob.unexpanded_dirs.iter().any(|p| p == "node_modules"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_text_skips_noise_dirs_unless_targeted() {
+        let root = temp_workspace("search_text_noise_dirs");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn clean() {}\n").unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "const x = 'ONLY_IN_NOISE_DEP';\n").unwrap();
+        fs::write(root.join("target/debug/out.log"), "ONLY_IN_TARGET_LOG\n").unwrap();
+
+        let workspace = Workspace::new(&root).unwrap();
+
+        let broad = workspace
+            .search_text(SearchTextRequest {
+                query: "ONLY_IN_NOISE_DEP".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(broad.matches.is_empty());
+        assert!(broad.hints.iter().any(|h| h.contains("node_modules")));
+
+        let explicit_path = workspace
+            .search_text(SearchTextRequest {
+                query: "ONLY_IN_NOISE_DEP".to_string(),
+                path: "node_modules".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(explicit_path.matches.len(), 1);
+        assert_eq!(explicit_path.matches[0].path, "node_modules/pkg/index.js");
+
+        let explicit_glob = workspace
+            .search_text(SearchTextRequest {
+                query: "ONLY_IN_TARGET_LOG".to_string(),
+                glob: vec!["target/**".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(explicit_glob.matches.len(), 1);
+        assert_eq!(explicit_glob.matches[0].path, "target/debug/out.log");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_dir_supports_single_file_path_and_filters() {
+        let root = temp_workspace("list_dir_single_file");
+        fs::create_dir_all(root.join("src")).unwrap();
+        let file = root.join("src/flow_libraries.rs");
+        fs::write(&file, "pub fn example() {}\n").unwrap();
+
+        let workspace = Workspace::new(&root).unwrap();
+
+        let listed = workspace
+            .list_dir(ListDirRequest {
+                path: "src/flow_libraries.rs".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(listed.root, "src/flow_libraries.rs");
+        assert!(!listed.truncated);
+        assert!(listed.unexpanded_dirs.is_empty());
+        assert_eq!(listed.entries.len(), 1);
+        assert_eq!(listed.entries[0].path, "src/flow_libraries.rs");
+        assert_eq!(listed.entries[0].kind, EntryKind::File);
+        assert_eq!(listed.entries[0].size_bytes, Some(20));
+        assert!(listed.entries[0].modified_at.is_some());
+
+        let only_dirs = workspace
+            .list_dir(ListDirRequest {
+                path: "src/flow_libraries.rs".to_string(),
+                kind: Some(EntryKind::Directory),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(only_dirs.entries.is_empty());
+
+        let only_files = workspace
+            .list_dir(ListDirRequest {
+                path: "src/flow_libraries.rs".to_string(),
+                kind: Some(EntryKind::File),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(only_files.entries.len(), 1);
+
+        let glob_hit = workspace
+            .list_dir(ListDirRequest {
+                path: "src/flow_libraries.rs".to_string(),
+                glob: vec!["*.rs".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(glob_hit.entries.len(), 1);
+
+        let glob_miss = workspace
+            .list_dir(ListDirRequest {
+                path: "src/flow_libraries.rs".to_string(),
+                glob: vec!["*.ts".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(glob_miss.entries.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_text_caps_response_within_inline_byte_budget() {
+        let root = temp_workspace("search_byte_budget");
+        let long_zh = "中文上下文内容用于验证字节预算截断上限_".repeat(12);
+        let mut big_content = String::new();
+        for i in 0..240 {
+            big_content.push_str(&format!("before_{i}: {long_zh}\n"));
+            big_content.push_str(&format!("NEEDLE_HIT_{i}: {long_zh}\n"));
+            big_content.push_str(&format!("after_{i}: {long_zh}\n"));
+        }
+        fs::write(root.join("dense.txt"), big_content).unwrap();
+
+        let workspace = Workspace::new(&root).unwrap();
+        let response = workspace
+            .search_text(SearchTextRequest {
+                query: "NEEDLE_HIT_".to_string(),
+                max_matches: 200,
+                context_lines: 1,
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert!(response.truncated, "byte-capped search must mark truncated=true");
+        assert!(!response.matches.is_empty(), "must retain matches up to budget");
+        assert!(response.matches.len() < 200, "must stop before max_matches due to byte budget");
+        assert!(
+            response.hints.iter().any(|h| h.contains("48 KiB")),
+            "expected 48 KiB budget hint: {:?}",
+            response.hints
+        );
+        let total_json_bytes = serde_json::to_vec(&response).unwrap().len();
+        assert!(
+            total_json_bytes <= 52 * 1024,
+            "response must stay well under 96 KiB soft limit, got {total_json_bytes} bytes"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn list_dir_and_search_text_support_pipe_globs_exclude_and_swarm_noise() {
+        let root = temp_workspace("pipe_glob_exclude_swarm");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("target/kylin-arm64/customer")).unwrap();
+        fs::create_dir_all(root.join("target/logs")).unwrap();
+        fs::create_dir_all(root.join(".swarm/reports")).unwrap();
+
+        fs::write(root.join("src/flow.rs"), "pub fn pipe_marker() {}\n").unwrap();
+        fs::write(root.join("src/app.ts"), "export const pipe_marker = 1;\n").unwrap();
+        fs::write(root.join("src/skip.tmp"), "pipe_marker\n").unwrap();
+        fs::write(root.join("target/dev.log"), "pipe_marker dev\n").unwrap();
+        fs::write(root.join("target/skip.tmp"), "pipe_marker tmp\n").unwrap();
+        fs::write(root.join("target/logs/run.log"), "pipe_marker run\n").unwrap();
+        fs::write(root.join("target/kylin-arm64/customer/a.log"), "pipe_marker kylin\n").unwrap();
+        fs::write(root.join(".swarm/reports/worker.md"), "pipe_marker swarm\n").unwrap();
+
+        let workspace = Workspace::new(&root).unwrap();
+
+        // `.swarm` is in NOISE_DIRS: visible unexpanded in list_dir, skipped by default in search_text.
+        let top = workspace.list_dir(ListDirRequest::default()).unwrap();
+        assert!(top.unexpanded_dirs.contains(&".swarm".to_string()));
+        let default_search = workspace
+            .search_text(SearchTextRequest {
+                query: "pipe_marker".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!default_search.matches.iter().any(|m| m.path.starts_with(".swarm/")));
+
+        // Bare directory name in `exclude` excludes nested descendants even when `glob` matches `*.log`.
+        let target_logs = workspace
+            .list_dir(ListDirRequest {
+                path: "target".to_string(),
+                glob: vec!["*.log".to_string()],
+                exclude: vec!["kylin-arm64".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        let target_paths: Vec<&str> = target_logs.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(target_paths, vec!["target/dev.log", "target/logs/run.log"]);
+
+        // Workspace-relative directory glob in `exclude` also works.
+        let no_logs_dir = workspace
+            .list_dir(ListDirRequest {
+                path: "target".to_string(),
+                glob: vec!["*.log".to_string()],
+                exclude: vec!["kylin-arm64|target/logs/**".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        let only_dev: Vec<&str> = no_logs_dir.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(only_dev, vec!["target/dev.log"]);
+
+        // Pipe-separated `glob` and braced `{...}` globs both work.
+        let piped = workspace
+            .list_dir(ListDirRequest {
+                path: "src".to_string(),
+                glob: vec!["*.rs|*.ts".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        let piped_paths: Vec<&str> = piped.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(piped_paths, vec!["src/app.ts", "src/flow.rs"]);
+
+        let braced = workspace
+            .list_dir(ListDirRequest {
+                path: "src".to_string(),
+                glob: vec!["{*.rs,*.ts}".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+        let braced_paths: Vec<&str> = braced.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(braced_paths, vec!["src/app.ts", "src/flow.rs"]);
+
+        // `search_text` honors pipe-separated `glob` and `exclude`.
+        let searched = workspace
+            .search_text(SearchTextRequest {
+                query: "pipe_marker".to_string(),
+                path: "target".to_string(),
+                glob: vec!["*.rs|*.log|*.tmp".to_string()],
+                exclude: vec!["kylin-arm64|*.tmp".to_string()],
+                max_matches: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        let matched_files: Vec<&str> = searched.matches.iter().map(|m| m.path.as_str()).collect();
+        assert!(!matched_files.iter().any(|p| p.contains("kylin-arm64")));
+        assert!(!matched_files.iter().any(|p| p.ends_with(".tmp")));
+        assert!(matched_files.contains(&"target/dev.log"));
+        assert!(matched_files.contains(&"target/logs/run.log"));
+
         let _ = fs::remove_dir_all(root);
     }
 }

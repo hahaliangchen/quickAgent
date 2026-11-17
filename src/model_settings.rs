@@ -15,8 +15,7 @@ pub const MAX_CONTEXT_WINDOW: usize = 2_000_000;
 pub const REASONING_EFFORTS: [&str; 6] = ["none", "low", "medium", "high", "xhigh", "max"];
 
 /// The accepted level a declared one stands for, or `None` when the host has no
-/// equivalent. `minimal` maps to `low` because both reach the wire as `low`:
-/// thinking is never off, so the lowest level is the floor.
+/// equivalent. `minimal` maps to `low`, while `false`/`off`/`none` fold to `none`.
 pub fn canonical_effort(level: &str) -> Option<&'static str> {
     match level.trim().to_ascii_lowercase().as_str() {
         "false" | "off" | "none" => Some("none"),

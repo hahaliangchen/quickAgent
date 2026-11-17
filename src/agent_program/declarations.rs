@@ -341,9 +341,9 @@ pub fn core_methods(libraries: &Libraries, definitions: &[Value]) -> String {
         for (method, target) in methods {
             let (inputs, outputs, purpose): (&[&str], &[&str], &str) = match target.as_str() {
                 "list_dir" => (
-                    &["path", "recursive", "max_depth", "glob", "kind", "modified_after", "modified_before", "sort_by", "max_entries"],
+                    &["path", "recursive", "max_depth", "glob", "exclude", "kind", "modified_after", "modified_before", "sort_by", "max_entries"],
                     &["entries", "truncated"],
-                    "Find and sort files or inspect layout; entries include path, kind, size_bytes, modified_at, modified_ms.",
+                    "Find and sort files, inspect layout, or stat a single file path (glob/exclude support | pipes); entries include path, kind, size_bytes, modified_at, modified_ms.",
                 ),
                 "read_file" => (
                     &["path", "max_bytes", "max_chars"],
@@ -361,9 +361,9 @@ pub fn core_methods(libraries: &Libraries, definitions: &[Value]) -> String {
                     "Stream a large file in bounded chunks from byte_offset; iterate until eof, summarize per chunk, and discard raw chunk text.",
                 ),
                 "search_text" => (
-                    &["query", "path", "regex", "output_mode", "glob", "context_lines", "max_matches", "max_matches_per_file"],
+                    &["query", "path", "regex", "output_mode", "glob", "exclude", "context_lines", "max_matches", "max_matches_per_file"],
                     &["matches", "files", "counts", "truncated"],
-                    "Find text or patterns; list matching files or count them.",
+                    "Find text or patterns (glob/exclude support | pipes; output capped at ~48 KiB inline budget); list matching files or count them.",
                 ),
                 "git_status" => (
                     &["paths", "include_untracked", "max_entries"],

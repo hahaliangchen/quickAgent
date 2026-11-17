@@ -200,6 +200,15 @@ pub(super) fn skill_library_names(s: &Session<'_>) -> Vec<(String, String)> {
 fn link(s: &Session<'_>, definitions: &[Value], spec: &str) -> (Value, bool) {
     let name = spec.strip_suffix("/promises").unwrap_or(spec);
     if name == "host" {
+        if spec != "host" {
+            return (
+                json!({
+                    "code": "MODULE_NOT_FOUND",
+                    "message": "require(\"host\") is synchronous only; omit /promises.",
+                }),
+                true,
+            );
+        }
         return (
             json!({
                 "library": spec,
@@ -734,7 +743,7 @@ pub(super) fn write_program_tool(module: bool) -> Value {
                 "version":{"type":"integer","minimum":1,"description":"Current saved version from the module directory."},
                 "reason":{"type":"string","minLength":1,"maxLength":2000,"description":"Concrete improvement and existing behavior to preserve."}
             },"required":["version","reason"],"additionalProperties":false}});
-        "Submit one complete JavaScript orchestration program for a fresh one-shot Runner once key targets, sizes, and commands are known (explore with direct tools first when unknowns remain). Express steps cleanly in middleware pipeline style passing a shared `mainContext` object, and use top-level `return` for the final distilled result. `@virtual` functions always run directly as a single-layer terminal AI leaf (no nested virtual layers; great for uniform parallel fan-out via Promise.all, not for dumping giant raw evidence blobs). Pass data across steps via `mainContext` or workspace files; there is no persistent Console heap. Call write_program as the only call in the reply. Code in reply text is never run: write code there only to show it to the user."
+        "Submit one complete JavaScript orchestration program for a fresh one-shot Runner once key targets, sizes, and commands are known (explore with direct tools first when unknowns remain). Express steps cleanly in middleware pipeline style passing a shared local `pipeline` state object, and use top-level `return` for the final distilled result. `@virtual` functions always run directly as a single-layer terminal AI leaf (no nested virtual layers; great for uniform parallel fan-out via Promise.all, not for dumping giant raw evidence blobs). Pass data across steps via local `pipeline` variables or workspace files; there is no persistent Console heap. Call write_program as the only call in the reply. Code in reply text is never run: write code there only to show it to the user."
     };
     let mut tool = function(WRITE_PROGRAM, description, properties, if module { json!(["source"]) } else { json!([]) });
     if !module { tool["function"]["parameters"]["oneOf"] = json!([{"required":["source"]},{"required":["resource"]}]); }
@@ -794,36 +803,6 @@ pub(super) fn js_marker(message: &Value) -> bool {
         let tag = text[at + 3..].chars().take_while(char::is_ascii_alphabetic).collect::<String>().to_ascii_lowercase();
         matches!(tag.as_str(), "js" | "javascript" | "mjs")
     })
-}
-/// The main script started. Getting to know the task was its scope and the
-/// script is its return value: the turn's request, what the user added since
-/// and the script stay; the exchanges that led to the script leave the
-/// context and stay in the record. Skills it read stay loaded, as they are
-/// carried across turns, and so do the skill instructions and module updates
-/// the host delivered.
-pub(super) fn end_familiarization(w: &mut Window, reply: &Value, source: &str) {
-    let Some(start) = w.messages.iter().rposition(|m| super::task_frames::is_user_original(m) && m.get("name").is_none()) else {
-        return;
-    };
-    let script = w.messages.iter().rposition(|m| m["role"] == "assistant" && written_source(m).and_then(Result::ok).as_deref() == Some(source))
-        .filter(|at| *at > start)
-        .map(|at| w.messages.remove(at))
-        .unwrap_or_else(|| reply.clone());
-    for message in w.messages.split_off(start + 1) {
-        if let Some(kept) = super::retain_turn_anchor_message(message, true) {
-            w.messages.push(kept);
-        }
-    }
-    if (!w.main_context.is_empty() || !w.step_trail.is_empty())
-        && !w
-            .messages
-            .iter()
-            .any(|m| m["name"].as_str() == Some(super::VIRTUAL_STEP_HANDOFF))
-    {
-        w.messages
-            .push(super::virtual_step_handoff_message(w, None, &[], false));
-    }
-    w.messages.push(script);
 }
 /// Clear superseded compile/runtime diagnostics, stale execution ledgers/plans,
 /// and earlier failed `write_program` attempts in a child implementation scope
@@ -1899,8 +1878,6 @@ async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value
         // clear the active runtime explicitly before returning to the model.
         w.program = None;
         w.program_value = None;
-        w.step_rounds_in_scope = 0;
-        w.step_handoff_required = false;
         let seq = append(s, "program/result", json!({"turn":s.turn,"step":step,"task_node_id":w.task_node_id,"result":value,"output":text}), false).await?;
         w.messages.push(sourced(json!({"role":"user","name":"program_result","content":text}), s.task, seq));
         save(s, w).await?;
@@ -2120,7 +2097,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                     )
                 }
                 ActionKind::LibraryCall { library, method, .. } if library == "host" => {
-                    return Box::pin(dispatch_host_library(s, w, &method)).await;
+                    return Box::pin(dispatch_host_library(s, w, method)).await;
                 }
                 ActionKind::LibraryCall { .. } => match action_task_descriptor(s, w, None, &action) {
                     Ok(args) => ("create_task".into(), args),
@@ -3865,7 +3842,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn getting_to_know_the_task_reads_directly_and_ends_when_the_program_starts() {
+    async fn write_program_keeps_prior_react_context_and_isolates_internal_io_calls() {
         let root = TestRoot::new();
         std::fs::write(root.path().join("a.txt"), "alpha").unwrap();
         let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
@@ -3880,14 +3857,15 @@ mod tests {
                 2 => call("read", "read_file", json!({"path":"a.txt"})),
                 3 => reply("```js\nconst broken = ;\n```".into()),
                 4 => reply("```js\nthrow new Error(\"boom\");\n```".into()),
-                _ => reply("The program failed: boom.".into()),
+                5 => reply("```js\nconst io = require(\"io\");\nconst file = io.read({ path: \"a.txt\" });\nreturn { read_ok: file.content === \"alpha\" };\n```".into()),
+                _ => reply("Done.".into()),
             }
         }).await;
         let bodies = bodies.lock().unwrap();
-        assert_eq!(bodies.len(), 5);
+        assert_eq!(bodies.len(), 6);
         let tools = tool_names(&bodies[0]);
         for name in FAMILIAR.iter().copied().chain([FIND, "read_session_history", "read_asset"]) {
-            assert!(tools.contains(&name.to_owned()), "{name} while getting to know the task: {tools:?}");
+            assert!(tools.contains(&name.to_owned()), "{name} while exploring: {tools:?}");
         }
         let text = |body: &Value| body["messages"].to_string();
         let calls = |body: &Value| body["messages"].as_array().unwrap().iter()
@@ -3897,13 +3875,26 @@ mod tests {
         assert_eq!(calls(&bodies[2]), ["write_file", "read_file"], "its own calls keep their names");
         // A program that does not compile has not started: the context stays.
         assert!(text(&bodies[3]).contains("PROGRAM_SOURCE_INVALID") && text(&bodies[3]).contains("alpha"));
-        // Once a program started, what led to it is gone; the request and the program stay.
-        let after = &bodies[4];
-        assert_eq!(calls(after), [WRITE_PROGRAM], "only the program's own hand-over is left: {}", text(after));
-        assert!(!text(after).contains("alpha") && !text(after).contains("PROGRAM_SOURCE_INVALID"), "{}", text(after));
-        assert!(text(after).contains("Summarize a and b") && text(after).contains("throw new Error"), "{}", text(after));
-        assert!(text(after).contains("PROGRAM_RUNTIME_ERROR"), "and how it ended");
-        assert!(tool_names(after).contains(&"read_file".to_owned()), "it can look again before it rewrites");
+        // Even after a program starts and fails, prior ReAct exploration stays intact.
+        let after_fail = &bodies[4];
+        assert_eq!(calls(after_fail), ["write_file", "read_file", WRITE_PROGRAM, WRITE_PROGRAM], "{}", text(after_fail));
+        assert!(text(after_fail).contains("alpha") && text(after_fail).contains("PROGRAM_SOURCE_INVALID"), "{}", text(after_fail));
+        assert!(text(after_fail).contains("Summarize a and b") && text(after_fail).contains("throw new Error"), "{}", text(after_fail));
+        assert!(text(after_fail).contains("PROGRAM_RUNTIME_ERROR"), "and how it ended");
+        assert!(tool_names(after_fail).contains(&"read_file".to_owned()), "it can look again before it rewrites");
+        // A 2nd write_program appends cleanly onto the prefix without wiping prior reads/results or leaking internal io.read calls.
+        let msgs3 = bodies[3]["messages"].as_array().unwrap();
+        let msgs4 = bodies[4]["messages"].as_array().unwrap();
+        let msgs5 = bodies[5]["messages"].as_array().unwrap();
+        assert_eq!(&msgs4[..msgs3.len()], msgs3.as_slice(), "1st write_program preserves KV prefix");
+        assert_eq!(&msgs5[..msgs4.len()], msgs4.as_slice(), "2nd write_program preserves KV prefix");
+        assert_eq!(calls(&bodies[5]), ["write_file", "read_file", WRITE_PROGRAM, WRITE_PROGRAM, WRITE_PROGRAM], "internal JS io.read must stay on JS heap");
+        let prog_result = msgs5
+            .last()
+            .expect("program_result must be appended")["content"]
+            .as_str()
+            .unwrap();
+        assert!(prog_result.contains("\"read_ok\":true"), "{prog_result}");
     }
 
     #[tokio::test]
@@ -4591,51 +4582,8 @@ mod tests {
             .unwrap();
         assert!(answered < addition, "the addition follows the turn it entered after");
     }
-    /// A turn with several programs: each start cleared the exchanges before
-    /// it, the delivered skill instructions and module updates with them, and
-    /// the next request sent them again in full.
     #[test]
-    fn what_the_host_delivered_stays_when_a_program_starts() {
-        let source = "console.log(1);";
-        let script = json!({"role":"assistant","content":null,"tool_calls":[{"id":"program","type":"function",
-            "function":{"name":WRITE_PROGRAM,"arguments":json!({"source":source}).to_string()}}]});
-        let host = |name: &str, marker: &str| json!({"role":"user","name":name,"content":"{}",marker:{"k":1}});
-        let mut w = Window { messages: vec![
-            json!({"role":"system","content":MAIN_PROMPT}),
-            json!({"role":"user","content":"Do it"}),
-            json!({"role":"assistant","content":null,"tool_calls":[{"id":"read","type":"function","function":{"name":"read_file","arguments":"{}"}}]}),
-            json!({"role":"tool","tool_call_id":"read","content":"alpha"}),
-            json!({"role":"user","name":"saved_asset","_pinned":true,"content":"pinned skill"}),
-            json!({"role":"user","name":super::VIRTUAL_STEP_HANDOFF,"_frame_input":true,"content":"{\"mainContext\":{\"k\":1}}"}),
-            host("skill_instructions", super::super::skill_scope::DELIVERED),
-            host(super::super::modules::UPDATE, super::super::modules::ANNOUNCED),
-            json!({"role":"user","name":"task_asset_index","content":"{}"}),
-            script.clone(),
-        ], ..Default::default() };
-        end_familiarization(&mut w, &script, source);
-        let kept = w.messages.iter().map(|m| m["name"].as_str().unwrap_or(m["role"].as_str().unwrap())).collect::<Vec<_>>();
-        assert_eq!(kept, ["system", "user", "saved_asset", super::VIRTUAL_STEP_HANDOFF, "skill_instructions", "chat_modules_update", "assistant"], "the reads that led to the program leave; what the host delivered, pinned assets, and virtual handoff stay");
-        assert_eq!(w.messages.last(), Some(&script));
-    }
-
-    #[test]
-    fn end_familiarization_and_implement_clear_stale_ledgers_plans_and_errors() {
-        let source = "console.log(2);";
-        let script = json!({"role":"assistant","content":null,"tool_calls":[{"id":"p2","type":"function",
-            "function":{"name":WRITE_PROGRAM,"arguments":json!({"source":source}).to_string()}}]});
-        let mut w = Window { messages: vec![
-            json!({"role":"system","content":MAIN_PROMPT}),
-            json!({"role":"user","content":"Do it"}),
-            json!({"role":"user","name":"execution_plan","content":"{}"}),
-            json!({"role":"user","name":"execution_ledger","content":"{\"action\":\"read_file\",\"status\":\"completed\"}"}),
-            json!({"role":"user","name":"execution_ledger","content":"{\"action\":\"virtual_call\",\"status\":\"completed\"}"}),
-            json!({"role":"user","name":"program_result","content":"step 1 ok"}),
-            script.clone(),
-        ], ..Default::default() };
-        end_familiarization(&mut w, &script, source);
-        let kept = w.messages.iter().map(|m| m["name"].as_str().unwrap_or(m["role"].as_str().unwrap())).collect::<Vec<_>>();
-        assert_eq!(kept, ["system", "user", "program_result", "assistant"], "stale plans and ledgers leave on program start");
-
+    fn implement_clears_stale_ledgers_plans_and_errors() {
         let fixed = "async function run() { return {ok: true}; }";
         let broken_call = json!({"role":"assistant","content":null,"tool_calls":[{"id":"bad","type":"function",
             "function":{"name":WRITE_PROGRAM,"arguments":json!({"source":"const = ;"}).to_string()}}]});
@@ -5948,7 +5896,7 @@ mod tests {
         assert_eq!(first["prompt_cache_key"], bodies[1]["prompt_cache_key"]);
         assert!(first["instructions"].as_str().unwrap().starts_with("Complete the user's authorized task"), "the role prompt is the instructions");
         assert_eq!(first["store"], false);
-        assert_eq!(first["reasoning"]["effort"], "low", "thinking is never off");
+        assert_eq!(first["reasoning"]["effort"], "none", "explicit none effort passes through on /v1/responses");
         assert!(first["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "read_file"));
         let input = bodies[1]["input"].as_array().unwrap();
         let at = |kind: &str| input.iter().position(|item| item["type"] == kind).unwrap_or_else(|| panic!("no {kind}: {input:?}"));

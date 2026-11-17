@@ -80,7 +80,7 @@ Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`�
 
 模块作者可用 `write_program({probe:true,source})` 运行小型只读探测。探测与正式实现使用同一套 SDK 名称和加载语法，权限在实际调用时检查：仅允许 `io.read`、`io.read_lines`、`io.search`、`io.list`、`io.workspace_info`。即使 process 库成功加载，shell 和写入仍返回 `MODULE_PROBE_READ_ONLY`。
 
-主流程本身推荐“先探索、后按中间件 `mainContext` 编排”的顺序：面对未知情况先跑轻量 ReAct 工具摸清目标，信息齐备后再提交一次性 `write_program`，用共享 `mainContext` 对象串联各阶段并直接 `return mainContext` 回传主 AI 总结（避免把几百 KB 原始材料硬塞给 `@virtual`）。
+主流程本身推荐“先探索、后按 JS 作用域分段编排”的顺序：面对未知情况先跑轻量 ReAct 工具摸清目标，信息齐备后再提交一次性 `write_program`，用普通 JS 函数作用域隔离局部大数据（函数返回即释放 `selfContext`），按需用 `const subContext = { ...host.context(), ... }` 传显式上下文给单层 `@virtual` 叶子；叶子工具交付同样携带 `event_seq`，可在返回的 JSON 中附 `"$slices": [{seq, ...}]` 由宿主解析成精确原文 `"slices"` 并入上层结果（避免把几百 KB 原始材料硬塞跨边界）。
 
 ## 失败与恢复
 
@@ -168,7 +168,7 @@ Rust 与 TS/JS 的符号定位可使用内置插件库 `require("code_index")`�
 
 ## 工具声明与固定名字
 
-模型请求发布按用途分组的 `program_tool_headers`。宿主库列出名字和用途，第三方库另列。用 `read_tool_contracts({libraries:["io"],overview:true})` 打开方法清单。只需要某个方法的完整契约时，用 `read_tool_contracts({methods:["io.read"]})`，省略 `libraries`。只传 `libraries` 且省略 `overview` 时，仍会读该库的全部契约。目录、方法清单和契约按当前可用权限生成。虚函数不写代码：它范围内的工具作为原生函数直接调用，范围是声明它的代码 import 和 require 的非 shell 方法，缺少时用 find_library_methods 查找；shell 不向虚函数开放；宿主照样校验原始 schema 与权限。程序源码用 import 或 require 引入宿主库，用 require 加载第三方库；声明资料不是可执行源码。主 AI 写程序之前先熟悉任务：能直接调用几个读取、编辑和看图的方法；shell 则交给模块实现，缺的用 find_library_methods 查，查不到写入类方法；程序开始执行时，这一轮此前的工具往来离开它的上下文（[设计文档](agent-design-guide.md)第 4 节）。
+模型请求发布按用途分组的 `program_tool_headers`。宿主库列出名字和用途，第三方库另列。用 `read_tool_contracts({libraries:["io"],overview:true})` 打开方法清单。只需要某个方法的完整契约时，用 `read_tool_contracts({methods:["io.read"]})`，省略 `libraries`。只传 `libraries` 且省略 `overview` 时，仍会读该库的全部契约。目录、方法清单和契约按当前可用权限生成。虚函数不写代码：它范围内的工具作为原生函数直接调用，范围是声明它的代码 import 和 require 的非 shell 方法，缺少时用 find_library_methods 查找；shell 不向虚函数开放；宿主照样校验原始 schema 与权限。程序源码用 import 或 require 引入宿主库，用 require 加载第三方库；声明资料不是可执行源码。主 AI 写程序之前先探索任务：能直接调用几个读取、编辑和看图的方法；程序开始执行时继续留在当前连续对话前缀中，保留前文读取、推理与已交付资产（[设计文档](agent-design-guide.md)第 4 节）。
 
 宿主自带的工具按能力分库，一个库只管一类能力，没有兜底的库（[设计文档](agent-design-guide.md)第 5.2 节）：io 是文件（read/read_lines/write/list/search/edit/replace/workspace_info），process 是运行程序和项目脚本、管理项目进程，http 是 probe，browser 是浏览器页面，memory 是工作记忆、架构记忆和符号的业务上下文，vision 是看图和图像分析，attachments 是读附件，session 是主对话自己的材料和记录（只有主脚本能用）。方法名去掉和库名重复的前缀（browser.open、http.probe），其余沿用原工具名。插件在 plugin.json 或远程握手的 plugin 中声明 library，例如 {"id":"ppt-master","library":"ppt"}；已登记的 ppt_master__get_design 对外的名字是 ppt.get_design：程序写 `const ppt = require("ppt")`，再调用 `ppt.get_design({...})`。插件的方法不需要先用 read_skill 激活。未声明 library 的旧插件按 ID 将连字符替换为下划线，作为固定兼容名字。项目技能的库名就是技能名。库名必须是有效、非保留的标识符，不能占用宿主自带的库名和 host；不同插件不能占用同一个库名。方法来自实际注册工具，不按业务含义猜测。
 

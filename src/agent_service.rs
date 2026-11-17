@@ -1690,6 +1690,8 @@ fn local_output_schema(name: &str) -> Option<Value> {
         "list_dir" => json!({"type":"object","required":["root","entries","truncated"],"properties":{
             "root":{"type":"string"},
             "truncated":{"type":"boolean","description":"true when more matching entries existed than max_entries returned"},
+            "unexpanded_dirs":{"type":"array","items":{"type":"string"},"description":"Default noise/dependency directories seen during listing without traversing inside them"},
+            "hints":{"type":"array","items":{"type":"string"},"description":"Usage or visibility hints for skipped noise/dependency directories"},
             "entries":{"type":"array","items":{"type":"object","required":["path","kind","size_bytes","modified_at","modified_ms"],"properties":{
                 "path":{"type":"string","description":"Workspace-relative path, usable as a read path"},
                 "kind":{"enum":["file","directory","symlink","other"]},
