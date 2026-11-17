@@ -115,15 +115,16 @@ pub fn builtin() -> Libraries {
         ])),
         // Published only while a program the user's message paused can be resumed.
         ("previous".into(), named(&[("resume", "resume_previous_program")])),
-        ("process".into(), same(&[
-            "exec_command",
-            "write_stdin",
-            "kill_session",
-            "run_program",
-            "run_project_script",
-            "install_dependencies",
-            "get_project_process",
-            "stop_project_process",
+        ("process".into(), BTreeMap::from([
+            ("exec_command".into(), "exec_command".into()),
+            ("write_stdin".into(), "write_stdin".into()),
+            ("kill_session".into(), "kill_session".into()),
+            ("run_program".into(), "run_program".into()),
+            ("run_project_script".into(), "run_project_script".into()),
+            ("install_dependencies".into(), "install_dependencies".into()),
+            ("get_project_process".into(), "get_project_process".into()),
+            ("stop_project_process".into(), "stop_project_process".into()),
+            ("run_readonly".into(), "run_readonly_command".into()),
         ])),
         ("http".into(), named(&[("probe", "http_probe")])),
         ("browser".into(), named(&[
@@ -290,9 +291,6 @@ pub fn control(name: &str) -> bool {
             | "ask_user"
             | "write_program"
             | "handoff_step"
-            | "set_next_step"
-            // The main AI's own look at the project; programs use process.
-            | "run_readonly_command"
     )
 }
 pub fn public_name(libraries: &Libraries, target: &str) -> Option<String> {

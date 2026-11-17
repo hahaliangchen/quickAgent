@@ -36,9 +36,9 @@ const INPUT_BUDGET: usize =
     crate::context_window::MAX_TOKENS - crate::model_settings::OUTPUT_RESERVE;
 const PAGE_CHARS: usize = 24_000;
 
-/// Soft ingestion ceilings for direct tool deliveries and `program_result`
-/// (`1/4` of `input_budget`), allowing large-context models to ingest sizable
-/// evidence in one pass while keeping room for prefix, reasoning, and output.
+/// Soft ingestion ceilings for direct tool deliveries and `program_result`,
+/// preventing a single Main ReAct round on a large-context model from pouring
+/// hundreds of thousands of raw characters straight into the main window.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DeliverySoftLimits {
     pub(super) single_chars: usize,
@@ -48,13 +48,13 @@ pub(super) struct DeliverySoftLimits {
 }
 
 pub(super) fn delivery_soft_limits(input_budget: usize) -> DeliverySoftLimits {
-    let quarter_tokens = (input_budget / 4).max(32_000);
-    let quarter_chars = quarter_tokens.saturating_mul(3);
+    let single_tokens = (input_budget / 4).clamp(24_000, 32_000);
+    let round_tokens = (input_budget / 4).clamp(32_000, 64_000);
     DeliverySoftLimits {
-        single_chars: quarter_chars,
-        single_tokens: quarter_tokens,
-        round_chars: quarter_chars,
-        round_tokens: quarter_tokens,
+        single_chars: single_tokens.saturating_mul(3),
+        single_tokens,
+        round_chars: round_tokens.saturating_mul(3),
+        round_tokens,
     }
 }
 /// Tries of one model request that fails before any of its answer arrives.
@@ -124,8 +124,8 @@ pub(crate) struct Window {
     /// or compacted window must perform a fresh, permission-checked lookup.
     #[serde(skip)]
     contract_reuse: BTreeMap<String, ContractReuse>,
-    /// Shared compact state passed explicitly across lightweight virtual steps
-    /// and across user turns without keeping bulky exploration tool dumps.
+    /// Shared compact state passed explicitly across fallback exploration
+    /// handoffs and across user turns without keeping bulky exploration dumps.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub(super) main_context: serde_json::Map<String, Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,14 +139,18 @@ pub(crate) struct Window {
 }
 
 pub(super) const HANDOFF_STEP: &str = "handoff_step";
-pub(super) const SET_NEXT_STEP: &str = "set_next_step";
 pub(super) const VIRTUAL_STEP_HANDOFF: &str = "virtual_step_handoff";
 const VIRTUAL_STEP_WRAP_DIRECTIVE: &str = "virtual_step_wrap_required";
 const MAIN_CONTEXT_PATCH_LIMIT_BYTES: usize = 32 * 1024;
 const MAIN_CONTEXT_TOTAL_LIMIT_BYTES: usize = 64 * 1024;
+const MAX_HANDOFF_SLICES: usize = 24;
+const MAX_SLICE_DEFAULT_LINES: usize = 80;
+const MAX_SLICE_EXCERPT_CHARS: usize = 4_000;
+const MAX_HANDOFF_SLICES_BYTES: usize = 32 * 1024;
 const MAX_STEP_HANDOFFS_PER_TURN: usize = 12;
-const STEP_WRAP_ROUND_CHARS: usize = 120_000;
-const STEP_WRAP_WINDOW_TOKENS: usize = 120_000;
+const STEP_WRAP_MIN_ROUNDS_IN_SCOPE: usize = 3;
+const STEP_WRAP_WINDOW_TOKENS: usize = 180_000;
+const STEP_WRAP_EMERGENCY_TOKENS: usize = 240_000;
 
 fn is_zero_usize(value: &usize) -> bool {
     *value == 0
@@ -170,6 +174,7 @@ struct StepHandoff {
     entry: StepSummary,
     next_step: String,
     next_goal: String,
+    context_slices: Vec<Value>,
     main_context_bytes: usize,
 }
 
@@ -319,6 +324,15 @@ fn function(name: &str, description: &str, properties: Value, required: Value) -
     json!({"type":"function","function":{"name":name,"description":description,
         "parameters":{"type":"object","properties":properties,"required":required}}})
 }
+fn push_read_only_if_missing(s: &Session<'_>, definitions: &mut Vec<Value>) {
+    if read_only_shell(s)
+        && !definitions
+            .iter()
+            .any(|t| t["function"]["name"] == crate::shell_process::READ_ONLY)
+    {
+        definitions.push(crate::shell_process::read_only_definition());
+    }
+}
 fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     let mut definitions = available_tools(s, w);
     {
@@ -342,11 +356,9 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
                 let mut extra = vec![program_flow::find_main_tool()];
                 if !is_leaf {
                     extra.push(program_flow::write_program_tool(false));
+                    push_read_only_if_missing(s, &mut extra);
                 }
                 extra.extend(project_flows::tools());
-                if read_only_shell(s) {
-                    extra.push(crate::shell_process::read_only_definition());
-                }
                 for tool in extra {
                     if let Some(name) = tool["function"]["name"].as_str()
                         && existing.insert(name.to_owned())
@@ -373,7 +385,11 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
                 allowed.extend(leaf_scope);
             }
             if is_leaf {
-                allowed.remove(program_flow::WRITE_PROGRAM);
+                allowed.retain(|name| {
+                    !matches!(name.as_str(), program_flow::WRITE_PROGRAM | HANDOFF_STEP)
+                        && !crate::project_process::is_execution(name)
+                        && name != crate::shell_process::READ_ONLY
+                });
             }
             definitions.retain(|tool| {
                 tool["function"]["name"]
@@ -411,71 +427,17 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     // The main AI finds methods to read and run with while it gets to know the task.
     if program_flow::role(w) == program_flow::Role::Main && s.is_primary() {
         definitions.push(handoff_step_tool());
-        definitions.push(set_next_step_tool());
     }
     if program_flow::role(w) == program_flow::Role::Main && s.plugin.is_none() {
         definitions.push(program_flow::find_main_tool());
         definitions.extend(project_flows::tools());
-        if read_only_shell(s) {
-            definitions.push(crate::shell_process::read_only_definition());
-        }
+        push_read_only_if_missing(s, &mut definitions);
     }
     #[cfg(test)]
     if documented_examples::repository_review_naive(s) {
-        definitions.retain(|tool| !matches!(tool["function"]["name"].as_str(), Some("write_program" | HANDOFF_STEP | SET_NEXT_STEP)));
+        definitions.retain(|tool| !matches!(tool["function"]["name"].as_str(), Some("write_program" | HANDOFF_STEP)));
     }
     definitions
-}
-
-fn set_next_step_tool() -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": SET_NEXT_STEP,
-            "description": "Declare what this exploration round is doing (current_step) and what you plan to do next (next_step). Can be called in parallel alongside read/search/command tools in the same reply with zero extra round latency.",
-            "parameters": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "current_step": {
-                        "type": "string",
-                        "description": "Concise 1-sentence purpose of the tool calls in this round."
-                    },
-                    "next_step": {
-                        "type": "string",
-                        "description": "Concise 1-sentence plan for what to do next once this round completes (usable later as a virtual method/goal boundary)."
-                    },
-                    "context_keys": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Optional short key/path names expected to feed the next step."
-                    }
-                },
-                "required": ["current_step", "next_step"]
-            }
-        }
-    })
-}
-
-fn prepare_next_step(args: &Value) -> Result<Value> {
-    let current_step = required_trimmed_str(args, "current_step")?;
-    let next_step = required_trimmed_str(args, "next_step")?;
-    let context_keys: Vec<String> = args
-        .get("context_keys")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(json!({
-        "recorded": true,
-        "current_step": current_step,
-        "next_step": next_step,
-        "context_keys": context_keys,
-    }))
 }
 
 fn ensure_primary_main_react(s: &Session<'_>, w: &Window, tool: &str) -> Result<()> {
@@ -494,33 +456,92 @@ fn handoff_step_tool() -> Value {
         "type": "function",
         "function": {
             "name": HANDOFF_STEP,
-            "description": "Finish the current virtual exploration/work step, merge compact verified facts into shared mainContext, clear transient tool outputs, and enter a clean next virtual step. Must be called alone. Rejects main_context_patch > 32 KiB or total mainContext > 64 KiB.",
+            "description": "Fallback exploration reset: carry exact excerpts from earlier tool results via `slices` (event_seq coordinates, avoiding expensive summary generation), optionally patch compact keys into mainContext, clear bulky exploration dumps, and continue with a clean window. Call alone only after heavy exploration or when virtual_step_wrap_required triggers; prefer write_program for multi-step work.",
             "parameters": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
+                    "next_goal": {
+                        "type": "string",
+                        "description": "Short explicit objective and next deliverable."
+                    },
+                    "slices": {
+                        "type": "array",
+                        "maxItems": MAX_HANDOFF_SLICES,
+                        "description": "Zero-rewrite coordinate excerpts copied directly by the host from prior tool event_seq records into context_slices. Prefer this over re-typing summaries or file/log excerpts.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "seq": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "Integer event_seq from an earlier workspace/asset tool result (read_asset envelopes auto-unwrap cleanly)."
+                                },
+                                "lines": {
+                                    "type": "array",
+                                    "items": { "type": "integer", "minimum": 1 },
+                                    "minItems": 2,
+                                    "maxItems": 2,
+                                    "description": "1-based inclusive line range [start, end] within the saved output."
+                                },
+                                "grep": {
+                                    "type": "string",
+                                    "description": "Case-sensitive substring filter across lines of the saved output."
+                                },
+                                "context_lines": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "maximum": 20,
+                                    "description": "Context lines around each grep hit (default 2)."
+                                },
+                                "head": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 120,
+                                    "description": "Take the first N lines."
+                                },
+                                "tail": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 120,
+                                    "description": "Take the last N lines."
+                                },
+                                "keys": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Optional top-level object keys to extract from JSON object results."
+                                },
+                                "label": {
+                                    "type": "string",
+                                    "description": "Optional short tag describing why this slice is carried forward."
+                                }
+                            },
+                            "required": ["seq"]
+                        }
+                    },
                     "step_name": {
                         "type": "string",
-                        "description": "Short camelCase or snake_case virtual method name for the step just completed (e.g. 'inventoryLogs' or 'inspect_api')."
+                        "description": "Optional short label for the stage just finished."
+                    },
+                    "situation": {
+                        "type": "string",
+                        "description": "Optional 1-sentence note when slices/main_context_patch alone do not convey state (avoid verbose summaries)."
                     },
                     "completed": {
                         "type": "string",
-                        "description": "Concise 1-2 sentence summary of verified findings or work completed in this step."
-                    },
-                    "main_context_patch": {
-                        "type": "object",
-                        "description": "Compact key/value updates to merge into shared mainContext (exact file paths, symbols, commands, counts, structured status; never raw file bodies or logs). Use null to delete a stale key."
+                        "description": "Backward-compatible optional alias for situation."
                     },
                     "next_step": {
                         "type": "string",
-                        "description": "Short virtual method name for the next clean step (e.g. 'verifyWorkflows' or 'implement_fix')."
+                        "description": "Optional short label for the next stage."
                     },
-                    "next_goal": {
-                        "type": "string",
-                        "description": "Explicit task boundary and deliverables for the next virtual method: which inputs in mainContext it owns and what it must produce."
+                    "main_context_patch": {
+                        "type": "object",
+                        "description": "Optional compact key/value state updates merged into mainContext (up to 32 KiB/patch, 64 KiB total; use null to delete stale keys; prefer slices for file/log/command excerpts)."
                     }
                 },
-                "required": ["step_name", "completed", "next_step", "next_goal"]
+                "required": ["next_goal"]
             }
         }
     })
@@ -535,15 +556,342 @@ fn required_trimmed_str<'a>(args: &'a Value, field: &str) -> Result<&'a str> {
     Ok(text)
 }
 
-fn prepare_handoff_step(w: &Window, args: &Value) -> Result<(Value, StepHandoff)> {
+fn optional_trimmed_str(args: &Value, field: &str) -> Option<String> {
+    args.get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn truncate_slice_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}\n... (truncated)")
+    } else {
+        head
+    }
+}
+
+fn extract_content_lines(content: &str, start_line: Option<usize>, path_prefix: Option<&str>) -> Vec<String> {
+    if content.is_empty() {
+        return vec!["[empty content]".to_owned()];
+    }
+    content
+        .lines()
+        .enumerate()
+        .map(|(idx, line)| match (path_prefix, start_line) {
+            (Some(path), Some(start)) if !path.is_empty() => format!("{path}:{}: {line}", start + idx),
+            (Some(path), None) if !path.is_empty() => format!("{path}: {line}"),
+            (None, Some(start)) => format!("{}: {line}", start + idx),
+            _ => line.to_owned(),
+        })
+        .collect()
+}
+
+fn extract_payload_lines(source_tool: Option<&str>, payload: &Value) -> Result<Vec<String>> {
+    if source_tool == Some(HANDOFF_STEP)
+        || payload
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| matches!(t, VIRTUAL_STEP_HANDOFF | VIRTUAL_STEP_WRAP_DIRECTIVE))
+    {
+        anyhow::bail!("HANDOFF_SLICE_INVALID: event_seq points to a control step event without workspace evidence");
+    }
+    if let Some(items) = payload.as_array() {
+        if items.is_empty() {
+            return Ok(vec!["[]".to_owned()]);
+        }
+        if items.iter().all(|item| item.get("content").and_then(Value::as_str).is_some()) {
+            let mut lines = Vec::new();
+            for item in items {
+                let path = item.get("path").and_then(Value::as_str);
+                let start = item.get("start_line").and_then(Value::as_u64).map(|n| n.max(1) as usize).or(Some(1));
+                let body = item["content"].as_str().unwrap_or("");
+                lines.extend(extract_content_lines(body, start, path));
+            }
+            return Ok(lines);
+        }
+        return Ok(serde_json::to_string_pretty(payload)?.lines().map(str::to_owned).collect());
+    }
+    if let Some(content) = payload.get("content").and_then(Value::as_str) {
+        let start = payload.get("start_line").and_then(Value::as_u64).map(|n| n.max(1) as usize);
+        return Ok(extract_content_lines(content, start, None));
+    }
+    if let Some(matches) = payload.get("matches").and_then(Value::as_array) {
+        if !matches.is_empty() {
+            let lines = matches
+                .iter()
+                .map(|m| {
+                    if let (Some(file), Some(line), Some(text)) = (
+                        m.get("file").and_then(Value::as_str),
+                        m.get("line").and_then(Value::as_u64),
+                        m.get("text").and_then(Value::as_str),
+                    ) {
+                        format!("{file}:{line}: {text}")
+                    } else {
+                        serde_json::to_string(m).unwrap_or_default()
+                    }
+                })
+                .collect();
+            return Ok(lines);
+        }
+        if let Some(files) = payload.get("files").and_then(Value::as_array)
+            && !files.is_empty()
+        {
+            return Ok(files
+                .iter()
+                .map(|f| f.as_str().map(str::to_owned).unwrap_or_else(|| f.to_string()))
+                .collect());
+        }
+        return Ok(vec!["[search_text: 0 matches]".to_owned()]);
+    }
+    if let Some(files) = payload.get("files").and_then(Value::as_array) {
+        if files.is_empty() {
+            return Ok(vec!["[search_text: 0 matches]".to_owned()]);
+        }
+        return Ok(files
+            .iter()
+            .map(|f| f.as_str().map(str::to_owned).unwrap_or_else(|| f.to_string()))
+            .collect());
+    }
+    if let Some(entries) = payload.get("entries").and_then(Value::as_array) {
+        if entries.is_empty() {
+            return Ok(vec!["[list_dir: empty]".to_owned()]);
+        }
+        return Ok(entries
+            .iter()
+            .map(|entry| {
+                let name = entry.get("name").and_then(Value::as_str).unwrap_or("");
+                let kind = entry.get("type").and_then(Value::as_str).unwrap_or("");
+                if name.is_empty() {
+                    entry.to_string()
+                } else if kind.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{name} ({kind})")
+                }
+            })
+            .collect());
+    }
+    if payload.get("stdout").is_some() || payload.get("stderr").is_some() {
+        let mut lines = vec![format!("exit_code={}", payload["exit_code"])];
+        let stdout = payload.get("stdout").and_then(Value::as_str).unwrap_or("");
+        let stderr = payload.get("stderr").and_then(Value::as_str).unwrap_or("");
+        lines.extend(stdout.lines().map(str::to_owned));
+        lines.extend(stderr.lines().map(|l| format!("[stderr] {l}")));
+        if stdout.trim().is_empty() && stderr.trim().is_empty() {
+            lines.push("[command produced no stdout/stderr]".to_owned());
+        }
+        return Ok(lines);
+    }
+    Ok(serde_json::to_string_pretty(payload)?.lines().map(str::to_owned).collect())
+}
+
+fn merge_line_windows(hits: &[usize], context: usize, total: usize) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for &idx in hits {
+        let lo = idx.saturating_sub(context);
+        let hi = (idx + context).min(total.saturating_sub(1));
+        if let Some(last) = ranges.last_mut()
+            && lo <= last.1 + 1
+        {
+            last.1 = last.1.max(hi);
+        } else {
+            ranges.push((lo, hi));
+        }
+    }
+    ranges
+}
+
+fn select_slice_excerpt(
+    raw_lines: &[String],
+    spec: &Value,
+    payload: &Value,
+) -> Result<(String, Option<[usize; 2]>)> {
+    let projected_lines: Vec<String>;
+    let working_lines = if let Some(keys_arr) = spec.get("keys").and_then(Value::as_array) {
+        let obj = payload
+            .as_object()
+            .context("HANDOFF_SLICE_INVALID: keys selector requires a JSON object tool result")?;
+        let mut picked = serde_json::Map::new();
+        for key in keys_arr {
+            let k = key
+                .as_str()
+                .context("HANDOFF_SLICE_INVALID: keys items must be strings")?;
+            if let Some(v) = obj.get(k) {
+                picked.insert(k.to_owned(), v.clone());
+            }
+        }
+        ensure!(
+            !picked.is_empty(),
+            "HANDOFF_SLICE_INVALID: keys selector matched 0 top-level fields"
+        );
+        projected_lines = serde_json::to_string_pretty(&Value::Object(picked))?
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        projected_lines.as_slice()
+    } else {
+        raw_lines
+    };
+    ensure!(
+        !working_lines.is_empty(),
+        "HANDOFF_SLICE_INVALID: target event has no sliceable text"
+    );
+
+    let (mut lo, mut hi, mut explicit_range) = (0usize, working_lines.len(), None);
+    if let Some(lines_val) = spec.get("lines") {
+        let pair = lines_val
+            .as_array()
+            .filter(|a| a.len() == 2)
+            .context("HANDOFF_SLICE_INVALID: lines must be a 2-element [start, end] array")?;
+        let start = pair[0]
+            .as_u64()
+            .filter(|&n| n >= 1)
+            .context("HANDOFF_SLICE_INVALID: lines[0] must be >= 1")? as usize;
+        let end = pair[1]
+            .as_u64()
+            .filter(|&n| n >= start as u64)
+            .context("HANDOFF_SLICE_INVALID: lines[1] must be >= lines[0]")? as usize;
+        ensure!(
+            start <= working_lines.len(),
+            "HANDOFF_SLICE_INVALID: lines [{start}, {end}] starts past total {} lines",
+            working_lines.len()
+        );
+        lo = start - 1;
+        hi = end.min(working_lines.len());
+        explicit_range = Some([start, hi]);
+    }
+    let scoped = &working_lines[lo..hi];
+
+    let grep = optional_trimmed_str(spec, "grep");
+    let head = spec.get("head").and_then(Value::as_u64).map(|n| n.clamp(1, 120) as usize);
+    let tail = spec.get("tail").and_then(Value::as_u64).map(|n| n.clamp(1, 120) as usize);
+
+    let (excerpt, sliced_range) = if let Some(needle) = grep {
+        let context = spec
+            .get("context_lines")
+            .and_then(Value::as_u64)
+            .unwrap_or(2)
+            .min(20) as usize;
+        let hits: Vec<usize> = scoped
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| line.contains(&needle).then_some(i))
+            .collect();
+        ensure!(
+            !hits.is_empty(),
+            "HANDOFF_SLICE_INVALID: grep {needle:?} matched 0 lines"
+        );
+        let windows = merge_line_windows(&hits, context, scoped.len());
+        let first_line = lo + windows[0].0 + 1;
+        let last_line = lo + windows.last().unwrap().1 + 1;
+        let chunks: Vec<String> = windows
+            .into_iter()
+            .map(|(w_lo, w_hi)| scoped[w_lo..=w_hi].join("\n"))
+            .collect();
+        (chunks.join("\n...\n"), Some([first_line, last_line]))
+    } else if let Some(n) = head {
+        let take = n.min(scoped.len());
+        (scoped[..take].join("\n"), Some([lo + 1, lo + take]))
+    } else if let Some(n) = tail {
+        let take = n.min(scoped.len());
+        let start = scoped.len() - take;
+        (scoped[start..].join("\n"), Some([lo + start + 1, hi]))
+    } else if explicit_range.is_some() {
+        (scoped.join("\n"), explicit_range)
+    } else if scoped.len() > MAX_SLICE_DEFAULT_LINES {
+        let shown = MAX_SLICE_DEFAULT_LINES;
+        let body = scoped[..shown].join("\n");
+        (
+            format!("{body}\n... ({} more lines; pass lines/grep/head/tail for narrow ranges)", scoped.len() - shown),
+            Some([lo + 1, lo + shown]),
+        )
+    } else {
+        (scoped.join("\n"), Some([lo + 1, hi]))
+    };
+
+    let trimmed = truncate_slice_chars(&excerpt, MAX_SLICE_EXCERPT_CHARS);
+    ensure!(
+        !trimmed.trim().is_empty(),
+        "HANDOFF_SLICE_INVALID: slice produced an empty excerpt"
+    );
+    Ok((trimmed, sliced_range))
+}
+
+fn build_slice_entry(root: &Path, task: &str, spec: &Value) -> Result<Value> {
+    let seq = spec
+        .get("seq")
+        .and_then(Value::as_i64)
+        .filter(|&s| s >= 1)
+        .context("HANDOFF_SLICE_INVALID: slice requires integer seq >= 1")?;
+    let (source_tool, payload) = crate::context_assets::read_event_payload(root, task, seq)?
+        .with_context(|| format!("HANDOFF_SLICE_INVALID: event_seq {seq} not found"))?;
+    let lines = extract_payload_lines(source_tool.as_deref(), &payload)?;
+    let (excerpt, sliced_range) = select_slice_excerpt(&lines, spec, &payload)?;
+    let mut entry = json!({
+        "seq": seq,
+        "excerpt": excerpt,
+    });
+    if let Some(tool) = source_tool {
+        entry["tool"] = json!(tool);
+    }
+    if let Some(label) = optional_trimmed_str(spec, "label") {
+        entry["label"] = json!(label);
+    }
+    if let Some(range) = sliced_range {
+        entry["sliced_range"] = json!(range);
+    }
+    Ok(entry)
+}
+
+fn build_handoff_slices(root: &Path, task: &str, args: &Value) -> Result<Vec<Value>> {
+    let Some(raw) = args.get("slices").filter(|v| !v.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let specs = raw
+        .as_array()
+        .context("HANDOFF_SLICE_INVALID: slices must be an array")?;
+    ensure!(
+        specs.len() <= MAX_HANDOFF_SLICES,
+        "HANDOFF_SLICE_INVALID: at most {MAX_HANDOFF_SLICES} slices allowed per handoff (got {})",
+        specs.len()
+    );
+    let mut out = Vec::with_capacity(specs.len());
+    for spec in specs {
+        out.push(build_slice_entry(root, task, spec)?);
+    }
+    let bytes = serde_json::to_vec(&out)?.len();
+    ensure!(
+        bytes <= MAX_HANDOFF_SLICES_BYTES,
+        "HANDOFF_SLICE_INVALID: carried slices total {bytes} bytes (max {MAX_HANDOFF_SLICES_BYTES}); narrow ranges with lines/grep/head/tail"
+    );
+    Ok(out)
+}
+
+fn prepare_handoff_step(
+    root: &Path,
+    task: &str,
+    w: &Window,
+    args: &Value,
+) -> Result<(Value, StepHandoff)> {
     ensure!(
         w.step_handoffs_in_turn < MAX_STEP_HANDOFFS_PER_TURN,
         "STEP_HANDOFF_LIMIT: reached {MAX_STEP_HANDOFFS_PER_TURN} virtual step handoffs in one turn; answer directly or run a program."
     );
-    let step_name = required_trimmed_str(args, "step_name")?.to_owned();
-    let completed = required_trimmed_str(args, "completed")?.to_owned();
-    let next_step = required_trimmed_str(args, "next_step")?.to_owned();
     let next_goal = required_trimmed_str(args, "next_goal")?.to_owned();
+    let step_idx = w.step_trail.len() + 1;
+    let step_name =
+        optional_trimmed_str(args, "step_name").unwrap_or_else(|| format!("step_{step_idx}"));
+    let situation = optional_trimmed_str(args, "situation")
+        .or_else(|| optional_trimmed_str(args, "completed"))
+        .unwrap_or_default();
+    let next_step =
+        optional_trimmed_str(args, "next_step").unwrap_or_else(|| format!("step_{}", step_idx + 1));
+
+    let context_slices = build_handoff_slices(root, task, args)?;
 
     let empty_patch = serde_json::Map::new();
     let patch = match args.get("main_context_patch") {
@@ -555,7 +903,7 @@ fn prepare_handoff_step(w: &Window, args: &Value) -> Result<(Value, StepHandoff)
     let patch_bytes = serde_json::to_vec(patch)?.len();
     ensure!(
         patch_bytes <= MAIN_CONTEXT_PATCH_LIMIT_BYTES,
-        "MAIN_CONTEXT_OVER_LIMIT: main_context_patch is {patch_bytes} bytes (max {MAIN_CONTEXT_PATCH_LIMIT_BYTES}). Store only compact verified facts, paths, commands, and structured status — never raw logs or file bodies."
+        "MAIN_CONTEXT_OVER_LIMIT: main_context_patch is {patch_bytes} bytes (max {MAIN_CONTEXT_PATCH_LIMIT_BYTES}). Store only compact state — prefer `slices` to carry file/log/command excerpts without re-typing."
     );
 
     let mut next_context = w.main_context.clone();
@@ -571,25 +919,30 @@ fn prepare_handoff_step(w: &Window, args: &Value) -> Result<(Value, StepHandoff)
     let main_context_bytes = serde_json::to_vec(&next_context)?.len();
     ensure!(
         main_context_bytes <= MAIN_CONTEXT_TOTAL_LIMIT_BYTES,
-        "MAIN_CONTEXT_OVER_LIMIT: merged mainContext is {main_context_bytes} bytes (max {MAIN_CONTEXT_TOTAL_LIMIT_BYTES}). Delete stale keys with null in main_context_patch or keep only compact structured facts."
+        "MAIN_CONTEXT_OVER_LIMIT: merged mainContext is {main_context_bytes} bytes (max {MAIN_CONTEXT_TOTAL_LIMIT_BYTES}). Delete stale keys with null in main_context_patch or use `slices`."
     );
 
-    let receipt = json!({
+    let mut receipt = json!({
         "status": "handed_off",
         "step": step_name,
         "next_step": next_step,
+        "slice_count": context_slices.len(),
         "main_context_bytes": main_context_bytes,
-        "step_count": w.step_trail.len() + 1,
+        "step_count": step_idx,
     });
+    if !situation.is_empty() {
+        receipt["situation"] = json!(situation);
+    }
     let handoff = StepHandoff {
         next_context,
         entry: StepSummary {
             step: step_name,
-            purpose: completed,
+            purpose: situation,
             updated_keys,
         },
         next_step,
         next_goal,
+        context_slices,
         main_context_bytes,
     };
     Ok((receipt, handoff))
@@ -598,6 +951,7 @@ fn prepare_handoff_step(w: &Window, args: &Value) -> Result<(Value, StepHandoff)
 pub(super) fn virtual_step_handoff_message(
     w: &Window,
     next_step: Option<(&str, &str)>,
+    context_slices: &[Value],
     carried_across_turns: bool,
 ) -> Value {
     let previous_steps: Vec<Value> = w
@@ -605,12 +959,16 @@ pub(super) fn virtual_step_handoff_message(
         .iter()
         .enumerate()
         .map(|(idx, entry)| {
-            json!({
+            let mut item = json!({
                 "index": idx + 1,
                 "step": entry.step,
-                "purpose": entry.purpose,
                 "updated_keys": entry.updated_keys,
-            })
+            });
+            if !entry.purpose.is_empty() {
+                item["situation"] = json!(entry.purpose);
+                item["purpose"] = json!(entry.purpose);
+            }
+            item
         })
         .collect();
     let mut payload = json!({
@@ -618,15 +976,26 @@ pub(super) fn virtual_step_handoff_message(
         "previous_steps": previous_steps,
         "mainContext": w.main_context,
     });
+    if !context_slices.is_empty() {
+        payload["context_slices"] = json!(context_slices);
+    }
     if let Some((name, goal)) = next_step {
-        payload["current_step"] = json!({"name": name, "goal": goal});
+        let mut current = json!({
+            "index": w.step_trail.len() + 1,
+            "name": name,
+            "goal": goal,
+        });
+        if let Some(sit) = w.step_trail.last().map(|e| e.purpose.as_str()).filter(|s| !s.is_empty()) {
+            current["situation"] = json!(sit);
+        }
+        payload["current_step"] = current;
         payload["instruction"] = json!(
-            "Clean virtual step scope. Earlier exploration tool dumps were cleared; original user constraints above and mainContext here remain authoritative. Continue from current_step.goal using direct ReAct tools (check search_text/list_dir or recorded line counts instead of guessing start_line), call handoff_step when ready to hand off a stage, or use write_program only when multi-step orchestration/parallel fan-out is needed."
+            "Clean exploration scope. Prior exploration tool dumps were cleared; original user constraints above, mainContext, and any context_slices here remain authoritative. Continue from current_step.goal, prefer write_program (with JS functions, @virtual leaves, and process.run_readonly/process.exec_command) for multi-step checks or bulk reads, or answer once settled."
         );
     } else if carried_across_turns {
         payload["carried_across_turns"] = json!(true);
         payload["instruction"] = json!(
-            "Previous turns left verified facts in mainContext and step summaries in previous_steps. Re-verify volatile workspace files/status before acting on stale assumptions."
+            "Previous turns left verified state in mainContext and previous_steps. Re-verify volatile workspace files/status before acting on stale assumptions."
         );
     }
     json!({
@@ -637,6 +1006,48 @@ pub(super) fn virtual_step_handoff_message(
     })
 }
 
+pub(super) fn retain_pinned_message(mut message: Value) -> Option<Value> {
+    if message["_pinned"].as_bool() != Some(true) {
+        return None;
+    }
+    if message["role"] == "tool" {
+        message["role"] = json!("user");
+        message["name"] = json!("saved_asset");
+        if let Some(object) = message.as_object_mut() {
+            object.remove("tool_call_id");
+        }
+    }
+    Some(message)
+}
+
+/// Shared anchor retention for both `end_familiarization` and `handoff_step`
+/// so user prompts, finished program results, host-delivered skills/modules,
+/// pinned assets, and active handoff state stay consistent.
+pub(super) fn retain_turn_anchor_message(mut message: Value, keep_handoff: bool) -> Option<Value> {
+    if task_frames::is_user_original(&message) {
+        return Some(message);
+    }
+    if matches!(message["name"].as_str(), Some("program_result" | "program_record"))
+        || (keep_handoff && message["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+    {
+        return Some(message);
+    }
+    if message.get(skill_scope::DELIVERED).is_some()
+        || message["name"] == modules::UPDATE
+        || message.get(crate::anthropic_messages::ADDED_TOOLS).is_some()
+    {
+        return Some(message);
+    }
+    if message["name"] == "program_diagnostic" {
+        return program_flow::failed_program_line(&message).map(|line| {
+            message["name"] = json!("program_record");
+            message["content"] = json!(line);
+            message
+        });
+    }
+    retain_pinned_message(message)
+}
+
 fn reset_messages_for_virtual_step(w: &mut Window, handoff: &StepHandoff) {
     let prefix_end = w
         .messages
@@ -644,29 +1055,21 @@ fn reset_messages_for_virtual_step(w: &mut Window, handoff: &StepHandoff) {
         .position(task_frames::is_user_original)
         .unwrap_or_else(|| w.messages.iter().take_while(|m| m["role"] == "system").count());
     let mut kept = Vec::new();
-    for (idx, mut message) in w.messages.drain(..).enumerate() {
+    for (idx, message) in w.messages.drain(..).enumerate() {
         if idx < prefix_end {
             if message["name"].as_str() != Some(VIRTUAL_STEP_HANDOFF) {
                 kept.push(message);
             }
             continue;
         }
-        if task_frames::is_user_original(&message) {
-            kept.push(message);
-        } else if message["_pinned"].as_bool() == Some(true) {
-            if message["role"] == "tool" {
-                message["role"] = json!("user");
-                message["name"] = json!("saved_asset");
-                if let Some(object) = message.as_object_mut() {
-                    object.remove("tool_call_id");
-                }
-            }
-            kept.push(message);
+        if let Some(retained) = retain_turn_anchor_message(message, false) {
+            kept.push(retained);
         }
     }
     kept.push(virtual_step_handoff_message(
         w,
         Some((&handoff.next_step, &handoff.next_goal)),
+        &handoff.context_slices,
         false,
     ));
     w.messages = kept;
@@ -698,9 +1101,11 @@ async fn maybe_require_step_wrap(
         return Ok(());
     }
     let current_tokens = w.input_tokens(s, &request(s, &w.messages, definitions));
-    let token_threshold = STEP_WRAP_WINDOW_TOKENS.min((s.input_budget / 2).max(1));
-    let bloated = round_added_chars >= STEP_WRAP_ROUND_CHARS
-        || (w.step_rounds_in_scope >= 2 && current_tokens >= token_threshold);
+    let token_threshold = STEP_WRAP_WINDOW_TOKENS.min((s.input_budget * 3 / 4).max(1));
+    let emergency_threshold = STEP_WRAP_EMERGENCY_TOKENS.min((s.input_budget * 4 / 5).max(1));
+    let bloated = (w.step_rounds_in_scope >= STEP_WRAP_MIN_ROUNDS_IN_SCOPE
+        && current_tokens >= token_threshold)
+        || current_tokens >= emergency_threshold;
     if !bloated {
         return Ok(());
     }
@@ -723,11 +1128,11 @@ async fn maybe_require_step_wrap(
     let payload = json!({
         "type": VIRTUAL_STEP_WRAP_DIRECTIVE,
         "reason": format!(
-            "Host closed this exploration scope because the current virtual step reached ~{} tokens ({} chars delivered in the last round).",
+            "Host closed this exploration scope because the main window reached ~{} tokens across {} round(s).",
             current_tokens,
-            round_added_chars
+            w.step_rounds_in_scope
         ),
-        "required_action": "Choose one clean exit now before calling more read/search/command tools: (1) call handoff_step({step_name, completed, main_context_patch, next_step, next_goal}) to name this virtual method, distill compact verified facts into mainContext (<= 32 KiB patch / 64 KiB total), name the next virtual method, and draw its exact task boundary; (2) submit write_program if targets/rules are ready to orchestrate; or (3) reply in plain text if the task is already settled.",
+        "required_action": "Choose one clean exit now before calling more read/search/command tools: (1) submit write_program to move remaining multi-step checks/work into JS functions and @virtual leaves (clears exploration dumps automatically); (2) call handoff_step({next_goal, slices?: [{seq, lines?, grep?, head?, tail?}], main_context_patch?}) to carry exact coordinate excerpts at zero rewrite cost and reset exploration dumps; or (3) reply in plain text if already settled.",
     });
     w.messages.push(json!({
         "role": "user",
@@ -745,7 +1150,7 @@ fn read_only_shell(s: &Session<'_>) -> bool {
     s.plugin.is_none() && !s.ban_execution && code_shell_context(s) && crate::shell_process::read_only_available()
 }
 
-fn code_shell_context(s: &Session<'_>) -> bool {
+pub(super) fn code_shell_context(s: &Session<'_>) -> bool {
     if s.plugin.is_some() { return false; }
     // Old sessions predate explicit kinds and are code sessions by default.
     let kind = agent_service::open_db(s.state.workspace.root()).ok().and_then(|conn| {
@@ -782,8 +1187,8 @@ fn available_tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     if w.resumable.is_some() {
         tools.push(paused_programs::resume_tool());
     }
-    tools.push(function("read_asset", "Read a stable asset_id without searching or repeating the original operation. Default restores the saved result in full; use char_offset/max_chars for explicit pages. Images select the saved pixels for the next AI request, without taking another screenshot. Read only if the needed content is no longer in your current context.",
-        json!({"asset_id":{"type":"string"},"char_offset":{"type":"integer","minimum":0},"max_chars":{"type":"integer","minimum":1,"maximum":PAGE_CHARS}}),json!(["asset_id"])));
+    tools.push(function("read_asset", "Read a saved asset by asset_id or integer tool event_seq without searching or repeating the original operation. Default restores the saved result in full; use char_offset/max_chars for explicit pages (values above 24000 clamp cleanly to one 24000-char page). Images select the saved pixels for the next AI request, without taking another screenshot.",
+        json!({"asset_id":{"type":"string"},"seq":{"type":"integer","description":"Integer event_seq of a prior tool result (shorthand alternative to copying asset_id)."},"char_offset":{"type":"integer","minimum":0},"max_chars":{"type":"integer","minimum":1,"maximum":PAGE_CHARS}}),json!([])));
     tools.push(function("release_assets", "Explicitly replace selected asset bodies in this working context by their durable references. Original files/history stay saved. Must be called alone, after receiving the material in a model request. The host never releases an asset automatically.",
         json!({"asset_ids":{"type":"array","minItems":1,"items":{"type":"string"}},"reason":{"type":"string"}}),json!(["asset_ids","reason"])));
     tools.push(function("list_context_assets", "Inspect the asset references and loaded/reference-only states in your current context. Does not read asset files or alter context.",json!({}),json!([])));
@@ -845,11 +1250,22 @@ fn available_tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     }
     tools
 }
+pub(super) fn program_definitions(
+    s: &Session<'_>,
+    w: &Window,
+    mut definitions: Vec<Value>,
+) -> Vec<Value> {
+    if program_flow::shell_code_allowed(s, w) {
+        push_read_only_if_missing(s, &mut definitions);
+    }
+    definitions
+}
 pub(crate) fn library_compile_scope(
     s: &Session<'_>,
     w: &Window,
 ) -> crate::agent_program::libraries::Libraries {
-    program_flow::compile_static_libraries(s, w, &available_tools(s, w), true)
+    let definitions = program_definitions(s, w, available_tools(s, w));
+    program_flow::compile_static_libraries(s, w, &definitions, true)
 }
 /// What the main AI calls itself, outside its program: the conversation's own
 /// tools, reading this conversation's history and saved materials, and the
@@ -865,7 +1281,10 @@ fn main_publishes(
 ) -> bool {
     name == "read_session_history"
         || crate::agent_program::libraries::public_name(libraries, name).is_none()
-        || (s.plugin.is_none() && (name == "read_asset" || familiar.contains(name)))
+        || (s.plugin.is_none()
+            && (name == "read_asset"
+                || name == crate::shell_process::READ_ONLY
+                || familiar.contains(name)))
 }
 fn page_allows(s: &Session<'_>, name: &str) -> bool {
     let Some(owner) = &s.plugin else {
@@ -890,7 +1309,6 @@ fn page_allows(s: &Session<'_>, name: &str) -> bool {
             | "list_context_assets"
             | "write_program"
             | "handoff_step"
-            | "set_next_step"
     ) || crate::function_frames::is_tool(name)
         || s.state
             .tool_catalog
@@ -1218,6 +1636,12 @@ fn host_tools_snapshot(s: &Session<'_>, definitions: &[Value]) -> Value {
     })
 }
 
+fn attach_event_seq(value: &mut Value, seq: Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.entry("event_seq").or_insert(seq);
+    }
+}
+
 fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value {
     let mut wire = messages.to_vec();
     let js_meta = messages
@@ -1264,15 +1688,15 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
             let workspace = project.as_ref().unwrap_or(&s.state.workspace)
                 .workspace_info(crate::tools::WorkspaceInfoRequest { workspace_root:None }).ok();
             let (access, own) = if role == "main" && read_only_shell(s) {
-                ("main_ai_read_only_commands_and_module_code",
-                    " Direct run_readonly_command is available for builds, tests, and small targeted checks; long output is a bounded preview with a saved asset for the complete result. Use git_status/git_diff/git_log or the git library for repository state/history, and list_dir/search_text/read_file_lines for file and log navigation; in a flow, delegate a step that needs shell as an empty @virtual function describing its result.")
+                ("main_ai_read_only_and_program_shell",
+                    " Direct run_readonly_command is available for builds, tests, and small targeted checks; inside write_program, process.run_readonly runs the same zero-approval read-only sandbox and process.exec_command runs under session permissions while keeping raw stdout/stderr on the JS heap.")
             } else { ("module_deterministic_code_only", "") };
             wire.insert(1.min(wire.len()), json!({"role":"system","name":"shell_environment",
                 "content":json!({"shell":shell,"workspace":workspace,
                     "access":access,
                     "memory":{"ai_input_limit_tokens":s.input_budget,"program_shell_output_limit_bytes":crate::shell_process::PROGRAM_OUTPUT_LIMIT,
                         "boundary":"Command output stays in the program until returned in a bounded result or passed to a virtual helper."},
-                    "usage":format!("{}{own}", if cfg!(windows) { "Use PowerShell 7 with Windows paths. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or dump huge bulk text into chat. Prefer structured file APIs (list_dir, search_text, read_file_lines) or module code over find/grep/tail shell pipelines." } else { "Use Bash. Shell methods run inside saved function implementations. Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or dump huge bulk text into chat. Prefer structured file APIs (list_dir, search_text, read_file_lines) or module code over find/grep/tail shell pipelines." })}).to_string()}));
+                    "usage":format!("{}{own}", if cfg!(windows) { "Use PowerShell 7 with Windows paths. Shell methods run inside top-level write_program and saved module code (never in @virtual leaves). Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or dump huge bulk text into chat. Prefer structured file APIs (list_dir, search_text, read_file_lines) or program code over find/grep/tail shell pipelines." } else { "Use Bash. Shell methods run inside top-level write_program and saved module code (never in @virtual leaves). Commands start fresh, without profiles or PTY. Check running/exit_code. Read needed evidence from saved output references after a capacity error; do not replay commands or dump huge bulk text into chat. Prefer structured file APIs (list_dir, search_text, read_file_lines) or program code over find/grep/tail shell pipelines." })}).to_string()}));
             }
             let environment = crate::agent_program::ENVIRONMENT;
             #[cfg(test)]
@@ -1434,10 +1858,9 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
         published.retain(|d| {
             d["function"]["name"].as_str().is_none_or(|name| main_publishes(s, &familiar, &libraries, name))
         });
-        // A library method's result is shown as the method returned it. A
-        // call the AI made keeps the name it used; histories saved before may
-        // hold calls under the retired transport name.
-        let mut library_calls = BTreeMap::<String, (String, bool)>::new();
+        // Unwrap material asset envelopes uniformly in main ReAct while preserving
+        // each tool's own schema and event_seq; keep retired invoke_library names.
+        let mut call_targets = BTreeMap::<String, (String, bool)>::new();
         for message in &mut wire {
             for call in message["tool_calls"].as_array().into_iter().flatten() {
                 let Some(raw) = call["function"]["name"].as_str() else {
@@ -1455,34 +1878,37 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
                                 .map(str::to_owned)
                         })
                     {
-                        library_calls.insert(id, (target, true));
+                        call_targets.insert(id, (target, true));
                     }
-                } else if crate::agent_program::libraries::public_name(&libraries, raw).is_some() {
-                    library_calls.insert(id, (raw.to_owned(), false));
+                } else {
+                    call_targets.insert(id, (raw.to_owned(), false));
                 }
             }
             if message["role"] == "tool" {
-                if let Some((target, retired)) = message["tool_call_id"]
+                let (is_read_asset, retired) = message["tool_call_id"]
                     .as_str()
-                    .and_then(|id| library_calls.get(id))
+                    .and_then(|id| call_targets.get(id))
+                    .map_or((false, false), |(target, retired)| {
+                        (target == "read_asset", *retired)
+                    });
+                if retired && message.get("name").is_some() {
+                    message["name"] = json!(crate::agent_program::declarations::CALL);
+                }
+                if !is_read_asset
+                    && let Some(packet) = message["content"]
+                        .as_str()
+                        .and_then(|v| serde_json::from_str::<Value>(v).ok())
+                    && packet["asset_reference"].is_object()
+                    && let Some(mut unwrapped) = packet.get("original_result").cloned()
                 {
-                    if *retired && message.get("name").is_some() {
-                        message["name"] = json!(crate::agent_program::declarations::CALL);
+                    if let Some(seq) = packet
+                        .get("event_seq")
+                        .cloned()
+                        .or_else(|| packet.pointer("/delivery_reference/event_seq").cloned())
+                    {
+                        attach_event_seq(&mut unwrapped, seq);
                     }
-                    // read_asset intrinsically returns a snapshot envelope; other
-                    // library operations return their original schema value.
-                    if target != "read_asset" {
-                        if let Some(packet) = message["content"]
-                            .as_str()
-                            .and_then(|v| serde_json::from_str::<Value>(v).ok())
-                        {
-                            if packet["asset_reference"].is_object()
-                                && packet.get("original_result").is_some()
-                            {
-                                message["content"] = json!(packet["original_result"].to_string());
-                            }
-                        }
-                    }
+                    message["content"] = json!(unwrapped.to_string());
                 }
             }
         }
@@ -1879,16 +2305,26 @@ async fn model_round(
 /// Keep the transcript and tool records intact, but leave room for the retry.
 /// Tool IDs and names must remain paired with the NOT_RUN results.
 fn compact_cut_off_context(message: &mut Value) {
-    const EXCERPT_CHARS: usize = 512;
+    const EXCERPT_CHARS: usize = 16_000;
+    const HALF_EXCERPT_CHARS: usize = EXCERPT_CHARS / 2;
     if let Some(object) = message.as_object_mut() {
         object.remove("reasoning_content");
         object.remove(crate::model_stream::REASONING_ITEMS);
         object.remove(crate::model_stream::THINKING_BLOCKS);
         if let Some(text) = object.get("content").and_then(Value::as_str) {
-            let mut chars = text.chars();
-            let excerpt: String = chars.by_ref().take(EXCERPT_CHARS).collect();
-            if chars.next().is_some() {
-                object.insert("content".into(), json!(format!("{excerpt}\n[Truncated reply omitted from retry context; the original is saved in the record.]")));
+            let total = text.chars().count();
+            if total > EXCERPT_CHARS {
+                let head: String = text.chars().take(HALF_EXCERPT_CHARS).collect();
+                let tail: String = text
+                    .chars()
+                    .skip(total.saturating_sub(HALF_EXCERPT_CHARS))
+                    .collect();
+                object.insert(
+                    "content".into(),
+                    json!(format!(
+                        "{head}\n...[middle omitted from retry context]...\n{tail}\n[Truncated reply at output limit; full original saved in the record.]"
+                    )),
+                );
             }
         }
         for call in object.get_mut("tool_calls").and_then(Value::as_array_mut).into_iter().flatten() {
@@ -1923,7 +2359,7 @@ async fn business_tool_inner(
     s:&Session<'_>,node:&str,name:&str,args:Value,call_id:&str,module_code:bool,program:bool,
 ) -> Result<Value> {
     ensure!(!crate::project_process::is_execution(name) || module_code,
-        "SHELL_MODULE_ONLY: Shell runs in the code implementation of a first-layer virtual function. In a main flow, declare an empty @virtual for the needed result; the host arranges its implementation. Inside that implementation, call shell directly; terminal virtual helpers cannot run shell.");
+        "SHELL_MODULE_ONLY: Shell execution requires top-level program or module code in an execution-enabled code session; terminal @virtual helpers cannot run shell.");
     ensure!(page_allows(s, name), "PLUGIN_SCOPE_DENIED: {name}");
     if name == "read_session_history" {
         let mut args = args;
@@ -2571,28 +3007,57 @@ fn outside_read_paths(
 }
 
 async fn load_saved_asset(s: &Session<'_>, args: &Value) -> Result<Value> {
-    let id = args["asset_id"]
-        .as_str()
-        .context("asset_id is required")?
-        .to_owned();
     let root = s.state.workspace.root().to_path_buf();
     let task = s.task.to_owned();
+    let seq = args.get("seq").and_then(Value::as_i64);
+    let id = match args["asset_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => Some(id.to_owned()),
+        None => match seq {
+            Some(seq) => {
+                let (r, t) = (root.clone(), task.clone());
+                tokio::task::spawn_blocking(move || crate::context_assets::asset_id_for_seq(&r, &t, seq))
+                    .await??
+            }
+            None => anyhow::bail!("asset_id or seq is required"),
+        },
+    };
+    let Some(id) = id else {
+        let seq = seq.context("asset_id or seq is required")?;
+        let (r, t) = (root.clone(), task.clone());
+        let (source_tool, payload) = tokio::task::spawn_blocking(move || {
+            crate::context_assets::read_event_payload(&r, &t, seq)
+        })
+        .await??
+        .with_context(|| format!("ASSET_NOT_FOUND: no saved result found for seq={seq}"))?;
+        return Ok(json!({
+            "event_seq": seq,
+            "source_tool": source_tool,
+            "original_result": payload,
+            "version": "event_history",
+        }));
+    };
+    let mut read_args = args.clone();
+    read_args["asset_id"] = json!(id.clone());
+    let (r, t) = (root.clone(), task.clone());
     let reference = tokio::task::spawn_blocking(move || {
-        crate::context_assets::reference(&root, &task, &id, None)
+        crate::context_assets::reference(&r, &t, &id, None)
     })
     .await??;
     ensure!(!s.cancel.is_cancelled(), "cancelled");
     if reference["storage"] == "plugin" {
         tokio::select! {
             _ = s.cancel.cancelled() => anyhow::bail!("cancelled"),
-            result = crate::plugin_io::read_asset(s.state, s.task, &reference, args) => result,
+            result = crate::plugin_io::read_asset(s.state, s.task, &reference, &read_args) => result,
         }
     } else {
-        let root = s.state.workspace.root().to_path_buf();
-        let task = s.task.to_owned();
-        let args = args.clone();
-        tokio::task::spawn_blocking(move || crate::context_assets::read(&root, &task, &args, None))
-            .await?
+        tokio::task::spawn_blocking(move || {
+            crate::context_assets::read(&root, &task, &read_args, None)
+        })
+        .await?
     }
 }
 
@@ -3285,16 +3750,12 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                     .map(|reference| crate::context_assets::delivered(&result, reference))
                     .unwrap_or_else(|| result.clone())
             };
-            // Library methods and a leaf's own finding and asking return their
-            // plain results; other tools carry their record's sequence number.
-            let library_result = crate::agent_program::libraries::public_name(
-                &program_flow::library_catalog(s, &definitions),
-                &call.name,
-            )
-            .is_some()
+            // Child leaf/implement functions and finding/asking return their
+            // plain results; main ReAct object results always carry event_seq.
+            let plain_leaf_result = w.program_task.is_some()
                 || matches!(call.name.as_str(), program_flow::FIND | program_flow::ASK);
-            if !library_result && let Some(object) = delivery.as_object_mut() {
-                object.entry("event_seq").or_insert(json!(seq));
+            if !plain_leaf_result {
+                attach_event_seq(&mut delivery, json!(seq));
             }
             if let (Some(previous), Some(current)) = (&refreshed_from, &asset_reference) {
                 delivery["refresh"] = json!({"previous_asset_id":previous["asset_id"],"current_asset_id":current["asset_id"],
@@ -3425,7 +3886,9 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                     "flowNodeId": node,
                     "completedStep": handoff.entry.step,
                     "completedPurpose": handoff.entry.purpose,
+                    "situation": handoff.entry.purpose,
                     "updatedKeys": handoff.entry.updated_keys,
+                    "sliceCount": handoff.context_slices.len(),
                     "nextStep": handoff.next_step,
                     "nextGoal": handoff.next_goal,
                     "mainContextBytes": handoff.main_context_bytes,
@@ -3555,7 +4018,10 @@ async fn cut_off_reply(
         w.messages.push(sourced(json!({"role":"tool","tool_call_id":call.call_id,"content":result.to_string()}), s.task, seq));
     }
     if calls.is_empty() {
-        let (_, advice) = cut_off_advice(program_flow::output_split(s, node), "Hand over long work as a program with write_program.");
+        let (_, advice) = cut_off_advice(
+            program_flow::output_split(s, node),
+            "If writing your final answer, continue directly from where it stopped without repeating earlier sections; if drafting long file or command work, hand it over as a program with write_program.",
+        );
         let notice = json!({"code":"REPLY_TRUNCATED","output_tokens":spent,
             "error":"your last reply stopped at the model's output limit, which your reasoning counts toward as well, so it is unfinished",
             "instruction":format!("Continue. {advice}")});
@@ -3846,7 +4312,7 @@ async fn execute_call(
         documented_examples::replay_paths(s, &mut args);
         if crate::project_process::is_execution(&call.name) {
             ensure!(at.is_some() && program_flow::shell_code_allowed(s,w),
-                "SHELL_MODULE_ONLY: Shell runs in the code implementation of a first-layer virtual function. In a main flow, declare an empty @virtual for the needed result; the host arranges its implementation. Inside that implementation, call shell directly; terminal virtual helpers cannot run shell.");
+                "SHELL_MODULE_ONLY: Shell execution requires top-level program or module code in an execution-enabled code session; terminal virtual helpers cannot run shell.");
         }
         if w.module_probe && call.name != "parallel_read_batch" {
             ensure!(program_flow::probe_read(&call.name),
@@ -3860,7 +4326,7 @@ async fn execute_call(
             && !matches!(call.name.as_str(), HANDOFF_STEP | program_flow::WRITE_PROGRAM)
         {
             anyhow::bail!(
-                "VIRTUAL_STEP_WRAP_REQUIRED: Host wrapped this bloated virtual step. Call handoff_step({{step_name, completed, main_context_patch, next_step, next_goal}}) to name this virtual method, save compact facts to mainContext, name the next method and define its task boundary — or call write_program / reply directly."
+                "VIRTUAL_STEP_WRAP_REQUIRED: Exploration reached the high-water wrap threshold. Call write_program to orchestrate, reply in plain text if settled, or call handoff_step({{next_goal, slices?: [{{seq, lines?, grep?, head?, tail?}}], main_context_patch?}}) to carry exact excerpts and reset exploration dumps."
             );
         }
         if crate::function_frames::is_tool(&call.name) || matches!(call.name.as_str(),"release_assets"|"unload_skill"|HANDOFF_STEP) {
@@ -3918,15 +4384,13 @@ async fn execute_call(
             },
             name if name == program_flow::FIND => program_flow::find(s, w, &args),
             crate::shell_process::READ_ONLY => {
-                let js_allows_readonly = w
-                    .program_task
-                    .as_ref()
-                    .and_then(|t| t["js_tools"].as_array())
-                    .is_some_and(|tools| {
-                        tools.iter().any(|t| t.as_str() == Some(crate::shell_process::READ_ONLY))
-                    });
-                ensure!(at.is_none() && (program_flow::role(w) == program_flow::Role::Main || js_allows_readonly) && read_only_shell(s),
-                    "TOOL_UNAVAILABLE: {}; only the main AI calls it directly. Program code runs commands in a module with process.exec_command", call.name);
+                let allowed = (at.is_none() && program_flow::role(w) == program_flow::Role::Main)
+                    || (at.is_some() && program_flow::shell_code_allowed(s, w));
+                ensure!(
+                    allowed && read_only_shell(s),
+                    "TOOL_UNAVAILABLE: {}; requires main ReAct or an execution-enabled program (never @virtual leaves).",
+                    call.name
+                );
                 material_source = Some((call.name.clone(), args.clone()));
                 let project = crate::tools::Workspace::new(crate::session_browser::task_workspace(s.state.workspace.root(), s.task)?)?;
                 crate::shell_process::run_read_only(&project, &args, s.cancel).await
@@ -4048,28 +4512,9 @@ async fn execute_call(
             "edit_file" if program_flow::role(w) == program_flow::Role::Fix => modules::edit(s, w, &args),
             name if name == HANDOFF_STEP => {
                 ensure_primary_main_react(s, w, HANDOFF_STEP)?;
-                let (receipt, handoff) = prepare_handoff_step(w, &args)?;
+                let (receipt, handoff) =
+                    prepare_handoff_step(s.state.workspace.root(), s.task, w, &args)?;
                 step_handoff = Some(handoff);
-                Ok(receipt)
-            }
-            name if name == SET_NEXT_STEP => {
-                ensure_primary_main_react(s, w, SET_NEXT_STEP)?;
-                let receipt = prepare_next_step(&args)?;
-                append(
-                    s,
-                    "flow/next_step_declared",
-                    json!({
-                        "actor": s.actor(),
-                        "turn": s.turn,
-                        "step": step,
-                        "flowNodeId": node,
-                        "currentStep": receipt["current_step"],
-                        "nextStep": receipt["next_step"],
-                        "contextKeys": receipt["context_keys"],
-                    }),
-                    false,
-                )
-                .await?;
                 Ok(receipt)
             }
             "refresh_asset" => {
@@ -4139,10 +4584,18 @@ async fn execute_call(
         }).await??;
         result["output_asset"] = reference.clone();
         result["read_output"] = json!({"tool":"read_asset","arguments":{"asset_id":result["output_asset"]["asset_id"]}});
-        result.as_object_mut().map(|object| {
-            object.remove("__full_stdout");
-            object.remove("__full_stderr");
-        });
+        let full_stdout = result.as_object_mut().and_then(|object| object.remove("__full_stdout"));
+        let full_stderr = result.as_object_mut().and_then(|object| object.remove("__full_stderr"));
+        if at.is_some() {
+            // In JS program code, deliver full stdout/stderr onto the JS heap instead of a preview.
+            if let Some(stdout) = full_stdout { result["stdout"] = stdout; }
+            if let Some(stderr) = full_stderr { result["stderr"] = stderr; }
+            result["truncated"] = json!(false);
+            result.as_object_mut().map(|object| {
+                object.remove("preview_note");
+                object.remove("preview_limit_chars");
+            });
+        }
         pre_registered_asset = Some(reference);
         material_source = None;
     }
@@ -4175,7 +4628,7 @@ async fn execute_call(
                 })
                 .await??,
             )
-        } else if call.name == "read_asset" {
+        } else if call.name == "read_asset" && !result["asset_reference"].is_null() {
             Some(result["asset_reference"].clone())
         } else {
             None
@@ -5377,7 +5830,7 @@ mod tests {
                 if n==3 {
                     let tool=body["messages"].as_array().unwrap().iter().rev().find(|message|message["role"]=="tool").unwrap();
                     let packet:Value=serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();
-                    assert!(packet["asset_reference"]["asset_id"].is_string());
+                    assert!(packet["event_seq"].as_i64().is_some());
                     let result=packet.get("original_result").unwrap_or(&packet);
                     assert_eq!(result["content"],std::fs::read_to_string(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/builtin_plugins/code_flow/SKILL.md")).unwrap());
                     assert_eq!(body["messages"].as_array().unwrap().iter().filter(|message|message["role"]=="user" && message.get("name").is_none()).count(),1);
@@ -6359,7 +6812,7 @@ mod tests {
                                     .iter()
                                     .filter(|t| t["error_code"] == "MATERIAL_OVER_CAPACITY")
                                     .collect::<Vec<_>>();
-                                assert!(!withheld.is_empty(), "round burst beyond 1/4 budget must withhold excess deliveries");
+                                assert!(!withheld.is_empty(), "round burst beyond bounded soft cap must withhold excess deliveries");
                                 assert!(
                                     tools.iter().any(|t| t["error_code"].is_null()),
                                     "earlier calls in the batch still fit"
@@ -6399,18 +6852,20 @@ mod tests {
     }
 
     #[test]
-    fn delivery_soft_limits_scale_to_quarter_of_model_budget() {
+    fn delivery_soft_limits_stay_bounded_for_main_react() {
         let large = delivery_soft_limits(1_025_424);
-        assert_eq!(large.single_tokens, 256_356);
-        assert_eq!(large.round_tokens, 256_356);
-        assert_eq!(large.single_chars, 769_068);
-        assert_eq!(large.round_chars, 769_068);
+        assert_eq!(large.single_tokens, 32_000);
+        assert_eq!(large.round_tokens, 64_000);
+        assert_eq!(large.single_chars, 96_000);
+        assert_eq!(large.round_chars, 192_000);
 
         let medium = delivery_soft_limits(INPUT_BUDGET);
+        assert_eq!(medium.single_tokens, 32_000);
         assert_eq!(medium.round_tokens, INPUT_BUDGET / 4);
-        assert!(medium.round_chars >= 170_000);
+        assert_eq!(medium.round_chars, (INPUT_BUDGET / 4) * 3);
 
         let tiny = delivery_soft_limits(32_000);
+        assert_eq!(tiny.single_tokens, 24_000);
         assert_eq!(tiny.round_tokens, 32_000);
     }
 
@@ -6601,6 +7056,8 @@ mod tests {
         };
 
         let (_, h1) = prepare_handoff_step(
+            root.path(),
+            "task",
             &w,
             &json!({
                 "step_name": "step_one",
@@ -6616,6 +7073,8 @@ mod tests {
         w.step_handoffs_in_turn = 1;
 
         let (_, h2) = prepare_handoff_step(
+            root.path(),
+            "task",
             &w,
             &json!({
                 "step_name": "step_two",
@@ -6630,6 +7089,8 @@ mod tests {
         w.step_trail.push(h2.entry.clone());
 
         let over_total = prepare_handoff_step(
+            root.path(),
+            "task",
             &w,
             &json!({
                 "step_name": "step_three",
@@ -6642,6 +7103,8 @@ mod tests {
         assert!(over_total.is_err());
 
         let (_, h3) = prepare_handoff_step(
+            root.path(),
+            "task",
             &w,
             &json!({
                 "step_name": "step_three",
@@ -6769,10 +7232,10 @@ mod tests {
     async fn host_forces_virtual_step_wrap_when_round_bloats_and_blocks_more_reads() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let root = TestRoot::new();
-        for i in 1..=3 {
+        for i in 1..=16 {
             std::fs::write(
                 root.path().join(format!("chunk{i}.txt")),
-                format!("BLOATED_DUMP_MARKER_{i}\n{}", "d".repeat(50_000)),
+                format!("BLOATED_DUMP_MARKER_{i}\n{}", "d".repeat(36_000)),
             )
             .unwrap();
         }
@@ -6789,23 +7252,63 @@ mod tests {
                         let step = rounds.fetch_add(1, Ordering::SeqCst);
                         let msgs = body["messages"].as_array().unwrap();
                         let joined = serde_json::to_string(msgs).unwrap();
+                        let read_batch = |range: std::ops::RangeInclusive<usize>| {
+                            range
+                                .map(|i| {
+                                    json!({
+                                        "id": format!("read_{i}"),
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": json!({"path": format!("chunk{i}.txt"), "max_chars": 40_000}).to_string()
+                                        }
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        };
                         let message = match step {
                             0 => json!({
                                 "role": "assistant",
                                 "content": Value::Null,
-                                "tool_calls": (1..=3).map(|i| json!({
-                                    "id": format!("read_{i}"),
-                                    "type": "function",
-                                    "function": {
-                                        "name": "read_file",
-                                        "arguments": json!({"path": format!("chunk{i}.txt"), "max_chars": 55_000}).to_string()
-                                    }
-                                })).collect::<Vec<_>>()
+                                "tool_calls": read_batch(1..=4)
                             }),
                             1 => {
                                 assert!(
+                                    !msgs.iter().any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_WRAP_DIRECTIVE)),
+                                    "round 1 (~55k tokens) must NOT trigger premature step_wrap_requested"
+                                );
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": read_batch(5..=8)
+                                })
+                            }
+                            2 => {
+                                assert!(
+                                    !msgs.iter().any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_WRAP_DIRECTIVE)),
+                                    "round 2 (< 3 rounds and below token threshold) must NOT trigger step_wrap_requested"
+                                );
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": read_batch(9..=12)
+                                })
+                            }
+                            3 => {
+                                assert!(
+                                    !msgs.iter().any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_WRAP_DIRECTIVE)),
+                                    "round 3 (~150k tokens < 180k threshold) must NOT trigger premature step_wrap_requested"
+                                );
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": read_batch(13..=16)
+                                })
+                            }
+                            4 => {
+                                assert!(
                                     msgs.iter().any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_WRAP_DIRECTIVE)),
-                                    "host must notify AI of forced virtual step wrap after heavy round"
+                                    "host must notify AI of virtual step wrap after >=3 rounds at >=180k tokens"
                                 );
                                 // Simulate AI ignoring wrap directive and trying another exploration call.
                                 json!({
@@ -6821,7 +7324,7 @@ mod tests {
                                     }]
                                 })
                             }
-                            2 => {
+                            5 => {
                                 let last_tool = msgs.iter().rev().find(|m| m["role"] == "tool").unwrap();
                                 assert!(
                                     last_tool["content"].as_str().unwrap().contains("VIRTUAL_STEP_WRAP_REQUIRED"),
@@ -6837,7 +7340,7 @@ mod tests {
                                             "name": HANDOFF_STEP,
                                             "arguments": json!({
                                                 "step_name": "scanLargeChunks",
-                                                "completed": "Read chunk1..chunk3 and distilled next file target",
+                                                "completed": "Read chunk1..chunk16 and distilled next file target",
                                                 "main_context_patch": {"next_file": "clean_target.txt"},
                                                 "next_step": "verifyCleanTarget",
                                                 "next_goal": "Read clean_target.txt and report its marker"
@@ -6846,7 +7349,7 @@ mod tests {
                                     }]
                                 })
                             }
-                            3 => {
+                            6 => {
                                 assert!(!joined.contains("BLOATED_DUMP_MARKER_1"));
                                 assert!(joined.contains("verifyCleanTarget"));
                                 json!({
@@ -6887,7 +7390,7 @@ mod tests {
             "task".into(),
             "fake".into(),
             "Scan chunks then verify clean target.".into(),
-            8,
+            12,
             CancellationToken::new(),
             1,
             false,
@@ -6895,7 +7398,7 @@ mod tests {
         .await
         .unwrap();
         server.abort();
-        assert_eq!(rounds.load(Ordering::SeqCst), 5);
+        assert_eq!(rounds.load(Ordering::SeqCst), 8);
         let wrap_events: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM agent_task_events WHERE task_id='task' AND kind='flow/step_wrap_requested'",
@@ -6907,18 +7410,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_next_step_runs_in_parallel_with_exploration_tools() {
+    async fn main_write_program_preserves_handoff_and_pinned_assets() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let root = TestRoot::new();
-        std::fs::write(root.path().join("notes.txt"), "TARGET_FACT_LINE").unwrap();
+        let skill_dir = root.path().join(".agents/skills/audit-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: audit-skill\ndescription: Pinned audit discipline\n---\nPINNED_AUDIT_RULE_KEEP\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("sample.rs"),
+            "fn one() {}\nfn two() {\n    // TARGET_RULE_9\n}\n",
+        )
+        .unwrap();
 
         let rounds = Arc::new(AtomicUsize::new(0));
+        let search_seq_cell = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let table_payload = json!({
+            "locked_target": "sample.rs",
+            "verdict_table": (0..40).map(|i| json!({
+                "log": format!("target/logs/run-{i:02}.log"),
+                "status": if i % 2 == 0 { "valid" } else { "superseded" },
+                "evidence": "src/single_agent.rs:701-850",
+            })).collect::<Vec<_>>()
+        });
+        let table_clone = table_payload.clone();
+
         let app = Router::new().route(
             "/v1/chat/completions",
             post({
                 let rounds = rounds.clone();
+                let search_seq_cell = search_seq_cell.clone();
+                let table_clone = table_clone.clone();
                 move |Json(body): Json<Value>| {
                     let rounds = rounds.clone();
+                    let search_seq_cell = search_seq_cell.clone();
+                    let table_clone = table_clone.clone();
                     async move {
                         let step = rounds.fetch_add(1, Ordering::SeqCst);
                         let msgs = body["messages"].as_array().unwrap();
@@ -6929,31 +7458,168 @@ mod tests {
                                 "content": Value::Null,
                                 "tool_calls": [
                                     {
-                                        "id": "declare_next",
+                                        "id": "call_pin_skill",
                                         "type": "function",
                                         "function": {
-                                            "name": SET_NEXT_STEP,
-                                            "arguments": json!({
-                                                "current_step": "Read notes.txt for target fact",
-                                                "next_step": "Verify and summarize findings",
-                                                "context_keys": ["notes.txt"]
-                                            }).to_string()
+                                            "name": "read_skill",
+                                            "arguments": json!({"name": "audit-skill"}).to_string()
                                         }
                                     },
                                     {
-                                        "id": "read_notes",
+                                        "id": "call_search",
                                         "type": "function",
                                         "function": {
-                                            "name": "read_file",
-                                            "arguments": json!({"path": "notes.txt"}).to_string()
+                                            "name": "search_text",
+                                            "arguments": json!({"path": "sample.rs", "query": "TARGET_RULE_9"}).to_string()
                                         }
                                     }
                                 ]
                             }),
+                            1 => {
+                                let search_tool = msgs
+                                    .iter()
+                                    .find(|m| m["role"] == "tool" && m["tool_call_id"] == "call_search")
+                                    .expect("search_text result missing");
+                                let search_payload: Value =
+                                    serde_json::from_str(search_tool["content"].as_str().unwrap()).unwrap();
+                                let search_seq = search_payload["event_seq"]
+                                    .as_i64()
+                                    .expect("main ReAct search_text must expose event_seq");
+                                search_seq_cell.store(search_seq, Ordering::SeqCst);
+                                // Verify empty slice match fails with HANDOFF_SLICE_INVALID without wiping window.
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "call_handoff_bad_slice",
+                                        "type": "function",
+                                        "function": {
+                                            "name": HANDOFF_STEP,
+                                            "arguments": json!({
+                                                "next_goal": "Test error path",
+                                                "slices": [{"seq": search_seq, "grep": "NO_SUCH_LINE"}]
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            2 => {
+                                let err_tool = msgs.iter().rev().find(|m| m["role"] == "tool").unwrap();
+                                assert!(err_tool["content"].as_str().unwrap().contains("HANDOFF_SLICE_INVALID"), "{err_tool}");
+                                assert!(joined.contains("PINNED_AUDIT_RULE_KEEP"), "failed slice handoff must not wipe window");
+                                let search_seq = search_seq_cell.load(Ordering::SeqCst);
+                                // Minimal zero-rewrite handoff: only next_goal + coordinate slices (+ optional patch).
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "call_handoff_ok_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": HANDOFF_STEP,
+                                            "arguments": json!({
+                                                "next_goal": "Confirm minimal slices and saved_asset survive handoff",
+                                                "slices": [{"seq": search_seq, "grep": "TARGET_RULE_9", "label": "search_hit"}],
+                                                "main_context_patch": table_clone
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            3 => {
+                                assert!(joined.contains("PINNED_AUDIT_RULE_KEEP"), "saved_asset must survive 1st handoff");
+                                assert!(msgs.iter().any(|m| m["name"].as_str() == Some("saved_asset")));
+                                let handoff_msg = msgs
+                                    .iter()
+                                    .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+                                    .expect("virtual_step_handoff must exist");
+                                let frame: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
+                                assert_eq!(frame["context_slices"].as_array().unwrap().len(), 1);
+                                assert!(frame["context_slices"][0]["excerpt"].as_str().unwrap().contains("TARGET_RULE_9"));
+                                let search_seq = search_seq_cell.load(Ordering::SeqCst);
+                                // Second handoff tests already-normalized role=="user" saved_asset survival.
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "call_handoff_ok_2",
+                                        "type": "function",
+                                        "function": {
+                                            "name": HANDOFF_STEP,
+                                            "arguments": json!({
+                                                "next_goal": "Run top-level write_program and continue",
+                                                "slices": [{"seq": search_seq, "grep": "TARGET_RULE_9"}],
+                                                "main_context_patch": {"phase": "orchestrate"}
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            4 => {
+                                assert!(joined.contains("PINNED_AUDIT_RULE_KEEP"), "saved_asset must survive 2nd handoff");
+                                let src = r#"
+const io = require("io");
+const r = io.read({ path: "sample.rs", max_chars: 200 });
+return { has_rule: r.content.includes("TARGET_RULE_9") };
+"#;
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "call_wp",
+                                        "type": "function",
+                                        "function": {
+                                            "name": program_flow::WRITE_PROGRAM,
+                                            "arguments": json!({"name": "verify-preservation", "source": src}).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            5 => {
+                                assert!(
+                                    msgs.iter().any(|m| m["name"].as_str() == Some("program_result")),
+                                    "program_result must be present after write_program completes"
+                                );
+                                assert!(
+                                    joined.contains("PINNED_AUDIT_RULE_KEEP"),
+                                    "pinned saved_asset MUST survive end_familiarization + write_program"
+                                );
+                                let handoff_msg = msgs
+                                    .iter()
+                                    .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+                                    .expect("virtual_step_handoff MUST survive end_familiarization + write_program");
+                                let frame: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
+                                assert_eq!(frame["mainContext"]["locked_target"], "sample.rs");
+                                assert_eq!(frame["mainContext"]["phase"], "orchestrate");
+                                assert_eq!(frame["mainContext"]["verdict_table"].as_array().unwrap().len(), 40);
+                                assert_eq!(frame["context_slices"].as_array().unwrap().len(), 1);
+                                assert!(frame["context_slices"][0]["excerpt"].as_str().unwrap().contains("TARGET_RULE_9"));
+                                // Do one follow-up direct read after write_program to confirm seamless continuation.
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "post_wp_list",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "list_dir",
+                                            "arguments": json!({"path": "."}).to_string()
+                                        }
+                                    }]
+                                })
+                            }
                             _ => {
-                                assert!(joined.contains("TARGET_FACT_LINE"));
-                                assert!(joined.contains("Verify and summarize findings"));
-                                json!({"role": "assistant", "content": "Declared next step and read file."})
+                                assert!(joined.contains("PINNED_AUDIT_RULE_KEEP"));
+                                let program_msg = msgs
+                                    .iter()
+                                    .find(|m| m["name"].as_str() == Some("program_result"))
+                                    .expect("program_result must stay anchored across post-wp continuation");
+                                assert!(
+                                    program_msg["content"].as_str().unwrap().contains("\"has_rule\":true"),
+                                    "unexpected program_result content: {program_msg}"
+                                );
+                                assert!(msgs.iter().any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF)));
+                                json!({"role": "assistant", "content": "Verified full continuation across minimal slice handoffs and write_program."})
                             }
                         };
                         Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
@@ -6975,8 +7641,8 @@ mod tests {
             state,
             "task".into(),
             "fake".into(),
-            "Inspect notes and plan next step".into(),
-            6,
+            "Test minimal slice handoffs, saved_asset, and write_program continuation".into(),
+            12,
             CancellationToken::new(),
             1,
             false,
@@ -6984,14 +7650,340 @@ mod tests {
         .await
         .unwrap();
         server.abort();
-        assert_eq!(rounds.load(Ordering::SeqCst), 2);
-        let declared_events: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM agent_task_events WHERE task_id='task' AND kind='flow/next_step_declared'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(declared_events, 1);
+        assert_eq!(rounds.load(Ordering::SeqCst), 7);
+    }
+
+    #[tokio::test]
+    async fn all_main_tools_expose_event_seq_and_read_asset_by_seq() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        std::fs::create_dir_all(root.path().join("sub")).unwrap();
+        let alpha_body = (1..=30)
+            .map(|n| format!("alpha_line_{n}_MARKER_{n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(root.path().join("sub/alpha.txt"), alpha_body).unwrap();
+        std::fs::write(root.path().join("sub/beta.txt"), "beta_hit\n").unwrap();
+        let skill_dir = root.path().join(".agents/skills/uniform-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: uniform-skill\ndescription: Uniform unwrap test\n---\nUNIFORM_SKILL_BODY\n",
+        )
+        .unwrap();
+
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let seqs = Arc::new(std::sync::Mutex::new(BTreeMap::<String, i64>::new()));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                let seqs = seqs.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    let seqs = seqs.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let msgs = body["messages"].as_array().unwrap();
+                        let message = match step {
+                            0 => json!({
+                                "role": "assistant",
+                                "content": Value::Null,
+                                "tool_calls": [
+                                    {"id": "t_dir", "type": "function", "function": {"name": "list_dir", "arguments": json!({"path": "sub"}).to_string()}},
+                                    {"id": "t_files", "type": "function", "function": {"name": "search_text", "arguments": json!({"path": "sub", "query": "beta_hit", "output_mode": "files_with_matches"}).to_string()}},
+                                    {"id": "t_zero", "type": "function", "function": {"name": "search_text", "arguments": json!({"path": "sub", "query": "ABSENT_NEEDLE_XYZ"}).to_string()}},
+                                    {"id": "t_chunk", "type": "function", "function": {"name": "read_file_chunk", "arguments": json!({"path": "sub/alpha.txt", "byte_offset": 0, "max_bytes": 400}).to_string()}},
+                                    {"id": "t_skill", "type": "function", "function": {"name": "read_skill", "arguments": json!({"name": "uniform-skill"}).to_string()}},
+                                    {"id": "t_skills", "type": "function", "function": {"name": "list_skills", "arguments": "{}".to_string()}}
+                                ]
+                            }),
+                            1 => {
+                                let mut map = seqs.lock().unwrap();
+                                for id in ["t_dir", "t_files", "t_zero", "t_chunk", "t_skill"] {
+                                    let tool_msg = msgs
+                                        .iter()
+                                        .find(|m| m["role"] == "tool" && m["tool_call_id"] == id)
+                                        .unwrap_or_else(|| panic!("missing tool output for {id}"));
+                                    let val: Value = serde_json::from_str(tool_msg["content"].as_str().unwrap()).unwrap();
+                                    let seq = val["event_seq"]
+                                        .as_i64()
+                                        .unwrap_or_else(|| panic!("{id} must expose top-level event_seq: {val}"));
+                                    map.insert(id.to_owned(), seq);
+                                    if id == "t_skill" {
+                                        let text = tool_msg["content"].as_str().unwrap();
+                                        assert!(text.contains("UNIFORM_SKILL_BODY"), "read_skill must unwrap cleanly in main: {text}");
+                                        assert!(!text.contains("\"asset_reference\""), "read_skill outer wrapper leaked: {text}");
+                                    }
+                                }
+                                let skills_msg = msgs
+                                    .iter()
+                                    .find(|m| m["role"] == "tool" && m["tool_call_id"] == "t_skills")
+                                    .expect("missing t_skills");
+                                let skills_val: Value = serde_json::from_str(skills_msg["content"].as_str().unwrap()).unwrap();
+                                assert!(skills_val.is_array(), "list_skills must remain a JSON array: {skills_val}");
+
+                                let chunk_seq = map["t_chunk"];
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [
+                                        {"id": "t_ra_full", "type": "function", "function": {"name": "read_asset", "arguments": json!({"seq": chunk_seq}).to_string()}},
+                                        {"id": "t_ra_paged", "type": "function", "function": {"name": "read_asset", "arguments": json!({"seq": chunk_seq, "char_offset": 0, "max_chars": 220}).to_string()}},
+                                        {"id": "t_ra_clamped", "type": "function", "function": {"name": "read_asset", "arguments": json!({"seq": chunk_seq, "max_chars": 60000}).to_string()}}
+                                    ]
+                                })
+                            }
+                            2 => {
+                                let mut map = seqs.lock().unwrap();
+                                for id in ["t_ra_full", "t_ra_paged", "t_ra_clamped"] {
+                                    let tool_msg = msgs
+                                        .iter()
+                                        .find(|m| m["role"] == "tool" && m["tool_call_id"] == id)
+                                        .unwrap_or_else(|| panic!("missing tool output for {id}"));
+                                    let text = tool_msg["content"].as_str().unwrap();
+                                    let val: Value = serde_json::from_str(text).unwrap();
+                                    let seq = val["event_seq"]
+                                        .as_i64()
+                                        .unwrap_or_else(|| panic!("{id} must expose event_seq: {val}"));
+                                    map.insert(id.to_owned(), seq);
+                                    assert!(!text.contains("ASSET_NOT_FOUND") && !text.contains("must be between"), "{id}: {text}");
+                                    assert!(text.contains("MARKER_2"), "{id}: {text}");
+                                }
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "t_handoff",
+                                        "type": "function",
+                                        "function": {
+                                            "name": HANDOFF_STEP,
+                                            "arguments": json!({
+                                                "next_goal": "Verify task_asset_index and coordinate slices across all tool outputs",
+                                                "slices": [
+                                                    {"seq": map["t_dir"], "grep": "alpha.txt", "label": "dir_entry"},
+                                                    {"seq": map["t_files"], "label": "search_files_mode"},
+                                                    {"seq": map["t_zero"], "label": "search_zero_hit"},
+                                                    {"seq": map["t_chunk"], "lines": [2, 4], "label": "chunk_lines"},
+                                                    {"seq": map["t_skill"], "grep": "UNIFORM_SKILL_BODY", "label": "skill_grep"},
+                                                    {"seq": map["t_ra_full"], "grep": "MARKER_4", "label": "read_asset_full"},
+                                                    {"seq": map["t_ra_paged"], "grep": "MARKER_2", "label": "read_asset_paged"}
+                                                ]
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            _ => {
+                                let index_msg = msgs
+                                    .iter()
+                                    .find(|m| m["name"].as_str() == Some("task_asset_index"))
+                                    .expect("task_asset_index must be present");
+                                let index_text = index_msg["content"].as_str().unwrap();
+                                assert!(index_text.contains("source_range"), "{index_text}");
+                                assert!(index_text.contains("\"seq\":"), "{index_text}");
+
+                                let handoff_msg = msgs
+                                    .iter()
+                                    .find(|m| m["name"].as_str() == Some(VIRTUAL_STEP_HANDOFF))
+                                    .expect("virtual_step_handoff must exist");
+                                let frame: Value = serde_json::from_str(handoff_msg["content"].as_str().unwrap()).unwrap();
+                                let slices = frame["context_slices"].as_array().unwrap();
+                                assert_eq!(slices.len(), 7, "all 7 slices must succeed: {slices:?}");
+                                for slice in slices {
+                                    let excerpt = slice["excerpt"].as_str().unwrap();
+                                    assert!(!excerpt.trim().is_empty(), "empty slice: {slice}");
+                                    assert!(!excerpt.contains("\"asset_reference\""), "read_asset envelope leaked: {slice}");
+                                }
+                                assert!(slices[0]["excerpt"].as_str().unwrap().contains("alpha.txt"));
+                                assert!(slices[1]["excerpt"].as_str().unwrap().contains("beta.txt"));
+                                assert!(slices[2]["excerpt"].as_str().unwrap().contains("0 matches"));
+                                assert!(slices[3]["excerpt"].as_str().unwrap().contains("MARKER_3"));
+                                assert!(slices[4]["excerpt"].as_str().unwrap().contains("UNIFORM_SKILL_BODY"));
+                                assert!(slices[5]["excerpt"].as_str().unwrap().contains("MARKER_4"));
+                                assert!(slices[6]["excerpt"].as_str().unwrap().contains("MARKER_2"));
+                                json!({"role": "assistant", "content": "All tools exposed event_seq, read_asset worked by seq, and slices carried exact excerpts."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state,
+            "task".into(),
+            "fake".into(),
+            "Verify event_seq, unwrapping, read_asset by seq, and uniform slicing".into(),
+            8,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 4);
+
+        // Also unit-verify silent exit_code=0 command and parallel_read_batch array slicing directly.
+        conn.execute(
+            "INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('task',901,0,'tool/result',?1)",
+            [json!({"meta":{"result":{"exit_code":0,"stdout":"","stderr":""}}}).to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('task',902,0,'tool/result',?1)",
+            [json!({"meta":{"result":[{"path":"a.rs","content":"fn a() {}\nTARGET_BATCH_LINE\n"},{"path":"b.rs","content":"fn b() {}\n"}]}}).to_string()],
+        )
+        .unwrap();
+        let silent_slice = build_slice_entry(root.path(), "task", &json!({"seq": 901})).unwrap();
+        assert!(silent_slice["excerpt"].as_str().unwrap().contains("exit_code=0"), "{silent_slice}");
+        let batch_slice = build_slice_entry(root.path(), "task", &json!({"seq": 902, "grep": "TARGET_BATCH_LINE"})).unwrap();
+        assert!(batch_slice["excerpt"].as_str().unwrap().contains("a.rs:2: TARGET_BATCH_LINE"), "{batch_slice}");
+    }
+
+    #[tokio::test]
+    async fn virtual_leaf_blocks_all_shell_tools_including_run_readonly() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        std::fs::write(root.path().join("sample.rs"), "pub fn marker() {}\n").unwrap();
+
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let msgs = body["messages"].as_array().unwrap();
+                        let tool_names: Vec<&str> = body["tools"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|t| t["function"]["name"].as_str())
+                            .collect();
+                        let message = match step {
+                            0 => {
+                                let src = r#"
+const io = require("io");
+/**
+ * Summarize sample.rs without shell access.
+ * @virtual
+ * @returns {{ summary: string }}
+ */
+function summarizeLeaf(note) {}
+return summarizeLeaf("check");
+"#;
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "call_wp_leaf",
+                                        "type": "function",
+                                        "function": {
+                                            "name": program_flow::WRITE_PROGRAM,
+                                            "arguments": json!({"name": "leaf-sandbox-test", "source": src}).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            1 => {
+                                for forbidden in [
+                                    crate::shell_process::READ_ONLY,
+                                    "exec_command",
+                                    "write_stdin",
+                                    "kill_session",
+                                    "run_program",
+                                    "run_project_script",
+                                    "install_dependencies",
+                                    "stop_project_process",
+                                    "get_project_process",
+                                    HANDOFF_STEP,
+                                    program_flow::WRITE_PROGRAM,
+                                ] {
+                                    assert!(
+                                        !tool_names.contains(&forbidden),
+                                        "@virtual leaf tool list must NOT contain {forbidden}: {tool_names:?}"
+                                    );
+                                }
+                                // Attempt calling run_readonly_command anyway to verify execute_call blocks it.
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "leaf_illegal_ro",
+                                        "type": "function",
+                                        "function": {
+                                            "name": crate::shell_process::READ_ONLY,
+                                            "arguments": json!({"command": "echo should_fail"}).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            2 => {
+                                let err_tool = msgs
+                                    .iter()
+                                    .find(|m| m["role"] == "tool" && m["tool_call_id"] == "leaf_illegal_ro")
+                                    .expect("leaf tool rejection missing");
+                                let text = err_tool["content"].as_str().unwrap();
+                                assert!(
+                                    text.contains("error") && !text.contains("should_fail"),
+                                    "execute_call must reject run_readonly_command inside @virtual leaf: {text}"
+                                );
+                                json!({
+                                    "role": "assistant",
+                                    "content": "{\"summary\":\"sandbox_verified\"}"
+                                })
+                            }
+                            _ => {
+                                assert!(
+                                    msgs.iter().any(|m| m["name"].as_str() == Some("program_result")),
+                                    "main must receive program_result after @virtual leaf finishes"
+                                );
+                                json!({"role": "assistant", "content": "Leaf sandbox verified."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state,
+            "task".into(),
+            "fake".into(),
+            "Verify @virtual leaf excludes all shell tools".into(),
+            10,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 4);
     }
 }

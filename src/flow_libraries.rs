@@ -591,6 +591,7 @@ pub(crate) fn read_contracts(
     let mut native_groups = Vec::new();
     let mut native_methods = Vec::new();
     let mut flow_selected: BTreeMap<String, Vec<MethodSpec>> = BTreeMap::new();
+    let mut unknown_errors: Vec<String> = Vec::new();
 
     for group in groups.into_iter().flatten() {
         let name = group.as_str().context("library name must be a string")?;
@@ -631,18 +632,23 @@ pub(crate) fn read_contracts(
                 Vec::new()
             };
             let hint = if group == "process" && !available.iter().any(|m| m == "exec_command") {
-                " (main-loop shell checks run via direct run_readonly_command; process.exec_command/run_program run inside @virtual/module implementations)"
+                " (for read-only sandbox checks use run_readonly_command or process.run_readonly; process.exec_command/run_program require an execution-enabled code frame)"
             } else {
                 ""
             };
             if available.is_empty() {
-                bail!("unknown or unavailable method {name}{hint}");
+                unknown_errors.push(format!("unknown or unavailable method {name}{hint}"));
+            } else {
+                unknown_errors.push(format!(
+                    "unknown or unavailable method {name}; available in {group}: [{}]{hint}",
+                    available.join(", ")
+                ));
             }
-            bail!(
-                "unknown or unavailable method {name}; available in {group}: [{}]{hint}",
-                available.join(", ")
-            );
         }
+    }
+
+    if native_groups.is_empty() && native_methods.is_empty() && flow_selected.is_empty() {
+        bail!("{}", unknown_errors.join("; "));
     }
 
     let overview = args["overview"] == true;
@@ -675,6 +681,18 @@ pub(crate) fn read_contracts(
             text.push('\n');
         }
         text.push_str(&section);
+    }
+
+    if !unknown_errors.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("Unavailable methods skipped:\n");
+        for err in &unknown_errors {
+            text.push_str("- ");
+            text.push_str(err);
+            text.push('\n');
+        }
     }
 
     let key = if overview { "overview" } else { "declarations" };

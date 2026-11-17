@@ -11,6 +11,7 @@ use std::{
 };
 
 pub const REFERENCE: &str = "_asset_reference";
+pub const MAX_PAGE_CHARS: usize = 24_000;
 
 #[cfg(test)]
 mod streaming_asset_tests {
@@ -56,13 +57,13 @@ mod streaming_asset_tests {
         file.flush()?;
         drop(file);
         let reference = f.register(&snapshot)?;
-        assert_eq!(reference["read_reference"]["arguments"]["max_chars"], 24000);
+        assert_eq!(reference["read_reference"]["arguments"]["max_chars"], MAX_PAGE_CHARS);
         assert_eq!(reference["bytes"], std::fs::metadata(&snapshot)?.len());
         let total = prefix.chars().count() + 300_000 + suffix.chars().count();
         let first = f.read(&reference, 0, None)?;
-        assert_eq!(first["returned_chars"], 24000);
+        assert_eq!(first["returned_chars"], MAX_PAGE_CHARS);
         assert_eq!(first["total_chars"], total);
-        assert_eq!(first["next_char_offset"], 24000);
+        assert_eq!(first["next_char_offset"], MAX_PAGE_CHARS);
         assert!(first.get("original_result").is_none());
         assert!(first["content"].as_str().unwrap().starts_with(prefix));
         let offset = prefix.chars().count() + 3 * 77_777 + 1;
@@ -74,7 +75,8 @@ mod streaming_asset_tests {
         assert!(tail["next_char_offset"].is_null());
         assert_eq!(f.read(&reference, total, None)?["returned_chars"], 0);
         assert!(f.read(&reference, total + 1, None).is_err());
-        for limit in [0, 24001] { assert!(f.read(&reference, 0, Some(limit)).is_err()); }
+        assert!(f.read(&reference, 0, Some(0)).is_err());
+        assert_eq!(f.read(&reference, 0, Some(MAX_PAGE_CHARS + 1))?["returned_chars"], MAX_PAGE_CHARS);
         assert!(read(&f.root, "asset-task", &json!({"asset_id":reference["asset_id"],"char_offset":-1}), None).is_err());
         // Alter a byte beyond the requested first page: hashing cannot stop
         // once enough characters for the page have been collected.
@@ -286,7 +288,7 @@ pub fn register(
         "history_reference":{"task_id":task,"event_seq":seq,"include_event":true},
         "read_reference":{"tool":"read_asset","arguments":{"asset_id":id}}});
     if tool == "shell_output" {
-        reference["read_reference"]["arguments"]["max_chars"] = json!(24000);
+        reference["read_reference"]["arguments"]["max_chars"] = json!(MAX_PAGE_CHARS);
     }
     for key in [
         "project_id",
@@ -417,7 +419,7 @@ pub(crate) fn register_file(
             "read_reference":{"tool":"read_asset","arguments":{"asset_id":id}}
         });
         if tool == "shell_output" {
-            reference["read_reference"]["arguments"]["max_chars"] = json!(24000);
+            reference["read_reference"]["arguments"]["max_chars"] = json!(MAX_PAGE_CHARS);
         }
         for key in ["project_id", "page_index", "revision", "expected_revision", "status", "task_id", "agent_id", "name"] {
             if let Some(value) = args.get(key).filter(|v| !v.is_null() && !v.is_object() && !v.is_array()) {
@@ -510,6 +512,148 @@ pub fn reference(root: &Path, task: &str, id: &str, through: Option<i64>) -> Res
     Ok(result)
 }
 
+/// Resolve the newest durable asset_id associated with an event sequence number in this task.
+pub fn asset_id_for_seq(root: &Path, task: &str, seq: i64) -> Result<Option<String>> {
+    let conn = connection(root)?;
+    let by_ref: Option<String> = conn
+        .query_row(
+            "SELECT asset_id FROM agent_context_assets WHERE task_id=?1 AND json_extract(reference_json,'$.history_reference.event_seq')=?2 LIMIT 1",
+            params![task, seq],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if by_ref.is_some() {
+        return Ok(by_ref);
+    }
+    conn.query_row(
+        "SELECT asset_id FROM agent_context_asset_deliveries WHERE task_id=?1 AND event_seq=?2 ORDER BY rowid DESC LIMIT 1",
+        params![task, seq],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Extract the stored tool result or event JSON from an `agent_task_events` row.
+fn extract_event_payload(kind: &str, data: Value) -> Value {
+    if matches!(kind, "tool/result" | "context/tool_result") {
+        if let Some(result) = data.pointer("/meta/result").filter(|v| !v.is_null()) {
+            return result.clone();
+        }
+        if let Some(text) = data.pointer("/message/content/0/text").and_then(Value::as_str) {
+            return serde_json::from_str::<Value>(text).unwrap_or_else(|_| json!({"text": text}));
+        }
+    }
+    data
+}
+
+/// Load the complete saved tool/event JSON payload and tool name for `(task, seq)`,
+/// preferring durable disk asset snapshots (e.g. un-truncated `run_readonly_command`)
+/// before falling back to `agent_task_events`.
+pub fn read_event_payload(root: &Path, task: &str, seq: i64) -> Result<Option<(Option<String>, Value)>> {
+    if let Some(asset_id) = asset_id_for_seq(root, task, seq)? {
+        let reference = reference(root, task, &asset_id, None)?;
+        let source_tool = reference["source_tool"].as_str().map(str::to_owned);
+        if reference["storage"] != "plugin"
+            && let Some(snapshot_rel) = reference["snapshot_path"].as_str()
+            && let Ok(path) = crate::file_edit::workspace_path(root, snapshot_rel)
+            && let Ok(bytes) = std::fs::read(&path)
+            && let Ok(payload) = serde_json::from_slice::<Value>(&bytes)
+        {
+            return Ok(Some((source_tool, payload)));
+        }
+    }
+    let conn = connection(root)?;
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT kind, data FROM agent_task_events WHERE task_id=?1 AND seq=?2",
+            params![task, seq],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((kind, raw)) = row else {
+        return Ok(None);
+    };
+    let data: Value = serde_json::from_str(&raw)?;
+    let payload = extract_event_payload(&kind, data.clone());
+    let mut source_tool: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(data,'$.action') FROM agent_task_events WHERE task_id=?1 AND kind='flow/ledger' AND json_extract(data,'$.tool_result_seq')=?2 LIMIT 1",
+            params![task, seq],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    if source_tool.is_none()
+        && let Some(call_id) = data.pointer("/message/toolCallId").and_then(Value::as_str)
+    {
+        source_tool = conn
+            .query_row(
+                "SELECT json_extract(data,'$.name') FROM agent_task_events WHERE task_id=?1 AND kind IN ('tool/call','context/tool_call') AND json_extract(data,'$.callId')=?2 ORDER BY seq DESC LIMIT 1",
+                params![task, call_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+    }
+    let mut unwrap_source = source_tool;
+    let mut final_payload = payload;
+    if unwrap_source.as_deref() == Some("read_asset")
+        || final_payload.get("asset_reference").is_some_and(Value::is_object)
+    {
+        let fallback_source = || {
+            final_payload
+                .pointer("/asset_reference/source_tool")
+                .and_then(Value::as_str)
+                .or_else(|| final_payload.get("source_tool").and_then(Value::as_str))
+                .map(str::to_owned)
+        };
+        if let Some(asset_id) = final_payload
+            .pointer("/asset_reference/asset_id")
+            .and_then(Value::as_str)
+            && let Ok(underlying_ref) = reference(root, task, asset_id, None)
+            && underlying_ref["storage"] != "plugin"
+            && let Some(snapshot_rel) = underlying_ref["snapshot_path"].as_str()
+            && let Ok(path) = crate::file_edit::workspace_path(root, snapshot_rel)
+            && let Ok(bytes) = std::fs::read(&path)
+            && let Ok(snapshot_payload) = serde_json::from_slice::<Value>(&bytes)
+        {
+            unwrap_source = underlying_ref["source_tool"]
+                .as_str()
+                .map(str::to_owned)
+                .or(unwrap_source);
+            final_payload = snapshot_payload;
+        } else if let Some(orig) = final_payload
+            .get("original_result")
+            .filter(|v| !v.is_null())
+            .cloned()
+        {
+            unwrap_source = fallback_source().or(unwrap_source);
+            final_payload = orig;
+        } else if let Some(orig_seq) = final_payload
+            .pointer("/asset_reference/history_reference/event_seq")
+            .and_then(Value::as_i64)
+            .filter(|orig_seq| *orig_seq != seq)
+            && let Some((orig_kind, orig_raw)) = conn
+                .query_row(
+                    "SELECT kind, data FROM agent_task_events WHERE task_id=?1 AND seq=?2",
+                    params![task, orig_seq],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()?
+            && let Ok(orig_data) = serde_json::from_str::<Value>(&orig_raw)
+        {
+            unwrap_source = fallback_source().or(unwrap_source);
+            final_payload = extract_event_payload(&orig_kind, orig_data);
+        } else if let Some(content_str) = final_payload.get("content").and_then(Value::as_str) {
+            unwrap_source = fallback_source().or(unwrap_source);
+            final_payload = serde_json::from_str::<Value>(content_str)
+                .unwrap_or_else(|_| json!({ "content": content_str }));
+        }
+    }
+    Ok(Some((unwrap_source, final_payload)))
+}
+
 /// Load handles once for assembling a child task; asset bodies stay on disk.
 /// Always read the exact saved version. A live re-read requires refresh_asset.
 pub fn read(root: &Path, task: &str, args: &Value, through: Option<i64>) -> Result<Value> {
@@ -544,10 +688,10 @@ fn read_shell_snapshot(reference: &Value, path: &Path, args: &Value) -> Result<V
     };
     let limit = match args.get("max_chars") {
         Some(value) => value.as_u64().context("max_chars must be an integer")?,
-        None => 24000,
+        None => MAX_PAGE_CHARS as u64,
     };
-    ensure!((1..=24000).contains(&limit), "max_chars must be between 1 and 24000");
-    let limit = limit as usize;
+    ensure!(limit >= 1, "max_chars must be at least 1");
+    let limit = (limit as usize).min(MAX_PAGE_CHARS);
     let mut file = std::fs::File::open(path)
         .context("asset snapshot unavailable; original history_reference is retained")?;
     let mut hash = Sha256::new();
@@ -624,10 +768,10 @@ fn saved_delivery(reference: &Value, text: &str, args: &Value) -> Result<Value> 
         Some(value) => {
             let limit = value.as_u64().context("max_chars must be an integer")?;
             ensure!(
-                (1..=24000).contains(&limit),
-                "max_chars must be between 1 and 24000; omit it for the complete saved result"
+                limit >= 1,
+                "max_chars must be at least 1; omit it for the complete saved result"
             );
-            Some(limit as usize)
+            Some((limit as usize).min(MAX_PAGE_CHARS))
         }
         None => None,
     };
@@ -840,13 +984,15 @@ pub fn frame_index(root: &Path, task: &str, node: &str, messages: &[Value]) -> R
     let mut selected = Vec::new();
     let mut tokens = 0;
     for (reference, seq) in entries.into_iter().take(64) {
-        let mut item = json!({"delivery_reference":{"task_id":task,"event_seq":seq}});
+        let mut item = json!({"seq":seq,"delivery_reference":{"task_id":task,"event_seq":seq}});
         for key in [
             "asset_id",
             "kind",
             "source_tool",
             "operation",
             "source_path",
+            "source_range",
+            "bytes",
             "revision",
         ] {
             if let Some(value) = reference.get(key) {
@@ -868,7 +1014,7 @@ pub fn frame_index(root: &Path, task: &str, node: &str, messages: &[Value]) -> R
     Ok(
         json!({"host_status":true,"not_a_user_request":true,"truncated":possibly_more||selected.len()<total,
         "assets":selected,"remaining_reference":{"tool":"read_session_history","arguments":{"node_id":node,"include_descendants":true}},
-        "instruction":"Latest saved snapshots per tool and arguments. in_context=true: its complete saved result is already in this request; reuse it. read_asset(asset_id) restores the complete recorded data of any other entry; old versions remain in step history."}),
+        "instruction":"Latest saved snapshots per tool and arguments. in_context=true: its complete saved result is already in this request; reuse it. read_asset({seq}) (or read_asset({asset_id})) restores the complete recorded data of any other entry; old versions remain in step history."}),
     )
 }
 

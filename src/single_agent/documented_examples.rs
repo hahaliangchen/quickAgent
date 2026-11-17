@@ -640,14 +640,13 @@ async fn skills_reach_only_the_code_that_references_them() {
         let function=messages.iter().find(|m|m["name"]=="program_task_input")
             .map(|m|serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap()["name"].as_str().unwrap().to_owned());
         let answer=match function.as_deref() {
-            Some("inspect")=>text("```js\nasync function inspect(x) {\n const cm = require(\"commonmark\");\n /**\n * @virtual\n * Decide whether x follows the rules. Returns {ok:boolean}.\n * @uses cm the rules to follow\n */\n async function judge(x) {}\n /** @virtual Count the characters of x. Return {n:number}. */\n async function count(x) {}\n const kept = await judge(x);\n const counted = await count(x);\n return {ok:kept.ok,n:counted.n};\n}\n```"),
             Some("judge")=>text(r#"{"ok":true}"#),
             Some("count")=>text(r#"{"n":1}"#),
             // The module's code requires a skill; its first version does not compile.
             Some(_) if all.contains("PROGRAM_SOURCE_INVALID")=>text("```js\nasync function check(input) {\n  require(\"spec-driven-testing\");\n  return {ok: true};\n}\n```"),
             Some(_)=>text("```js\nimport * as io from \"host:io\";\nasync function check(input) {\n  require(\"spec-driven-testing\");\n  io.nothing({});\n  return {ok: true};\n}\n```"),
             None if messages.iter().any(|m|m["name"]=="program_result")=>text("Done."),
-            None if all.contains("PROGRAM_RUNTIME_ERROR")=>text("```js\nconst kept = await inspect(\"x\");\nconst checked = await check(\"x\");\n/** @virtual Check whether x follows the rules and count it. Returns {ok:boolean,n:number}. */\nasync function inspect(x) {}\n/** @virtual Return {ok:true}. */\nasync function check(input) {}\n```"),
+            None if all.contains("PROGRAM_RUNTIME_ERROR")=>text("```js\nconst cm = require(\"commonmark\");\nconst kept = await judge(\"x\");\nconst counted = await count(\"x\");\nconst checked = await check(\"x\");\n\n/**\n * @virtual\n * Decide whether x follows the rules. Returns {ok:boolean}.\n * @uses cm the rules to follow\n */\nasync function judge(x) {}\n\n/** @virtual Count the characters of x. Return {n:number}. */\nasync function count(x) {}\n\n/** @module Return {ok:true}. */\nasync function check(input) {}\n```"),
             None=>match results {
                 0=>call("list_skills",json!({})),
                 1=>call("read_skill",json!({"name":"commonmark"})),
@@ -671,7 +670,7 @@ async fn skills_reach_only_the_code_that_references_them() {
     let main=seen.iter().filter(|body|function(body).is_none()).cloned().collect::<Vec<_>>();
     // commonmark's instructions hold the delimiter stack; spec-driven-testing's say to write tests from the spec.
     let (commonmark,testing)=("分隔符栈","按规格写测试");
-    assert_eq!(main.len(),6,"three setup requests, two repair submissions and one final answer");
+    assert_eq!(main.len(),5,"three setup requests, one repair submission and one final answer");
     for body in &main {
         assert!(named(body,"project_skills").contains("- commonmark:"),"the main AI is told which skills it can read");
     }

@@ -29,20 +29,33 @@ fn execution_boundary(task: &Value) -> Option<bool> {
     if task["module"] == true || task["library_module"] == true { return Some(true); }
     if task["role"] == "body" { None } else { Some(false) }
 }
+fn is_shell_tool(name: &str) -> bool {
+    crate::project_process::is_execution(name) || name == crate::shell_process::READ_ONLY
+}
+fn main_execution_allowed(s: &Session<'_>) -> bool {
+    !s.ban_execution && super::code_shell_context(s)
+}
 fn ancestor_execution_allowed(s: &Session<'_>, node: Option<&str>) -> bool {
-    let Some(node) = node else { return false };
+    let main_ok = main_execution_allowed(s);
+    let Some(node) = node else { return main_ok };
     let Ok(conn) = agent_service::open_db(s.state.workspace.root()) else { return false };
     let Ok(path) = crate::function_frames::path(&conn, s.task, node) else { return false };
-    path.iter().rev().find_map(|node| execution_boundary(&node.inputs["program_task"])).unwrap_or(false)
+    path.iter().rev().find_map(|node| execution_boundary(&node.inputs["program_task"])).unwrap_or(main_ok)
 }
-/// Availability for module code and its author/fixer's declarations. The
-/// execution entry point must additionally require an actual code location.
+/// Availability for top-level program code, module code, and ordinary helper
+/// bodies nested inside them. Virtual leaves remain capability barriers.
 pub(super) fn shell_code_allowed(s: &Session<'_>, w: &Window) -> bool {
-    let Some(task) = &w.program_task else { return false };
+    if !main_execution_allowed(s) {
+        return false;
+    }
+    let Some(task) = &w.program_task else { return true };
     execution_boundary(task).unwrap_or_else(|| ancestor_execution_allowed(s,
         w.task_node_id.as_deref().or_else(|| s.scope.strip_prefix("node:")).or(s.task_node_id.as_deref())))
 }
 fn catalog_execution_allowed(s: &Session<'_>) -> bool {
+    if !main_execution_allowed(s) {
+        return false;
+    }
     ancestor_execution_allowed(s, s.scope.strip_prefix("node:").or(s.task_node_id.as_deref()))
 }
 fn catalog_with_execution(
@@ -51,7 +64,7 @@ fn catalog_with_execution(
     let mut libraries = agent_program::libraries::catalog(definitions, &packages(s));
     if !execution {
         for methods in libraries.values_mut() {
-            methods.retain(|_, target| !crate::project_process::is_execution(target));
+            methods.retain(|_, target| !is_shell_tool(target));
         }
         libraries.retain(|_, methods| !methods.is_empty());
     }
@@ -68,9 +81,9 @@ pub(super) fn compile_static_libraries(
     s: &Session<'_>,
     w: &Window,
     definitions: &[Value],
-    body: bool,
+    _body: bool,
 ) -> agent_program::libraries::Libraries {
-    static_libraries_with(s, definitions, body && shell_code_allowed(s, w))
+    static_libraries_with(s, definitions, shell_code_allowed(s, w))
 }
 /// The host's own libraries, which source imports from host: and compiles against.
 pub(super) fn static_libraries(
@@ -310,8 +323,13 @@ pub(super) fn function_task(
     } else {
         name
     };
-    let leaf_tools = function.leaf_tools.as_ref().map(|tools| tools.iter()
-        .filter(|tool| !crate::project_process::is_execution(tool)).cloned().collect::<Vec<_>>());
+        let leaf_tools = function.leaf_tools.as_ref().map(|tools| {
+        tools
+            .iter()
+            .filter(|tool| !is_shell_tool(tool))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
     let mut task = json!({"name":shown,"description":description,"parameters":function.params,"arguments":arguments,
         "captured":captured,"role":role,"leaf_tools":leaf_tools,"async":function.is_async});
     if function.module_task {
@@ -446,8 +464,8 @@ pub(super) fn scheduled_function_task_with_scope(
                 custom_tools = true;
             }
         }
-        // A leaf child waiting on an active parent program can never call main-only loop controls.
-        resolved_tools.retain(|tool| !matches!(tool.as_str(), WRITE_PROGRAM | super::HANDOFF_STEP | super::SET_NEXT_STEP));
+        // A leaf child waiting on an active parent program can never call main-only controls or shell tools.
+        resolved_tools.retain(|tool| !matches!(tool.as_str(), WRITE_PROGRAM | super::HANDOFF_STEP) && !is_shell_tool(tool));
         if !resolved_tools.is_empty() || custom_tools || js_ctx.get("tools").is_some_and(Value::is_array) {
             task["js_tools"] = json!(resolved_tools);
             task["js_custom_tools"] = json!(custom_tools);
@@ -650,7 +668,7 @@ pub(super) fn role(w: &Window) -> Role {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     tools.extend(found_tools(&w.messages));
-    tools.retain(|tool| !crate::project_process::is_execution(tool));
+    tools.retain(|tool| !is_shell_tool(tool));
     Role::Leaf(tools)
 }
 pub(super) const IMPLEMENT_PROMPT: &str = include_str!("../../prompts/module_author.md");
@@ -791,38 +809,19 @@ pub(super) fn end_familiarization(w: &mut Window, reply: &Value, source: &str) {
         .filter(|at| *at > start)
         .map(|at| w.messages.remove(at))
         .unwrap_or_else(|| reply.clone());
-    for mut message in w.messages.split_off(start + 1) {
-        if super::task_frames::is_user_original(&message) {
-            w.messages.push(message);
-        } else if matches!(message["name"].as_str(), Some("program_result" | "program_record")) {
-            // What this turn's finished programs produced is fact, not getting
-            // to know the task: the work and the answer go on from it.
-            w.messages.push(message);
-        } else if message.get(super::skill_scope::DELIVERED).is_some()
-            || message["name"] == super::modules::UPDATE
-            || message.get(crate::anthropic_messages::ADDED_TOOLS).is_some()
-        {
-            // What the host delivered stays delivered. Dropped, a skill's
-            // instructions and the turn's new modules were sent again in
-            // full after every program start, and never from the cache. A
-            // recorded tool activation is protocol state: the deferred
-            // declarations it activates must stay where it was made.
-            w.messages.push(message);
-        } else if message["name"] == "program_diagnostic" {
-            // A failed version leaves one line: which program, where, what.
-            if let Some(line) = failed_program_line(&message) {
-                message["name"] = json!("program_record");
-                message["content"] = json!(line);
-                w.messages.push(message);
-            }
-        } else if message["_pinned"] == true && message["role"] == "tool" {
-            message["role"] = json!("user");
-            message["name"] = json!("saved_asset");
-            if let Some(object) = message.as_object_mut() {
-                object.remove("tool_call_id");
-            }
-            w.messages.push(message);
+    for message in w.messages.split_off(start + 1) {
+        if let Some(kept) = super::retain_turn_anchor_message(message, true) {
+            w.messages.push(kept);
         }
+    }
+    if (!w.main_context.is_empty() || !w.step_trail.is_empty())
+        && !w
+            .messages
+            .iter()
+            .any(|m| m["name"].as_str() == Some(super::VIRTUAL_STEP_HANDOFF))
+    {
+        w.messages
+            .push(super::virtual_step_handoff_message(w, None, &[], false));
     }
     w.messages.push(script);
 }
@@ -869,7 +868,7 @@ pub(super) fn clear_failed_program_attempts(w: &mut Window, reply: &Value, sourc
     w.messages.push(script);
 }
 /// The one line a failed main program leaves once a new program replaces it.
-fn failed_program_line(message: &Value) -> Option<String> {
+pub(super) fn failed_program_line(message: &Value) -> Option<String> {
     let diagnostic = serde_json::from_str::<Value>(message["content"].as_str()?).ok()?;
     if diagnostic["code"] != "PROGRAM_RUNTIME_ERROR" {
         return None;
@@ -953,7 +952,7 @@ pub(super) fn find(s: &Session<'_>, w: &Window, args: &Value) -> Result<Value> {
     let query = args["query"].as_str().context("query is required")?.to_lowercase();
     let terms = query.split_whitespace().collect::<Vec<_>>();
     ensure!(!terms.is_empty(), "query is required");
-    let definitions = available_tools(s, w);
+    let definitions = super::program_definitions(s, w, available_tools(s, w));
     let catalog = catalog_with_execution(s, &definitions, shell_code_allowed(s, w));
     let mut matches = definitions
         .iter()
@@ -1149,7 +1148,7 @@ pub(super) fn install_scoped(
             "probe is available only while authoring a module implementation");
         ensure!(probe.is_boolean(), "probe must be a boolean");
     }
-    let definitions = tools(s, w);
+    let definitions = super::program_definitions(s, w, tools(s, w));
     let libraries = if args["probe"] == true {
         probe_libraries(s, &definitions)
     } else {
@@ -1900,6 +1899,8 @@ async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value
         // clear the active runtime explicitly before returning to the model.
         w.program = None;
         w.program_value = None;
+        w.step_rounds_in_scope = 0;
+        w.step_handoff_required = false;
         let seq = append(s, "program/result", json!({"turn":s.turn,"step":step,"task_node_id":w.task_node_id,"result":value,"output":text}), false).await?;
         w.messages.push(sourced(json!({"role":"user","name":"program_result","content":text}), s.task, seq));
         save(s, w).await?;
@@ -2054,6 +2055,7 @@ fn is_readonly_program_tool(name: &str) -> bool {
             | "git_status"
             | "git_diff"
             | "git_log"
+            | crate::shell_process::READ_ONLY
             | "parallel_read_batch"
             | "read_code_flow"
             | "read_git"
@@ -2134,7 +2136,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                 ActionKind::Tool { name, args } => (name.clone(), args.clone()),
                 // The host links the library itself; no tool runs and no AI sees it.
                 ActionKind::Require { library } => {
-                    let definitions = super::tools(s, w);
+                    let definitions = super::program_definitions(s, w, super::tools(s, w));
                     let (value, failed) = if w.module_probe {
                         let name = library.strip_suffix("/promises").unwrap_or(library);
                         if let Some(methods) = probe_libraries(s, &definitions).get(name) {
@@ -2185,7 +2187,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
                 // so crash recovery never replays them.
                 super::checkpoint_program(s, w, true).await?;
             }
-            let definitions = super::tools(s, w);
+            let definitions = super::program_definitions(s, w, super::tools(s, w));
             let done = Box::pin(super::execute_call(s, w, &definitions, &node, step, &call, 1, Some(&at))).await?;
             if done.result["host_denied"] == true && done.result["code"] == WAITING && w.program_task.is_none() {
                 // A plugin's explicit user-confirmation boundary stops the
@@ -2295,38 +2297,69 @@ mod tests {
     }
 
     #[test]
-    fn module_execution_boundary_main_and_leaf_cannot_compile_or_discover_execution() {
+    fn module_execution_boundary_main_allows_execution_and_leaf_cannot_compile_or_discover_execution() {
         let root = TestRoot::new();
         let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
         let cancel = CancellationToken::new();
-        let s = execution_test_session(&state, &cancel);
-        let definitions = execution_test_definitions();
+        let mut s = execution_test_session(&state, &cancel);
+        let mut definitions = execution_test_definitions();
+        definitions.push(crate::shell_process::read_only_definition());
         let libraries = static_libraries(&s, &definitions);
         assert!(libraries["process"].contains_key("get_project_process"));
+        assert_eq!(libraries["process"].get("run_readonly").map(String::as_str), Some(crate::shell_process::READ_ONLY));
         assert!(libraries.contains_key("http"));
         for name in ["exec_command", "write_stdin", "kill_session", "run_program", "install_dependencies", "run_project_script", "stop_project_process"] {
             assert!(!FAMILIAR.contains(&name));
-            assert!(agent_program::libraries::public_name(&library_catalog(&s, &definitions), name).is_none());
+            assert_eq!(
+                agent_program::libraries::public_name(&library_catalog(&s, &definitions), name).as_deref(),
+                Some(format!("process.{name}")).as_deref()
+            );
             let mut main = Window::default();
             let source = format!("import * as process from 'host:process'; process.{name}({{}});");
-            assert!(install_with(&mut main, &json!({"source":source}), libraries.clone(), None).is_err(), "main accepted {name}");
-            assert!(main.program.is_none());
+            assert!(install_with(&mut main, &json!({"source":source}), libraries.clone(), Some(&s)).is_ok(), "main rejected {name}");
+            assert!(main.program.is_some());
         }
-        // Histories from an older host cannot revive a discovered execution tool.
+        let mut main_ro = Window::default();
+        assert!(install_with(
+            &mut main_ro,
+            &json!({"source": "import * as process from 'host:process'; process.run_readonly({cmd:'echo ok'});"}),
+            libraries.clone(),
+            Some(&s)
+        ).is_ok());
+        assert!(main_ro.program.is_some());
+
+        // Banned-execution sessions still deny execution methods in Main.
+        s.ban_execution = true;
+        let banned_libs = static_libraries(&s, &definitions);
+        for name in ["exec_command", "write_stdin", "kill_session", "run_program", "install_dependencies", "run_project_script", "stop_project_process"] {
+            let mut main = Window::default();
+            let source = format!("import * as process from 'host:process'; process.{name}({{}});");
+            assert!(install_with(&mut main, &json!({"source":source}), banned_libs.clone(), None).is_err(), "banned main accepted {name}");
+        }
+        s.ban_execution = false;
+
+        // Histories from an older host cannot revive a discovered execution tool on a @virtual leaf.
         let messages = vec![
             json!({"role":"assistant","tool_calls":[{"id":"found","function":{"name":FIND}}]}),
             json!({"role":"tool","tool_call_id":"found","content":json!({"methods":[{"tool":"exec_command"},{"tool":"run_program"}]}).to_string()}),
         ];
         assert!(!familiar().iter().any(|tool| crate::project_process::is_execution(tool)));
-        let leaf = Window { program_task: Some(json!({"role":"leaf","leaf_tools":["exec_command","run_program","get_project_process"]})),
+        let leaf = Window { program_task: Some(json!({"role":"leaf","leaf_tools":["exec_command","run_program","run_readonly_command","get_project_process"]})),
             messages, ..Default::default() };
         assert!(!shell_code_allowed(&s, &leaf));
         let Role::Leaf(scope) = role(&leaf) else { panic!("expected leaf") };
         assert!(scope.contains("get_project_process"));
         assert!(!scope.iter().any(|tool| crate::project_process::is_execution(tool)));
-        let found = find(&s, &leaf, &json!({"query":"shell exec_command run_program install_dependencies kill_session"})).unwrap();
+        assert!(!scope.contains(crate::shell_process::READ_ONLY), "standalone @virtual leaf must not receive run_readonly_command: {scope:?}");
+        let leaf_catalog = catalog_with_execution(&s, &definitions, false);
+        assert!(
+            leaf_catalog.get("process").and_then(|m| m.get("run_readonly")).is_none(),
+            "non-execution catalog must exclude process.run_readonly: {leaf_catalog:?}"
+        );
+        let found = find(&s, &leaf, &json!({"query":"shell exec_command run_program install_dependencies kill_session readonly run_readonly"})).unwrap();
         assert!(found["methods"].as_array().unwrap().iter().all(|method|
-            !crate::project_process::is_execution(method["tool"].as_str().unwrap())), "{found}");
+            !crate::project_process::is_execution(method["tool"].as_str().unwrap())
+                && method["tool"].as_str() != Some(crate::shell_process::READ_ONLY)), "{found}");
     }
 
     #[test]
@@ -2384,7 +2417,7 @@ mod tests {
         execution_frame(root.path(), "main-body", "n0", body);
         s.scope = "node:main-body".into();
         let child = Window { task_node_id: Some("main-body".into()), program_task: Some(json!({"role":"body"})), ..Default::default() };
-        assert!(!shell_code_allowed(&s, &child));
+        assert!(shell_code_allowed(&s, &child), "ordinary helpers nested under main inherit main execution allowance");
     }
 
     #[test]
@@ -4572,6 +4605,8 @@ mod tests {
             json!({"role":"user","content":"Do it"}),
             json!({"role":"assistant","content":null,"tool_calls":[{"id":"read","type":"function","function":{"name":"read_file","arguments":"{}"}}]}),
             json!({"role":"tool","tool_call_id":"read","content":"alpha"}),
+            json!({"role":"user","name":"saved_asset","_pinned":true,"content":"pinned skill"}),
+            json!({"role":"user","name":super::VIRTUAL_STEP_HANDOFF,"_frame_input":true,"content":"{\"mainContext\":{\"k\":1}}"}),
             host("skill_instructions", super::super::skill_scope::DELIVERED),
             host(super::super::modules::UPDATE, super::super::modules::ANNOUNCED),
             json!({"role":"user","name":"task_asset_index","content":"{}"}),
@@ -4579,7 +4614,7 @@ mod tests {
         ], ..Default::default() };
         end_familiarization(&mut w, &script, source);
         let kept = w.messages.iter().map(|m| m["name"].as_str().unwrap_or(m["role"].as_str().unwrap())).collect::<Vec<_>>();
-        assert_eq!(kept, ["system", "user", "skill_instructions", "chat_modules_update", "assistant"], "the reads that led to the program leave; what the host delivered stays");
+        assert_eq!(kept, ["system", "user", "saved_asset", super::VIRTUAL_STEP_HANDOFF, "skill_instructions", "chat_modules_update", "assistant"], "the reads that led to the program leave; what the host delivered, pinned assets, and virtual handoff stay");
         assert_eq!(w.messages.last(), Some(&script));
     }
 
@@ -6780,13 +6815,13 @@ console.log(JSON.stringify(res));
         assert!(leaf_list.contains(&"read_session_history".to_owned()), "inherited js_tools must keep read_session_history: {leaf_list:?}");
         assert!(!leaf_list.contains(&WRITE_PROGRAM.to_owned()), "leaf child must never receive write_program: {leaf_list:?}");
         assert!(!leaf_list.contains(&super::HANDOFF_STEP.to_owned()), "leaf child must never receive handoff_step: {leaf_list:?}");
-        assert!(!leaf_list.contains(&super::SET_NEXT_STEP.to_owned()), "leaf child must never receive set_next_step: {leaf_list:?}");
+        assert!(!leaf_list.contains(&crate::shell_process::READ_ONLY.to_owned()), "leaf child must never receive run_readonly_command: {leaf_list:?}");
         let expected_leaf_tools: Vec<String> = main_list
             .iter()
-            .filter(|t| !matches!(t.as_str(), WRITE_PROGRAM | super::HANDOFF_STEP | super::SET_NEXT_STEP))
+            .filter(|t| !matches!(t.as_str(), WRITE_PROGRAM | super::HANDOFF_STEP) && !is_shell_tool(t))
             .cloned()
             .collect();
-        assert_eq!(*leaf_list, expected_leaf_tools, "passing host.context() directly must align tools with main minus main-only controls");
+        assert_eq!(*leaf_list, expected_leaf_tools, "passing host.context() directly must align tools with main minus main-only controls and shell tools");
     }
 
     #[test]
@@ -6829,8 +6864,9 @@ console.log(JSON.stringify(res));
         let root = TestRoot::new();
         let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
         let cancel = CancellationToken::new();
-        let s = execution_test_session(&state, &cancel);
-        let definitions = execution_test_definitions();
+        let mut s = execution_test_session(&state, &cancel);
+        let mut definitions = execution_test_definitions();
+        definitions.push(crate::shell_process::read_only_definition());
         let catalog = library_catalog(&s, &definitions);
         let err = crate::flow_libraries::read_contracts(
             &s,
@@ -6841,7 +6877,73 @@ console.log(JSON.stringify(res));
         .unwrap_err()
         .to_string();
         assert!(err.contains("unknown or unavailable method process.run"), "{err}");
-        assert!(err.contains("available in process: [get_project_process]"), "{err}");
-        assert!(err.contains("run_readonly_command"), "{err}");
+        assert!(err.contains("exec_command") && err.contains("get_project_process") && err.contains("run_readonly"), "{err}");
+
+        // Mixed valid + unknown batch returns valid contracts plus a skipped note instead of failing everything.
+        let (mixed, _) = crate::flow_libraries::read_contracts(
+            &s,
+            &catalog,
+            &definitions,
+            &json!({"methods": ["process.run", "process.get_project_process"]}),
+        )
+        .unwrap();
+        let mixed_decl = mixed["declarations"].as_str().unwrap();
+        assert!(mixed_decl.contains("get_project_process"), "{mixed_decl}");
+        assert!(mixed_decl.contains("Unavailable methods skipped:") && mixed_decl.contains("process.run"), "{mixed_decl}");
+
+        // Banned-execution session still exposes only get_project_process and guides to run_readonly_command.
+        s.ban_execution = true;
+        let banned_defs = execution_test_definitions();
+        let banned_catalog = library_catalog(&s, &banned_defs);
+        let err_banned = crate::flow_libraries::read_contracts(
+            &s,
+            &banned_catalog,
+            &banned_defs,
+            &json!({"methods": ["process.run"]}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err_banned.contains("available in process: [get_project_process]"), "{err_banned}");
+        assert!(err_banned.contains("run_readonly_command"), "{err_banned}");
+    }
+
+    #[tokio::test]
+    async fn top_level_program_executes_process_readonly_and_returns_distilled_output() {
+        if !crate::shell_process::read_only_available() {
+            eprintln!("skipped: no read-only sandbox shell here");
+            return;
+        }
+        let root = TestRoot::new();
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let log = bodies.clone();
+        let program_source = r#"
+const proc = require("process");
+const out = proc.run_readonly({ cmd: "printf 'HELLO_PROG_READONLY\n'" });
+return { exit_code: out.exit_code, matched: out.stdout.includes("HELLO_PROG_READONLY") };
+"#;
+        run_scripted(root.path(), move |body| {
+            let mut log = log.lock().unwrap();
+            log.push(body.clone());
+            match log.len() {
+                1 => json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,
+                    "tool_calls":[{"id":"wp","type":"function","function":{"name":WRITE_PROGRAM,"arguments":json!({"source":program_source,"name":"run-ro-check"}).to_string()}}]}}]}),
+                _ => reply("Done.".into()),
+            }
+        }).await;
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "program should return directly to round 2");
+        let prog_result = bodies[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "program_result")
+            .expect("program_result message must exist")["content"]
+            .as_str()
+            .unwrap();
+        if prog_result.contains("SANDBOX_UNAVAILABLE") {
+            eprintln!("skipped: bwrap cannot run here: {prog_result}");
+            return;
+        }
+        assert!(prog_result.contains("\"exit_code\":0") && prog_result.contains("\"matched\":true"), "{prog_result}");
     }
 }

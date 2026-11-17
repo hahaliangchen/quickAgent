@@ -166,7 +166,17 @@ function summaryFor(name: string, args: Record<string, unknown>): string | undef
     case 'kill_session': return `会话 ${String(args.session_id ?? '未知')}`
     case 'create_task': return [text(args.goal), text(args.reason) && `原因：${text(args.reason)}`].filter(Boolean).join(' · ')
     case 'create_step': return [text(args.result) && `完成：${text(args.result)}`, text(args.next) && `下一步：${text(args.next)}`].filter(Boolean).join(' · ')
-    case 'handoff_step': return [text(args.step_name) && `完成 ${text(args.step_name)}`, text(args.next_step) && `进入 ${text(args.next_step)}`, text(args.next_goal)].filter(Boolean).join(' · ')
+    case 'handoff_step': {
+      const situation = text(args.situation ?? args.completed)
+      const sliceCount = Array.isArray(args.slices) ? args.slices.length : 0
+      return [
+        text(args.step_name) && `完成 ${text(args.step_name)}`,
+        situation && `当前情形：${situation}`,
+        text(args.next_step) && `进入 ${text(args.next_step)}`,
+        text(args.next_goal) && `下一轮目的：${text(args.next_goal)}`,
+        sliceCount > 0 ? `截取 ${sliceCount} 段上下文` : '',
+      ].filter(Boolean).join(' · ')
+    }
     case 'set_next_step': return [text(args.current_step), text(args.next_step) && `下一步：${text(args.next_step)}`].filter(Boolean).join(' · ')
     case 'plan_tasks': {
       const tasks = Array.isArray(args.tasks) ? args.tasks : []

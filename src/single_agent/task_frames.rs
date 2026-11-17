@@ -887,7 +887,7 @@ pub(super) async fn fresh_main_window(
     if !window.main_context.is_empty() || !window.step_trail.is_empty() {
         window
             .messages
-            .push(super::virtual_step_handoff_message(&window, None, true));
+            .push(super::virtual_step_handoff_message(&window, None, &[], true));
     }
     Ok(window)
 }

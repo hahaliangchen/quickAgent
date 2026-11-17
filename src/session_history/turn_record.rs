@@ -671,8 +671,8 @@ mod tests {
             "PROGRAM_SOURCE_INVALID 第 12 行：TS_PROGRAM 12:29: TS1005"
         );
         let long = call_line("run_readonly_command", Some(&json!({"cmd":format!("git status; {}", "x".repeat(400))}).to_string()));
-        assert!(long.starts_with(r#"run_readonly_command({cmd: "git status; xx"#) && long.ends_with("…\" /* 共 412 字 */});"), "{long}");
-        assert_eq!(call_line("run_readonly_command", Some(r#"{"cmd":"git status"}"#)), r#"run_readonly_command({cmd: "git status"});"#);
+        assert!(long.starts_with(r#"process.run_readonly({cmd: "git status; xx"#) && long.ends_with("…\" /* 共 412 字 */});"), "{long}");
+        assert_eq!(call_line("run_readonly_command", Some(r#"{"cmd":"git status"}"#)), r#"process.run_readonly({cmd: "git status"});"#);
         assert_eq!(outcome("search_text", &json!({"matches":[1,2,3]}), false), "3 处");
         assert_eq!(outcome("search_text", &json!({"files":["a"],"matches":[]}), false), "1 个文件");
         assert_eq!(outcome("read_file", &json!({"content":"a\nb\n","complete":false}), false), "2 行，没读完");

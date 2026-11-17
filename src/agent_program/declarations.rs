@@ -286,6 +286,14 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
 
 /// The default table of contents. List only libraries available in this frame.
 pub fn directory(libraries: &Libraries) -> String {
+    let process_purpose = if libraries
+        .get("process")
+        .is_some_and(|m| m.contains_key("exec_command") || m.contains_key("run_readonly"))
+    {
+        "Run project commands and inspect their processes."
+    } else {
+        "Inspect Agent-managed project processes."
+    };
     let sections: &[(&str, &[(&str, &str)])] = &[
         ("Read and navigate code", &[
             ("io", "List files, search text, read small files, tail line ranges, or stream large files chunk by chunk. Use for raw source and workspace paths."),
@@ -294,7 +302,7 @@ pub fn directory(libraries: &Libraries) -> String {
             ("git", "Read bounded structured status, diffs, and commit history without shell parsing."),
         ]),
         ("Run and inspect applications", &[
-            ("process", "Run project commands and inspect their processes."),
+            ("process", process_purpose),
             ("http", "Probe HTTP endpoints."),
             ("browser", "Open, inspect, and interact with browser pages."),
             ("vision", "View and analyze images."),
@@ -372,14 +380,17 @@ pub fn core_methods(libraries: &Libraries, definitions: &[Value]) -> String {
                     &["commits", "truncated"],
                     "Read a bounded structured commit history.",
                 ),
+                "run_readonly_command" => (&["cmd", "workdir", "timeout_ms"],
+                    &["exit_code", "stdout", "stderr", "duration_ms", "truncated"],
+                    "Run a read-only sandboxed Bash check/build/test (source/.git read-only; gitignored target/ and private /tmp writable)."),
                 "exec_command" => (&["cmd", "workdir", "yield_time_ms", "max_output_tokens", "stdin"],
                     &["session_id", "running", "exit_code", "stdout", "stderr", "duration_ms", "encoding", "truncated"],
-                    "Module code only: run a platform-shell command; output enters JS heap, not AI context."),
+                    "Program/module code: run a platform-shell command; output enters JS heap, not AI context."),
                 "write_stdin" => (&["session_id", "chars", "yield_time_ms", "max_output_tokens", "stream", "char_offset"],
                     &["session_id", "running", "exit_code", "stdout", "stderr", "output", "next_char_offset"],
-                    "Module code only: poll with empty chars, page full saved output, or send chars to a command started with stdin:true."),
+                    "Program/module code: poll with empty chars, page full saved output, or send chars to a command started with stdin:true."),
                 "kill_session" => (&["session_id"], &["session_id", "running", "exit_code", "stdout", "stderr"],
-                    "Module code only: stop this process tree; settle change_interval after its last shell exits."),
+                    "Program/module code: stop this process tree; settle change_interval after its last shell exits."),
                 _ => continue,
             };
             let Some(definition) = definitions.get(target.as_str()) else { continue };
