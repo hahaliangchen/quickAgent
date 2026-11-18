@@ -860,6 +860,39 @@ pub(super) fn failed_program_line(message: &Value) -> Option<String> {
         .map(|count| format!("，停下了 {count} 个还在跑的调用")).unwrap_or_default();
     Some(format!("{}在{at}出错停止：{text}{stopped}。后面的程序取代了它。", program_label(&diagnostic["program"])))
 }
+/// The one line a completed main program leaves once `handoff_step` compacts exploration history.
+pub(super) fn program_result_line(message: &Value) -> Option<String> {
+    let raw = message["content"].as_str()?;
+    let seq = message
+        .get("source")
+        .and_then(|source| source.get("seq"))
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            raw.strip_prefix("[event_seq:")
+                .and_then(|rest| rest.split(']').next())
+                .and_then(|digits| digits.trim().parse::<i64>().ok())
+        });
+    let mut non_empty = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !(line.starts_with("[event_seq:") && line.ends_with(']')));
+    let headline = non_empty.next().unwrap_or("程序已完成。");
+    let detail = non_empty.next().unwrap_or("");
+    let seq_note = seq
+        .map(|seq| format!(" (event_seq: {seq})"))
+        .unwrap_or_default();
+    let line = if detail.is_empty() {
+        format!("{headline}{seq_note}")
+    } else {
+        let truncated = if detail.chars().count() > 160 {
+            format!("{}…", detail.chars().take(160).collect::<String>())
+        } else {
+            detail.to_owned()
+        };
+        format!("{headline}{seq_note} {truncated}")
+    };
+    Some(line)
+}
 /// How outcomes and records name a main program: its place in the turn and
 /// its file, which `read_session_history({programs:true, program})` reads.
 fn program_label(program: &Value) -> String {
@@ -1593,23 +1626,73 @@ fn printed(w: &Window) -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub(super) fn program_delivery_limits(input_budget: usize) -> (usize, usize) {
+    let soft_tokens = (input_budget / 4).max(1);
+    let soft_chars = soft_tokens.saturating_mul(3);
+    (soft_tokens, soft_chars)
+}
+
 fn console_chars(records: &[String]) -> Vec<usize> {
     records.iter().map(|line| line.chars().count()).collect()
 }
 
-fn delivery_capacity(s: &Session<'_>, w: &Window, message: &Value) -> (usize, bool) {
+pub(super) fn delivery_capacity(s: &Session<'_>, w: &Window, message: &Value) -> (usize, bool) {
     let tools = super::tools(s, w);
     let base = w.input_tokens(s, &super::request(s, &w.messages, &tools));
     let mut candidate = w.messages.clone();
     candidate.push(message.clone());
     let required = w.input_tokens(s, &super::request(s, &candidate, &tools));
     let added_tokens = required.saturating_sub(base);
-    let content_chars = message["content"].as_str().map(str::len).unwrap_or(0);
-    let limits = super::delivery_soft_limits(s.input_budget);
+    let content_chars = message["content"]
+        .as_str()
+        .map(|text| text.chars().count())
+        .unwrap_or(0);
+    let (soft_tokens, soft_chars) = program_delivery_limits(s.input_budget);
     let fits = required.saturating_add(4096) <= s.input_budget
-        && added_tokens <= limits.round_tokens
-        && content_chars <= limits.round_chars;
+        && added_tokens <= soft_tokens
+        && content_chars <= soft_chars;
     (required, fits)
+}
+
+fn result_field_chars(value: &Value) -> Option<Value> {
+    const MAX_REPORTED_FIELDS: usize = 20;
+    match value {
+        Value::Object(map) if !map.is_empty() => {
+            let mut entries: Vec<(&str, usize)> = map
+                .iter()
+                .map(|(k, v)| {
+                    let chars = match v {
+                        Value::String(s) => s.chars().count(),
+                        other => other.to_string().chars().count(),
+                    };
+                    (k.as_str(), chars)
+                })
+                .collect();
+            entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            let mut out = serde_json::Map::new();
+            for (k, chars) in entries.iter().take(MAX_REPORTED_FIELDS) {
+                out.insert((*k).to_owned(), json!(chars));
+            }
+            if entries.len() > MAX_REPORTED_FIELDS {
+                out.insert("_omitted_fields".into(), json!(entries.len() - MAX_REPORTED_FIELDS));
+            }
+            Some(Value::Object(out))
+        }
+        Value::Array(items) if !items.is_empty() => {
+            let total_chars: usize = items
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => s.chars().count(),
+                    other => other.to_string().chars().count(),
+                })
+                .sum();
+            Some(json!({"_array_len": items.len(), "total_item_chars": total_chars}))
+        }
+        Value::String(text) if !text.is_empty() => {
+            Some(json!({"_string_chars": text.chars().count()}))
+        }
+        _ => None,
+    }
 }
 
 async fn archive_program_output(s: &Session<'_>, w: &Window, result: &Value) -> Result<Value> {
@@ -1624,16 +1707,28 @@ async fn archive_program_output(s: &Session<'_>, w: &Window, result: &Value) -> 
     tokio::task::spawn_blocking(move || crate::context_assets::register(&root,&task,seq,"program_output",&json!({}),&snapshot)).await?
 }
 
-fn output_capacity_error(s: &Session<'_>, required: usize, reference: Value, record_chars: &[usize]) -> Value {
-    let limits = super::delivery_soft_limits(s.input_budget);
+fn output_capacity_error(
+    s: &Session<'_>,
+    required: usize,
+    reference: Value,
+    record_chars: &[usize],
+    value: Option<&Value>,
+) -> Value {
+    let (soft_tokens, soft_chars) = program_delivery_limits(s.input_budget);
     let mut error = json!({"name":"ResourceLimitError","code":"OUTPUT_OVER_CAPACITY","boundary":"ai_context",
-        "message":"This delivery exceeds the 1/4-window soft delivery cap or remaining AI context. The one-shot program stopped; no prefix or shortened result was substituted. Full output is saved. Read the saved output reference or submit a smaller program result; do not repeat completed commands or writes.",
+        "message":format!(
+            "This program delivery exceeds the 1/4-window soft delivery cap (max {soft_tokens} tokens / {soft_chars} chars for input budget {}) or remaining AI context. The one-shot program stopped; no prefix or shortened result was substituted. Full output is saved. Read the saved output reference or return a more compact structured result from your program; do not repeat completed commands or writes.",
+            s.input_budget
+        ),
         "required_input_tokens":required,"input_budget":s.input_budget,
-        "soft_delivery_chars":limits.round_chars,"soft_delivery_tokens":limits.round_tokens,
+        "soft_delivery_chars":soft_chars,"soft_delivery_tokens":soft_tokens,
         "delivered":false,"original_saved":true,
         "program_output_asset":reference,"read_output":reference["read_reference"]});
     if !record_chars.is_empty() {
         error["console_record_chars"] = json!(record_chars);
+    }
+    if let Some(fields) = value.and_then(result_field_chars) {
+        error["result_field_chars"] = fields;
     }
     error
 }
@@ -1771,7 +1866,7 @@ pub(super) async fn stop_main(s: &Session<'_>, w: &mut Window) -> Result<bool> {
     let (required, fits) = delivery_capacity(s, w, &json!({"role":"assistant","content":proposed}));
     let capacity = if fits { None } else {
         let chars = console_chars(&console);
-        Some(output_capacity_error(s, required, archive_program_output(s, w, &Value::Null).await?, &chars))
+        Some(output_capacity_error(s, required, archive_program_output(s, w, &Value::Null).await?, &chars, None))
     };
     record_end(s, w, "stopped", json!({})).await?;
     let stopped_at = super::paused_programs::pause_main(s, w, true).await?;
@@ -1808,7 +1903,7 @@ pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window, step: usize, blo
     let (required, fits) = delivery_capacity(s,w,&json!({"role":"assistant","content":proposed}));
     let capacity = if fits {None} else {
         let chars = console_chars(&console);
-        Some(output_capacity_error(s,required,archive_program_output(s,w,&Value::Null).await?,&chars))
+        Some(output_capacity_error(s,required,archive_program_output(s,w,&Value::Null).await?,&chars,None))
     };
     let ended = if blocker.is_some() { "needs_user" } else { "paused" };
     record_end(s, w, ended, json!({"blocker":blocker})).await?;
@@ -1840,7 +1935,7 @@ async fn finish_probe(s: &Session<'_>, w: &mut Window, outcome: Result<Value, Va
     if !fits || agent_program::runtime::is_resource_error(&value) {
         let chars = console_chars(&printed(w));
         let reference = archive_program_output(s,w,&value).await?;
-        let error = if !fits { output_capacity_error(s,required,reference,&chars) } else {
+        let error = if !fits { output_capacity_error(s,required,reference,&chars,Some(&value)) } else {
             let mut error = value; error["program_output_asset"] = reference; error
         };
         stop_unfinished(s,w).await?;
@@ -1865,21 +1960,23 @@ async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value
         // end of the user's task. Give its actual result back to its author.
         let output = printed(w);
         let text = outcome(s, &output, Ok(&value))?;
-        let message = json!({"role":"user","name":"program_result","content":text});
-        let (required, fits) = delivery_capacity(s,w,&message);
+        let preview = format!("[event_seq: 000000]\n{text}");
+        let message = json!({"role":"user","name":"program_result","content":preview});
+        let (required, fits) = delivery_capacity(s, w, &message);
         if !fits {
             let chars = console_chars(&output);
-            let reference = archive_program_output(s,w,&value).await?;
-            return Box::pin(failed_program(s,w,step,output_capacity_error(s,required,reference,&chars))).await;
+            let reference = archive_program_output(s, w, &value).await?;
+            return Box::pin(failed_program(s, w, step, output_capacity_error(s, required, reference, &chars, Some(&value)))).await;
         }
-        record_end(s, w, "completed", json!({"result":value})).await?;
+        record_end(s, w, "completed", json!({"result": value})).await?;
         // A completed main program must not be scheduled again. The old
         // persistent-console handoff used `take()` here; one-shot runners
         // clear the active runtime explicitly before returning to the model.
         w.program = None;
         w.program_value = None;
-        let seq = append(s, "program/result", json!({"turn":s.turn,"step":step,"task_node_id":w.task_node_id,"result":value,"output":text}), false).await?;
-        w.messages.push(sourced(json!({"role":"user","name":"program_result","content":text}), s.task, seq));
+        let seq = append(s, "program/result", json!({"turn": s.turn, "step": step, "task_node_id": w.task_node_id, "result": value, "output": text}), false).await?;
+        let delivered = format!("[event_seq: {seq}]\n{text}");
+        w.messages.push(sourced(json!({"role":"user","name":"program_result","content":delivered}), s.task, seq));
         save(s, w).await?;
         return Ok(Round::Continue);
     }
@@ -1933,10 +2030,11 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
         "content":json!({"error":error,"console":console}).to_string()});
     let (required, fits) = delivery_capacity(s,w,&diagnostic);
     if !fits || agent_program::runtime::is_resource_error(&error) {
+        let recorded_result = w.program.as_ref().map(|p| p.result.clone()).unwrap_or(Value::Null);
         let reference = if error["program_output_asset"].is_object() { error["program_output_asset"].clone() }
-            else { archive_program_output(s,w,&w.program.as_ref().map(|p|p.result.clone()).unwrap_or(Value::Null)).await? };
+            else { archive_program_output(s,w,&recorded_result).await? };
         if !fits && !agent_program::runtime::is_resource_error(&error) {
-            error = output_capacity_error(s,required,reference,&record_chars);
+            error = output_capacity_error(s,required,reference,&record_chars,Some(&recorded_result));
         } else {
             error["program_output_asset"] = reference;
             error["original_saved"] = json!(true);
@@ -3066,10 +3164,12 @@ mod tests {
         let s=execution_test_session(&state,&cancel);
         agent_service::open_db(root.path()).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)",[]).unwrap();
         let mut w=Window::default();
-        install(&mut w,&json!({"source":"return { evidence: 'D'.repeat(200000) };"})).unwrap();
+        install(&mut w,&json!({"source":"return { small: 'ok', evidence: 'D'.repeat(200000) };"})).unwrap();
         assert!(matches!(next(&s,&mut w,1).await.unwrap(),Round::Rewrite));
         let diagnostic:Value=serde_json::from_str(w.messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
         assert_eq!(diagnostic["error"]["code"],"OUTPUT_OVER_CAPACITY");
+        assert_eq!(diagnostic["error"]["result_field_chars"]["evidence"], 200_000);
+        assert_eq!(diagnostic["error"]["result_field_chars"]["small"], 2);
         assert!(diagnostic.get("console_bindings").is_none());
         assert!(diagnostic.get("console_binding_previews").is_none());
         assert!(diagnostic.get("console_scope").is_none());
@@ -3077,6 +3177,65 @@ mod tests {
         assert_eq!(diagnostic["error"]["read_output"]["tool"],"read_asset");
         let page=crate::context_assets::read(root.path(),"task",&json!({"asset_id":reference["asset_id"],"max_chars":200}),None).unwrap();
         assert!(page.to_string().contains("evidence"),"saved output is recoverable: {page}");
+    }
+
+    #[tokio::test]
+    async fn program_result_soft_limit_scales_as_one_quarter_budget_and_counts_unicode_chars() {
+        assert_eq!(program_delivery_limits(256_000), (64_000, 192_000));
+        assert_eq!(program_delivery_limits(500_000), (125_000, 375_000));
+        assert_eq!(program_delivery_limits(1_025_424), (256_356, 769_068));
+
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let s = execution_test_session(&state, &cancel);
+        agent_service::open_db(root.path()).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
+
+        let (expected_tokens, expected_chars) = program_delivery_limits(s.input_budget);
+        assert_eq!(expected_tokens, (s.input_budget / 4).max(1));
+        assert_eq!(expected_chars, expected_tokens * 3);
+
+        // 25,000 Chinese chars = 75,000 UTF-8 bytes (~50,000 est tokens <= 57,856 on INPUT_BUDGET).
+        let mut w_zh = Window::default();
+        install(&mut w_zh, &json!({"source": "return { evidence: '中'.repeat(25_000) };"})).unwrap();
+        assert!(matches!(next(&s, &mut w_zh, 1).await.unwrap(), Round::Continue));
+        assert_eq!(w_zh.messages.last().unwrap()["name"], "program_result");
+
+        // 130,000 ASCII chars (~43k tokens, <= 173,568 chars) also passes comfortably under 1/4 cap!
+        let mut w_mid = Window::default();
+        install(&mut w_mid, &json!({"source": "return { audit: 'A'.repeat(130_000) };"})).unwrap();
+        assert!(matches!(next(&s, &mut w_mid, 2).await.unwrap(), Round::Continue));
+        assert_eq!(w_mid.messages.last().unwrap()["name"], "program_result");
+
+        let mut w_over = Window::default();
+        install(&mut w_over, &json!({"source": "return { huge: 'E'.repeat(190_000), note: 'ok' };"})).unwrap();
+        assert!(matches!(next(&s, &mut w_over, 3).await.unwrap(), Round::Rewrite));
+        let diagnostic: Value = serde_json::from_str(w_over.messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
+        assert_eq!(diagnostic["error"]["code"], "OUTPUT_OVER_CAPACITY");
+        assert_eq!(diagnostic["error"]["soft_delivery_chars"], expected_chars);
+        assert_eq!(diagnostic["error"]["soft_delivery_tokens"], expected_tokens);
+        assert_eq!(diagnostic["error"]["result_field_chars"]["huge"], 190_000);
+        assert_eq!(diagnostic["error"]["result_field_chars"]["note"], 2);
+    }
+
+    #[tokio::test]
+    async fn host_library_exposes_only_context_and_tools() {
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let s = execution_test_session(&state, &cancel);
+        agent_service::open_db(root.path()).unwrap().execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','','fake','running',0,0)", []).unwrap();
+
+        let mut w_digest = Window::default();
+        install(&mut w_digest, &json!({"source": "const host = require('host'); return host.digest('abc', 'goal');"})).unwrap();
+        for step in 1..=3 {
+            if w_digest.program.is_none() {
+                break;
+            }
+            let _ = next(&s, &mut w_digest, step).await.unwrap();
+        }
+        let content = w_digest.messages.last().unwrap()["content"].as_str().unwrap();
+        assert!(content.contains("TypeError") || content.contains("UNKNOWN_HOST_METHOD"), "{content}");
     }
 
     #[tokio::test]

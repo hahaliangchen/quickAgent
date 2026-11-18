@@ -48,8 +48,8 @@ pub(super) struct DeliverySoftLimits {
 }
 
 pub(super) fn delivery_soft_limits(input_budget: usize) -> DeliverySoftLimits {
-    let single_tokens = (input_budget / 4).clamp(24_000, 32_000);
-    let round_tokens = (input_budget / 4).clamp(32_000, 64_000);
+    let single_tokens = (input_budget / 4).clamp(32_000, 128_000);
+    let round_tokens = (input_budget / 3).clamp(64_000, 256_000);
     DeliverySoftLimits {
         single_chars: single_tokens.saturating_mul(3),
         single_tokens,
@@ -139,15 +139,13 @@ pub(crate) struct Window {
 pub(super) const HANDOFF_STEP: &str = "handoff_step";
 pub(super) const VIRTUAL_STEP_HANDOFF: &str = "virtual_step_handoff";
 const VIRTUAL_STEP_WRAP_DIRECTIVE: &str = "virtual_step_wrap_required";
-const MAIN_CONTEXT_TOTAL_LIMIT_BYTES: usize = 64 * 1024;
-const MAX_HANDOFF_SLICES: usize = 24;
-const MAX_SLICE_DEFAULT_LINES: usize = 80;
-const MAX_SLICE_EXCERPT_CHARS: usize = 4_000;
-const MAX_HANDOFF_SLICES_BYTES: usize = 32 * 1024;
+const MAIN_CONTEXT_TOTAL_LIMIT_BYTES: usize = 192 * 1024;
+const MAX_HANDOFF_SLICES: usize = 48;
+const MAX_SLICE_DEFAULT_LINES: usize = 160;
+const MAX_SLICE_EXCERPT_CHARS: usize = 12_000;
+const MAX_HANDOFF_SLICES_BYTES: usize = 128 * 1024;
 const MAX_STEP_HANDOFFS_PER_TURN: usize = 12;
 const STEP_WRAP_MIN_ROUNDS_IN_SCOPE: usize = 3;
-const STEP_WRAP_WINDOW_TOKENS: usize = 180_000;
-const STEP_WRAP_EMERGENCY_TOKENS: usize = 240_000;
 
 fn is_zero_usize(value: &usize) -> bool {
     *value == 0
@@ -662,6 +660,9 @@ fn extract_payload_lines(source_tool: Option<&str>, payload: &Value) -> Result<V
         }
         return Ok(lines);
     }
+    if let Some(output) = payload.get("output").and_then(Value::as_str) {
+        return Ok(output.lines().map(str::to_owned).collect());
+    }
     Ok(serde_json::to_string_pretty(payload)?.lines().map(str::to_owned).collect())
 }
 
@@ -963,8 +964,15 @@ fn retain_turn_anchor_message(mut message: Value) -> Option<Value> {
     if task_frames::is_user_original(&message) {
         return Some(message);
     }
-    if matches!(message["name"].as_str(), Some("program_result" | "program_record")) {
+    if message["name"].as_str() == Some("program_record") {
         return Some(message);
+    }
+    if message["name"] == "program_result" {
+        return program_flow::program_result_line(&message).map(|line| {
+            message["name"] = json!("program_record");
+            message["content"] = json!(line);
+            message
+        });
     }
     if message.get(skill_scope::DELIVERED).is_some()
         || message["name"] == modules::UPDATE
@@ -982,28 +990,31 @@ fn retain_turn_anchor_message(mut message: Value) -> Option<Value> {
     retain_pinned_message(message)
 }
 
-fn reset_messages_for_virtual_step(w: &mut Window) {
-    let prefix_end = w
-        .messages
+fn retained_step_messages(messages: &[Value], handoff_entries: &[Value]) -> Vec<Value> {
+    let prefix_end = messages
         .iter()
         .position(task_frames::is_user_original)
-        .unwrap_or_else(|| w.messages.iter().take_while(|m| m["role"] == "system").count());
+        .unwrap_or_else(|| messages.iter().take_while(|m| m["role"] == "system").count());
     let mut kept = Vec::new();
-    for (idx, message) in w.messages.drain(..).enumerate() {
+    for (idx, message) in messages.iter().enumerate() {
         if idx < prefix_end {
             if message["name"].as_str() != Some(VIRTUAL_STEP_HANDOFF) {
-                kept.push(message);
+                kept.push(message.clone());
             }
             continue;
         }
-        if let Some(retained) = retain_turn_anchor_message(message) {
+        if let Some(retained) = retain_turn_anchor_message(message.clone()) {
             kept.push(retained);
         }
     }
-    for entry in &w.handoff_entries {
+    for entry in handoff_entries {
         kept.push(virtual_step_handoff_message(entry));
     }
-    w.messages = kept;
+    kept
+}
+
+fn reset_messages_for_virtual_step(w: &mut Window) {
+    w.messages = retained_step_messages(&w.messages, &w.handoff_entries);
 }
 
 async fn maybe_require_step_wrap(
@@ -1032,11 +1043,16 @@ async fn maybe_require_step_wrap(
         return Ok(());
     }
     let current_tokens = w.input_tokens(s, &request(s, &w.messages, definitions));
-    let token_threshold = STEP_WRAP_WINDOW_TOKENS.min((s.input_budget * 3 / 4).max(1));
-    let emergency_threshold = STEP_WRAP_EMERGENCY_TOKENS.min((s.input_budget * 4 / 5).max(1));
+    let retained = retained_step_messages(&w.messages, &w.handoff_entries);
+    let anchor_baseline_tokens = w.input_tokens(s, &request(s, &retained, definitions));
+    let reclaimable_tokens = current_tokens.saturating_sub(anchor_baseline_tokens);
+    let token_threshold = (s.input_budget * 4 / 5).max(1);
+    let emergency_threshold = (s.input_budget * 7 / 8).max(1);
+    let min_reclaimable = (s.input_budget / 12).max(1);
     let bloated = (w.step_rounds_in_scope >= STEP_WRAP_MIN_ROUNDS_IN_SCOPE
-        && current_tokens >= token_threshold)
-        || current_tokens >= emergency_threshold;
+        && current_tokens >= token_threshold
+        && reclaimable_tokens >= min_reclaimable)
+        || (current_tokens >= emergency_threshold && reclaimable_tokens > 0);
     if !bloated {
         return Ok(());
     }
@@ -1050,6 +1066,8 @@ async fn maybe_require_step_wrap(
             "step": step,
             "flowNodeId": node,
             "estimatedTokens": current_tokens,
+            "anchorBaselineTokens": anchor_baseline_tokens,
+            "reclaimableTokens": reclaimable_tokens,
             "roundAddedChars": round_added_chars,
             "stepRoundsInScope": w.step_rounds_in_scope,
         }),
@@ -1059,11 +1077,14 @@ async fn maybe_require_step_wrap(
     let payload = json!({
         "type": VIRTUAL_STEP_WRAP_DIRECTIVE,
         "reason": format!(
-            "Host closed this exploration scope because the main window reached ~{} tokens across {} round(s).",
+            "Host closed the current top-level scope because the main window reached ~{} / {} tokens (~{} reclaimable in selfContext above ~{} retained mainContext baseline) across {} round(s).",
             current_tokens,
+            s.input_budget,
+            reclaimable_tokens,
+            anchor_baseline_tokens,
             w.step_rounds_in_scope
         ),
-        "required_action": "Choose one clean exit now before running more tools (write_program appends to the current window rather than clearing it): (1) call handoff_step({next_goal, summary?, slices?: [{seq, lines?, grep?, head?, tail?, keys?, label?}], step_name?, next_step?}) to append compact findings onto mainContext and reset this scope; or (2) reply directly in plain text if already settled.",
+        "required_action": "Choose one clean exit now before running more tools (write_program appends to the current window rather than clearing it): (1) call handoff_step({next_goal, summary?, slices?: [{seq, lines?, grep?, head?, tail?, keys?, label?}], step_name?, next_step?}) to append compact findings onto mainContext (`mainContext += selfContext.slice(...)`), release this finished scope's raw dumps, and continue in the next top-level scope; or (2) reply directly in plain text if already settled.",
     });
     w.messages.push(json!({
         "role": "user",
@@ -3426,7 +3447,14 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
         let (node, mut message, cut_off) = if w.program.is_some() {
             match Box::pin(program_flow::next(s, w, step)).await? {
                 program_flow::Round::Exchange(node, message) => (node, message, false),
-                program_flow::Round::Rewrite | program_flow::Round::Continue => continue,
+                program_flow::Round::Rewrite | program_flow::Round::Continue => {
+                    if w.program.is_none() {
+                        let definitions = tools(s, w);
+                        maybe_require_step_wrap(s, w, &definitions, step, "program_result", 0)
+                            .await?;
+                    }
+                    continue;
+                }
                 program_flow::Round::Entered(scope) => {
                     current.scope = scope;
                     continue;
@@ -6809,19 +6837,19 @@ mod tests {
     #[test]
     fn delivery_soft_limits_stay_bounded_for_main_react() {
         let large = delivery_soft_limits(1_025_424);
-        assert_eq!(large.single_tokens, 32_000);
-        assert_eq!(large.round_tokens, 64_000);
-        assert_eq!(large.single_chars, 96_000);
-        assert_eq!(large.round_chars, 192_000);
+        assert_eq!(large.single_tokens, 128_000);
+        assert_eq!(large.round_tokens, 256_000);
+        assert_eq!(large.single_chars, 384_000);
+        assert_eq!(large.round_chars, 768_000);
 
         let medium = delivery_soft_limits(INPUT_BUDGET);
-        assert_eq!(medium.single_tokens, 32_000);
-        assert_eq!(medium.round_tokens, INPUT_BUDGET / 4);
-        assert_eq!(medium.round_chars, (INPUT_BUDGET / 4) * 3);
+        assert_eq!(medium.single_tokens, INPUT_BUDGET / 4);
+        assert_eq!(medium.round_tokens, INPUT_BUDGET / 3);
+        assert_eq!(medium.round_chars, (INPUT_BUDGET / 3) * 3);
 
         let tiny = delivery_soft_limits(32_000);
-        assert_eq!(tiny.single_tokens, 24_000);
-        assert_eq!(tiny.round_tokens, 32_000);
+        assert_eq!(tiny.single_tokens, 32_000);
+        assert_eq!(tiny.round_tokens, 64_000);
     }
 
     #[tokio::test]
@@ -6869,7 +6897,7 @@ mod tests {
                                             "name": HANDOFF_STEP,
                                             "arguments": json!({
                                                 "step_name": "explore_files",
-                                                "summary": "z".repeat(66_000),
+                                                "summary": "z".repeat(MAIN_CONTEXT_TOTAL_LIMIT_BYTES + 4_000),
                                                 "next_step": "finalize",
                                                 "next_goal": "Answer concisely"
                                             }).to_string()
@@ -7016,7 +7044,7 @@ mod tests {
             &w,
             &json!({
                 "step_name": "step_one",
-                "summary": format!("ENTRY_ONE_KEEP {}", "a".repeat(30_000)),
+                "summary": format!("ENTRY_ONE_KEEP {}", "a".repeat(90_000)),
                 "next_step": "step_two",
                 "next_goal": "Store second entry"
             }),
@@ -7024,7 +7052,7 @@ mod tests {
         .unwrap();
         let (bytes1, dropped1) = push_handoff_entry(&mut w.handoff_entries, h1.entry).unwrap();
         assert_eq!(dropped1, 0);
-        assert!(bytes1 > 30_000);
+        assert!(bytes1 > 90_000);
         w.step_handoffs_in_turn = 1;
         reset_messages_for_virtual_step(&mut w);
         let msg1_after_step1 = w
@@ -7042,9 +7070,9 @@ mod tests {
             &w,
             &json!({
                 "step_name": "step_two",
-                "summary": format!("ENTRY_TWO_KEEP {}", "b".repeat(25_000)),
+                "summary": format!("ENTRY_TWO_KEEP {}", "b".repeat(80_000)),
                 "next_step": "step_three",
-                "next_goal": "Keep total within 64K"
+                "next_goal": "Keep total within 192K"
             }),
         )
         .unwrap();
@@ -7064,28 +7092,28 @@ mod tests {
         );
         assert!(handoffs_after_step2[1].contains("ENTRY_TWO_KEEP"));
 
-        // Oversized single entry (>64 KiB) fails cleanly without mutating w.handoff_entries.
+        // Oversized single entry (>192 KiB) fails cleanly without mutating w.handoff_entries.
         let over_single = prepare_handoff_step(
             root.path(),
             "task",
             &w,
             &json!({
                 "step_name": "too_big",
-                "summary": "c".repeat(66_000),
+                "summary": "c".repeat(200_000),
                 "next_goal": "Should fail"
             }),
         );
         assert!(over_single.is_err());
         assert_eq!(w.handoff_entries.len(), 2);
 
-        // Appending a valid third entry that pushes total > 64 KiB FIFO-drops the oldest entry.
+        // Appending a valid third entry that pushes total > 192 KiB FIFO-drops the oldest entry.
         let (r3, h3) = prepare_handoff_step(
             root.path(),
             "task",
             &w,
             &json!({
                 "step_name": "step_three",
-                "summary": format!("ENTRY_THREE_HEAD_ABC123 {}", "d".repeat(20_000)),
+                "summary": format!("ENTRY_THREE_HEAD_ABC123 {}", "d".repeat(60_000)),
                 "next_step": "verify",
                 "next_goal": "Run verification"
             }),
@@ -7431,6 +7459,227 @@ mod tests {
             )
             .unwrap();
         assert_eq!(wrap_events, 1);
+    }
+
+    #[tokio::test]
+    async fn step_wrap_scales_thresholds_with_budget_and_compacts_program_result() {
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        let s = Session {
+            agent_id: None,
+            task_node_id: None,
+            plugin: None,
+            state: &state,
+            task: "task",
+            model: "fake",
+            turn: 1,
+            cancel: &cancel,
+            ban_execution: false,
+            scope: "main".into(),
+            parent: None,
+            input_budget: 1_025_424,
+        };
+
+        let mut w = Window::default();
+        w.messages.push(json!({"role": "system", "content": "sys"}));
+        w.messages.push(json!({"role": "user", "content": "Investigate 1M budget thresholds"}));
+        let definitions = tools(&s, &w);
+
+        // ~350k tokens across 4 rounds stays well below 80% of 1M (~820k) and must never trigger premature wrap.
+        for i in 0..4 {
+            w.messages.push(json!({
+                "role": "tool",
+                "tool_call_id": format!("c_{i}"),
+                "content": "B".repeat(260_000),
+            }));
+            maybe_require_step_wrap(&s, &mut w, &definitions, i + 1, "node", 260_000)
+                .await
+                .unwrap();
+            assert!(
+                !w.step_handoff_required,
+                "1M budget (~350k tokens on round {}) must NOT trigger premature step_wrap",
+                i + 1
+            );
+        }
+
+        // Reaching >= 80% (~820k tokens) after >= 3 rounds triggers regular step_wrap.
+        w.messages.push(json!({
+            "role": "user",
+            "name": "program_result",
+            "source": {"task": "task", "seq": 42},
+            "content": format!("[event_seq: 42]\n第 1 段程序（scan-all.js）已完成。\n返回：{}", "A".repeat(1_500_000)),
+        }));
+        maybe_require_step_wrap(&s, &mut w, &definitions, 5, "program_result", 0)
+            .await
+            .unwrap();
+        assert!(
+            w.step_handoff_required,
+            "1M budget reaching >=80% (~850k tokens including large program_result) must trigger step_wrap"
+        );
+
+        // Resetting for virtual step compacts program_result -> lightweight 1-line program_record with event_seq.
+        reset_messages_for_virtual_step(&mut w);
+        let record = w
+            .messages
+            .iter()
+            .find(|m| m["name"].as_str() == Some("program_record"))
+            .expect("handoff compaction must turn program_result into program_record");
+        let record_text = record["content"].as_str().unwrap();
+        assert!(record_text.contains("scan-all.js"), "{record_text}");
+        assert!(record_text.contains("event_seq: 42"), "{record_text}");
+        assert!(
+            record_text.len() < 400,
+            "compacted program_record must drop huge payload, got {} bytes",
+            record_text.len()
+        );
+        assert!(
+            w.messages.iter().all(|m| m["name"].as_str() != Some("program_result")),
+            "raw program_result must be compacted on handoff_step"
+        );
+    }
+
+    #[tokio::test]
+    async fn consecutive_program_results_trigger_step_wrap_and_slice_by_event_seq() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = TestRoot::new();
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let first_seq_cell = Arc::new(std::sync::atomic::AtomicI64::new(0));
+
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let rounds = rounds.clone();
+                let first_seq_cell = first_seq_cell.clone();
+                move |Json(body): Json<Value>| {
+                    let rounds = rounds.clone();
+                    let first_seq_cell = first_seq_cell.clone();
+                    async move {
+                        let step = rounds.fetch_add(1, Ordering::SeqCst);
+                        let msgs = body["messages"].as_array().unwrap();
+                        let joined = serde_json::to_string(msgs).unwrap();
+                        let message = match step {
+                            0..=3 => {
+                                if step == 1 {
+                                    let first_prog = msgs
+                                        .iter()
+                                        .find(|m| m["name"].as_str() == Some("program_result"))
+                                        .expect("first program_result missing");
+                                    let seq = first_prog["content"]
+                                        .as_str()
+                                        .unwrap()
+                                        .lines()
+                                        .find_map(|line| {
+                                            line.strip_prefix("[event_seq:")
+                                                .and_then(|rest| rest.strip_suffix(']'))
+                                                .and_then(|s| s.trim().parse::<i64>().ok())
+                                        })
+                                        .expect("program_result must expose [event_seq: N]");
+                                    first_seq_cell.store(seq, Ordering::SeqCst);
+                                }
+                                assert!(
+                                    !msgs.iter().any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_WRAP_DIRECTIVE)),
+                                    "must not trigger step_wrap prematurely on program step {step}"
+                                );
+                                let marker = if step == 0 { "NEEDLE_FIRST_PROGRAM\n" } else { "" };
+                                // ~140k ASCII chars (~46.7k tokens): fits under 1/4 soft cap (~57.8k tokens), 4 runs (~198k) exceed 80% (~185k).
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": format!("wp_{step}"),
+                                        "type": "function",
+                                        "function": {
+                                            "name": program_flow::WRITE_PROGRAM,
+                                            "arguments": json!({
+                                                "name": format!("chunk-prog-{step}"),
+                                                "source": format!(
+                                                    "return {:?} + \"X\".repeat(140000);",
+                                                    marker
+                                                )
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            4 => {
+                                assert!(
+                                    msgs.iter().any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_WRAP_DIRECTIVE)),
+                                    "cumulative program_result messages must trigger step_wrap via run_loop"
+                                );
+                                let seq1 = first_seq_cell.load(Ordering::SeqCst);
+                                assert!(seq1 > 0, "expected captured first program_result event_seq");
+                                json!({
+                                    "role": "assistant",
+                                    "content": Value::Null,
+                                    "tool_calls": [{
+                                        "id": "handoff_progs",
+                                        "type": "function",
+                                        "function": {
+                                            "name": HANDOFF_STEP,
+                                            "arguments": json!({
+                                                "next_goal": "Finish after compacting program_results",
+                                                "slices": [{"seq": seq1, "grep": "NEEDLE_FIRST_PROGRAM", "context_lines": 0}]
+                                            }).to_string()
+                                        }
+                                    }]
+                                })
+                            }
+                            _ => {
+                                assert!(
+                                    joined.contains("NEEDLE_FIRST_PROGRAM"),
+                                    "sliced line from program/result event must survive handoff"
+                                );
+                                assert!(
+                                    !joined.contains(&"X".repeat(1000)),
+                                    "bloated program_result bodies must be reclaimed after handoff_step"
+                                );
+                                assert!(
+                                    msgs.iter().any(|m| m["name"].as_str() == Some("program_record")),
+                                    "compacted window must keep lightweight program_record anchors"
+                                );
+                                assert!(
+                                    !msgs.iter().any(|m| m["name"].as_str() == Some(VIRTUAL_STEP_WRAP_DIRECTIVE)),
+                                    "compacted window must stay clear of step_wrap loop"
+                                );
+                                json!({"role": "assistant", "content": "Compacted program results cleanly."})
+                            }
+                        };
+                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = agent_service::tests::test_state(root.path(), listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let conn = agent_service::open_db(root.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('task','test','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        seed_task_window(&state, "task").await;
+        run_task(
+            state,
+            "task".into(),
+            "fake".into(),
+            "Run several large programs then wrap cleanly.".into(),
+            12,
+            CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert_eq!(rounds.load(Ordering::SeqCst), 6);
     }
 
     #[tokio::test]
