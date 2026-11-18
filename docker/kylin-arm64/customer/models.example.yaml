@@ -1,0 +1,52 @@
+# 客户模型配置示例
+# 使用方式：按此格式编辑同目录 models.yaml，保存后执行：
+#   ./deploy.sh up   或   docker compose restart app
+#
+# 说明：
+# 1. 默认 models.yaml 中 providers 为 []，不会覆盖前端设置页的已有配置。
+# 2. 当 providers 非空时，每次修改 models.yaml 并重启 app 会自动同步到 Agent（无需再去前端重复填写）。
+# 3. 日志 logs/customer.log 与诊断工具均不会记录此文件中的 api_key。
+
+# 应用模式：
+# - replace（默认）：以本文件的 providers 为准同步，适合固定配置反复部署与迁移复用
+# - merge：按 id 合并或更新提供商，保留前端页面中添加的其他提供商
+mode: replace
+
+# 默认主 Agent 模型（不填时自动选用第一个提供商的第一个模型）
+default_provider: qwen-local
+default_model: qwen3-vl-32b
+
+# 推理强度（可选："" / none / low / medium / high / xhigh / max）
+# reasoning_effort: ""
+
+# 联网搜索提供商（可选；默认 "" 表示未启用，避免缺搜索密钥阻止本地模型保存）
+web_search_provider: ""
+
+# PPT 插件可用模型（可选；不配置或留空表示允许所有已配置的 openai-completions 模型）
+# 支持写法："provider_id/model_id" 或 { provider: "...", model: "..." }
+# ppt_models:
+#   - qwen-local/qwen3-vl-32b
+
+# 视觉工具专用模型（可选；不配置则跟随主模型）
+# visual_tool:
+#   provider: qwen-local
+#   model: qwen3-vl-32b
+
+providers:
+  # 示例 1：内网 / 本地自部署免鉴权模型（api_key 留空即可）
+  - id: qwen-local
+    display_name: 本地 Qwen
+    url: http://10.10.10.201:12891/v1
+    api_type: openai-completions
+    api_key: ""
+    models:
+      - qwen3-vl-32b
+
+  # 示例 2：需要 API Key 的 OpenAI 兼容或 DeepSeek 服务（按需取消注释并填写真实地址与密钥）
+  # - id: deepseek
+  #   display_name: DeepSeek
+  #   url: https://api.deepseek.com/v1
+  #   api_type: openai-completions
+  #   api_key: "sk-请替换为真实密钥"
+  #   models:
+  #     - deepseek-chat

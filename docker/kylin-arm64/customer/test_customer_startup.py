@@ -96,6 +96,66 @@ class CustomerStartupTests(unittest.TestCase):
                                 "DOCKER_TEST_ARGS": str(arguments)})
             self.assertEqual(arguments.read_text().splitlines(),
                              ["compose", "up", "-d", "--wait", "--wait-timeout", "480", "app"])
+            self.assertTrue((root / "models.yaml").is_file())
+
+    def test_sync_models_file_applies_once_per_edit_and_skips_empty_default(self):
+        import io
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            profile = root / "agent-config"
+            profile.mkdir()
+            models_file = root / "models.yaml"
+            models_file.write_text("providers: []\n")
+            calls = []
+
+            def fake_open(req, timeout=30):
+                calls.append((req.get_method(), json.loads(req.data.decode()) if req.data else None))
+                if req.get_method() == "GET":
+                    body = {"revision": "rev-1", "providers": [], "orchestrator_provider": None, "orchestrator_model": None}
+                else:
+                    body = {"revision": "rev-2", "providers": [{"id": "qwen-local"}],
+                            "orchestrator_provider": "qwen-local", "orchestrator_model": "qwen3-vl-32b"}
+                return io.BytesIO(json.dumps(body).encode())
+
+            with patch.object(entrypoint.HTTP, "open", side_effect=fake_open):
+                self.assertFalse(entrypoint.sync_models_file(profile, models_file))
+                self.assertEqual(calls, [])
+
+                models_file.write_text(
+                    "providers:\n"
+                    "  - id: qwen-local\n"
+                    "    url: http://10.10.10.201:12891/v1\n"
+                    "    api_key: ''\n"
+                    "    models:\n"
+                    "      - qwen3-vl-32b\n"
+                    "ppt_models:\n"
+                    "  - qwen-local/qwen3-vl-32b\n"
+                )
+                self.assertTrue(entrypoint.sync_models_file(profile, models_file))
+                self.assertEqual([c[0] for c in calls], ["GET", "PUT"])
+                put_payload = calls[1][1]
+                self.assertEqual(put_payload["orchestrator_provider"], "qwen-local")
+                self.assertEqual(put_payload["orchestrator_model"], "qwen3-vl-32b")
+                self.assertTrue(put_payload["providers"][0]["clear_api_key"])
+                self.assertEqual(put_payload["plugin_models"], {"ppt-master": [{"provider": "qwen-local", "model": "qwen3-vl-32b"}]})
+
+                # Unchanged file is not re-applied on restart.
+                self.assertFalse(entrypoint.sync_models_file(profile, models_file))
+                self.assertEqual(len(calls), 2)
+
+                # Editing models.yaml re-syncs automatically.
+                models_file.write_text(
+                    "providers:\n"
+                    "  - id: subapi\n"
+                    "    url: http://104.238.154.29:58081/v1\n"
+                    "    api_key: sk-test-key\n"
+                    "    models:\n"
+                    "      - gpt-6.1-terra\n"
+                )
+                self.assertTrue(entrypoint.sync_models_file(profile, models_file))
+                self.assertEqual(len(calls), 4)
+                self.assertEqual(calls[3][1]["providers"][0]["api_key"], "sk-test-key")
+                self.assertEqual(calls[3][1]["orchestrator_model"], "gpt-6.1-terra")
 
 
 if __name__ == "__main__":

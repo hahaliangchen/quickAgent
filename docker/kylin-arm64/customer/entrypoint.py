@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -143,6 +144,22 @@ def write_config():
         "agent": {"ai-provider":"", "skill-resource-dir":"resource/ai_skills", "project-output-dir":"projects", "session-ttl":"72h", "session-key-prefix":"ppt-customer:", "max-consecutive-failures":3, "max-history-string-len":16384},
         "deepseek": {"api-key":"", "model":"", "base-url":""},
         "workbench": {"data-file":str(STATE / "server/workbench-data.json"), "model-provider":"", "llm-model":"", "llm-base-url":"", "llm-api-key":"", "enable-heuristic-fallback":False},
+        "onlyoffice": {
+            "version": "1.15.0",
+            "server-address": os.getenv("ONLYOFFICE_SERVER_ADDRESS", ""),
+            "doc-server-host": os.getenv("ONLYOFFICE_DOC_SERVER_HOST", ""),
+            "doc-server-api-url": "web-apps/apps/api/documents/api.js",
+            "doc-server-preloader-url": "web-apps/apps/api/documents/api.js",
+            "workbench-api-base-url": os.getenv("ONLYOFFICE_WORKBENCH_API_BASE_URL", ""),
+            "plugin-base-url": os.getenv("ONLYOFFICE_PLUGIN_BASE_URL", ""),
+            "editor-entry-url": "/onlyoffice-editor",
+            "direct-download-enabled": True,
+            "save-error-fallback-enabled": False,
+            "jwt-secret": os.getenv("ONLYOFFICE_JWT_SECRET", ""),
+            "open-ticket-expire-seconds": 300,
+            "jwt-is-enabled": os.getenv("ONLYOFFICE_JWT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
+            "storage-path": "filestore",
+        },
         "yalongjiang": {"enabled":False, "native-login-enabled":True},
     }
     config_path = STATE / "server-config.yaml"
@@ -156,6 +173,204 @@ def write_config():
     # Installed code must not be shadowed by an older mounted resource tree.
     # Mutable customer templates and projects remain under /state.
     os.environ["PPT_BUNDLED_SKILL_DIR"] = str(APP / "server/resource/ai_skills/ppt-master")
+
+
+def _settings_request(payload=None):
+    headers = {} if payload is None else {"Content-Type": "application/json"}
+    data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
+    return urllib.request.Request("http://127.0.0.1:3001/agent/settings/data",
+                                  data=data, headers=headers,
+                                  method="GET" if payload is None else "PUT")
+
+
+def _normalize_models_yaml_providers(raw_providers):
+    if isinstance(raw_providers, dict):
+        items = [{"id": key, **(value or {})} for key, value in raw_providers.items()]
+    elif isinstance(raw_providers, list):
+        items = raw_providers
+    else:
+        raise ValueError("models.yaml: 'providers' must be a list or mapping")
+    normalized = []
+    for row in items:
+        if not isinstance(row, dict):
+            raise ValueError("models.yaml: each provider entry must be a mapping")
+        pid = str(row.get("id") or "").strip()
+        if not pid:
+            raise ValueError("models.yaml: provider 'id' is required")
+        url = str(row.get("url") or row.get("base_url") or row.get("baseURL") or "").strip()
+        if not url:
+            raise ValueError(f"models.yaml: provider '{pid}' requires 'url'")
+        raw_models = row.get("models") or []
+        models = []
+        for entry in raw_models:
+            if isinstance(entry, dict):
+                mid = str(entry.get("id") or "").strip()
+            else:
+                mid = str(entry or "").strip()
+            if mid:
+                models.append(mid)
+        if not models:
+            raise ValueError(f"models.yaml: provider '{pid}' requires at least one model")
+        entry = {
+            "id": pid,
+            "url": url,
+            "api_type": str(row.get("api_type") or row.get("api") or "openai-completions").strip(),
+            "models": models,
+        }
+        display_name = row.get("display_name") or row.get("displayName")
+        if display_name is not None and str(display_name).strip():
+            entry["display_name"] = str(display_name).strip()
+        if "api_key" in row:
+            key = "" if row["api_key"] is None else str(row["api_key"]).strip()
+            if key:
+                entry["api_key"] = key
+            else:
+                entry["clear_api_key"] = True
+        elif row.get("clear_api_key"):
+            entry["clear_api_key"] = True
+        else:
+            entry["_key_omitted"] = True
+        normalized.append(entry)
+    return normalized
+
+
+def _parse_ppt_models(raw_items):
+    refs = []
+    for item in raw_items or []:
+        if isinstance(item, str) and "/" in item:
+            provider, model = item.split("/", 1)
+            refs.append({"provider": provider.strip(), "model": model.strip()})
+        elif isinstance(item, dict) and item.get("provider") and item.get("model"):
+            refs.append({"provider": str(item["provider"]).strip(), "model": str(item["model"]).strip()})
+        else:
+            raise ValueError("models.yaml: ppt_models entries must be 'provider/model' or {provider, model}")
+    return refs
+
+
+def sync_models_file(profile, models_path=None):
+    import yaml
+    path = Path(models_path or os.environ.get("CUSTOMER_MODELS_FILE", "/config/models.yaml"))
+    if not path.is_file():
+        return False
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    marker = Path(profile) / ".models-yaml-applied.sha256"
+    doc = yaml.safe_load(raw.decode("utf-8"))
+    if doc is None:
+        doc = {}
+    if not isinstance(doc, dict):
+        raise ValueError("models.yaml: top-level YAML value must be a mapping")
+    providers = _normalize_models_yaml_providers(doc.get("providers") or [])
+    if not providers and not doc.get("clear_when_empty"):
+        return False
+    if marker.is_file() and marker.read_text().strip() == digest and not doc.get("force_apply"):
+        return False
+    mode = str(doc.get("mode") or "replace").strip().lower()
+    if mode not in {"replace", "merge"}:
+        raise ValueError("models.yaml: 'mode' must be 'replace' or 'merge'")
+    with HTTP.open(_settings_request(), timeout=30) as response:
+        current = json.load(response)
+    if not providers:
+        payload = {
+            "revision": current["revision"],
+            "providers": [],
+            "orchestrator_provider": None,
+            "orchestrator_model": None,
+            "web_search_provider": str(doc.get("web_search_provider") or ""),
+            "reasoning_effort": "",
+            "fast_mode": False,
+            "visual_tool": {},
+            "delegate_agent": {},
+            "plugin_models": {},
+        }
+    else:
+        configured = []
+        for row in providers:
+            item = {k: v for k, v in row.items() if k != "_key_omitted"}
+            if row.get("_key_omitted") and mode == "replace":
+                item["clear_api_key"] = True
+            configured.append(item)
+        if mode == "merge":
+            by_id = {}
+            for existing in current.get("providers") or []:
+                item = {
+                    "id": existing["id"],
+                    "url": existing["url"],
+                    "api_type": existing.get("api_type") or "openai-completions",
+                    "models": list(existing.get("models") or []),
+                }
+                if existing.get("display_name"):
+                    item["display_name"] = existing["display_name"]
+                by_id[existing["id"]] = item
+            for item in configured:
+                by_id[item["id"]] = item
+            merged_providers = list(by_id.values())
+        else:
+            merged_providers = configured
+        default_provider = str(doc.get("default_provider") or doc.get("orchestrator_provider") or "").strip()
+        default_model = str(doc.get("default_model") or doc.get("orchestrator_model") or "").strip()
+        if not default_provider and not default_model:
+            if mode == "merge" and current.get("orchestrator_provider") and current.get("orchestrator_model"):
+                default_provider = current["orchestrator_provider"]
+                default_model = current["orchestrator_model"]
+            else:
+                default_provider = configured[0]["id"]
+                default_model = configured[0]["models"][0]
+        elif not default_provider or not default_model:
+            raise ValueError("models.yaml: specify both default_provider and default_model")
+        payload = {
+            "revision": current["revision"],
+            "providers": merged_providers,
+            "orchestrator_provider": default_provider,
+            "orchestrator_model": default_model,
+        }
+        if "web_search_provider" in doc:
+            payload["web_search_provider"] = "" if doc["web_search_provider"] is None else str(doc["web_search_provider"]).strip()
+        elif mode == "replace":
+            payload["web_search_provider"] = ""
+        if "reasoning_effort" in doc:
+            payload["reasoning_effort"] = "" if doc["reasoning_effort"] is None else str(doc["reasoning_effort"]).strip()
+        elif mode == "replace":
+            payload["reasoning_effort"] = ""
+        if "fast_mode" in doc:
+            payload["fast_mode"] = bool(doc["fast_mode"])
+        elif mode == "replace":
+            payload["fast_mode"] = False
+        if "visual_tool" in doc:
+            payload["visual_tool"] = doc["visual_tool"] or {}
+        elif mode == "replace":
+            payload["visual_tool"] = {}
+        if "delegate_agent" in doc:
+            payload["delegate_agent"] = doc["delegate_agent"] or {}
+        elif mode == "replace":
+            payload["delegate_agent"] = {}
+        if "plugin_models" in doc:
+            payload["plugin_models"] = doc["plugin_models"] or {}
+        elif "ppt_models" in doc:
+            refs = _parse_ppt_models(doc.get("ppt_models"))
+            payload["plugin_models"] = {"ppt-master": refs} if refs else {}
+        elif mode == "replace":
+            payload["plugin_models"] = {}
+    try:
+        with HTTP.open(_settings_request(payload), timeout=30) as response:
+            saved = json.load(response)
+    except urllib.error.HTTPError as error:
+        body = error.read().decode(errors="replace")[:500]
+        raise RuntimeError(f"Failed to apply models.yaml (HTTP {error.code}): {body}") from error
+    temporary = marker.with_name(marker.name + ".tmp")
+    temporary.write_text(digest + "\n")
+    temporary.chmod(0o600)
+    temporary.replace(marker)
+    if RUNTIME_LOG is not None:
+        RUNTIME_LOG.write(
+            "supervisor",
+            "models_yaml_applied",
+            mode=mode,
+            provider_count=len(saved.get("providers") or []),
+            orchestrator_provider=saved.get("orchestrator_provider"),
+            orchestrator_model=saved.get("orchestrator_model"),
+        )
+    return True
 
 
 def wait_ready(url, processes, timeout=180):
@@ -212,6 +427,7 @@ def main():
         start([str(APP / "bin/quickagent")], "agent", STATE / "workspace")
         wait_ready("http://127.0.0.1:3000/health", children)
         wait_ready("http://127.0.0.1:3001/agent/", children)
+        sync_models_file(STATE / "agent-config")
         start([str(APP / "bin/customer-gateway")], "gateway")
         wait_ready(gateway_request(), children)
         deadline = time.monotonic() + 60

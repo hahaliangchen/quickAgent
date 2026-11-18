@@ -19,6 +19,14 @@ def copy_tree(source, destination):
         ".git", "__pycache__", "*.pyc", ".env", ".env.*", "credentials*.json", "credentials*.yaml", "*.map", "*.log", "*.sql", "node_modules"))
 
 
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def verify_elf(path):
     header = subprocess.check_output(["readelf", "-h", str(path)], text=True)
     if "AArch64" not in header:
@@ -111,8 +119,9 @@ def main():
     output=args.output.resolve()
     output.mkdir(parents=True,exist_ok=True)
     (output/"manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+"\n")
-    for name in ["compose.yaml","deploy.sh","collect-diagnostics.sh","diagnostics.py","customer_logging.py"]:
+    for name in ["compose.yaml","deploy.sh","collect-diagnostics.sh","diagnostics.py","customer_logging.py","models.yaml","models.example.yaml"]:
         shutil.copy2(HERE/name,output/name)
+    (output/"models.yaml").chmod(0o600)
     (output/"deploy.sh").chmod(0o755)
     (output/"collect-diagnostics.sh").chmod(0o755)
     (output/"README-部署.txt").write_text(
@@ -123,12 +132,16 @@ def main():
         "全部应用来自本次最新工作区快照；各项目分支、提交及快照校验值见 manifest.json。\n\n"
         "部署：\n1. 解压本目录后运行 ./deploy.sh load，校验文件并加载离线镜像。\n"
         "2. 运行 ./deploy.sh init。首次在空数据库初始化，生成本机随机密码和 JWT 密钥。\n"
-        "3. 本包不预置任何模型、提供商或密钥；启动后由客户在设置页自行配置。\n"
+        "3. 本包不预置任何模型、提供商或密钥；启动后可在宿主机 models.yaml（推荐，可反复复用）或在设置页配置。\n"
         "4. 运行 ./deploy.sh up；访问 http://服务器地址:8899。\n"
         "5. 用户名 admin；初始密码为本机 .env 的 CUSTOMER_ADMIN_PASSWORD，登录后可修改。\n\n"
-        "客户入口只保留创建 PPT、历史会话；Agent 和数据库的初始提供商、模型目录全部为空。\n"
-        "自部署模型：在设置页填写 OpenAI 兼容地址（通常以 /v1 结尾）及服务实际返回的模型 ID，免鉴权时 API 密钥留空。\n"
-        "选择它作为主代理模型后保存；联网搜索默认未启用，缺少搜索密钥不会阻止本地模型设置和调用。\n"
+        "模型配置文件（models.yaml）：\n"
+        "- 默认 models.yaml 为空（providers: []），不会覆盖前端设置页的已有配置。\n"
+        "- 按 models.example.yaml 的格式编辑 models.yaml 后执行 ./deploy.sh up 或 docker compose restart app，系统会自动同步模型与默认路由。\n"
+        "- 免鉴权自部署模型将 api_key 留空（\"\"）即可；联网搜索默认未启用，缺少搜索密钥不会阻止本地模型设置和调用。\n"
+        "- 将 models.yaml 备份或复制到新部署目录即可反复复用同一套模型配置。\n\n"
+        "客户菜单保留：PPT管理（创建PPT、历史会话）、WORD管理（文档管理、插件管理）、模型中心（模型接入）；Agent 和数据库的初始提供商、模型目录全部为空。\n"
+        "如需启用文档管理的 OnlyOffice 在线编辑，请在 .env 中配置 ONLYOFFICE_SERVER_ADDRESS、ONLYOFFICE_DOC_SERVER_HOST 与 ONLYOFFICE_JWT_SECRET（留空时回退 JWT_SIGNING_KEY），再执行 ./deploy.sh up。\n"
         "PPT 插件在 Agent 启动时自动注册，库名为 ppt；健康检查会确认注册成功，无需先打开页面手动连接。\n"
         "升级会一次性移除旧版出厂的 DeepSeek 专用 PPT 允许列表及视觉路由；客户自行定制的列表和路由保留。\n"
         "QuickAgent 页面：http://服务器地址:3001/agent/；设置页：/agent/settings。\n"
@@ -143,10 +156,10 @@ def main():
         "诊断导出会提取旧版已有会话的错误记录，不包含 .env、模型凭据、整库、用户文档或完整对话。\n"
         "数据保存在 state/、Compose 的 mysql-data 与 redis-data volume；升级前保留并备份这些数据及 .env。\n"
         "初始化器拒绝在已有表的数据库执行首次初始化，不导入开发机数据库或业务数据。\n"
-        "离线镜像可在无外网环境加载与启动；需要鉴权的模型在设置页填写其有效密钥。\n"
+        "离线镜像可在无外网环境加载与启动；需要鉴权的模型在 models.yaml 或设置页填写其有效密钥。\n"
         "实际 ARM64 服务器保持 QUICKAGENT_ARM64_EMULATED=0；完整的 x86 QEMU 验证使用源码中的 smoke.py（含一次性 Redis 探针测试覆盖）。\n"
     )
-    tags=["quickagent-customer-ppt-arm64:20261113-fixed-flow","quickagent-customer-ppt-renderer-arm64:20261113-fixed-flow"]
+    tags=["quickagent-customer-ppt-arm64:20261118","quickagent-customer-ppt-renderer-arm64:20261118"]
     for dockerfile,tag in zip(["app.Dockerfile","renderer.Dockerfile"],tags):
         subprocess.run(["docker","build","--platform","linux/arm64","-t",tag,"-f",str(stage/dockerfile),str(stage)],check=True)
     for source_tag,target in [("mysql:8.0","quickagent-customer-mysql-arm64:8.0"),("redis:7-alpine","quickagent-customer-redis-arm64:7")]:
@@ -160,6 +173,10 @@ def main():
     (output/"manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+"\n")
     if args.export:
         subprocess.run(["docker","save","--platform","linux/arm64","-o",str(output/"images.tar"),*tags],check=True)
+        (output/"SHA256SUMS").write_text("".join(
+            f"{hashlib.sha256(p.read_bytes()).hexdigest() if p.name != 'images.tar' else _file_sha256(p)}  {p.relative_to(output).as_posix()}\n"
+            for p in sorted(output.rglob("*")) if p.is_file() and p.name != "SHA256SUMS"
+        ))
     print("Deployment folder: "+str(output),flush=True)
 
 

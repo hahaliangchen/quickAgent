@@ -1,0 +1,5 @@
+# 客户模型配置文件（挂载于宿主机 ./models.yaml）
+# 修改保存后执行 ./deploy.sh up 或 docker compose restart app 自动生效。
+# 默认留空（providers: []）时，启动不会覆盖您在 Agent 前端设置页中的配置。
+# 完整配置项与示例请参考同目录 models.example.yaml。
+providers: []

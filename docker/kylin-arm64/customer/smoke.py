@@ -37,6 +37,7 @@ def main():
         (work/'.env').write_text(''.join(f'{k}={v}\n' for k,v in values.items()))
         (work/'.env').chmod(0o600)
         shutil.copy2(HERE/'compose.yaml',work/'compose.yaml')
+        shutil.copy2(HERE/'models.yaml',work/'models.yaml')
     values = dict(line.split('=',1) for line in (work/'.env').read_text().splitlines() if '=' in line)
     compose = ['docker','compose','-f','compose.yaml']
     if values.get('QUICKAGENT_ARM64_EMULATED')=='1':
@@ -83,7 +84,8 @@ def main():
         assert login['code']==0, login.get('msg')
         token=login['data']['token']
         menus=post('/prod-api/menu/getMenu',{},token)['data']['menus']
-        assert [m['path'] for m in menus]==['create-ppt','ppt-history']
+        assert [m['name'] for m in menus]==['pptManageRoot','wordManage','modelCenter'], menus
+        assert [c['path'] for m in menus for c in (m.get('children') or [])]==['create-ppt','ppt-history','document','onlyoffice-plugin','modelAccess'], menus
         connection=post('/ppt-agent/agent/plugins/ppt-master/connect',{},token)
         handle=connection['connection_handle']
         models=post('/ppt-agent/agent/plugins/ppt-master/session',{'method':'models','connection_handle':handle},token)
@@ -160,7 +162,7 @@ def main():
         for filename in ['customer-render.png','customer-render.pptx','customer-create-ppt.png','customer-ppt-history.png','customer-quickagent-settings.png','customer-quickagent-empty.png','customer-ppt-plugin-registered.png']:
             run(['docker','cp',renderer_id+':/tmp/'+filename,str(evidence/filename)])
         images={}
-        for image in ['quickagent-customer-ppt-arm64:20261113-fixed-flow','quickagent-customer-ppt-renderer-arm64:20261113-fixed-flow','quickagent-customer-mysql-arm64:8.0','quickagent-customer-redis-arm64:7']:
+        for image in ['quickagent-customer-ppt-arm64:20261118','quickagent-customer-ppt-renderer-arm64:20261118','quickagent-customer-mysql-arm64:8.0','quickagent-customer-redis-arm64:7']:
             item=json.loads(run(['docker','image','inspect','--platform','linux/arm64',image],capture=True))[0]
             assert item['Architecture']=='arm64'
             images[image]=item['Id']
