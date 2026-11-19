@@ -13,12 +13,16 @@
 
 #![allow(dead_code)]
 
-use crate::agent_program::{self, Runtime, State, runtime::ActionKind};
+use crate::agent_program::{
+    self, Runtime, State,
+    runtime::{ActionKind, ConcurrentState},
+};
 use crate::agent_service::{self, AgentServiceState};
 use anyhow::{Result, bail};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
@@ -30,8 +34,11 @@ mod managed_files;
 mod model_call;
 pub(crate) mod modules;
 mod task_frames;
+mod virtual_frame;
 #[cfg(test)]
 mod tests_step1;
+#[cfg(test)]
+mod tests_step2;
 
 #[cfg(test)]
 use host_tools::{business_tool, business_tool_inner};
@@ -360,7 +367,8 @@ async fn execute_js_step(
     let pre_fps = runtime.user_binding_fingerprints();
     let log_start = runtime.logs_len();
 
-    if let Err(compile_err) = runtime.prepare_segment(&source, libs.clone(), true) {
+    // Main turn allows declaring top-level `@virtual` functions (`is_virtual_leaf = false`).
+    if let Err(compile_err) = runtime.prepare_segment(&source, libs.clone(), false) {
         let msg = format!("{compile_err:#}");
         append_event(
             s,
@@ -383,7 +391,7 @@ async fn execute_js_step(
     }
 
     let node = format!("step_{}_{}", s.turn, step);
-    let (final_state, external_tool_calls) =
+    let (final_state, external_tool_calls, virtual_receipts) =
         drive_vm_segment(s, &mut runtime, libs, &node, step, allow_shell).await?;
     let logs = runtime.logs_since(log_start);
 
@@ -395,23 +403,35 @@ async fn execute_js_step(
                     Value::Null => String::new(),
                     other => serde_json::to_string_pretty(&other).unwrap_or_default(),
                 };
-                w.context_doc
-                    .record_completed_segment(source, &runtime, &pre_fps, &logs, None);
+                w.context_doc.record_completed_segment(
+                    source,
+                    &runtime,
+                    &pre_fps,
+                    &logs,
+                    None,
+                    &virtual_receipts,
+                );
                 finish_turn_with_reply(s, w, step, answer).await?;
                 return Ok(true);
             }
             if let Some(reply_md) = pending_reply {
                 if external_tool_calls == 0 {
                     // Pure in-memory JS projection + final reply: pin `// =>` and finish!
-                    w.context_doc
-                        .record_completed_segment(source, &runtime, &pre_fps, &logs, None);
+                    w.context_doc.record_completed_segment(
+                        source,
+                        &runtime,
+                        &pre_fps,
+                        &logs,
+                        None,
+                        &virtual_receipts,
+                    );
                     finish_turn_with_reply(s, w, step, reply_md).await?;
                     return Ok(true);
                 }
-                // First-Trap Truncation: external host tools ran, so the trailing
+                // First-Trap Truncation: external host tools/virtual calls ran, so the trailing
                 // `return <<<` was written before observing real results — discard it!
                 let note = format!(
-                    "// [Host note: executed your JS above ({external_tool_calls} host tool call(s)) and discarded the premature `return <<<` so you can inspect the real result below before replying.]"
+                    "// [Host note: executed your JS above ({external_tool_calls} host/virtual call(s)) and discarded the premature `return <<<` so you can inspect the real result below before replying.]"
                 );
                 w.context_doc.record_completed_segment(
                     source,
@@ -419,6 +439,7 @@ async fn execute_js_step(
                     &pre_fps,
                     &logs,
                     Some(note),
+                    &virtual_receipts,
                 );
                 w.program = Some(runtime);
                 save_window(s, w).await?;
@@ -426,11 +447,17 @@ async fn execute_js_step(
             }
             let note = (runtime.segment_returned_explicitly() && external_tool_calls > 0).then(|| {
                 format!(
-                    "// [Host note: executed your JS above ({external_tool_calls} host tool call(s)); inspect the real output below before returning your final answer.]"
+                    "// [Host note: executed your JS above ({external_tool_calls} host/virtual call(s)); inspect the real output below before returning your final answer.]"
                 )
             });
-            w.context_doc
-                .record_completed_segment(source, &runtime, &pre_fps, &logs, note);
+            w.context_doc.record_completed_segment(
+                source,
+                &runtime,
+                &pre_fps,
+                &logs,
+                note,
+                &virtual_receipts,
+            );
             w.program = Some(runtime);
             save_window(s, w).await?;
             Ok(false)
@@ -445,7 +472,7 @@ async fn execute_js_step(
         State::Action(_) | State::Waiting => {
             w.program = Some(runtime);
             save_window(s, w).await?;
-            bail!("VM suspended in an unsupported state in Step 1");
+            bail!("VM suspended in an unexpected waiting state");
         }
     }
 }
@@ -478,8 +505,9 @@ async fn finish_turn_with_reply(
 }
 
 /// Execute one prepared JS segment in `runtime` until it returns or fails,
-/// proxying every host tool trap directly into Rust `host_tools`.
-/// Returns `(terminal_state, external_tool_calls_count)`.
+/// proxying host tool traps into Rust `host_tools` and spawning isolated
+/// `@virtual` calls (including concurrent `Promise.all` fan-out via `JoinSet`).
+/// Returns `(terminal_state, external_call_count, virtual_receipt_lines)`.
 async fn drive_vm_segment(
     s: &Session<'_>,
     runtime: &mut Runtime,
@@ -487,61 +515,183 @@ async fn drive_vm_segment(
     node: &str,
     step: usize,
     allow_shell: bool,
-) -> Result<(State, usize)> {
+) -> Result<(State, usize, Vec<String>)> {
     let mut external_tool_calls = 0usize;
+    let mut virtual_receipts = Vec::new();
+    let mut inflight_virtual: tokio::task::JoinSet<
+        Result<(String, Value, bool, virtual_frame::VirtualCallReceipt)>,
+    > = tokio::task::JoinSet::new();
+
     loop {
         if s.cancel.is_cancelled() {
+            inflight_virtual.abort_all();
             bail!("cancelled");
         }
-        match runtime.next() {
-            State::Action(action) => match action.kind {
-                ActionKind::Tool { name, args } => {
-                    external_tool_calls += 1;
-                    let (result, is_error) =
-                        proxy_rust_tool(s, libs, node, step, &action.id, &name, args, allow_shell)
+        match runtime.next_concurrent() {
+            ConcurrentState::Actions(actions) => {
+                for action in actions {
+                    let scope_vars = action.scope_variables().cloned();
+                    match action.kind {
+                        ActionKind::Tool { name, args } => {
+                            external_tool_calls += 1;
+                            let (result, is_error) = proxy_rust_tool(
+                                s,
+                                libs,
+                                node,
+                                step,
+                                &action.id,
+                                &name,
+                                args,
+                                allow_shell,
+                            )
                             .await?;
-                    runtime.resume(result, is_error)?;
-                }
-                ActionKind::ParallelReads { operations } => {
-                    external_tool_calls += operations.len();
-                    let mut results = Vec::with_capacity(operations.len());
-                    let mut failed = false;
-                    for (idx, (name, args)) in operations.into_iter().enumerate() {
-                        let call_id = format!("{}-p{idx}", action.id);
-                        let (res, is_err) = proxy_rust_tool(
-                            s,
-                            libs,
-                            node,
-                            step,
-                            &call_id,
-                            &name,
-                            args,
-                            false,
-                        )
-                        .await?;
-                        if is_err {
-                            failed = true;
-                            results.push(res);
-                            break;
+                            runtime.resume_action(&action.id, result, is_error)?;
                         }
-                        results.push(res);
-                    }
-                    if failed {
-                        runtime.resume(results.pop().unwrap_or(Value::Null), true)?;
-                    } else {
-                        runtime.resume(Value::Array(results), false)?;
+                        ActionKind::ParallelReads { operations } => {
+                            external_tool_calls += operations.len();
+                            let mut items = Vec::with_capacity(operations.len());
+                            for (idx, (name, args)) in operations.into_iter().enumerate() {
+                                let call_id = format!("{}-p{idx}", action.id);
+                                let (res, is_err) = proxy_rust_tool(
+                                    s,
+                                    libs,
+                                    node,
+                                    step,
+                                    &call_id,
+                                    &name,
+                                    args,
+                                    false,
+                                )
+                                .await?;
+                                items.push(json!({"failed": is_err, "value": res}));
+                            }
+                            runtime.resume_action(&action.id, Value::Array(items), false)?;
+                        }
+                        ActionKind::Call {
+                            name,
+                            args,
+                            captured,
+                        } => {
+                            external_tool_calls += 1;
+                            let spec = build_virtual_spec(
+                                runtime,
+                                &action.id,
+                                &name,
+                                args,
+                                captured,
+                                scope_vars.as_ref(),
+                            );
+                            let action_id = spec.action_id.clone();
+                            let state_owned = s.state.clone();
+                            let task_owned = s.task.to_owned();
+                            let model_owned = s.model.to_owned();
+                            let cancel_owned = s.cancel.clone();
+                            let plugin_owned = s.plugin.clone();
+                            let scope_owned = s.scope.clone();
+                            let libs_owned = libs.clone();
+                            let turn = s.turn;
+                            let ban_execution = s.ban_execution;
+                            let input_budget = s.input_budget;
+
+                            inflight_virtual.spawn(async move {
+                                let parent_s = Session {
+                                    agent_id: None,
+                                    task_node_id: None,
+                                    plugin: plugin_owned,
+                                    state: &state_owned,
+                                    task: &task_owned,
+                                    model: &model_owned,
+                                    turn,
+                                    cancel: &cancel_owned,
+                                    ban_execution,
+                                    scope: scope_owned,
+                                    parent: None,
+                                    input_budget,
+                                };
+                                let (val, is_err, receipt) = virtual_frame::execute_virtual_call(
+                                    &parent_s,
+                                    &libs_owned,
+                                    spec,
+                                    step,
+                                )
+                                .await?;
+                                Ok((action_id, val, is_err, receipt))
+                            });
+                        }
+                        other => {
+                            let err = json!({
+                                "code": "UNSUPPORTED_ACTION",
+                                "message": format!("Action {:?} is not yet wired", other),
+                            });
+                            runtime.resume_action(&action.id, err, true)?;
+                        }
                     }
                 }
-                other => {
-                    let err = json!({
-                        "code": "UNSUPPORTED_ACTION_STEP1",
-                        "message": format!("Action {:?} will be wired in upcoming steps", other),
-                    });
-                    runtime.resume(err, true)?;
-                }
-            },
-            terminal => return Ok((terminal, external_tool_calls)),
+            }
+            ConcurrentState::Waiting => {
+                let Some(joined) = inflight_virtual.join_next().await else {
+                    return Ok((State::Waiting, external_tool_calls, virtual_receipts));
+                };
+                let (action_id, value, is_error, receipt) = joined??;
+                virtual_receipts.push(receipt.format_line());
+                runtime.resume_action(&action_id, value, is_error)?;
+            }
+            ConcurrentState::Returned(val) => {
+                inflight_virtual.abort_all();
+                return Ok((State::Returned(val), external_tool_calls, virtual_receipts));
+            }
+            ConcurrentState::Failed(err) => {
+                inflight_virtual.abort_all();
+                return Ok((State::Failed(err), external_tool_calls, virtual_receipts));
+            }
         }
+    }
+}
+
+fn build_virtual_spec(
+    runtime: &Runtime,
+    action_id: &str,
+    fn_name: &str,
+    args: Vec<Value>,
+    mut captured: BTreeMap<String, Value>,
+    scope_vars: Option<&BTreeMap<String, Value>>,
+) -> virtual_frame::VirtualCallSpec {
+    let fn_def = runtime.program.functions.get(fn_name);
+    // Only merge `scope_vars` for partial `@virtual` functions that executed local
+    // prefix JS statements inside their own body before suspending; for ordinary
+    // `@virtual` declarations, `captured` already holds ONLY explicit `@uses` bindings.
+    if fn_def.is_some_and(|f| f.partial_virtual)
+        && let Some(vars) = scope_vars
+    {
+        for (k, v) in vars {
+            captured.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    let param_names: Vec<String> = fn_def
+        .map(|f| f.params.clone())
+        .unwrap_or_else(|| (0..args.len()).map(|i| format!("arg{i}")).collect());
+    let params: Vec<(String, Value)> = param_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), args.get(i).cloned().unwrap_or(Value::Null)))
+        .collect();
+    let async_prefix = if fn_def.is_some_and(|f| f.is_async) {
+        "async "
+    } else {
+        ""
+    };
+    let signature = format!("{async_prefix}function {fn_name}({})", param_names.join(", "));
+    let contract = fn_def
+        .map(|f| f.description.trim().to_owned())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| format!("Complete `{fn_name}` and return a JSON object with a concise `summary` field."));
+    virtual_frame::VirtualCallSpec {
+        action_id: action_id.to_owned(),
+        fn_name: fn_name.to_owned(),
+        signature,
+        contract,
+        params,
+        captures: captured,
     }
 }
 

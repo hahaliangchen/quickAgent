@@ -42,6 +42,10 @@ pub struct ContextDocument {
 pub struct TurnDoc {
     pub turn: usize,
     pub user_text: String,
+    /// Optional header replacing `// === USER GOAL === ... async function executeTask() {`
+    /// when this document represents an isolated `@virtual` child frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_header: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<TraceSegment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,8 +85,68 @@ impl ContextDocument {
         self.turns.push(TurnDoc {
             turn,
             user_text: user_text.into(),
+            virtual_header: None,
             segments: Vec::new(),
             ephemeral_peek: None,
+            assistant_reply: None,
+        });
+    }
+
+    /// Initialize an isolated single-turn document for a `@virtual` child frame.
+    /// Small params/captures print inline; large ones (> 2KB) expand in Step 1's
+    /// `EPHEMERAL_PEEK` while keeping a compact signature in the function header.
+    pub fn begin_virtual_frame(
+        &mut self,
+        signature: &str,
+        contract: &str,
+        params: &[(String, Value)],
+        captures: &BTreeMap<String, Value>,
+    ) {
+        self.turns.clear();
+        let mut header = String::from("// === @virtual CONTRACT ===\n");
+        for line in contract.lines() {
+            header.push_str("// ");
+            header.push_str(line);
+            header.push('\n');
+        }
+        header.push('\n');
+        header.push_str(signature);
+        header.push_str(" {");
+
+        let mut peek_sections = Vec::new();
+        if !params.is_empty() {
+            header.push_str("\n  // bound params:");
+            for (name, val) in params {
+                let (receipt, peek) = format_binding_three_tier(name, val);
+                for line in receipt.lines() {
+                    header.push_str("\n  ");
+                    header.push_str(line);
+                }
+                if let Some(p) = peek {
+                    peek_sections.push(p);
+                }
+            }
+        }
+        if !captures.is_empty() {
+            header.push_str("\n  // captured (@uses):");
+            for (name, val) in captures {
+                let (receipt, peek) = format_binding_three_tier(name, val);
+                for line in receipt.lines() {
+                    header.push_str("\n  ");
+                    header.push_str(line);
+                }
+                if let Some(p) = peek {
+                    peek_sections.push(p);
+                }
+            }
+        }
+
+        self.turns.push(TurnDoc {
+            turn: 1,
+            user_text: contract.to_owned(),
+            virtual_header: Some(header),
+            segments: Vec::new(),
+            ephemeral_peek: build_ephemeral_peek(peek_sections, None),
             assistant_reply: None,
         });
     }
@@ -108,9 +172,15 @@ impl ContextDocument {
         pre_fingerprints: &BTreeMap<String, String>,
         console_logs: &[String],
         extra_note: Option<String>,
+        virtual_receipts: &[String],
     ) {
-        let (receipts, peek_sections) =
+        let (mut receipts, peek_sections) =
             format_segment_feedback(runtime, pre_fingerprints, console_logs);
+        if !virtual_receipts.is_empty() {
+            let mut combined = virtual_receipts.to_vec();
+            combined.extend(receipts);
+            receipts = combined;
+        }
         if let Some(turn) = self.active_turn_mut() {
             turn.segments.push(TraceSegment {
                 source,
@@ -220,10 +290,13 @@ impl ContextDocument {
 }
 
 fn render_stable_user(turn: &TurnDoc) -> String {
-    let mut out = format!(
-        "// === USER GOAL ===\n{}\n\n// === EXECUTION TRACE (Append-Only) ===\nasync function executeTask() {{",
-        turn.user_text
-    );
+    let mut out = match &turn.virtual_header {
+        Some(vh) => vh.clone(),
+        None => format!(
+            "// === USER GOAL ===\n{}\n\n// === EXECUTION TRACE (Append-Only) ===\nasync function executeTask() {{",
+            turn.user_text
+        ),
+    };
     for seg in &turn.segments {
         out.push('\n');
         for line in seg.source.lines() {

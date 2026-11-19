@@ -34,6 +34,10 @@ Each response MUST be **exactly ONE** of the two modes below — NEVER both in t
 - Everything after `return <<<` is delivered verbatim to the user and NEVER executed as JS (so ```` ```js ```` / ```` ```rust ```` example blocks need zero escaping).
 - NEVER write executable JS statements before or after `return <<<` in the same response!
 
+## Ordinary JS Functions vs Isolated `@virtual` Functions
+- Use ordinary JS functions/loops (`function foo(...) { ... }`) for deterministic multi-file reads, filtering, or batch computation (0 extra LLM calls).
+- Declare a single-layer `/** @virtual <contract; ask for a concise summary field> */ async function inspect(item) {}` (optionally with `@uses varName` in JSDoc to pass outer bindings) and call `await inspect(x)` or `await Promise.all(items.map(inspect))` when isolated semantic judgment or parallel fan-out is needed. Each `@virtual` call runs in its own isolated non-shell stack frame, discards its intermediate context on `return`, and leaves a factual `[virtual ...]` receipt + return value in your `// =>` trace.
+
 ## Per-Turn Clean VM
 When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.
 
@@ -57,6 +61,20 @@ Found the vulnerability in `src/auth.rs` lines 61–75...
 ```
 "#;
 
+const VIRTUAL_LEAF_SYSTEM_PROMPT: &str = r#"You are executing inside an isolated single-layer `@virtual` JavaScript function frame.
+Complete ONLY this function's contract using its bound parameters, `@uses` captures, and allowed non-shell libraries in the `.d.ts` below.
+There are ZERO JSON tool schemas.
+
+## STRICT RULES
+1. **Emit ONLY raw JavaScript statements** to continue the function body (NO XML tags, NO Markdown prose outside `//` comments, NO `return <<<`).
+2. **Bound parameters and `@uses` captures are already live JS variables** — use them directly by identifier name.
+3. **Host libraries (`io`, `git`, `host`)** proxy synchronously into Rust. Shell (`process.*`) and nested `@virtual` declarations are strictly forbidden.
+4. **Finish by executing native JS `return <json_value>;`**:
+   - Always include a short `summary` field in your returned object (e.g. `return { ok: true, summary: "audited src/a.rs: no issues" };`) so the caller knows exactly what you checked or changed, even for file-editing tasks.
+   - If the contract cannot be satisfied, execute `return { "$task_error": "concrete reason" };`.
+5. **No native tool channel**: emit the JS statements for this step and stop generating immediately; the host executes them and returns real `// =>` / `EPHEMERAL_PEEK` output on the next step.
+"#;
+
 pub(super) struct ModelReply {
     pub content: String,
     pub finish_reason: Option<String>,
@@ -69,12 +87,21 @@ pub(super) fn build_request_body(
     w: &Window,
     libs: &Libraries,
 ) -> Value {
-    let mut system_text = String::from(V2_SYSTEM_PROMPT);
+    build_request_body_for_doc(s, &w.context_doc, V2_SYSTEM_PROMPT, libs)
+}
+
+pub(super) fn build_request_body_for_doc(
+    s: &Session<'_>,
+    doc: &super::context_doc::ContextDocument,
+    base_prompt: &str,
+    libs: &Libraries,
+) -> Value {
+    let mut system_text = String::from(base_prompt);
     system_text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
     system_text.push_str(&declarations::static_library_header(libs));
 
     let mut messages = vec![json!({"role": "system", "content": system_text})];
-    messages.extend(w.context_doc.render_conversation_messages());
+    messages.extend(doc.render_conversation_messages());
 
     let mut body = json!({
         "model": s.model,
@@ -130,11 +157,35 @@ pub(super) async fn call_model(
 ) -> Result<ModelReply> {
     let body = build_request_body(s, w, libs);
     let node = format!("step_{}_{}", s.turn, step);
+    send_model_request(s, w.task_node_id.as_deref(), body, &node, step, "agent").await
+}
+
+pub(super) async fn call_virtual_model(
+    s: &Session<'_>,
+    doc: &super::context_doc::ContextDocument,
+    leaf_libs: &Libraries,
+    parent_step: usize,
+    sub_step: usize,
+    action_id: &str,
+) -> Result<ModelReply> {
+    let body = build_request_body_for_doc(s, doc, VIRTUAL_LEAF_SYSTEM_PROMPT, leaf_libs);
+    let node = format!("virtual_{action_id}_{parent_step}_{sub_step}");
+    send_model_request(s, s.task_node_id.as_deref(), body, &node, sub_step, "virtual").await
+}
+
+async fn send_model_request(
+    s: &Session<'_>,
+    frame: Option<&str>,
+    body: Value,
+    node: &str,
+    step: usize,
+    actor: &str,
+) -> Result<ModelReply> {
     let trace = crate::request_context::record(
         s.state.workspace.root(),
         s.task,
         json!({
-            "actor": "agent",
+            "actor": actor,
             "stage": "execution",
             "turn": s.turn,
             "step": step,
@@ -157,7 +208,7 @@ pub(super) async fn call_model(
                 "task_id": s.task,
                 "turn": s.turn,
                 "step": step,
-                "actor": "agent",
+                "actor": actor,
                 "provider": s.state.provider_name,
                 "model": s.model,
                 "attempt": attempt,
@@ -172,7 +223,7 @@ pub(super) async fn call_model(
         diagnostics.sending();
         let attempt_res = async {
             let response = crate::anthropic_messages::send(s.state, s.task, &s.scope, &body)
-                .header("x-client-request-id", node.as_str())
+                .header("x-client-request-id", node)
                 .header(
                     "x-agent-affinity",
                     crate::model_transport::affinity(s.task, &s.scope),
@@ -187,7 +238,7 @@ pub(super) async fn call_model(
                 s.task,
                 s.turn,
                 step,
-                w.task_node_id.as_deref(),
+                frame,
                 s.cancel,
                 Some(&diagnostics),
             )
