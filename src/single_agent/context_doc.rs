@@ -316,6 +316,32 @@ impl ContextDocument {
         }
     }
 
+    /// Record a segment that paused cleanly to ask the user a clarifying question (`host.ask_user`).
+    pub fn record_paused_for_user(
+        &mut self,
+        source: String,
+        runtime: &Runtime,
+        pre_fingerprints: &BTreeMap<String, String>,
+        console_logs: &[String],
+        hints: &SegmentContextHints,
+    ) {
+        let (mut receipts, _) =
+            format_segment_feedback(runtime, pre_fingerprints, console_logs, hints);
+        if !hints.virtual_receipts.is_empty() {
+            let mut combined = hints.virtual_receipts.clone();
+            combined.extend(receipts);
+            receipts = combined;
+        }
+        if let Some(turn) = self.active_turn_mut() {
+            turn.segments.push(TraceSegment {
+                source,
+                inline_receipts: receipts,
+                error_note: Some("// [paused for user input via host.ask_user]".into()),
+            });
+            turn.ephemeral_peek = None;
+        }
+    }
+
     /// Seal the active turn with the final user-facing Markdown reply and strip
     /// `ephemeral_peek` completely.
     pub fn finish_turn(&mut self, assistant_markdown: impl Into<String>) {
@@ -323,6 +349,18 @@ impl ContextDocument {
             turn.ephemeral_peek = None;
             turn.assistant_reply = Some(assistant_markdown.into());
         }
+    }
+
+    /// Render the clean executed JS trace of `turn` (for durable `.js` archiving in `host_folder`).
+    /// Returns `None` if no JS segments were executed during that turn.
+    pub fn render_turn_js(&self, turn: usize) -> Option<String> {
+        let doc = self.turns.iter().find(|t| t.turn == turn)?;
+        if doc.segments.is_empty() {
+            return None;
+        }
+        let mut out = render_stable_user(doc);
+        out.push_str("\n}\n");
+        Some(out)
     }
 
     /// Exact stable byte prefix of the active `user #N` message (everything
@@ -687,8 +725,13 @@ fn format_binding_three_tier(
             return (format_comment_block(&label, &add_line_numbers(content, 1)), None);
         }
         let ref_part = ref_id.map(|r| format!(" | {r}")).unwrap_or_default();
+        let asset_part = obj
+            .get("__asset_id")
+            .and_then(Value::as_str)
+            .map(|id| format!(" | asset: {id}"))
+            .unwrap_or_default();
         let sig = format!(
-            "// => {name} = [File({path:?}){ref_part} | {line_count} lines, {content_chars} chars | .slice() .grep() .outline()]"
+            "// => {name} = [File({path:?}){ref_part} | {line_count} lines, {content_chars} chars{asset_part} | .slice() .grep() .outline()]"
         );
         let h = fnv1a64(content);
         let peek = if tracker.claim_peek(ref_id, Some(h)) {
@@ -726,8 +769,13 @@ fn format_binding_three_tier(
             return (format_comment_block(&label, &combined), None);
         }
         let ref_part = ref_id.map(|r| format!(" | {r}")).unwrap_or_default();
+        let asset_part = obj
+            .get("__asset_id")
+            .and_then(Value::as_str)
+            .map(|id| format!(" | asset: {id}"))
+            .unwrap_or_default();
         let sig = format!(
-            "// => {name} = [CommandResult(exit_code={exit}){ref_part} | {lines} lines, {chars} chars | .slice() .grep() .tail()]"
+            "// => {name} = [CommandResult(exit_code={exit}){ref_part} | {lines} lines, {chars} chars{asset_part} | .slice() .grep() .tail()]"
         );
         let h = fnv1a64(&combined);
         let peek = if tracker.claim_peek(ref_id, Some(h)) {
@@ -849,8 +897,14 @@ fn format_binding_three_tier(
                 .join(", ")
         })
         .unwrap_or_else(|| "value".into());
+    let asset_part = value
+        .as_object()
+        .and_then(|o| o.get("__asset_id"))
+        .and_then(Value::as_str)
+        .map(|id| format!(" | asset: {id}"))
+        .unwrap_or_default();
     let sig = format!(
-        "// => {name} = [Object {{ {keys_summary} }} | {chars} chars]"
+        "// => {name} = [Object {{ {keys_summary} }} | {chars} chars{asset_part}]"
     );
     if tracker.container_already_covered(value) {
         return (sig, None);

@@ -306,6 +306,14 @@ async fn drive_leaf_vm(
                             }),
                             true,
                         )
+                    } else if name == "ask_user" {
+                        (
+                            json!({
+                                "code": "VIRTUAL_ASK_USER_FORBIDDEN",
+                                "error": "`host.ask_user` is forbidden inside `@virtual` frames; return `{ \"$task_error\": \"...\" }` to the caller instead."
+                            }),
+                            true,
+                        )
                     } else {
                         super::proxy_rust_tool(
                             s,
@@ -354,6 +362,20 @@ async fn drive_leaf_vm(
                         items.push(json!({"failed": is_err, "value": res}));
                     }
                     runtime.resume(Value::Array(items), false)?;
+                }
+                ActionKind::Require { library } => {
+                    let base = library.strip_suffix("/promises").unwrap_or(&library);
+                    if let Some(methods) = leaf_libs.get(base) {
+                        runtime.resume(json!({ "methods": methods }), false)?;
+                    } else {
+                        runtime.resume(
+                            json!({
+                                "code": "VIRTUAL_LIBRARY_FORBIDDEN",
+                                "error": format!("Library `{library}` is unavailable inside `@virtual` frames."),
+                            }),
+                            true,
+                        )?;
+                    }
                 }
                 ActionKind::Call { name, .. } => {
                     runtime.resume(

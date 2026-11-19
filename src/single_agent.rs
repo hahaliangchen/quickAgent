@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 mod context_doc;
 mod external_changes;
+mod flow_runtime;
 mod host_folder;
 mod host_tools;
 mod managed_files;
@@ -41,6 +42,8 @@ mod tests_step1;
 mod tests_step2;
 #[cfg(test)]
 mod tests_step3;
+#[cfg(test)]
+mod tests_step4;
 
 #[cfg(test)]
 use host_tools::{business_tool, business_tool_inner};
@@ -476,6 +479,31 @@ async fn execute_js_step(
             Ok(false)
         }
         State::Failed(err) => {
+            if agent_program::runtime::is_user_blocker(&err) {
+                let question = err["question"]
+                    .as_str()
+                    .or_else(|| err["message"].as_str())
+                    .map(str::trim)
+                    .filter(|q| !q.is_empty())
+                    .unwrap_or("需要你的确认后才能继续。")
+                    .to_owned();
+                w.context_doc
+                    .record_paused_for_user(source, &runtime, &pre_fps, &logs, &hints);
+                append_event(
+                    s,
+                    "agent/needs_user",
+                    json!({
+                        "actor": "agent",
+                        "turn": s.turn,
+                        "step": step,
+                        "question": question,
+                    }),
+                    false,
+                )
+                .await?;
+                finish_turn_with_reply(s, w, step, question).await?;
+                return Ok(true);
+            }
             w.context_doc
                 .record_failed_segment(source, &runtime, &pre_fps, &logs, &err);
             w.program = Some(runtime);
@@ -496,6 +524,15 @@ async fn finish_turn_with_reply(
     step: usize,
     markdown: String,
 ) -> Result<()> {
+    // Archive clean turn JS trace into `host_folder` (best-effort) when JS ran.
+    if let Some(turn_js) = w.context_doc.render_turn_js(s.turn) {
+        let _ = host_folder::write_program(
+            s.state.workspace.root(),
+            s.task,
+            &format!("turn-{:02}", s.turn),
+            &turn_js,
+        );
+    }
     // Strip EPHEMERAL_PEEK, pair `(user #N, assistant #N)`, and unconditionally destroy VM!
     w.context_doc.finish_turn(&markdown);
     w.program = None;
@@ -532,18 +569,25 @@ async fn drive_vm_segment(
 ) -> Result<(State, usize, context_doc::SegmentContextHints)> {
     let mut external_tool_calls = 0usize;
     let mut hints = context_doc::SegmentContextHints::default();
-    let mut inflight_virtual: tokio::task::JoinSet<
-        Result<(String, Value, bool, virtual_frame::VirtualCallReceipt)>,
+    let mut spawned_ids = std::collections::BTreeSet::<String>::new();
+    let mut inflight_jobs: tokio::task::JoinSet<
+        Result<(String, Value, bool, Option<String>)>,
     > = tokio::task::JoinSet::new();
 
     loop {
         if s.cancel.is_cancelled() {
-            inflight_virtual.abort_all();
+            inflight_jobs.abort_all();
             bail!("cancelled");
         }
         match runtime.next_concurrent() {
             ConcurrentState::Actions(actions) => {
+                let inflight_set: std::collections::BTreeSet<String> = runtime
+                    .inflight_actions()
+                    .into_iter()
+                    .map(|a| a.id)
+                    .collect();
                 for action in actions {
+                    let is_async_inflight = inflight_set.contains(&action.id);
                     let scope_vars = action.scope_variables().cloned();
                     match action.kind {
                         ActionKind::Tool { name, args } => {
@@ -587,6 +631,83 @@ async fn drive_vm_segment(
                             }
                             runtime.resume_action(&action.id, Value::Array(items), false)?;
                         }
+                        ActionKind::Require { library } => {
+                            let (res, is_err) = flow_runtime::resolve_require(s, libs, &library);
+                            runtime.resume_action(&action.id, res, is_err)?;
+                        }
+                        ActionKind::LibraryCall {
+                            library,
+                            method,
+                            args,
+                        } => {
+                            external_tool_calls += 1;
+                            if library == "host" || !is_async_inflight {
+                                // Synchronous library call (e.g. `require("batch-files")` without `/promises`
+                                // or `host.*`): MUST complete and resume BEFORE calling `next_concurrent()`.
+                                let (val, is_err, receipt) = flow_runtime::execute_library_call(
+                                    s,
+                                    libs,
+                                    &library,
+                                    &method,
+                                    args,
+                                    step,
+                                    allow_shell,
+                                )
+                                .await?;
+                                if let Some(line) = receipt {
+                                    hints.virtual_receipts.push(line);
+                                }
+                                runtime.resume_action(&action.id, val, is_err)?;
+                                continue;
+                            }
+                            if !spawned_ids.insert(action.id.clone()) {
+                                inflight_jobs.abort_all();
+                                bail!("internal error: duplicate inflight library action {}", action.id);
+                            }
+                            if inflight_jobs.len() >= 64 {
+                                inflight_jobs.abort_all();
+                                bail!("CONCURRENCY_LIMIT: exceeded 64 concurrent inflight tasks");
+                            }
+                            let action_id = action.id.clone();
+                            let state_owned = s.state.clone();
+                            let task_owned = s.task.to_owned();
+                            let model_owned = s.model.to_owned();
+                            let cancel_owned = s.cancel.clone();
+                            let plugin_owned = s.plugin.clone();
+                            let scope_owned = s.scope.clone();
+                            let libs_owned = libs.clone();
+                            let turn = s.turn;
+                            let ban_execution = s.ban_execution;
+                            let input_budget = s.input_budget;
+
+                            inflight_jobs.spawn(async move {
+                                let parent_s = Session {
+                                    agent_id: None,
+                                    task_node_id: None,
+                                    plugin: plugin_owned,
+                                    state: &state_owned,
+                                    task: &task_owned,
+                                    model: &model_owned,
+                                    turn,
+                                    cancel: &cancel_owned,
+                                    ban_execution,
+                                    scope: scope_owned,
+                                    parent: None,
+                                    input_budget,
+                                };
+                                let (val, is_err, receipt) = flow_runtime::execute_library_call(
+                                    &parent_s,
+                                    &libs_owned,
+                                    &library,
+                                    &method,
+                                    args,
+                                    step,
+                                    allow_shell,
+                                )
+                                .await?;
+                                Ok((action_id, val, is_err, receipt))
+                            });
+                        }
                         ActionKind::Call {
                             name,
                             args,
@@ -615,6 +736,27 @@ async fn drive_vm_segment(
                                 captured,
                                 scope_vars.as_ref(),
                             );
+                            if !is_async_inflight {
+                                // Synchronous `@virtual` call (non-`async function`): execute & resume immediately!
+                                let (val, is_err, receipt) = virtual_frame::execute_virtual_call(
+                                    s,
+                                    libs,
+                                    spec,
+                                    step,
+                                )
+                                .await?;
+                                hints.virtual_receipts.push(receipt.format_line());
+                                runtime.resume_action(&action.id, val, is_err)?;
+                                continue;
+                            }
+                            if !spawned_ids.insert(action.id.clone()) {
+                                inflight_jobs.abort_all();
+                                bail!("internal error: duplicate inflight virtual action {}", action.id);
+                            }
+                            if inflight_jobs.len() >= 64 {
+                                inflight_jobs.abort_all();
+                                bail!("CONCURRENCY_LIMIT: exceeded 64 concurrent inflight tasks");
+                            }
                             let action_id = spec.action_id.clone();
                             let state_owned = s.state.clone();
                             let task_owned = s.task.to_owned();
@@ -627,7 +769,7 @@ async fn drive_vm_segment(
                             let ban_execution = s.ban_execution;
                             let input_budget = s.input_budget;
 
-                            inflight_virtual.spawn(async move {
+                            inflight_jobs.spawn(async move {
                                 let parent_s = Session {
                                     agent_id: None,
                                     task_node_id: None,
@@ -649,7 +791,7 @@ async fn drive_vm_segment(
                                     step,
                                 )
                                 .await?;
-                                Ok((action_id, val, is_err, receipt))
+                                Ok((action_id, val, is_err, Some(receipt.format_line())))
                             });
                         }
                         other => {
@@ -663,19 +805,21 @@ async fn drive_vm_segment(
                 }
             }
             ConcurrentState::Waiting => {
-                let Some(joined) = inflight_virtual.join_next().await else {
+                let Some(joined) = inflight_jobs.join_next().await else {
                     return Ok((State::Waiting, external_tool_calls, hints));
                 };
                 let (action_id, value, is_error, receipt) = joined??;
-                hints.virtual_receipts.push(receipt.format_line());
+                if let Some(line) = receipt {
+                    hints.virtual_receipts.push(line);
+                }
                 runtime.resume_action(&action_id, value, is_error)?;
             }
             ConcurrentState::Returned(val) => {
-                inflight_virtual.abort_all();
+                inflight_jobs.abort_all();
                 return Ok((State::Returned(val), external_tool_calls, hints));
             }
             ConcurrentState::Failed(err) => {
-                inflight_virtual.abort_all();
+                inflight_jobs.abort_all();
                 return Ok((State::Failed(err), external_tool_calls, hints));
             }
         }
@@ -757,14 +901,88 @@ async fn proxy_rust_tool(
     )
     .await?;
 
-    let outcome = match tool_name {
-        "read_tool_contracts" => Ok(json!({
-            "declarations": agent_program::declarations::static_library_header(libs)
-        })),
-        "read_program_guide" => Ok(json!({
-            "guide": agent_program::CAPABILITIES,
-            "builtin_contracts": agent_program::BUILTIN_CONTRACTS,
-        })),
+    let args_snapshot = args.clone();
+    let (mut result, is_error) = match tool_name {
+        "ask_user" => {
+            let question = args["question"]
+                .as_str()
+                .map(str::trim)
+                .filter(|q| !q.is_empty());
+            match question {
+                Some(q) => (
+                    json!({
+                        "code": agent_program::runtime::NEEDS_USER,
+                        "question": q,
+                        "message": q,
+                    }),
+                    true,
+                ),
+                None => (
+                    json!({"error": "ask_user requires a non-empty `question` string"}),
+                    true,
+                ),
+            }
+        }
+        "read_asset" => match crate::context_assets::read(
+            s.state.workspace.root(),
+            s.task,
+            &args,
+            None,
+        ) {
+            Ok(val) => (val, false),
+            Err(err) => (json!({"error": format!("{err:#}")}), true),
+        },
+        "read_session_history" => match crate::session_history::read(
+            s.state.workspace.root(),
+            s.task,
+            &args,
+        )
+        .await
+        {
+            Ok(val) => (val, false),
+            Err(err) => (json!({"error": format!("{err:#}")}), true),
+        },
+        "list_skills" => {
+            let project = crate::project_notes::task_project(s.state.workspace.root(), s.task)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| s.state.workspace.root().to_path_buf());
+            let mut items: Vec<Value> = crate::flow_skills::list(&project)
+                .into_iter()
+                .map(|sk| json!({"name": sk.name, "description": sk.description}))
+                .collect();
+            for (name, desc) in crate::flow_libraries::list_libraries(s) {
+                if !items.iter().any(|it| it["name"] == name) {
+                    items.push(json!({"name": name, "description": desc, "library": true}));
+                }
+            }
+            (Value::Array(items), false)
+        }
+        "read_skill" => {
+            let name = args["name"].as_str().unwrap_or("");
+            let project = crate::project_notes::task_project(s.state.workspace.root(), s.task)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| s.state.workspace.root().to_path_buf());
+            match crate::flow_skills::read(&project, name) {
+                Some(Ok(val)) => (val, false),
+                Some(Err(err)) => (json!({"error": format!("{err:#}")}), true),
+                None => (json!({"error": format!("skill '{name}' not found")}), true),
+            }
+        }
+        "read_tool_contracts" => (
+            json!({
+                "declarations": agent_program::declarations::static_library_header(libs)
+            }),
+            false,
+        ),
+        "read_program_guide" => (
+            json!({
+                "guide": agent_program::CAPABILITIES,
+                "builtin_contracts": agent_program::BUILTIN_CONTRACTS,
+            }),
+            false,
+        ),
         "find_library_methods" => {
             let query = args["query"].as_str().unwrap_or("").to_ascii_lowercase();
             let mut matched = Vec::new();
@@ -779,20 +997,36 @@ async fn proxy_rust_tool(
                     }
                 }
             }
-            Ok(json!({"methods": matched}))
+            for (lib, desc) in crate::flow_libraries::list_libraries(s) {
+                for m in crate::flow_libraries::public_method_names(s, &lib).unwrap_or_default() {
+                    if query.is_empty()
+                        || lib.to_ascii_lowercase().contains(&query)
+                        || m.to_ascii_lowercase().contains(&query)
+                        || desc.to_ascii_lowercase().contains(&query)
+                    {
+                        matched.push(json!({"library": lib, "method": m, "orchestration": true, "description": desc}));
+                    }
+                }
+            }
+            (json!({"methods": matched}), false)
         }
-        _ => {
-            host_tools::business_tool_inner(s, node, tool_name, args, call_id, allow_shell, true)
-                .await
-        }
+        _ => match host_tools::business_tool_inner(
+            s,
+            node,
+            tool_name,
+            args,
+            call_id,
+            allow_shell,
+            true,
+        )
+        .await
+        {
+            Ok(val) => (val, false),
+            Err(err) => (json!({"error": format!("{err:#}")}), true),
+        },
     };
 
-    let (result, is_error) = match outcome {
-        Ok(val) => (val, false),
-        Err(err) => (json!({"error": format!("{err:#}")}), true),
-    };
-
-    append_event(
+    let result_seq = append_event(
         s,
         "tool/result",
         json!({
@@ -811,6 +1045,26 @@ async fn proxy_rust_tool(
         false,
     )
     .await?;
+
+    // Automatically archive large (> 24KB) material results into durable content-addressed
+    // context assets so future turns (after VM destruction) can inspect any slice via
+    // `session.read_asset({ asset_id, char_offset, max_chars })`.
+    if !is_error
+        && crate::context_assets::is_material_tool(tool_name)
+        && result.to_string().chars().count() > context_doc::PEEK_FULL_LIMIT_CHARS
+        && let Ok(reference) = crate::context_assets::register(
+            s.state.workspace.root(),
+            s.task,
+            result_seq,
+            tool_name,
+            &args_snapshot,
+            &result,
+        )
+        && let Some(asset_id) = reference["asset_id"].as_str()
+        && let Some(obj) = result.as_object_mut()
+    {
+        obj.insert("__asset_id".into(), Value::String(asset_id.to_owned()));
+    }
 
     Ok((result, is_error))
 }

@@ -38,8 +38,11 @@ Each response MUST be **exactly ONE** of the two modes below — NEVER both in t
 - Use ordinary JS functions/loops (`function foo(...) { ... }`) for deterministic multi-file reads, filtering, or batch computation (0 extra LLM calls).
 - Declare a single-layer `/** @virtual <contract; ask for a concise summary field> */ async function inspect(item) {}` (optionally with `@uses varName` in JSDoc to pass outer bindings) and call `await inspect(x)` or `await Promise.all(items.map(inspect))` when isolated semantic judgment or parallel fan-out is needed. Pass file paths OR `ResourceHandle` objects (`const f = io.read(...); await inspect(f);`) directly — handles passed to `@virtual` stay compact (`Ref#N`) in your outer trace without expanding raw file contents, and auto-dereference inside the isolated child frame. Each `@virtual` call runs in its own isolated non-shell stack frame, discards its intermediate context on `return`, and leaves a factual `[virtual ...]` receipt + return value in your `// =>` trace.
 
-## Per-Turn Clean VM
-When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.
+## Per-Turn Clean VM & Cross-Turn Continuity
+- When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.
+- Large results (`> 24KB`) are automatically archived with an `asset: asset-...` id in permanent `// =>`; in later turns you can page them back via `session.read_asset({ asset_id, char_offset, max_chars })`.
+- Reusable cross-session JS orchestration libraries (listed below the `.d.ts` when available) can be loaded with `const lib = require("<name>");`.
+- If you cannot proceed without user clarification, call `host.ask_user({ question: "..." });` to pause the turn and deliver your question directly.
 
 ## Multi-Step Interaction Example
 [Model Response 1 — ONLY read the file, then STOP]:
@@ -99,6 +102,19 @@ pub(super) fn build_request_body_for_doc(
     let mut system_text = String::from(base_prompt);
     system_text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
     system_text.push_str(&declarations::static_library_header(libs));
+    if !s.scope.starts_with("virtual:") {
+        let orch = crate::flow_libraries::list_libraries(s);
+        if !orch.is_empty() {
+            system_text.push_str("\n// Reusable JS orchestration libraries via `require(\"<name>\")`:\n");
+            for (name, desc) in orch {
+                let methods = crate::flow_libraries::public_method_names(s, &name).unwrap_or_default();
+                system_text.push_str(&format!(
+                    "// - require({name:?}) -> {{ {} }}: {desc}\n",
+                    methods.join(", ")
+                ));
+            }
+        }
+    }
 
     let mut messages = vec![json!({"role": "system", "content": system_text})];
     messages.extend(doc.render_conversation_messages());
