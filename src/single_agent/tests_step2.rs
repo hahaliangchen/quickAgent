@@ -458,6 +458,7 @@ async fn live_step2_virtual_parallel_audit() {
         cancel_watchdog.cancel();
     });
 
+    let model_outer = model.clone();
     let started = std::time::Instant::now();
     let run_res = run_task(
         state,
@@ -501,12 +502,13 @@ async fn live_step2_virtual_parallel_audit() {
             let meta: Value = serde_json::from_str(meta_raw).unwrap_or_default();
             let req: Value = serde_json::from_str(req_raw).unwrap_or_default();
             let scope = meta["context_scope"].as_str().unwrap_or("");
+            let req_model = req["model"].as_str().unwrap_or("");
             let sys = req["messages"][0]["content"].as_str().unwrap_or("");
             let user = req["messages"][1]["content"].as_str().unwrap_or("");
             let has_tools = req.get("tools").is_some();
             let has_process_dts = sys.contains("declare namespace process");
             println!(
-                "\n--- [req #{id}] actor={actor} step={step} node={node_id} scope={scope} tools={has_tools} has_process_dts={has_process_dts} ---"
+                "\n--- [req #{id}] actor={actor} model={req_model} step={step} node={node_id} scope={scope} tools={has_tools} has_process_dts={has_process_dts} ---"
             );
             assert!(!has_tools, "request #{id} must have zero JSON tools");
             if actor == "virtual" {
@@ -516,6 +518,12 @@ async fn live_step2_virtual_parallel_audit() {
                     !has_process_dts,
                     "virtual frame #{id} MUST NOT receive process.* .d.ts!"
                 );
+                if let Ok(expected_del) = std::env::var("LIVE_DELEGATE_MODEL") {
+                    assert!(
+                        !req_model.is_empty() && req_model != model_outer,
+                        "expected virtual frame #{id} to route to delegate model ({expected_del}), got {req_model}"
+                    );
+                }
                 // Print full user trace for virtual frames (concise single-frame view)
                 println!("{user}");
             } else {
@@ -537,12 +545,13 @@ async fn live_step2_virtual_parallel_audit() {
             println!("\n=== FINAL ASSISTANT #1 ===\n{}", a["content"].as_str().unwrap_or(""));
         }
 
-        // Stack-Frame GC assertion: raw file sentinels read ONLY inside `@virtual`
-        // frames MUST NEVER appear in the outer main trace!
+        // Stack-Frame GC assertion: raw full file bodies read ONLY inside `@virtual`
+        // frames MUST NEVER dump into the outer main trace! (Check middle padding lines
+        // rather than line 2, since a child may legitimately quote a 5-line head snippet.)
         assert!(
-            !final_user.contains("SENTINEL_ONLY_CHILD_AUTH_SEES")
-                && !final_user.contains("SENTINEL_ONLY_CHILD_DB_SEES")
-                && !final_user.contains("SENTINEL_ONLY_CHILD_CACHE_SEES"),
+            !final_user.contains("auth padding note 025")
+                && !final_user.contains("db padding note 025")
+                && !final_user.contains("cache padding note 025"),
             "child raw file contents leaked into outer trace!"
         );
         assert!(
