@@ -505,3 +505,22 @@
   flex: 1;
   padding: 8px 16px 20px;
 }
+
+/* Borderless Paper style: floating tonal cards with zero 1px box outlines */
+:global(body[data-ui-style='paper']) .card {
+  border: none;
+  border-radius: 14px;
+  background: var(--codex-card-bg, #ffffff);
+  box-shadow: 0 3px 16px rgba(15, 23, 42, 0.045);
+}
+
+:global(body[data-ds-dark-theme][data-ui-style='paper']) .card {
+  border: none;
+  background: var(--codex-card-bg, #23221f);
+  box-shadow: none;
+}
+
+:global(body[data-ui-style='paper']) .header {
+  border-bottom: none;
+  background: transparent;
+}

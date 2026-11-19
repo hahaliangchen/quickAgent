@@ -189,39 +189,57 @@
   }
 }
 
-/* Borderless Paper style */
+/* Borderless Paper style — faithful to floating tile + luminous mint mist Hero mockup */
 :global(body[data-ui-style='paper']) .page {
   background-image:
-    radial-gradient(ellipse 560px 360px at 52% 38%, rgba(29, 158, 117, 0.085) 0%, rgba(29, 158, 117, 0.02) 48%, transparent 76%),
-    radial-gradient(ellipse 420px 300px at 36% 68%, rgba(148, 163, 184, 0.05) 0%, transparent 70%);
+    radial-gradient(ellipse 640px 420px at 50% 38%, rgba(29, 158, 117, 0.14) 0%, rgba(29, 158, 117, 0.04) 46%, transparent 74%),
+    radial-gradient(ellipse 460px 320px at 34% 72%, rgba(148, 163, 184, 0.06) 0%, transparent 70%);
 }
 
 :global(body[data-ds-dark-theme][data-ui-style='paper']) .page {
   background-image:
-    radial-gradient(ellipse 560px 380px at 50% 40%, rgba(76, 184, 148, 0.11) 0%, rgba(43, 138, 107, 0.035) 48%, transparent 74%);
+    radial-gradient(ellipse 620px 420px at 50% 40%, rgba(76, 184, 148, 0.14) 0%, rgba(43, 138, 107, 0.045) 48%, transparent 74%);
+}
+
+:global(body[data-ui-style='paper']) .emblem {
+  width: 68px;
+  height: 68px;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.04);
+  filter: none;
+}
+
+:global(body[data-ds-dark-theme][data-ui-style='paper']) .emblem {
+  background: #23221f;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.36);
+  filter: none;
 }
 
 :global(body[data-ui-style='paper']) .workspace {
   box-shadow: none;
+  padding: 3px 14px 4px;
 }
 
 :global(body[data-ui-style='paper']) .starterChip {
   border: none;
-  border-radius: 11px;
+  border-radius: 999px;
+  height: 38px;
+  padding: 0 16px;
   background: var(--codex-card-bg, #ffffff);
-  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.045);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.055), 0 1px 3px rgba(15, 23, 42, 0.03);
 }
 
 :global(body[data-ui-style='paper']) .starterChip:hover:not(:disabled) {
-  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.09);
 }
 
 :global(body[data-ds-dark-theme][data-ui-style='paper']) .starterChip {
   background: var(--codex-card-bg, #23221f);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
 }
 
 :global(body[data-ds-dark-theme][data-ui-style='paper']) .starterChip:hover:not(:disabled) {
   background: #2b2a26;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.30);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.34);
 }

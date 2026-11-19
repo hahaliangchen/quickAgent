@@ -178,3 +178,9 @@
 .event[data-event-tone='error'] .eventHeader > span {
   color: var(--dsw-alias-state-error-primary, #d23c3c);
 }
+
+/* Borderless Paper style: 2px emerald left ink bar annotation */
+:global(body[data-ui-style='paper']) .inside {
+  border-left: 2px solid var(--codex-blue-primary, #1d9e75);
+  padding-left: 14px;
+}

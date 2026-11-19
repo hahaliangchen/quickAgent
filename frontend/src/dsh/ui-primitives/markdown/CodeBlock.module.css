@@ -271,3 +271,29 @@
   outline: 1px solid var(--dsw-alias-state-business-primary);
   outline-offset: -2px;
 }
+
+/* Borderless Paper style: soft tinted code slab with zero outer/inner borders */
+:global(body[data-ui-style='paper']) .source {
+  --gh-bg: #f2f4f7;
+  --gh-header: #eceff3;
+  --gh-hover: #e7ebf0;
+  border: none;
+  border-radius: 14px;
+}
+
+:global(body[data-ds-dark-theme][data-ui-style='paper']) .source {
+  --gh-bg: #151412;
+  --gh-header: #1a1917;
+  --gh-hover: #21201d;
+  border: none;
+  border-radius: 14px;
+}
+
+:global(body[data-ui-style='paper']) .source [data-code-block-banner] {
+  border-bottom: none;
+}
+
+:global(body[data-ui-style='paper']) .foldToggle {
+  border-top: none;
+  color: var(--sprout-strong, #0f6e56);
+}

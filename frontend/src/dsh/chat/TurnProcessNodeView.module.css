@@ -55,3 +55,8 @@
     transition: none;
   }
 }
+
+/* Borderless Paper style: remove horizontal underline below disclosure toggle */
+:global(body[data-ui-style='paper']) .root {
+  border-bottom: none;
+}
