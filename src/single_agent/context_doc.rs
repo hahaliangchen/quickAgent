@@ -286,8 +286,7 @@ fn format_segment_feedback(
         } else {
             let line_count = joined.lines().count();
             receipts.push(format!(
-                "// => console = [{} chars, {} lines | live output]",
-                chars, line_count
+                "// => console = [{line_count} lines, {chars} chars]"
             ));
             peek_sections.push(format_peek_string("console", &joined, None));
         }
@@ -348,7 +347,7 @@ fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<Strin
             return (format_comment_block(&label, &add_line_numbers(content, 1)), None);
         }
         let sig = format!(
-            "// => {name} = [live File({path:?}) | {line_count} lines, {content_chars} chars | live in JS memory]"
+            "// => {name} = [File({path:?}) | {line_count} lines, {content_chars} chars]"
         );
         let peek = format_peek_string(
             &format!("{name}.content ({path})"),
@@ -380,7 +379,7 @@ fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<Strin
             return (format_comment_block(&label, &combined), None);
         }
         let sig = format!(
-            "// => {name} = [live CommandResult(exit_code={exit}) | {lines} lines, {chars} chars | live in JS memory]"
+            "// => {name} = [CommandResult(exit_code={exit}) | {lines} lines, {chars} chars]"
         );
         let peek = if chars <= PEEK_FULL_LIMIT_CHARS {
             format!(
@@ -407,7 +406,7 @@ fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<Strin
             return (format!("// => {name} = {text:?}"), None);
         }
         let sig = format!(
-            "// => {name} = [live string | {lines} lines, {chars} chars | > 2KB not inlined; live in JS memory]"
+            "// => {name} = [string | {lines} lines, {chars} chars | > 2KB not inlined]"
         );
         let peek = format_peek_string(name, text, None);
         return (sig, Some(peek));
@@ -425,7 +424,7 @@ fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<Strin
         }
         let shape = describe_item_shape(&arr[0]);
         let sig = format!(
-            "// => {name} = [live Array({}) | itemShape: {shape} | {chars} chars | live in JS memory]",
+            "// => {name} = [Array({}) | itemShape: {shape} | {chars} chars]",
             arr.len()
         );
         let peek = if chars <= PEEK_FULL_LIMIT_CHARS {
@@ -453,7 +452,7 @@ fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<Strin
         })
         .unwrap_or_else(|| "value".into());
     let sig = format!(
-        "// => {name} = [live Object {{ {keys_summary} }} | {chars} chars | live in JS memory]"
+        "// => {name} = [Object {{ {keys_summary} }} | {chars} chars]"
     );
     let peek = if chars <= PEEK_FULL_LIMIT_CHARS {
         let pretty = serde_json::to_string_pretty(value).unwrap_or(serialized);

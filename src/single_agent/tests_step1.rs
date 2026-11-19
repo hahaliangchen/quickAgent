@@ -174,8 +174,8 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
             let user_msg = body["messages"][1]["content"].as_str().unwrap();
             let stable = split_stable_prefix(user_msg);
             assert!(
-                stable.contains("// => authFile = [live File(\"src/auth.rs\")"),
-                "permanent trace must keep compact signature: {stable}"
+                stable.contains("// => authFile = [File(\"src/auth.rs\")"),
+                "permanent trace must keep compact neutral signature: {stable}"
             );
             assert!(
                 !stable.contains("decode_without_verify"),

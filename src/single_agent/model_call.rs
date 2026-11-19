@@ -25,7 +25,7 @@ Each response MUST be **exactly ONE** of the two modes below — NEVER both in t
 - Host libraries (`io`, `git`, `process`, `host`, `session`, etc.) declared in the `.d.ts` below are pre-bound in scope and proxy synchronously into Rust.
 - All top-level variables (`const`, `let`, `function`) stay live in VM memory for the rest of the current user turn:
   - Short results (`<= 2KB`) print verbatim in permanent `// =>` comments below your code.
-  - Medium results (`2KB..=24KB`) leave a compact `[live ...]` signature in `// =>` and expand in full (with line numbers) inside `EPHEMERAL_PEEK` at the bottom for ONE step only.
+  - Medium results (`2KB..=24KB`) leave a compact `[File(...) | ...]` / `[Object ...]` signature in `// =>` and expand in full (with line numbers) inside `EPHEMERAL_PEEK` at the bottom for ONE step only.
   - Large results (`> 24KB`) show a high-entropy index (symbols / error lines + tail / schema) in `EPHEMERAL_PEEK`.
 - **Code-as-Projection**: `EPHEMERAL_PEEK` disappears on the next step. After reading `EPHEMERAL_PEEK`, if you still need specific lines for further work, pin only those critical lines into a small JS variable (`<= 2KB`, e.g. `const bug = f.content.split("\n").slice(60, 75).join("\n");`). If you already have everything needed to answer the user, you may jump straight to Mode 2 (`return <<<`).
 
@@ -41,7 +41,7 @@ When a turn finishes, its VM is completely destroyed. Each new user turn starts 
 [Model Response 1 — ONLY read the file, then STOP]:
 const f = io.read({ path: "src/auth.rs" });
 
-[Host executes Step 1 and shows `// => f = [live File(...)]` + `EPHEMERAL_PEEK` full file with line numbers]
+[Host executes Step 1 and shows `// => f = [File("src/auth.rs") | ...]` + `EPHEMERAL_PEEK` full file with line numbers]
 
 [Model Response 2 — pin key lines in JS (optional) OR jump straight to `return <<<`]:
 const verifyFn = f.content.split("\n").slice(60, 75).join("\n");
