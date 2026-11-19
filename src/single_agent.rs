@@ -1305,10 +1305,16 @@ fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str)
                 matches!(name, "edit_file" | "read_tool_contracts" | "read_program_guide"),
                 "TOOL_UNAVAILABLE: {name}; fix the module by editing its file with edit_file"
             ),
-            program_flow::Role::Leaf(_) => ensure!(
-                definitions.iter().any(|tool| tool["function"]["name"] == name),
-                "TOOL_UNAVAILABLE: {name}; use the given tools or find_library_methods"
-            ),
+            program_flow::Role::Leaf(_) => {
+                ensure!(
+                    !definitions.is_empty(),
+                    "NO_TOOLS_AVAILABLE: this step has zero tools (no tools are declared or runnable here). Do NOT emit any tool call; reply directly with the requested JSON or text output."
+                );
+                ensure!(
+                    definitions.iter().any(|tool| tool["function"]["name"] == name),
+                    "TOOL_UNAVAILABLE: {name}; use the given tools or find_library_methods"
+                );
+            }
             // Outside a program the main AI can use its published tools directly.
             program_flow::Role::Main => ensure!(
                 s.plugin.is_some()
@@ -1874,7 +1880,11 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
     // its call; tools that change the context must still come alone
     // (execute_call). 2026-11-13: with this off, one task's main AI spent
     // 63 model requests on 82 reads and searches.
-    let mut body = json!({"model":s.model,"stream":true,"messages":wire,"tools":published,"parallel_tool_calls":true});
+    let mut body = json!({"model":s.model,"stream":true,"messages":wire});
+    if !published.is_empty() {
+        body["tools"] = json!(published);
+        body["parallel_tool_calls"] = json!(true);
+    }
     if let Some(error) = plugin_error {
         body["_host_plugin_instruction_error"] = json!(error);
     }
@@ -8489,5 +8499,58 @@ function inspectLeaf(path) {}
         .unwrap();
         server.abort();
         assert_eq!(rounds.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn request_omits_tools_and_parallel_tool_calls_when_empty() {
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let session = Session {
+            agent_id: None,
+            task_node_id: None,
+            plugin: None,
+            state: &state,
+            task: "task",
+            model: "fake",
+            turn: 1,
+            cancel: &cancel,
+            ban_execution: false,
+            scope: "main".into(),
+            parent: None,
+            input_budget: INPUT_BUDGET,
+        };
+        let messages = vec![json!({"role": "user", "content": "hi"})];
+        let body = request(&session, &messages, &[]);
+        assert!(body.get("tools").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    #[test]
+    fn validate_tool_reports_no_tools_available_for_empty_leaf() {
+        let root = TestRoot::new();
+        let state = agent_service::tests::test_state(root.path(), "127.0.0.1:9".parse().unwrap());
+        let cancel = CancellationToken::new();
+        let session = Session {
+            agent_id: None,
+            task_node_id: None,
+            plugin: Some("ppt-master".into()),
+            state: &state,
+            task: "task",
+            model: "fake",
+            turn: 1,
+            cancel: &cancel,
+            ban_execution: false,
+            scope: "main".into(),
+            parent: None,
+            input_budget: INPUT_BUDGET,
+        };
+        let leaf = Window {
+            program_task: Some(json!({"name": "leaf_fn", "role": "leaf", "tools": []})),
+            ..Default::default()
+        };
+        let err = validate_tool(&session, &leaf, &[], "write_program").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("NO_TOOLS_AVAILABLE"), "unexpected error: {msg}");
     }
 }
