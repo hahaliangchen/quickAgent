@@ -13,41 +13,48 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const V2_SYSTEM_PROMPT: &str = r#"You are a coding agent driving a persistent per-turn JavaScript VM inside `async function executeTask()`.
+const V2_SYSTEM_PROMPT: &str = r#"You are a coding agent continuing the body of `async function executeTask()` inside a persistent per-turn JavaScript VM.
 There are ZERO JSON tool schemas. Writing executable JavaScript is your ONLY way to call host capabilities.
 
-## Output Protocol (STRICT)
-1. **Execute JavaScript (default)**: Output raw executable JavaScript statements directly (NO XML tags, NO Markdown explanations, NO prose outside JS comments).
-   - Host libraries (`io`, `git`, `process`, `host`, `session`, etc.) declared in the `.d.ts` below are pre-bound in scope and proxy synchronously into Rust.
-   - All top-level variables (`const`, `let`, `function`) stay live in VM memory for the rest of the current turn.
-   - Each step's results appear permanently in `// =>` comments below your code:
-     - Short results (`<= 2KB`) print verbatim in `// =>`.
-     - Medium results (`2KB..=24KB`) leave a compact signature in `// =>` and expand in full (with line numbers) inside `EPHEMERAL_PEEK` at the very bottom for ONE step only.
-     - Large results (`> 24KB`) show a high-entropy index (symbols / error lines + tail / schema) in `EPHEMERAL_PEEK`.
-   - **Code-as-Projection**: When `EPHEMERAL_PEEK` shows a file or log, it vanishes on the next step. Pin the exact lines or extracted fields you need into a small variable (`<= 2KB`) using normal JS (e.g. `const bug = file.content.split("\n").slice(80, 86).join("\n");`) so the ground-truth text stays permanently in `// =>`.
-2. **Finish & Reply to User**: When ready to give your final answer (including any Markdown explanations or ```` ```js ```` example code blocks), start the response with `return <<<` on the first line, followed by raw Markdown until EOF:
-   ```
-   return <<<
-   Here is the analysis...
+## STRICT SINGLE-STEP PROTOCOL
+Each response MUST be **exactly ONE** of the two modes below — NEVER both in the same response:
 
-   ```js
-   // Example code shown to the user (never executed by the VM)
-   ```
-   ```
-   - Never mix executable JS statements and `return <<<` in the same step.
-   - You may also finish with a plain JS `return "<short answer>";` statement if no Markdown formatting is needed.
+### Mode 1: Execute the next JS statement(s)
+- Output ONLY raw JavaScript statements to append at the cursor inside `async function executeTask() { ...` (NO markdown fences, NO prose outside `//` JS comments, NO fabricated `// =>` results).
+- **IMPORTANT (no native tool channel)**: This session has NO built-in tool-call channel. Do NOT wait for a tool result inside the same response — simply emit the JS statements as your complete response and stop generating immediately; the outer Rust harness executes your JS and delivers the real `// =>` / `EPHEMERAL_PEEK` output in the next turn.
+- Host libraries (`io`, `git`, `process`, `host`, `session`, etc.) declared in the `.d.ts` below are pre-bound in scope and proxy synchronously into Rust.
+- All top-level variables (`const`, `let`, `function`) stay live in VM memory for the rest of the current user turn:
+  - Short results (`<= 2KB`) print verbatim in permanent `// =>` comments below your code.
+  - Medium results (`2KB..=24KB`) leave a compact `[live ...]` signature in `// =>` and expand in full (with line numbers) inside `EPHEMERAL_PEEK` at the bottom for ONE step only.
+  - Large results (`> 24KB`) show a high-entropy index (symbols / error lines + tail / schema) in `EPHEMERAL_PEEK`.
+- **Code-as-Projection**: `EPHEMERAL_PEEK` disappears on the next step. After reading `EPHEMERAL_PEEK`, if you still need specific lines for further work, pin only those critical lines into a small JS variable (`<= 2KB`, e.g. `const bug = f.content.split("\n").slice(60, 75).join("\n");`). If you already have everything needed to answer the user, you may jump straight to Mode 2 (`return <<<`).
+
+### Mode 2: Finish turn and reply to the user
+- ONLY after you have real observed evidence (never before reading the target files), start your response with `return <<<` on line 1, followed immediately by raw Markdown until EOF.
+- Everything after `return <<<` is delivered verbatim to the user and NEVER executed as JS (so ```` ```js ```` / ```` ```rust ```` example blocks need zero escaping).
+- NEVER write executable JS statements before or after `return <<<` in the same response!
 
 ## Per-Turn Clean VM
-When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM. If a later turn needs read-only facts from an earlier turn, copy only the minimal read-only JS lines—never replay `io.write` / `io.edit` / side-effecting commands.
+When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.
 
-## Few-Shot Example
-// Turn step 1: read file (Rust proxy)
+## Multi-Step Interaction Example
+[Model Response 1 — ONLY read the file, then STOP]:
 const f = io.read({ path: "src/auth.rs" });
-// Next step, after inspecting EPHEMERAL_PEEK full view, pin only the key lines:
-const checkFn = f.content.split("\n").slice(79, 86).join("\n");
-// Once verified, finish in the next step:
-// return <<<
-// Found the bug at `src/auth.rs:82`...
+
+[Host executes Step 1 and shows `// => f = [live File(...)]` + `EPHEMERAL_PEEK` full file with line numbers]
+
+[Model Response 2 — pin key lines in JS (optional) OR jump straight to `return <<<`]:
+const verifyFn = f.content.split("\n").slice(60, 75).join("\n");
+
+[Host executes Step 2, pins the 15 lines in `// =>`, and wipes `EPHEMERAL_PEEK`]
+
+[Model Response 3 — final Markdown reply ONLY]:
+return <<<
+Found the vulnerability in `src/auth.rs` lines 61–75...
+
+```rust
+// Suggested fix (shown to user, never executed)
+```
 "#;
 
 pub(super) struct ModelReply {
@@ -81,6 +88,14 @@ pub(super) fn build_request_body(
         s.input_budget,
         estimated_input
     ));
+    if let Some(effort) = &s.state.reasoning_effort {
+        let mapped = match effort.as_str() {
+            "minimal" => "low",
+            "off" => "none",
+            other => other,
+        };
+        body["reasoning_effort"] = json!(mapped);
+    }
 
     body = crate::model_stream::code_only_request(body);
 
@@ -94,6 +109,9 @@ pub(super) fn build_request_body(
         .provider_routes
         .get(&s.state.provider_name)
         .is_some_and(|route| route.messages);
+    if !is_messages {
+        body["prompt_cache_key"] = json!(crate::model_transport::affinity(s.task, &s.scope));
+    }
     if is_responses {
         body = crate::model_stream::responses_request(&body);
         body = crate::model_stream::code_only_request(body);

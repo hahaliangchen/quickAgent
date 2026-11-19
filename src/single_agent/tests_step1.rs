@@ -335,3 +335,196 @@ async fn step1_anti_cheating_slice_lock_and_per_turn_fresh_vm() {
     let replies = assistant_messages(ws.path(), "step1-lock");
     assert_eq!(replies, vec!["Turn 1 done cleanly.", "Rebound cleanly: fresh-turn-2"]);
 }
+
+#[tokio::test]
+async fn step1_termination_rule_external_tools_continue_pure_memory_projection_finishes() {
+    let ws = TestWorkspace::new();
+    std::fs::write(ws.path().join("sample.rs"), "pub fn bad() { unsafe_call(); }\n").unwrap();
+    init_task_row(ws.path(), "step1-term");
+
+    let (state, captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
+        // Round 0: external tool call (`io.read`) + premature `return <<<`
+        // Because `external_tool_calls > 0`, host MUST execute `io.read`, discard
+        // the premature reply, and continue to Round 1!
+        0 => completion(
+            "const f = io.read({ path: \"sample.rs\" });return <<<\nPREMATURE_MUST_BE_DISCARDED\n>>>",
+        ),
+        // Round 1: pure in-memory JS slicing (`external_tool_calls == 0`) + `return <<<`
+        // Host MUST execute slice into permanent `// =>` AND immediately finish the turn!
+        1 => {
+            let user_msg = body["messages"][1]["content"].as_str().unwrap();
+            assert!(
+                user_msg.contains("unsafe_call()"),
+                "round 1 must see real file content from round 0: {user_msg}"
+            );
+            assert!(
+                user_msg.contains("discarded the premature `return <<<`"),
+                "host note must explain discarded premature reply: {user_msg}"
+            );
+            completion(
+                "const pinned = f.content.trim();\nreturn <<<\nVerified: `sample.rs` calls `unsafe_call()`.\n<<<",
+            )
+        }
+        other => panic!("unexpected round {other}"),
+    })
+    .await;
+
+    run_task(
+        state,
+        "step1-term".into(),
+        "fake".into(),
+        "Check sample.rs".into(),
+        5,
+        CancellationToken::new(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    assert_eq!(captured.lock().unwrap().len(), 2);
+    assert_eq!(tool_call_count(ws.path(), "step1-term", "read_file"), 1);
+    let replies = assistant_messages(ws.path(), "step1-term");
+    assert_eq!(replies, vec!["Verified: `sample.rs` calls `unsafe_call()`."]);
+}
+
+/// Live real-model smoke test for Step 1 (opt-in via `--ignored`).
+/// Loads `~/.config/grow/providers.yml` (override with `LIVE_PROVIDER` / `LIVE_MODEL`),
+/// runs a real code-analysis task on a ~140-line Rust file, and prints the exact
+/// trace, tool proxy calls, rejections (if any), and final Markdown reply.
+#[tokio::test]
+#[ignore]
+async fn live_step1_analyze_real_code_file() {
+    let ws = TestWorkspace::new();
+    std::fs::create_dir_all(ws.path().join("src")).unwrap();
+
+    let mut auth_rs = String::from(
+        "//! Lightweight JWT & session token validator.\n\
+         use std::collections::HashMap;\n\n\
+         pub struct Claims {\n\
+         \x20\x20\x20\x20pub sub: String,\n\
+         \x20\x20\x20\x20pub role: String,\n\
+         \x20\x20\x20\x20pub exp: u64,\n\
+         }\n\n",
+    );
+    for i in 1..=55 {
+        auth_rs.push_str(&format!(
+            "// helper documentation line {i:03}: standard middleware pipeline notes for auth service\n"
+        ));
+    }
+    auth_rs.push_str(
+        "pub fn verify_token(token: &str, secret: &str, now_ts: u64) -> Option<Claims> {\n\
+         \x20\x20\x20\x20let parts: Vec<&str> = token.split('.').collect();\n\
+         \x20\x20\x20\x20if parts.len() != 3 {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20return None;\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20// BUG 1: ignores HMAC signature when header says alg=none\n\
+         \x20\x20\x20\x20if parts[0].contains(\"none\") {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20return decode_claims_unchecked(parts[1]);\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20// BUG 2: non-constant-time comparison & skips `claims.exp < now_ts` check\n\
+         \x20\x20\x20\x20let expected = compute_hmac(parts[0], parts[1], secret);\n\
+         \x20\x20\x20\x20if parts[2] == expected {\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let _ = now_ts;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20return decode_claims_unchecked(parts[1]);\n\
+         \x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20None\n\
+         }\n\n",
+    );
+    for i in 1..=50 {
+        auth_rs.push_str(&format!(
+            "// audit note {i:03}: internal helper stub for token serialization and logging\n"
+        ));
+    }
+    auth_rs.push_str(
+        "fn compute_hmac(_h: &str, _p: &str, _s: &str) -> String { String::new() }\n\
+         fn decode_claims_unchecked(_p: &str) -> Option<Claims> { None }\n",
+    );
+    std::fs::write(ws.path().join("src/auth.rs"), &auth_rs).unwrap();
+
+    let config = crate::ai_proxy::load_config(&crate::ai_proxy::config_path())
+        .expect("failed to load ~/.config/grow/providers.yml");
+    let mut state = agent_service::tests::test_state(ws.path(), "127.0.0.1:0".parse().unwrap());
+    crate::ai_proxy::apply_agent_config(&mut state, &config);
+    if let Ok(prov) = std::env::var("LIVE_PROVIDER")
+        && let Some(route) = state.provider_routes.get(&prov).cloned()
+    {
+        state.provider_name = prov;
+        state.provider_url = route.url;
+        state.api_key = route.api_key;
+        state.model_map = route.models;
+    }
+    let model = std::env::var("LIVE_MODEL").unwrap_or_else(|_| state.default_model.clone());
+    state.reasoning_effort = Some(
+        std::env::var("LIVE_EFFORT").unwrap_or_else(|_| "low".into()),
+    );
+    println!(
+        "=== LIVE STEP1 TEST ===\nprovider={} url={} model={} effort={:?} auth.rs={} chars",
+        state.provider_name,
+        state.provider_url,
+        model,
+        state.reasoning_effort,
+        auth_rs.chars().count()
+    );
+
+    let task_id = "live-step1-auth";
+    init_task_row(ws.path(), task_id);
+
+    let cancel = CancellationToken::new();
+    let cancel_watchdog = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(240)).await;
+        cancel_watchdog.cancel();
+    });
+
+    let run_res = run_task(
+        state,
+        task_id.into(),
+        model,
+        "请分析 src/auth.rs 中的鉴权逻辑，找出所有安全漏洞，并给出修复示例（只展示修复代码，不要修改文件）。".into(),
+        5,
+        cancel,
+        1,
+        false,
+    )
+    .await;
+    println!("\n=== run_task result: {run_res:?} ===");
+
+    let conn = agent_service::open_db(ws.path()).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT seq, kind, data FROM agent_task_events WHERE task_id=?1 ORDER BY seq")
+        .unwrap();
+    let events: Vec<(i64, String, String)> = stmt
+        .query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    println!("\n=== NON-DELTA EVENTS ===");
+    for (seq, kind, data) in &events {
+        if kind == "assistant/delta" {
+            continue;
+        }
+        let preview: String = data.chars().take(700).collect();
+        println!("  #{seq} [{kind}] {preview}");
+    }
+
+    if let Ok(raw_win) = conn.query_row(
+        "SELECT state FROM agent_runtime_windows WHERE task_id=?1 AND scope='main'",
+        [task_id],
+        |r| r.get::<_, String>(0),
+    ) {
+        let win: super::Window = serde_json::from_str(&raw_win).unwrap();
+        let wire = win.context_doc.render_conversation_messages();
+        println!("\n=== USER #1 TRACE ===\n{}", wire[0]["content"].as_str().unwrap_or(""));
+        if let Some(a) = wire.get(1) {
+            println!("\n=== FINAL ASSISTANT #1 ===\n{}", a["content"].as_str().unwrap_or(""));
+        }
+    }
+
+    run_res.expect("live run_task failed");
+    assert_eq!(tool_call_count(ws.path(), task_id, "write_file"), 0, "must not write files");
+    assert_eq!(tool_call_count(ws.path(), task_id, "edit_file"), 0, "must not edit files");
+    assert!(!assistant_messages(ws.path(), task_id).is_empty(), "must produce final assistant reply");
+}

@@ -286,6 +286,11 @@ pub(crate) async fn run_task_with_resource(
         }
 
         let reply = model_call::call_model(&s, &w, &libs, step).await?;
+        #[cfg(test)]
+        if std::env::var_os("LIVE_DEBUG_STEPS").is_some() {
+            let head: String = reply.content.chars().take(260).collect();
+            eprintln!("[LIVE step={step} finish={:?} len={}] head={head:?}", reply.finish_reason, reply.content.len());
+        }
         let submission = crate::model_stream::parse_run_submission(
             &reply.content,
             reply.finish_reason.as_deref(),
@@ -293,6 +298,7 @@ pub(crate) async fn run_task_with_resource(
 
         match submission {
             crate::model_stream::RunSubmission::Rejected { code, message } => {
+                let raw_preview: String = reply.content.chars().take(600).collect();
                 append_event(
                     &s,
                     "program/source_invalid",
@@ -302,6 +308,7 @@ pub(crate) async fn run_task_with_resource(
                         "step": step,
                         "code": code,
                         "error": message,
+                        "raw_preview": raw_preview,
                     }),
                     false,
                 )
@@ -316,86 +323,15 @@ pub(crate) async fn run_task_with_resource(
             }
 
             crate::model_stream::RunSubmission::Run { source } => {
-                let Some(mut runtime) = w.program.take() else {
-                    bail!("turn VM missing");
-                };
-                runtime.install_static_libraries(&libs)?;
-                let pre_fps = runtime.user_binding_fingerprints();
-                let log_start = runtime.logs_len();
-
-                if let Err(compile_err) = runtime.prepare_segment(&source, libs.clone(), true) {
-                    let msg = format!("{compile_err:#}");
-                    append_event(
-                        &s,
-                        "program/source_invalid",
-                        json!({
-                            "actor": "agent",
-                            "turn": s.turn,
-                            "step": step,
-                            "code": "COMPILE_ERROR",
-                            "error": msg,
-                            "source": source,
-                        }),
-                        false,
-                    )
-                    .await?;
-                    w.program = Some(runtime);
-                    w.context_doc.set_rejection("COMPILE_ERROR", &msg);
-                    save_window(&s, &w).await?;
-                    continue;
+                if execute_js_step(&s, &mut w, &libs, step, allow_shell, source, None).await? {
+                    return Ok(());
                 }
-
-                // Drive the Rust JS VM, proxying every trapped ActionKind::Tool into Rust.
-                let node = format!("step_{}_{}", s.turn, step);
-                let final_state = drive_vm_segment(
-                    &s,
-                    &mut runtime,
-                    &libs,
-                    &node,
-                    step,
-                    allow_shell,
-                )
-                .await?;
-                let logs = runtime.logs_since(log_start);
-
-                match final_state {
-                    State::Returned(val) => {
-                        if runtime.segment_returned_explicitly() {
-                            let answer = match val {
-                                Value::String(text) => text,
-                                Value::Null => String::new(),
-                                other => serde_json::to_string_pretty(&other).unwrap_or_default(),
-                            };
-                            w.context_doc.record_completed_segment(
-                                source,
-                                &runtime,
-                                &pre_fps,
-                                &logs,
-                            );
-                            finish_turn_with_reply(&s, &mut w, step, answer).await?;
-                            return Ok(());
-                        }
-                        w.context_doc
-                            .record_completed_segment(source, &runtime, &pre_fps, &logs);
-                        w.program = Some(runtime);
-                        save_window(&s, &w).await?;
-                    }
-                    State::Failed(err) => {
-                        w.context_doc.record_failed_segment(
-                            source,
-                            &runtime,
-                            &pre_fps,
-                            &logs,
-                            &err,
-                        );
-                        w.program = Some(runtime);
-                        save_window(&s, &w).await?;
-                    }
-                    State::Action(_) | State::Waiting => {
-                        w.program = Some(runtime);
-                        save_window(&s, &w).await?;
-                        bail!("VM suspended in an unsupported state in Step 1");
-                    }
+            }
+            crate::model_stream::RunSubmission::CodeAndReply { source, markdown } => {
+                if execute_js_step(&s, &mut w, &libs, step, allow_shell, source, Some(markdown))
+                    .await?
+                {
+                    return Ok(());
                 }
             }
         }
@@ -404,6 +340,114 @@ pub(crate) async fn run_task_with_resource(
     // Reached max_rounds (mainly test cap); persist current state cleanly.
     save_window(&s, &w).await?;
     Ok(())
+}
+
+/// Execute one JS step (with optional trailing `return <<<` reply).
+/// Returns `Ok(true)` if the turn finished and delivered the final reply.
+async fn execute_js_step(
+    s: &Session<'_>,
+    w: &mut Window,
+    libs: &agent_program::libraries::Libraries,
+    step: usize,
+    allow_shell: bool,
+    source: String,
+    pending_reply: Option<String>,
+) -> Result<bool> {
+    let Some(mut runtime) = w.program.take() else {
+        bail!("turn VM missing");
+    };
+    runtime.install_static_libraries(libs)?;
+    let pre_fps = runtime.user_binding_fingerprints();
+    let log_start = runtime.logs_len();
+
+    if let Err(compile_err) = runtime.prepare_segment(&source, libs.clone(), true) {
+        let msg = format!("{compile_err:#}");
+        append_event(
+            s,
+            "program/source_invalid",
+            json!({
+                "actor": "agent",
+                "turn": s.turn,
+                "step": step,
+                "code": "COMPILE_ERROR",
+                "error": msg,
+                "source": source,
+            }),
+            false,
+        )
+        .await?;
+        w.program = Some(runtime);
+        w.context_doc.set_rejection("COMPILE_ERROR", &msg);
+        save_window(s, w).await?;
+        return Ok(false);
+    }
+
+    let node = format!("step_{}_{}", s.turn, step);
+    let (final_state, external_tool_calls) =
+        drive_vm_segment(s, &mut runtime, libs, &node, step, allow_shell).await?;
+    let logs = runtime.logs_since(log_start);
+
+    match final_state {
+        State::Returned(val) => {
+            if runtime.segment_returned_explicitly() && external_tool_calls == 0 {
+                let answer = match val {
+                    Value::String(text) => text,
+                    Value::Null => String::new(),
+                    other => serde_json::to_string_pretty(&other).unwrap_or_default(),
+                };
+                w.context_doc
+                    .record_completed_segment(source, &runtime, &pre_fps, &logs, None);
+                finish_turn_with_reply(s, w, step, answer).await?;
+                return Ok(true);
+            }
+            if let Some(reply_md) = pending_reply {
+                if external_tool_calls == 0 {
+                    // Pure in-memory JS projection + final reply: pin `// =>` and finish!
+                    w.context_doc
+                        .record_completed_segment(source, &runtime, &pre_fps, &logs, None);
+                    finish_turn_with_reply(s, w, step, reply_md).await?;
+                    return Ok(true);
+                }
+                // First-Trap Truncation: external host tools ran, so the trailing
+                // `return <<<` was written before observing real results — discard it!
+                let note = format!(
+                    "// [Host note: executed your JS above ({external_tool_calls} host tool call(s)) and discarded the premature `return <<<` so you can inspect the real result below before replying.]"
+                );
+                w.context_doc.record_completed_segment(
+                    source,
+                    &runtime,
+                    &pre_fps,
+                    &logs,
+                    Some(note),
+                );
+                w.program = Some(runtime);
+                save_window(s, w).await?;
+                return Ok(false);
+            }
+            let note = (runtime.segment_returned_explicitly() && external_tool_calls > 0).then(|| {
+                format!(
+                    "// [Host note: executed your JS above ({external_tool_calls} host tool call(s)); inspect the real output below before returning your final answer.]"
+                )
+            });
+            w.context_doc
+                .record_completed_segment(source, &runtime, &pre_fps, &logs, note);
+            w.program = Some(runtime);
+            save_window(s, w).await?;
+            Ok(false)
+        }
+        State::Failed(err) => {
+            w.context_doc
+                .record_failed_segment(source, &runtime, &pre_fps, &logs, &err);
+            w.program = Some(runtime);
+            save_window(s, w).await?;
+            Ok(false)
+        }
+        State::Action(_) | State::Waiting => {
+            w.program = Some(runtime);
+            save_window(s, w).await?;
+            bail!("VM suspended in an unsupported state in Step 1");
+        }
+    }
 }
 
 async fn finish_turn_with_reply(
@@ -435,6 +479,7 @@ async fn finish_turn_with_reply(
 
 /// Execute one prepared JS segment in `runtime` until it returns or fails,
 /// proxying every host tool trap directly into Rust `host_tools`.
+/// Returns `(terminal_state, external_tool_calls_count)`.
 async fn drive_vm_segment(
     s: &Session<'_>,
     runtime: &mut Runtime,
@@ -442,7 +487,8 @@ async fn drive_vm_segment(
     node: &str,
     step: usize,
     allow_shell: bool,
-) -> Result<State> {
+) -> Result<(State, usize)> {
+    let mut external_tool_calls = 0usize;
     loop {
         if s.cancel.is_cancelled() {
             bail!("cancelled");
@@ -450,12 +496,14 @@ async fn drive_vm_segment(
         match runtime.next() {
             State::Action(action) => match action.kind {
                 ActionKind::Tool { name, args } => {
+                    external_tool_calls += 1;
                     let (result, is_error) =
                         proxy_rust_tool(s, libs, node, step, &action.id, &name, args, allow_shell)
                             .await?;
                     runtime.resume(result, is_error)?;
                 }
                 ActionKind::ParallelReads { operations } => {
+                    external_tool_calls += operations.len();
                     let mut results = Vec::with_capacity(operations.len());
                     let mut failed = false;
                     for (idx, (name, args)) in operations.into_iter().enumerate() {
@@ -492,7 +540,7 @@ async fn drive_vm_segment(
                     runtime.resume(err, true)?;
                 }
             },
-            terminal => return Ok(terminal),
+            terminal => return Ok((terminal, external_tool_calls)),
         }
     }
 }

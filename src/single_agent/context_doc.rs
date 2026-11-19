@@ -107,6 +107,7 @@ impl ContextDocument {
         runtime: &Runtime,
         pre_fingerprints: &BTreeMap<String, String>,
         console_logs: &[String],
+        extra_note: Option<String>,
     ) {
         let (receipts, peek_sections) =
             format_segment_feedback(runtime, pre_fingerprints, console_logs);
@@ -116,7 +117,7 @@ impl ContextDocument {
                 inline_receipts: receipts,
                 error_note: None,
             });
-            turn.ephemeral_peek = build_ephemeral_peek(peek_sections, None);
+            turn.ephemeral_peek = build_ephemeral_peek(peek_sections, extra_note);
         }
     }
 
@@ -219,11 +220,10 @@ impl ContextDocument {
 }
 
 fn render_stable_user(turn: &TurnDoc) -> String {
-    let mut out = format!("// === USER GOAL ===\n{}", turn.user_text);
-    if turn.segments.is_empty() {
-        return out;
-    }
-    out.push_str("\n\n// === EXECUTION TRACE (Append-Only) ===\nasync function executeTask() {");
+    let mut out = format!(
+        "// === USER GOAL ===\n{}\n\n// === EXECUTION TRACE (Append-Only) ===\nasync function executeTask() {{",
+        turn.user_text
+    );
     for seg in &turn.segments {
         out.push('\n');
         for line in seg.source.lines() {

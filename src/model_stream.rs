@@ -22,36 +22,90 @@ pub const THINKING_BLOCKS: &str = "_thinking_blocks";
 /// - Normal execution steps emit raw JavaScript directly (no XML `<run>` tags,
 ///   no JSON tool calls).
 /// - Final user-facing Markdown replies (which may freely contain ```` ```js ````
-///   example code blocks with zero escaping) begin with `return <<<` on the
-///   first non-empty line, followed by the raw Markdown reply until EOF.
+///   example code blocks with zero escaping) begin with `return <<<` followed by
+///   the raw Markdown reply until EOF (optional trailing `>>>` closing line is
+///   stripped cleanly).
+/// - `CodeAndReply`: executable JS followed by `return <<<`:
+///   - If running `source` makes 0 external host tool calls (pure in-memory
+///     slicing/projection), the host pins `// =>` and immediately delivers `markdown`.
+///   - If running `source` makes `> 0` external host tool calls (First-Trap
+///     Truncation), the host keeps the real tool results in `EPHEMERAL_PEEK` and
+///     discards the premature `markdown` so the model inspects real output next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunSubmission {
     Run { source: String },
     Reply { markdown: String },
+    CodeAndReply { source: String, markdown: String },
     Rejected { code: &'static str, message: String },
 }
 
-/// If `text` begins (after optional leading whitespace) with a `return <<<`
-/// header line, return the byte offset where the raw Markdown body starts.
-fn reply_heredoc_body_start(text: &str) -> Option<usize> {
-    let trimmed_start_len = text.len() - text.trim_start().len();
-    let rest = &text[trimmed_start_len..];
-    let after_return = rest.strip_prefix("return")?;
-    let after_space = after_return.strip_prefix(|c: char| c == ' ' || c == '\t')?;
-    let after_ws = after_space.trim_start_matches([' ', '\t']);
-    let after_marker = after_ws.strip_prefix("<<<")?;
-    // The rest of the first line may only contain horizontal whitespace.
-    let after_trailing = after_marker.trim_start_matches([' ', '\t']);
-    if let Some(after_nl) = after_trailing
-        .strip_prefix("\r\n")
-        .or_else(|| after_trailing.strip_prefix('\n'))
-    {
-        return Some(text.len() - after_nl.len());
-    }
-    if after_trailing.is_empty() {
-        return Some(text.len());
+/// Find the first `return <<<` boundary (either at line start or immediately
+/// after a JS token boundary such as `;` or whitespace) and return
+/// `(prefix_end_byte, reply_body_start_byte)`.
+fn find_reply_heredoc(text: &str) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(rel) = text[search_from..].find("return") {
+        let start = search_from + rel;
+        search_from = start + 6;
+        // Must not be part of a longer identifier (e.g. `myreturn`) or inside a `//` line comment.
+        if start > 0 {
+            let prev = text[..start].chars().next_back().unwrap();
+            if prev.is_ascii_alphanumeric() || prev == '_' || prev == '$' {
+                continue;
+            }
+        }
+        let line_start = text[..start].rfind('\n').map_or(0, |p| p + 1);
+        if text[line_start..start].trim_start().starts_with("//") {
+            continue;
+        }
+        let after_return = &text[start + 6..];
+        let Some(after_space) = after_return.strip_prefix(|c: char| c == ' ' || c == '\t') else {
+            continue;
+        };
+        let after_ws = after_space.trim_start_matches([' ', '\t']);
+        let Some(after_marker) = after_ws.strip_prefix("<<<") else {
+            continue;
+        };
+        let after_trailing = after_marker.trim_start_matches([' ', '\t']);
+        if let Some(after_nl) = after_trailing
+            .strip_prefix("\r\n")
+            .or_else(|| after_trailing.strip_prefix('\n'))
+        {
+            let body_start = text.len() - after_nl.len();
+            return Some((start, body_start));
+        }
+        if after_trailing.is_empty() && bytes.len() == text.len() {
+            return Some((start, text.len()));
+        }
     }
     None
+}
+
+fn clean_heredoc_markdown(raw: &str) -> String {
+    let trimmed = raw.trim_end();
+    // Strip an optional closing `>>>` or `<<<` line if the model echoed delimiters.
+    for closer in [">>>", "<<<"] {
+        if let Some(prefix) = trimmed.strip_suffix(closer) {
+            let before = prefix.trim_end_matches([' ', '\t']);
+            if before.is_empty() || before.ends_with('\n') {
+                return before.trim_end().to_owned();
+            }
+        }
+    }
+    trimmed.to_owned()
+}
+
+/// Clean stray RL tool-tag tails (e.g. `</parameter>`) that models occasionally
+/// emit right after a valid JS statement.
+fn clean_js_source(raw: &str) -> String {
+    let mut s = raw.trim().to_owned();
+    for stray in ["</parameter>", "</invoke>", "</tool_call>", "</function>"] {
+        if let Some(stripped) = s.strip_suffix(stray) {
+            s = stripped.trim_end().to_owned();
+        }
+    }
+    s
 }
 
 /// Strip a single outer Markdown code fence (```` ```js ... ``` ````) if the
@@ -68,7 +122,6 @@ fn strip_single_js_fence(text: &str) -> Option<String> {
     }
     let body = &trimmed[first_nl + 1..];
     let stripped = body.strip_suffix("```")?;
-    // Only accept if there isn't another closing fence in the middle (prose outside).
     if stripped.contains("\n```") {
         return None;
     }
@@ -81,9 +134,10 @@ fn strip_single_js_fence(text: &str) -> Option<String> {
 
 /// Parse one completed model response under the pure-JS + `return <<<` protocol.
 pub fn parse_run_submission(text: &str, finish_reason: Option<&str>) -> RunSubmission {
-    let is_reply_prefix = reply_heredoc_body_start(text).is_some();
+    let heredoc = find_reply_heredoc(text);
+    let is_pure_reply = heredoc.is_some_and(|(start, _)| text[..start].trim().is_empty());
     if finish_reason == Some("length") {
-        let code = if is_reply_prefix {
+        let code = if is_pure_reply {
             "REPLY_TRUNCATED"
         } else {
             "OUTPUT_TRUNCATED"
@@ -99,31 +153,53 @@ pub fn parse_run_submission(text: &str, finish_reason: Option<&str>) -> RunSubmi
             message: "Empty response. Emit JavaScript statements to continue, or start with `return <<<` followed by your final Markdown reply.".into(),
         };
     }
-    if let Some(body_start) = reply_heredoc_body_start(text) {
-        let markdown = text[body_start..].trim_end().to_owned();
-        if markdown.is_empty() {
+    if let Some((prefix_end, body_start)) = heredoc {
+        let prefix = &text[..prefix_end];
+        let markdown = clean_heredoc_markdown(&text[body_start..]);
+        if prefix.trim().is_empty() {
+            if markdown.is_empty() {
+                return RunSubmission::Rejected {
+                    code: "EMPTY_REPLY",
+                    message: "The `return <<<` reply body was empty. Provide your final Markdown reply after `return <<<`.".into(),
+                };
+            }
+            return RunSubmission::Reply { markdown };
+        }
+        if let Some(stripped) = strip_single_js_fence(prefix) {
+            let source = clean_js_source(&stripped);
+            if markdown.is_empty() {
+                return RunSubmission::Run { source };
+            }
+            return RunSubmission::CodeAndReply { source, markdown };
+        }
+        if prefix.trim_start().starts_with("```") {
+            // Non-JS Markdown fences (e.g. ```rust / ```toml) must NEVER be fed to
+            // the JS compiler where ``` parses as an empty tagged template literal!
             return RunSubmission::Rejected {
-                code: "EMPTY_REPLY",
-                message: "The `return <<<` reply body was empty. Provide your final Markdown reply after `return <<<`.".into(),
+                code: "MARKDOWN_NOT_JS",
+                message: "Non-JavaScript Markdown code fences (such as ```rust) cannot be executed as JS. To send a final Markdown answer with example code, start line 1 with `return <<<`.".into(),
             };
         }
-        return RunSubmission::Reply { markdown };
+        let source = clean_js_source(prefix);
+        if markdown.is_empty() {
+            return RunSubmission::Run { source };
+        }
+        return RunSubmission::CodeAndReply { source, markdown };
     }
-    // Guard against mixing executable JS with a trailing `return <<<` reply in one step.
-    if text.lines().any(|line| {
-        let t = line.trim();
-        t.strip_prefix("return")
-            .and_then(|r| r.strip_prefix(|c: char| c == ' ' || c == '\t'))
-            .map(|r| r.trim())
-            == Some("<<<")
-    }) {
-        return RunSubmission::Rejected {
-            code: "MIXED_CODE_AND_REPLY",
-            message: "Do not mix executable JavaScript and `return <<<` in the same step. Run code first, inspect the result, then emit `return <<<` in a separate step.".into(),
+    if let Some(stripped) = strip_single_js_fence(text) {
+        return RunSubmission::Run {
+            source: clean_js_source(&stripped),
         };
     }
-    let source = strip_single_js_fence(text).unwrap_or_else(|| text.trim().to_owned());
-    RunSubmission::Run { source }
+    if text.trim_start().starts_with("```") {
+        return RunSubmission::Rejected {
+            code: "MARKDOWN_NOT_JS",
+            message: "Non-JavaScript Markdown code fences (such as ```rust) cannot be executed as JS. To send a final Markdown answer with example code, start line 1 with `return <<<`.".into(),
+        };
+    }
+    RunSubmission::Run {
+        source: clean_js_source(text),
+    }
 }
 
 /// Remove legacy business-tool fields when projecting a context document to
@@ -1527,13 +1603,28 @@ mod tests {
                 markdown: "检查完毕，示例代码：\n```js\nconst x = 1;\n```".into()
             }
         );
-        assert!(matches!(
-            parse_run_submission("const a = 1;\nreturn <<<\ndone", Some("stop")),
-            RunSubmission::Rejected {
-                code: "MIXED_CODE_AND_REPLY",
-                ..
+        assert_eq!(
+            parse_run_submission("const a = 1;\nreturn <<<\ndone\n>>>", Some("stop")),
+            RunSubmission::CodeAndReply {
+                source: "const a = 1;".into(),
+                markdown: "done".into(),
             }
-        ));
+        );
+        // Handles glued `;return <<<\n` without newline (e.g. multi-channel proxy concat).
+        assert_eq!(
+            parse_run_submission("const f = io.read({path:\"a.rs\"});return <<<\npremature", Some("stop")),
+            RunSubmission::CodeAndReply {
+                source: "const f = io.read({path:\"a.rs\"});".into(),
+                markdown: "premature".into(),
+            }
+        );
+        // Strips stray RL tag tails after valid JS.
+        assert_eq!(
+            parse_run_submission("const f = io.read({path:\"a.rs\"});\n</parameter>", Some("stop")),
+            RunSubmission::Run {
+                source: "const f = io.read({path:\"a.rs\"});".into(),
+            }
+        );
         assert!(matches!(
             parse_run_submission("const a = 1;", Some("length")),
             RunSubmission::Rejected {
