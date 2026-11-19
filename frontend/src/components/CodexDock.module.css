@@ -15,8 +15,8 @@
 }
 
 :global(body[data-ds-dark-theme]) .dock {
-  background: #141415;
-  border-right-color: #27272a;
+  background: var(--codex-dock-bg);
+  border-right-color: var(--codex-border-subtle);
 }
 
 .topGroup,
@@ -54,13 +54,13 @@
 }
 
 .dockBtn.active {
-  background: var(--codex-active-pill, #ebecee);
-  color: var(--codex-text-primary, #18181b);
+  background: var(--codex-active-pill, #e3f4ec);
+  color: var(--codex-blue-primary, #1d9e75);
 }
 
 :global(body[data-ds-dark-theme]) .dockBtn.active {
-  background: #27272a;
-  color: #fafafa;
+  background: var(--codex-active-pill, #163329);
+  color: var(--brand-mark, #34d399);
 }
 
 .avatarWrapper {

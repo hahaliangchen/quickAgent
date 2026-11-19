@@ -167,7 +167,7 @@
   position: relative;
 }
 
-/* Layer 2: Floating White Card with Google Search Box elevation */
+/* Layer 2: Floating Card with refined Light/Dark elevation */
 .card {
   position: relative;
   z-index: 2;
@@ -176,10 +176,9 @@
   min-width: 0;
   box-sizing: border-box;
   background: var(--codex-card-bg, #ffffff);
-  border: 1px solid var(--codex-card-border, #dfe1e5);
-  border-radius: 20px;
-  /* Softer, higher-blur ambient elevation with +2px spread */
-  box-shadow: 0 2px 14px 2px rgba(32, 33, 36, 0.10);
+  border: 1px solid var(--codex-card-border, #d8dce3);
+  border-radius: 18px;
+  box-shadow: 0 4px 20px rgba(17, 24, 39, 0.06), 0 1px 3px rgba(17, 24, 39, 0.04);
   padding: 12px 16px 10px 16px;
   display: flex;
   flex-direction: column;
@@ -188,42 +187,38 @@
 }
 
 .card:hover {
-  border-color: rgba(223, 225, 229, 0);
-  box-shadow: 0 3px 18px 2px rgba(32, 33, 36, 0.14);
+  border-color: #c5cbd6;
+  box-shadow: 0 6px 24px rgba(17, 24, 39, 0.09), 0 1px 4px rgba(17, 24, 39, 0.05);
 }
 
 .card:focus-within {
-  border-color: transparent;
-  box-shadow: 0 4px 22px 3px rgba(32, 33, 36, 0.16);
+  border-color: color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 55%, var(--codex-card-border, #d8dce3));
+  box-shadow: 0 6px 26px rgba(29, 158, 117, 0.10), 0 0 0 3px rgba(29, 158, 117, 0.08);
 }
 
 :global(body[data-ds-dark-theme]) .card {
-  background: #202024;
-  border-color: #303134;
-  box-shadow: 0 2px 14px 2px rgba(0, 0, 0, 0.35);
+  background: var(--codex-card-bg, #1e2025);
+  border-color: var(--codex-card-border, #32353e);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.36);
 }
 
 :global(body[data-ds-dark-theme]) .card:hover {
-  border-color: transparent;
-  box-shadow: 0 3px 18px 2px rgba(0, 0, 0, 0.45);
+  border-color: #3f434e;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.44);
 }
 
 :global(body[data-ds-dark-theme]) .card:focus-within {
-  border-color: transparent;
-  box-shadow: 0 4px 22px 3px rgba(0, 0, 0, 0.6);
+  border-color: rgba(52, 211, 153, 0.45);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5), 0 0 0 3px rgba(29, 158, 117, 0.14);
 }
 
-/* Keep the welcome illustration visually prominent, even when the input is focused. */
-.hero .card,
-.hero .card:hover,
-.hero .card:focus-within {
-  box-shadow: 0 3px 16px rgba(32, 33, 36, 0.09);
+/* Hero composer: slightly more breathing room so it anchors the centered page. */
+.hero .card {
+  padding: 14px 18px 12px 18px;
 }
 
-:global(body[data-ds-dark-theme]) .hero .card,
-:global(body[data-ds-dark-theme]) .hero .card:hover,
-:global(body[data-ds-dark-theme]) .hero .card:focus-within {
-  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.25);
+.hero .textarea {
+  min-height: 44px;
 }
 
 .inputWrap {

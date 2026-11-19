@@ -6,36 +6,37 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap');
 
 :root {
-  /* The windmill mark: deep leaf green, lifted to bright leaf green on dark. */
-  --brand-mark: #4a8f2e;
+  /* QuickAgent emerald geometric emblem: crisp teal-green on light, bright mint on dark. */
+  --brand-mark: #1d9e75;
 
-  /* Ultra-smooth font stack matching OpenAI Codex Desktop */
+  /* Ultra-smooth font stack */
   --codex-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
     'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei',
     'Source Han Sans CN', sans-serif;
   --dsw-font-family: var(--codex-font-sans);
 
+  /* 3-tier cool-neutral Light surface hierarchy: Dock (#f3f4f6) -> Sidebar (#f7f8fa) -> Canvas (#ffffff) */
   --codex-bg-main: #ffffff;
-  --codex-dock-bg: #ffffff;
-  --codex-sidebar-bg: #ffffff;
-  --codex-panel-bg: #ffffff;
+  --codex-dock-bg: #f3f4f6;
+  --codex-sidebar-bg: #f7f8fa;
+  --codex-panel-bg: #f8f9fb;
   --codex-card-bg: #ffffff;
 
-  /* Crisp, high-contrast text matching OpenAI Codex Desktop */
+  /* Crisp, high-contrast neutral text */
   --codex-text-primary: #111827;
   --codex-text-secondary: #374151;
   --codex-text-muted: #6b7280;
 
-  --codex-border-subtle: #efefef;
-  --codex-card-border: #e5e7eb;
-  --codex-hover-bg: #f5f6f7;
-  --codex-active-pill: #f3f5f5;
-  --codex-active-hover: #ecefee;
-  /* Sprout theme: the brand accent is green; the variable names predate it. */
+  --codex-border-subtle: #e6e8ec;
+  --codex-card-border: #d8dce3;
+  --codex-hover-bg: #eceff3;
+  --codex-active-pill: #e3f4ec;
+  --codex-active-hover: #d5ede2;
+  /* Emerald brand accent */
   --codex-blue-primary: #1d9e75;
   --codex-blue-hover: #0f6e56;
   --sprout-strong: #0f6e56;
-  --sprout-soft: #e3f1ea;
+  --sprout-soft: #e3f4ec;
   --codex-amber-circle: #d97706;
   --codex-amber-bg: #fef3c7;
   --codex-amber-border: #fde68a;
@@ -44,8 +45,7 @@
   --codex-diff-del: #dc2626;
   --codex-diff-del-bg: #fee2e2;
 
-  /* Illustration and status colours: leaf icons, leaf cards and the
-     context usage ring. */
+  /* Status & context usage ring colours */
   --codex-leaf-border: #9fe1cb;
   --codex-leaf-bg: #f2fbf7;
   --theme-leaf-light: #5dcaa5;
@@ -56,38 +56,38 @@
   --theme-ring-mid: #5dcaa5;
   --theme-ring-high: #d97706;
 
-  /* Harmonize DSH tokens with Codex aesthetic */
+  /* Harmonize DSH tokens with QuickAgent surface hierarchy */
   --dsw-alias-bg-base: #ffffff;
-  --dsw-specific-sidebar-fill: #ffffff;
-  --dsw-specific-bubble: #f5f6f7;
-  --dsw-alias-border-l2: #e5e7eb;
-  --dsw-alias-border-l3: #efefef;
+  --dsw-specific-sidebar-fill: #f7f8fa;
+  --dsw-specific-bubble: #f3f4f6;
+  --dsw-alias-border-l2: #d8dce3;
+  --dsw-alias-border-l3: #e6e8ec;
   --dsw-alias-label-primary: #111827;
   --dsw-alias-label-secondary: #374151;
   --dsw-alias-label-tertiary: #6b7280;
-  --dsw-alias-interactive-bg-hover: #eef3ef;
+  --dsw-alias-interactive-bg-hover: #eceff3;
   --dsw-alias-state-business-primary: #1d9e75;
 }
 
 body[data-ds-dark-theme] {
-  --brand-mark: #6fb447;
-  --codex-bg-main: #18181b;
-  --codex-dock-bg: #141415;
-  --codex-sidebar-bg: #151917;
-  --codex-panel-bg: #151917;
-  --codex-card-bg: #202024;
+  --brand-mark: #34d399;
+  --codex-bg-main: #18191d;
+  --codex-dock-bg: #111214;
+  --codex-sidebar-bg: #15171a;
+  --codex-panel-bg: #141619;
+  --codex-card-bg: #1e2025;
   --codex-text-primary: #f4f4f5;
   --codex-text-secondary: #e4e4e7;
-  --codex-text-muted: #a1a1aa;
-  --codex-border-subtle: #27272a;
-  --codex-card-border: #323238;
-  --codex-hover-bg: #222a25;
-  --codex-active-pill: #1d3a2e;
-  --codex-active-hover: #24493a;
+  --codex-text-muted: #9ca3af;
+  --codex-border-subtle: #26272b;
+  --codex-card-border: #32353e;
+  --codex-hover-bg: #22252b;
+  --codex-active-pill: #163329;
+  --codex-active-hover: #1d4034;
   --codex-blue-primary: #1d9e75;
   --codex-blue-hover: #25b585;
   --sprout-strong: #5dcaa5;
-  --sprout-soft: #1d3a2e;
+  --sprout-soft: #163329;
   --codex-amber-circle: #f59e0b;
   --codex-amber-bg: #78350f33;
   --codex-amber-border: #b45309;
@@ -96,14 +96,14 @@ body[data-ds-dark-theme] {
   --theme-on-soft: #e1f5ee;
   --theme-soft-border: #2d5a47;
 
-  --dsw-alias-bg-base: #18181b;
-  --dsw-specific-sidebar-fill: #151917;
-  --dsw-alias-border-l2: #323238;
-  --dsw-alias-border-l3: #27272a;
+  --dsw-alias-bg-base: #18191d;
+  --dsw-specific-sidebar-fill: #15171a;
+  --dsw-alias-border-l2: #32353e;
+  --dsw-alias-border-l3: #26272b;
   --dsw-alias-label-primary: #f4f4f5;
   --dsw-alias-label-secondary: #e4e4e7;
-  --dsw-alias-label-tertiary: #a1a1aa;
-  --dsw-alias-interactive-bg-hover: #222a25;
+  --dsw-alias-label-tertiary: #9ca3af;
+  --dsw-alias-interactive-bg-hover: #22252b;
   --dsw-alias-state-business-primary: #1d9e75;
 }
 

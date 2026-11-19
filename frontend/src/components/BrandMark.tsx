@@ -1,21 +1,21 @@
-/** Sails on the diagonals, each a stock with its cloth on one side. */
-const SAILS = [45, 135, 225, 315]
-
 /**
- * The QuickAgent mark: the windmill of the welcome illustration as a silhouette.
- * It takes --brand-mark, so it follows the app's theme rather than the system's;
- * assets/windmill-mark.svg is the same drawing for the favicon and notifications.
+ * The QuickAgent mark: four symmetrical geometric emerald leaves forming
+ * a crisp modern pinwheel emblem. Follows --brand-mark for light/dark themes;
+ * assets/windmill-mark.svg is the matching favicon and notification icon.
  */
 export function BrandMark({ size = 28, className }: { size?: number; className?: string }) {
-  return <svg width={size} height={size} viewBox="0 0 96 96" className={className} aria-hidden="true">
-    <g fill="var(--brand-mark, #4a8f2e)">
-      {/* Roof and tower as one outline, with the window and door cut out. */}
-      <path fillRule="evenodd" d="M33 44 48 14 63 44h-4l6 44H31l6-44ZM45 58a3 3 0 0 1 6 0v2a3 3 0 0 1-6 0ZM43 88v-8a5 5 0 0 1 10 0v8Z" />
-      {SAILS.map(angle => <g key={angle} transform={`translate(48 38) rotate(${angle})`}>
-        <rect x="-1.6" y="-41" width="3.2" height="38" rx="1.6" />
-        <rect x="1" y="-41" width="10" height="29" rx="1.8" />
-      </g>)}
-      <circle cx="48" cy="38" r="4.2" />
-    </g>
-  </svg>
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" fill="none" className={className} aria-hidden="true">
+      <g fill="var(--brand-mark, #1d9e75)">
+        {/* Top-left leaf */}
+        <path d="M12 12C22.5 12 29 18.5 29 29C18.5 29 12 22.5 12 12Z" />
+        {/* Top-right leaf */}
+        <path d="M52 12C52 22.5 45.5 29 35 29C35 18.5 41.5 12 52 12Z" />
+        {/* Bottom-right leaf */}
+        <path d="M52 52C41.5 52 35 45.5 35 35C45.5 35 52 41.5 52 52Z" />
+        {/* Bottom-left leaf */}
+        <path d="M12 52C12 41.5 18.5 35 29 35C29 45.5 22.5 52 12 52Z" />
+      </g>
+    </svg>
+  )
 }

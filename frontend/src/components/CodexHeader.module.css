@@ -13,8 +13,8 @@
 }
 
 :global(body[data-ds-dark-theme]) .header {
-  background: #18181b;
-  border-bottom-color: #27272a;
+  background: var(--codex-bg-main);
+  border-bottom-color: var(--codex-border-subtle);
 }
 
 .titleArea {
@@ -163,11 +163,11 @@
 }
 
 .iconBtnActive {
-  background: var(--codex-hover-bg, #f4f4f5);
-  color: var(--codex-blue-primary, #007aff);
+  background: var(--codex-active-pill, #e3f4ec);
+  color: var(--codex-blue-primary, #1d9e75);
 }
 
 :global(body[data-ds-dark-theme]) .iconBtnActive {
-  background: #27272a;
-  color: #0a84ff;
+  background: var(--codex-active-pill, #163329);
+  color: var(--sprout-strong, #5dcaa5);
 }
