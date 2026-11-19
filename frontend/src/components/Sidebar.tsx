@@ -135,7 +135,12 @@ export function Sidebar({
           ? <span className={css.awaitingMark} title="等你确认是否运行命令">待确认</span>
           : running
             ? <span className={css.runningSpinner} aria-label="执行中">◌</span>
-            : timeText && <span className={css.sessionTime}>{timeText}</span>}
+            : (isActive || timeText) && (
+              <span className={css.sessionMeta}>
+                {isActive && <span className={css.activeDot} aria-hidden="true" />}
+                {timeText && <span className={css.sessionTime}>{timeText}</span>}
+              </span>
+            )}
       </button>
       <RowMenu label={`会话操作：${taskTitle(task)}`} items={[
         {id:'rename', label:'重命名'}, {id:'pin', label: task.pinned ? '取消置顶' : '置顶'},
