@@ -203,8 +203,8 @@ export function Sidebar({
     </div>
     <div className={css.actionStack}>
       <button type="button" className={css.newChatBtn} onClick={onNew}>
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.85" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-        <span>{mode === 'chat' ? '新建聊天' : '新建代码会话'}</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        <span>{mode === 'chat' ? '新聊天' : '新会话'}</span>
       </button>
       <div className={css.modeSwitch} role="tablist" aria-label="会话类型">
         <button type="button" role="tab" aria-selected={mode === 'code'} className={clsx(css.modeButton, mode === 'code' && css.modeActive)} onClick={() => onModeChange?.('code')}>
