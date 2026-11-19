@@ -3,48 +3,38 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 52px;
-  padding: 0 20px;
+  height: 48px;
+  padding: 0 16px;
   box-sizing: border-box;
-  background: var(--codex-bg-main, #fafafb);
-  border-bottom: none;
+  background: var(--codex-bg-main, #ffffff);
+  border-bottom: 1px solid var(--codex-border-subtle, #efefef);
   user-select: none;
   z-index: 5;
 }
 
 :global(body[data-ds-dark-theme]) .header {
   background: var(--codex-bg-main);
-  border-bottom: none;
+  border-bottom-color: var(--codex-border-subtle);
 }
 
 .titleArea {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex: 1 1 0;
   min-width: 0;
 }
 
 .titleIcon {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  background: var(--codex-blue-primary, #1d9e75);
-  color: #ffffff;
+  color: var(--codex-text-muted, #71717a);
   display: flex;
   align-items: center;
-  justify-content: center;
   flex: none;
 }
 
-:global(body[data-ds-dark-theme]) .titleIcon {
-  background: var(--sprout-soft, #202d27);
-  color: var(--brand-mark, #4cb894);
-}
-
 .titleText {
-  font-size: 14px;
-  font-weight: 550;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--codex-text-primary, #18181b);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -52,64 +42,64 @@
 }
 
 :global(body[data-ds-dark-theme]) .titleText {
-  color: var(--codex-text-primary, #ece9e2);
+  color: #f4f4f5;
 }
 
-/* Quiet borderless text toggle floating directly on paper */
+/* Center segmented tabs — crisp 1px hairline track + elevated pill */
 .tabPillGroup {
   display: flex;
   flex: none;
   align-items: center;
   padding: 2px;
-  gap: 4px;
-  border-radius: 10px;
-  border: none;
-  background: transparent;
+  gap: 2px;
+  border-radius: 9px;
+  border: 1px solid var(--codex-border-subtle, #e2e5ea);
+  background: var(--codex-dock-bg, #f3f4f6);
   white-space: nowrap;
 }
 
 :global(body[data-ds-dark-theme]) .tabPillGroup {
-  background: transparent;
+  background: #111214;
+  border-color: var(--codex-border-subtle, #2b2e35);
 }
 
 .tabPill {
   flex: none;
-  height: 28px;
+  height: 26px;
   padding: 0 12px;
-  border-radius: 8px;
-  border: none;
+  border-radius: 7px;
+  border: 1px solid transparent;
   background: transparent;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
-  color: var(--codex-text-muted, #71717a);
+  color: var(--codex-text-muted, #6b7280);
   cursor: pointer;
-  transition: color 0.15s ease, background-color 0.15s ease;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
 }
 
 :global(body[data-ds-dark-theme]) .tabPill {
-  color: var(--codex-text-muted, #8a867e);
+  color: #9ca3af;
 }
 
 .tabPill:hover {
-  background: var(--codex-hover-bg, #eef0f3);
-  color: var(--codex-text-primary, #18181b);
+  color: var(--codex-text-primary, #111827);
 }
 
 :global(body[data-ds-dark-theme]) .tabPill:hover {
-  background: var(--codex-hover-bg, #242320);
-  color: var(--codex-text-primary, #ece9e2);
+  color: #f4f4f5;
 }
 
 .tabPillActive {
-  background: var(--codex-hover-bg, #eef0f3) !important;
-  color: var(--codex-text-primary, #18181b) !important;
-  font-weight: 600;
+  background: var(--codex-card-bg, #ffffff) !important;
+  color: var(--codex-text-primary, #111827) !important;
+  border-color: var(--codex-card-border, #d0d5dd);
 }
 
 :global(body[data-ds-dark-theme]) .tabPillActive {
-  background: var(--codex-hover-bg, #242320) !important;
-  color: var(--codex-text-primary, #ece9e2) !important;
+  background: #24272f !important;
+  color: #ffffff !important;
+  border-color: var(--codex-card-border, #363a44);
 }
 
 /* Right utilities */
@@ -127,19 +117,20 @@
   align-items: center;
   gap: 5px;
   height: 26px;
-  padding: 0 9px;
+  padding: 0 10px;
   border-radius: 999px;
-  border: none;
-  background: var(--sprout-soft, #e6f4ee);
-  font-size: 12px;
+  border: 1px solid var(--codex-accent-border, rgba(29, 158, 117, 0.34));
+  background: var(--sprout-soft, #e3f4ec);
+  font-size: 11.5px;
   font-weight: 500;
   white-space: nowrap;
   color: var(--sprout-strong, #0f6e56);
 }
 
 :global(body[data-ds-dark-theme]) .durationBadge {
-  background: var(--sprout-soft, #202d27);
-  color: var(--sprout-strong, #64cca8);
+  background: var(--sprout-soft, #163329);
+  border-color: var(--codex-accent-border, rgba(52, 211, 153, 0.42));
+  color: var(--sprout-strong, #5dcaa5);
 }
 
 .liveDot {
@@ -181,11 +172,76 @@
 }
 
 .iconBtnActive {
-  background: var(--codex-active-pill, #e6f4ee);
+  background: var(--codex-active-pill, #e3f4ec);
   color: var(--codex-blue-primary, #1d9e75);
+  box-shadow: inset 0 0 0 1px var(--codex-accent-border, rgba(29, 158, 117, 0.34));
 }
 
 :global(body[data-ds-dark-theme]) .iconBtnActive {
-  background: var(--codex-active-pill, #202d27);
-  color: var(--sprout-strong, #64cca8);
+  background: var(--codex-active-pill, #163329);
+  color: var(--sprout-strong, #5dcaa5);
+  box-shadow: inset 0 0 0 1px var(--codex-accent-border, rgba(52, 211, 153, 0.42));
+}
+
+/* Borderless Paper style */
+:global(body[data-ui-style='paper']) .header {
+  height: 52px;
+  padding: 0 20px;
+  border-bottom: none;
+}
+
+:global(body[data-ui-style='paper']) .titleArea {
+  gap: 10px;
+}
+
+:global(body[data-ui-style='paper']) .titleIcon {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--codex-blue-primary, #1d9e75);
+  color: #ffffff;
+  justify-content: center;
+}
+
+:global(body[data-ds-dark-theme][data-ui-style='paper']) .titleIcon {
+  background: var(--sprout-soft, #202d27);
+  color: var(--brand-mark, #4cb894);
+}
+
+:global(body[data-ui-style='paper']) .tabPillGroup {
+  border: none;
+  background: transparent;
+  gap: 4px;
+}
+
+:global(body[data-ui-style='paper']) .tabPill {
+  border: none;
+  height: 28px;
+  border-radius: 8px;
+}
+
+:global(body[data-ui-style='paper']) .tabPill:hover {
+  background: var(--codex-hover-bg, #eef0f3);
+}
+
+:global(body[data-ds-dark-theme][data-ui-style='paper']) .tabPill:hover {
+  background: var(--codex-hover-bg, #242320);
+}
+
+:global(body[data-ui-style='paper']) .tabPillActive {
+  border: none;
+  background: var(--codex-hover-bg, #eef0f3) !important;
+  font-weight: 600;
+}
+
+:global(body[data-ds-dark-theme][data-ui-style='paper']) .tabPillActive {
+  background: var(--codex-hover-bg, #242320) !important;
+}
+
+:global(body[data-ui-style='paper']) .durationBadge {
+  border: none;
+}
+
+:global(body[data-ui-style='paper']) .iconBtnActive {
+  box-shadow: none;
 }

@@ -30,7 +30,7 @@
      keeps narrow windows sane. */
   max-width: 100%;
   background: var(--dsw-specific-bubble);
-  border: none;
+  border: 1px solid var(--codex-border-subtle, #e2e5ea);
   border-radius: 14px;
   /* 42px single-line bubble at the default size: 22 line + 10 vertical
      padding each side; the Settings font-size preference moves size and line
@@ -43,6 +43,10 @@
      decorated single-line message stays one line. */
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+:global(body[data-ds-dark-theme]) .bubble {
+  border-color: #264236;
 }
 
 .referenceSummary {
@@ -411,4 +415,9 @@
   color: var(--dsw-alias-label-tertiary, rgba(0, 0, 0, 0.45));
   font-size: 12px;
   line-height: 15px;
+}
+
+/* Borderless Paper style */
+:global(body[data-ui-style='paper']) .bubble {
+  border: none;
 }

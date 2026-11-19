@@ -167,7 +167,7 @@
   position: relative;
 }
 
-/* Layer 2: Borderless floating paper sheet lifted by gentle natural daylight shadow */
+/* Layer 2: Floating Card — crisp 1px hairline border over heavy diffuse shadows */
 .card {
   position: relative;
   z-index: 2;
@@ -176,38 +176,40 @@
   min-width: 0;
   box-sizing: border-box;
   background: var(--codex-card-bg, #ffffff);
-  border: none;
-  border-radius: 18px;
-  box-shadow: 0 6px 28px rgba(15, 23, 42, 0.06), 0 1px 4px rgba(15, 23, 42, 0.03);
+  border: 1px solid var(--codex-card-border, #d0d5dd);
+  border-radius: 16px;
+  box-shadow: 0 2px 10px rgba(17, 24, 39, 0.04);
   padding: 12px 16px 10px 16px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  transition: box-shadow 0.2s ease, background-color 0.2s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .card:hover {
-  box-shadow: 0 8px 32px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.04);
+  border-color: #b8c0cc;
+  box-shadow: 0 3px 12px rgba(17, 24, 39, 0.06);
 }
 
 .card:focus-within {
-  box-shadow: 0 10px 36px rgba(29, 158, 117, 0.09), 0 2px 8px rgba(15, 23, 42, 0.05);
+  border-color: var(--codex-blue-primary, #1d9e75);
+  box-shadow: 0 2px 12px rgba(29, 158, 117, 0.08);
 }
 
 :global(body[data-ds-dark-theme]) .card {
-  background: var(--codex-card-bg, #23221f);
-  border: none;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.30);
+  background: var(--codex-card-bg, #1e2025);
+  border-color: var(--codex-card-border, #363a44);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.24);
 }
 
 :global(body[data-ds-dark-theme]) .card:hover {
-  background: #272622;
-  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.36);
+  border-color: #464b58;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.3);
 }
 
 :global(body[data-ds-dark-theme]) .card:focus-within {
-  background: #282723;
-  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.42);
+  border-color: rgba(52, 211, 153, 0.55);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.34);
 }
 
 /* Hero composer: slightly more breathing room so it anchors the centered page. */
@@ -740,4 +742,34 @@
   color: var(--codex-text-muted, #9ca3af);
   cursor: default;
   transform: none;
+}
+
+/* Borderless Paper style: floating paper sheet lifted by gentle natural daylight shadow */
+:global(body[data-ui-style='paper']) .card {
+  border: none;
+  border-radius: 18px;
+  box-shadow: 0 6px 28px rgba(15, 23, 42, 0.06), 0 1px 4px rgba(15, 23, 42, 0.03);
+}
+
+:global(body[data-ui-style='paper']) .card:hover {
+  box-shadow: 0 8px 32px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.04);
+}
+
+:global(body[data-ui-style='paper']) .card:focus-within {
+  box-shadow: 0 10px 36px rgba(29, 158, 117, 0.09), 0 2px 8px rgba(15, 23, 42, 0.05);
+}
+
+:global(body[data-ds-dark-theme][data-ui-style='paper']) .card {
+  border: none;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.30);
+}
+
+:global(body[data-ds-dark-theme][data-ui-style='paper']) .card:hover {
+  background: #272622;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.36);
+}
+
+:global(body[data-ds-dark-theme][data-ui-style='paper']) .card:focus-within {
+  background: #282723;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.42);
 }

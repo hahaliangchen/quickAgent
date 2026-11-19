@@ -30,7 +30,7 @@ import appearanceCss from '../dsh/settings/AppearanceRow.module.css'
 import modelsCss from '../dsh/settings/ModelsSection.module.css'
 import pluginsCss from '../dsh/settings/PluginInventorySettingsTab.module.css'
 import rootCss from '../dsh/settings/SettingsRoot.module.css'
-import { getThemeMode, setThemeMode, type ThemeMode } from '../theme.ts'
+import { getThemeMode, getUiStyle, setThemeMode, setUiStyle, type ThemeMode, type UiStyle } from '../theme.ts'
 import type { SettingsTab } from '../useAgentWorkspace.ts'
 import { shellSetupApi, type ShellStatus } from '../shellSetup.ts'
 
@@ -136,6 +136,7 @@ export function SettingsModal({
   onSaved: () => void
 }) {
   const [themeMode, setThemeModeState] = useState<ThemeMode>(getThemeMode)
+  const [uiStyle, setUiStyleState] = useState<UiStyle>(getUiStyle)
   const [draft, setDraft] = useState<DraftSettings | null>(null)
   const [openProviderId, setOpenProviderId] = useState<string | null>(null)
   const [baseline, setBaseline] = useState<string | null>(null)
@@ -489,6 +490,34 @@ export function SettingsModal({
                             }}
                           >
                             {option.icon}
+                            <span>{option.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className={appearanceCss.row}>
+                      <div className={appearanceCss.rowText}>
+                        <span className={appearanceCss.rowTitle}>界面风格</span>
+                        <span className={appearanceCss.rowHint}>精致细线（1px 结构框线）或纸面无边框（纯色阶留白）</span>
+                      </div>
+                      <div className={appearanceCss.segmented} role="radiogroup" aria-label="界面风格">
+                        {([
+                          { style: 'crisp', label: '精致细线' },
+                          { style: 'paper', label: '纸面无边框' },
+                        ] as const).map(option => (
+                          <button
+                            key={option.style}
+                            type="button"
+                            role="radio"
+                            aria-checked={uiStyle === option.style}
+                            className={clsx(appearanceCss.segment, uiStyle === option.style && appearanceCss.segmentOn)}
+                            onClick={() => {
+                              setUiStyleState(option.style)
+                              setUiStyle(option.style)
+                              onThemeChanged()
+                            }}
+                          >
                             <span>{option.label}</span>
                           </button>
                         ))}
