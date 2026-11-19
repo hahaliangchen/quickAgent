@@ -17,7 +17,13 @@ pub const REASONING_ITEMS: &str = "_reasoning_items";
 /// transport replay data, never part of the conversation the model reads.
 pub const THINKING_BLOCKS: &str = "_thinking_blocks";
 
-/// The code-only response protocol used by the context-as-code agent loop.
+/// The pure-JS + `return <<<` response protocol used by Context-as-Code v2.
+///
+/// - Normal execution steps emit raw JavaScript directly (no XML `<run>` tags,
+///   no JSON tool calls).
+/// - Final user-facing Markdown replies (which may freely contain ```` ```js ````
+///   example code blocks with zero escaping) begin with `return <<<` on the
+///   first non-empty line, followed by the raw Markdown reply until EOF.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunSubmission {
     Run { source: String },
@@ -25,110 +31,99 @@ pub enum RunSubmission {
     Rejected { code: &'static str, message: String },
 }
 
-fn strip_markdown_fences_keep_lengths(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_fence = false;
-    for line in text.split_inclusive('\n') {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            out.push_str(&" ".repeat(line.len()));
-            continue;
-        }
-        if in_fence {
-            for ch in line.chars() {
-                out.push(if ch == '\n' { '\n' } else { ' ' });
-            }
-        } else {
-            out.push_str(line);
-        }
+/// If `text` begins (after optional leading whitespace) with a `return <<<`
+/// header line, return the byte offset where the raw Markdown body starts.
+fn reply_heredoc_body_start(text: &str) -> Option<usize> {
+    let trimmed_start_len = text.len() - text.trim_start().len();
+    let rest = &text[trimmed_start_len..];
+    let after_return = rest.strip_prefix("return")?;
+    let after_space = after_return.strip_prefix(|c: char| c == ' ' || c == '\t')?;
+    let after_ws = after_space.trim_start_matches([' ', '\t']);
+    let after_marker = after_ws.strip_prefix("<<<")?;
+    // The rest of the first line may only contain horizontal whitespace.
+    let after_trailing = after_marker.trim_start_matches([' ', '\t']);
+    if let Some(after_nl) = after_trailing
+        .strip_prefix("\r\n")
+        .or_else(|| after_trailing.strip_prefix('\n'))
+    {
+        return Some(text.len() - after_nl.len());
     }
-    out
+    if after_trailing.is_empty() {
+        return Some(text.len());
+    }
+    None
 }
 
-/// Parse one completed model response without interpreting Markdown code
-/// fences. Only an exact `<run>...</run>` block outside Markdown fences is executable.
+/// Strip a single outer Markdown code fence (```` ```js ... ``` ````) if the
+/// model accidentally wrapped an executable JS step in fences with no prose outside.
+fn strip_single_js_fence(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with("```") {
+        return None;
+    }
+    let first_nl = trimmed.find('\n')?;
+    let lang = trimmed[3..first_nl].trim().to_ascii_lowercase();
+    if !matches!(lang.as_str(), "" | "js" | "javascript" | "ts" | "typescript") {
+        return None;
+    }
+    let body = &trimmed[first_nl + 1..];
+    let stripped = body.strip_suffix("```")?;
+    // Only accept if there isn't another closing fence in the middle (prose outside).
+    if stripped.contains("\n```") {
+        return None;
+    }
+    let inner = stripped
+        .strip_suffix("\r\n")
+        .or_else(|| stripped.strip_suffix('\n'))
+        .unwrap_or(stripped);
+    Some(inner.to_owned())
+}
+
+/// Parse one completed model response under the pure-JS + `return <<<` protocol.
 pub fn parse_run_submission(text: &str, finish_reason: Option<&str>) -> RunSubmission {
+    let is_reply_prefix = reply_heredoc_body_start(text).is_some();
     if finish_reason == Some("length") {
-        let code = if text.contains("<run") {
-            "OUTPUT_TRUNCATED"
-        } else {
+        let code = if is_reply_prefix {
             "REPLY_TRUNCATED"
+        } else {
+            "OUTPUT_TRUNCATED"
         };
         return RunSubmission::Rejected {
             code,
-            message: "The model response was truncated at the output token limit. Resubmit a shorter <run> block or continue your final reply concisely.".into(),
+            message: "The model response hit the output token limit. Resubmit a shorter JS step or a concise `return <<<` reply.".into(),
         };
     }
-    let trimmed = text.trim_start();
-    let scan_target = if trimmed.starts_with("<run") {
-        std::borrow::Cow::Borrowed(text)
-    } else {
-        std::borrow::Cow::Owned(strip_markdown_fences_keep_lengths(text))
-    };
-    let opener = scan_target.match_indices("<run").find_map(|(index, _)| {
-        let end = scan_target[index + 4..].find('>')?;
-        scan_target[index + 4..index + 4 + end]
-            .chars()
-            .all(char::is_whitespace)
-            .then_some((index, index + 4 + end))
-    });
-    let open_count = scan_target
-        .match_indices("<run")
-        .filter(|(index, _)| {
-            scan_target[*index + 4..]
-                .find('>')
-                .is_some_and(|end| scan_target[*index + 4..*index + 4 + end].chars().all(char::is_whitespace))
-        })
-        .count();
-    let close_count = scan_target.match_indices("</run>").count();
-    if open_count == 0 && close_count == 0 {
-        return if trimmed.starts_with("<run") {
-            RunSubmission::Rejected {
-                code: "OUTPUT_TRUNCATED",
-                message: "The <run> block is incomplete. Resubmit the complete execution block.".into(),
-            }
-        } else {
-            RunSubmission::Reply { markdown: text.to_owned() }
-        };
-    }
-    if open_count == 1 && close_count == 0 {
+    if text.trim().is_empty() {
         return RunSubmission::Rejected {
-            code: "OUTPUT_TRUNCATED",
-            message: "The <run> block is incomplete. Resubmit the complete execution block.".into(),
+            code: "EMPTY_RESPONSE",
+            message: "Empty response. Emit JavaScript statements to continue, or start with `return <<<` followed by your final Markdown reply.".into(),
         };
     }
-    if open_count != 1 || close_count != 1 {
+    if let Some(body_start) = reply_heredoc_body_start(text) {
+        let markdown = text[body_start..].trim_end().to_owned();
+        if markdown.is_empty() {
+            return RunSubmission::Rejected {
+                code: "EMPTY_REPLY",
+                message: "The `return <<<` reply body was empty. Provide your final Markdown reply after `return <<<`.".into(),
+            };
+        }
+        return RunSubmission::Reply { markdown };
+    }
+    // Guard against mixing executable JS with a trailing `return <<<` reply in one step.
+    if text.lines().any(|line| {
+        let t = line.trim();
+        t.strip_prefix("return")
+            .and_then(|r| r.strip_prefix(|c: char| c == ' ' || c == '\t'))
+            .map(|r| r.trim())
+            == Some("<<<")
+    }) {
         return RunSubmission::Rejected {
-            code: "MULTIPLE_RUN_BLOCKS",
-            message: "Output exactly one <run>...</run> block per execution step.".into(),
+            code: "MIXED_CODE_AND_REPLY",
+            message: "Do not mix executable JavaScript and `return <<<` in the same step. Run code first, inspect the result, then emit `return <<<` in a separate step.".into(),
         };
     }
-    let (opener_start, opener_end) = opener.unwrap();
-    let start = opener_end + 1;
-    let end = scan_target.find("</run>").unwrap();
-    if end < start {
-        return RunSubmission::Rejected {
-            code: "OUTPUT_TRUNCATED",
-            message: "The <run> block is incomplete.".into(),
-        };
-    }
-    let outside = format!("{}{}", &text[..opener_start], &text[end + 6..]);
-    if !outside.trim().is_empty() {
-        return RunSubmission::Rejected {
-            code: "MIXED_RUN_AND_REPLY",
-            message: "Output only <run>...</run> when executing code. Send the final Markdown reply in a separate step.".into(),
-        };
-    }
-    let inner = &text[start..end];
-    let inner = inner
-        .strip_prefix("\r\n")
-        .or_else(|| inner.strip_prefix('\n'))
-        .unwrap_or(inner);
-    let inner = inner
-        .strip_suffix("\r\n")
-        .or_else(|| inner.strip_suffix('\n'))
-        .unwrap_or(inner);
-    RunSubmission::Run { source: inner.to_owned() }
+    let source = strip_single_js_fence(text).unwrap_or_else(|| text.trim().to_owned());
+    RunSubmission::Run { source }
 }
 
 /// Remove legacy business-tool fields when projecting a context document to
@@ -156,10 +151,11 @@ enum GateMode {
     Reply,
 }
 
-/// UTF-8-safe five-character look-ahead gate. It keeps `<run` private until
-/// the tag is identified, while ordinary Markdown replies (including multi-byte
-/// UTF-8 CJK characters) stream immediately once the prefix is known not to be
-/// an executable `<run>` block.
+/// UTF-8-safe streaming gate for pure-JS + `return <<<` output.
+///
+/// Only responses beginning with `return <<<\n` stream user-visible Markdown
+/// deltas (`ReplyDelta`). All executable JavaScript steps stay in `Code` mode
+/// (`RunProgress`) so raw execution code never leaks into chat bubbles.
 #[derive(Default)]
 pub struct RunStreamGate {
     pending: String,
@@ -182,46 +178,63 @@ impl RunStreamGate {
         }
         self.pending.push_str(chunk);
         let mut events = Vec::new();
-        let Some((run_start, first_char)) = self
-            .pending
-            .char_indices()
-            .find(|(_, ch)| !ch.is_whitespace())
-        else {
-            // Only whitespace seen so far; hold briefly until first non-whitespace char.
+        let trimmed_start_len = self.pending.len() - self.pending.trim_start().len();
+        let candidate = &self.pending[trimmed_start_len..];
+        if candidate.is_empty() {
+            return events;
+        }
+        // Check whether `candidate` can still match `return[ \t]+<<<[ \t]*\r?\n`.
+        if "return".starts_with(candidate) {
+            return events;
+        }
+        let Some(after_return) = candidate.strip_prefix("return") else {
+            self.mode = GateMode::Code;
+            events.push(RunStreamEvent::RunProgress(std::mem::take(&mut self.pending)));
             return events;
         };
-        if first_char != '<' {
-            self.mode = GateMode::Reply;
-            events.push(RunStreamEvent::ReplyDelta(std::mem::take(&mut self.pending)));
-            return events;
-        }
-        let candidate = &self.pending[run_start..];
-        if "<run".starts_with(candidate) {
-            // Partial prefix "<", "<r", "<ru", or "<run": wait for next char.
-            return events;
-        }
-        if !candidate.starts_with("<run") {
-            self.mode = GateMode::Reply;
-            events.push(RunStreamEvent::ReplyDelta(std::mem::take(&mut self.pending)));
-            return events;
-        }
-        let after_run = &candidate[4..];
-        let Some(fifth) = after_run.chars().next() else {
-            return events;
-        };
-        if fifth == '>' || fifth.is_whitespace() {
-            if let Some(gt_offset) = after_run.find('>') {
-                self.mode = GateMode::Code;
-                let rest = self.pending.split_off(run_start + 4 + gt_offset + 1);
-                self.pending.clear();
-                if !rest.is_empty() {
-                    events.push(RunStreamEvent::RunProgress(rest));
-                }
+        let after_ws = after_return.trim_start_matches([' ', '\t']);
+        if after_ws.is_empty() {
+            // Seen `return` + spaces/tabs so far; wait for next token.
+            if after_return.is_empty() {
+                return events;
             }
             return events;
         }
-        self.mode = GateMode::Reply;
-        events.push(RunStreamEvent::ReplyDelta(std::mem::take(&mut self.pending)));
+        if after_return.len() == after_ws.len() {
+            // Something like `returnValue` or `return(` — definitely JS code.
+            self.mode = GateMode::Code;
+            events.push(RunStreamEvent::RunProgress(std::mem::take(&mut self.pending)));
+            return events;
+        }
+        if "<<<".starts_with(after_ws) {
+            return events;
+        }
+        let Some(after_marker) = after_ws.strip_prefix("<<<") else {
+            // e.g. `return "ok";` or `return { ... };` — JS return expression.
+            self.mode = GateMode::Code;
+            events.push(RunStreamEvent::RunProgress(std::mem::take(&mut self.pending)));
+            return events;
+        };
+        let after_trailing = after_marker.trim_start_matches([' ', '\t']);
+        if after_trailing.is_empty() || after_trailing == "\r" {
+            // Wait for the newline terminating the `return <<<` header line.
+            return events;
+        }
+        if let Some(after_nl) = after_trailing
+            .strip_prefix("\r\n")
+            .or_else(|| after_trailing.strip_prefix('\n'))
+        {
+            self.mode = GateMode::Reply;
+            let body = after_nl.to_owned();
+            self.pending.clear();
+            if !body.is_empty() {
+                events.push(RunStreamEvent::ReplyDelta(body));
+            }
+            return events;
+        }
+        // Non-whitespace on the same line after `<<<` -> treat as code.
+        self.mode = GateMode::Code;
+        events.push(RunStreamEvent::RunProgress(std::mem::take(&mut self.pending)));
         events
     }
 
@@ -230,9 +243,9 @@ impl RunStreamGate {
             return Vec::new();
         }
         let event = match self.mode {
-            GateMode::Code => RunStreamEvent::RunProgress(std::mem::take(&mut self.pending)),
-            GateMode::Undecided | GateMode::Reply => {
-                RunStreamEvent::ReplyDelta(std::mem::take(&mut self.pending))
+            GateMode::Reply => RunStreamEvent::ReplyDelta(std::mem::take(&mut self.pending)),
+            GateMode::Code | GateMode::Undecided => {
+                RunStreamEvent::RunProgress(std::mem::take(&mut self.pending))
             }
         };
         vec![event]
@@ -1494,43 +1507,83 @@ mod tests {
     }
 
     #[test]
-    fn run_protocol_rejects_mixed_output_and_preserves_markdown() {
-        assert_eq!(parse_run_submission("<run>const x = 1;</run>", Some("stop")), RunSubmission::Run { source: "const x = 1;".into() });
-        assert!(matches!(parse_run_submission("done\n<run>const x = 1;</run>", Some("stop")), RunSubmission::Rejected { code: "MIXED_RUN_AND_REPLY", .. }));
-        assert_eq!(parse_run_submission("```js\nconst x = 1;\n```", Some("stop")), RunSubmission::Reply { markdown: "```js\nconst x = 1;\n```".into() });
-        assert!(matches!(parse_run_submission("<run>const", Some("length")), RunSubmission::Rejected { code: "OUTPUT_TRUNCATED", .. }));
-        assert!(matches!(parse_run_submission("<run>const", Some("stop")), RunSubmission::Rejected { code: "OUTPUT_TRUNCATED", .. }));
-        assert_eq!(parse_run_submission("<run\n>const x = 1;</run>", Some("stop")), RunSubmission::Run { source: "const x = 1;".into() });
+    fn run_protocol_parses_bare_js_and_return_heredoc_replies() {
+        assert_eq!(
+            parse_run_submission("const x = io.read({ path: \"a.rs\" });", Some("stop")),
+            RunSubmission::Run {
+                source: "const x = io.read({ path: \"a.rs\" });".into()
+            }
+        );
+        assert_eq!(
+            parse_run_submission("```js\nconst x = 1;\n```", Some("stop")),
+            RunSubmission::Run {
+                source: "const x = 1;".into()
+            }
+        );
+        let reply = "return <<<\n检查完毕，示例代码：\n```js\nconst x = 1;\n```";
+        assert_eq!(
+            parse_run_submission(reply, Some("stop")),
+            RunSubmission::Reply {
+                markdown: "检查完毕，示例代码：\n```js\nconst x = 1;\n```".into()
+            }
+        );
+        assert!(matches!(
+            parse_run_submission("const a = 1;\nreturn <<<\ndone", Some("stop")),
+            RunSubmission::Rejected {
+                code: "MIXED_CODE_AND_REPLY",
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_run_submission("const a = 1;", Some("length")),
+            RunSubmission::Rejected {
+                code: "OUTPUT_TRUNCATED",
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_run_submission("return <<<\nhalf", Some("length")),
+            RunSubmission::Rejected {
+                code: "REPLY_TRUNCATED",
+                ..
+            }
+        ));
     }
 
     #[test]
-    fn run_stream_gate_waits_for_five_character_prefix() {
-        let mut gate = RunStreamGate::default();
-        assert!(gate.push("<r").is_empty());
-        assert_eq!(gate.push("un>").len(), 0);
-        assert_eq!(gate.push("x")[0], RunStreamEvent::RunProgress("x".into()));
-        let mut newline = RunStreamGate::default();
-        assert!(newline.push("<run").is_empty());
-        assert_eq!(newline.push("\n>").len(), 0);
-        assert_eq!(newline.push("x")[0], RunStreamEvent::RunProgress("x".into()));
-        let mut spaced = RunStreamGate::default();
-        assert!(spaced.push("  <r").is_empty());
-        assert_eq!(spaced.push("un>").len(), 0);
-        assert_eq!(spaced.push("x")[0], RunStreamEvent::RunProgress("x".into()));
+    fn run_stream_gate_separates_bare_js_from_return_heredoc_reply() {
+        // Bare JS code never leaks into ReplyDelta.
+        let mut code = RunStreamGate::default();
+        assert_eq!(
+            code.push("const f = io.read({});"),
+            vec![RunStreamEvent::RunProgress("const f = io.read({});".into())]
+        );
+        assert!(code.is_code());
+
+        // `return "x";` is also JS code, not a heredoc reply.
+        let mut js_ret = RunStreamGate::default();
+        assert!(js_ret.push("ret").is_empty());
+        assert!(js_ret.push("urn ").is_empty());
+        assert_eq!(
+            js_ret.push("\"ok\";"),
+            vec![RunStreamEvent::RunProgress("return \"ok\";".into())]
+        );
+        assert!(js_ret.is_code());
+
+        // `return <<<\n` streams subsequent UTF-8 Markdown immediately as ReplyDelta.
         let mut reply = RunStreamGate::default();
-        let events = reply.push("hello");
-        assert_eq!(events[0], RunStreamEvent::ReplyDelta("hello".into()));
+        assert!(reply.push("ret").is_empty());
+        assert!(reply.push("urn <<<").is_empty());
+        assert_eq!(
+            reply.push("\n你好世界"),
+            vec![RunStreamEvent::ReplyDelta("你好世界".into())]
+        );
+        assert_eq!(
+            reply.push("\n```js\nconst a = 1;\n```"),
+            vec![RunStreamEvent::ReplyDelta("\n```js\nconst a = 1;\n```".into())]
+        );
+        assert!(!reply.is_code());
         assert!(reply.finish().is_empty());
-
-        // Multi-byte UTF-8 Chinese characters must never panic on char boundaries.
-        let mut chinese = RunStreamGate::default();
-        assert_eq!(chinese.push("你好世界"), vec![RunStreamEvent::ReplyDelta("你好世界".into())]);
-        assert_eq!(chinese.push("！再测试"), vec![RunStreamEvent::ReplyDelta("！再测试".into())]);
-        assert!(chinese.finish().is_empty());
-
-        // Markdown fenced examples mentioning <run> stay plain Markdown replies.
-        let fenced_md = "示例用法：\n```xml\n<run>\nconst a = 1;\n</run>\n```\n以上是示例。";
-        assert_eq!(parse_run_submission(fenced_md, Some("stop")), RunSubmission::Reply { markdown: fenced_md.into() });
     }
 }
 
