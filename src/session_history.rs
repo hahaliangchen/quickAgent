@@ -193,7 +193,6 @@ pub(crate) fn program_output_text(end: &Value) -> String {
     text
 }
 
-#[cfg(test)]
 pub async fn read(root: &Path, task: &str, args: &Value) -> Result<Value> {
     read_for_call(root, task, args, None).await
 }
