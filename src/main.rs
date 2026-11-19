@@ -11,7 +11,6 @@ mod builtin_plugins;
 mod code_map;
 mod composer_catalog;
 mod context_assets;
-mod context_document;
 mod context_window;
 mod database;
 mod db_writer;
@@ -68,8 +67,6 @@ mod visual_jobs;
 mod visual_probe;
 #[cfg(test)]
 mod visual_tests;
-#[cfg(test)]
-mod context_acceptance_tests;
 mod workspace_changes;
 
 use std::{env, fmt as std_fmt, net::SocketAddr, path::PathBuf, sync::Arc};
