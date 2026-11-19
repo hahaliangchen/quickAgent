@@ -1600,7 +1600,7 @@ pub(crate) async fn consume_model_stream_observed(
             }
             let tool_progress = if tool_dirty {
                 if run_gate.is_code() {
-                    json!([{"name": "run", "arguments_chars": run_code_chars}])
+                    json!([{"name": "run", "argument_bytes": run_code_chars}])
                 } else {
                     accumulator.tool_progress()
                 }

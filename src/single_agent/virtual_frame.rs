@@ -77,9 +77,141 @@ pub(super) fn leaf_libraries(parent_libs: &Libraries) -> Libraries {
     libs
 }
 
-/// Execute one isolated `@virtual` function call to completion and destroy its
-/// entire VM & context frame upon returning.
+/// Execute one isolated `@virtual` function call to completion, emitting
+/// frontend-compatible collapsible frame events (`create_task` + `task/node_*`)
+/// and destroying its entire VM & context frame upon returning.
 pub(super) async fn execute_virtual_call(
+    parent_session: &Session<'_>,
+    parent_libs: &Libraries,
+    spec: VirtualCallSpec,
+    parent_step: usize,
+) -> Result<(Value, bool, VirtualCallReceipt)> {
+    let call_id = spec.action_id.clone();
+    let fn_name = spec.fn_name.clone();
+    let contract = spec.contract.clone();
+    let args_preview = format_args_preview(&spec.params);
+
+    // Emit frontend collapsible `@virtual` call card + running frame marker so
+    // child `assistant/delta` and `tool/call` events nest cleanly inside it.
+    let _ = super::append_event(
+        parent_session,
+        "tool/call",
+        json!({
+            "actor": "agent",
+            "turn": parent_session.turn,
+            "step": parent_step,
+            "callId": call_id,
+            "name": "create_task",
+            "arguments": json!({
+                "program_task": {
+                    "name": format!("{fn_name}({args_preview})"),
+                    "description": contract,
+                    "module": false,
+                }
+            }).to_string(),
+        }),
+        false,
+    )
+    .await;
+    let _ = super::append_event(
+        parent_session,
+        "task/node_running",
+        json!({
+            "node_id": call_id,
+            "task_node_id": call_id,
+            "status": "running",
+            "metadata": {
+                "role": "temp",
+                "caller": {"call_id": call_id},
+            },
+        }),
+        false,
+    )
+    .await;
+
+    let outcome = run_virtual_loop(parent_session, parent_libs, spec, parent_step).await;
+
+    match &outcome {
+        Ok((val, failed, _)) => {
+            let status = if *failed { "failed" } else { "done" };
+            let kind = if *failed { "task/node_failed" } else { "task/node_done" };
+            let text = val.to_string();
+            let result_payload = if *failed {
+                json!({"node_id": call_id, "error": text})
+            } else {
+                json!({"node_id": call_id, "result": text})
+            };
+            let _ = super::append_event(
+                parent_session,
+                kind,
+                json!({
+                    "node_id": call_id,
+                    "task_node_id": call_id,
+                    "status": status,
+                    "metadata": {"role": "temp", "caller": {"call_id": call_id}},
+                    "result": result_payload,
+                }),
+                false,
+            )
+            .await;
+            let _ = super::append_event(
+                parent_session,
+                "tool/result",
+                json!({
+                    "actor": "agent",
+                    "turn": parent_session.turn,
+                    "step": parent_step,
+                    "message": {
+                        "role": "tool",
+                        "toolCallId": call_id,
+                        "isError": failed,
+                        "content": [{"type": "text", "text": result_payload.to_string()}],
+                    },
+                }),
+                false,
+            )
+            .await;
+        }
+        Err(err) => {
+            let msg = format!("{err:#}");
+            let result_payload = json!({"node_id": call_id, "error": msg});
+            let _ = super::append_event(
+                parent_session,
+                "task/node_failed",
+                json!({
+                    "node_id": call_id,
+                    "task_node_id": call_id,
+                    "status": "failed",
+                    "metadata": {"role": "temp", "caller": {"call_id": call_id}},
+                    "result": result_payload,
+                }),
+                false,
+            )
+            .await;
+            let _ = super::append_event(
+                parent_session,
+                "tool/result",
+                json!({
+                    "actor": "agent",
+                    "turn": parent_session.turn,
+                    "step": parent_step,
+                    "message": {
+                        "role": "tool",
+                        "toolCallId": call_id,
+                        "isError": true,
+                        "content": [{"type": "text", "text": result_payload.to_string()}],
+                    },
+                }),
+                false,
+            )
+            .await;
+        }
+    }
+
+    outcome
+}
+
+async fn run_virtual_loop(
     parent_session: &Session<'_>,
     parent_libs: &Libraries,
     spec: VirtualCallSpec,

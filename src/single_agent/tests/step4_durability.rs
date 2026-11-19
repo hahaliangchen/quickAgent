@@ -421,13 +421,25 @@ async fn step4_host_folder_turn_js_archive_and_rewind_roundtrip() {
     let t1_js = std::fs::read_to_string(chat_dir.join("turn-01.js")).unwrap();
     assert!(t1_js.contains("io.write") && t1_js.contains("state.txt"));
 
-    // Mark task idle/completed before rewinding to before Turn 2!
+    // Verify `run_task` automatically transitioned `agent_tasks.status` to `completed`
+    // and emitted `turn/start` + `turn/end` events for the frontend!
     let conn = agent_service::open_db(ws.path()).unwrap();
-    conn.execute(
-        "UPDATE agent_tasks SET status='completed' WHERE id='step4-rewind'",
-        [],
-    )
-    .unwrap();
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM agent_tasks WHERE id='step4-rewind'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "completed");
+    let turn_ends: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_task_events WHERE task_id='step4-rewind' AND kind='turn/end'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(turn_ends, 2);
     drop(conn);
 
     let rewound = crate::rewind::rewind(ws.path(), "step4-rewind", 2).unwrap();

@@ -263,7 +263,18 @@ pub(crate) async fn run_task_with_resource(
         .and_then(|raw| serde_json::from_str(raw).ok())
         .unwrap_or_default();
 
-    // Emit durable user/message event.
+    // Emit durable turn/start and user/message events for frontend timeline.
+    append_event(
+        &s,
+        "turn/start",
+        json!({
+            "turn": turn,
+            "runtime": "single_agent",
+        }),
+        false,
+    )
+    .await?;
+
     append_event(
         &s,
         "user/message",
@@ -293,6 +304,14 @@ pub(crate) async fn run_task_with_resource(
         if cancel.is_cancelled() {
             w.program = None;
             save_window(&s, &w).await?;
+            let _ = append_event(
+                &s,
+                "turn/end",
+                json!({"turn": turn, "reason": {"kind": "aborted"}}),
+                false,
+            )
+            .await;
+            let _ = agent_service::finish(s.state, s.task, "cancelled").await;
             bail!("cancelled");
         }
 
@@ -319,6 +338,7 @@ pub(crate) async fn run_task_with_resource(
                         "step": step,
                         "code": code,
                         "error": message,
+                        "diagnostic": {"error": message},
                         "raw_preview": raw_preview,
                     }),
                     false,
@@ -383,6 +403,7 @@ async fn execute_js_step(
                 "step": step,
                 "code": "COMPILE_ERROR",
                 "error": msg,
+                "diagnostic": {"error": msg},
                 "source": source,
             }),
             false,
@@ -550,5 +571,17 @@ async fn finish_turn_with_reply(
         true,
     )
     .await?;
-    save_window(s, w).await
+    save_window(s, w).await?;
+    append_event(
+        s,
+        "turn/end",
+        json!({
+            "turn": s.turn,
+            "reason": {"kind": "completed"},
+        }),
+        false,
+    )
+    .await?;
+    let _ = agent_service::finish(s.state, s.task, "completed").await;
+    Ok(())
 }

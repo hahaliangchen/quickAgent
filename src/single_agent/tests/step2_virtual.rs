@@ -152,6 +152,16 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
         assistant_messages(ws.path(), "step2-iso"),
         vec!["审计完成：mod_a.rs 违反 NO_UNWRAP 规则。"]
     );
+    // Verify frontend collapsible `@virtual` card events were emitted cleanly.
+    let conn = agent_service::open_db(ws.path()).unwrap();
+    let node_done: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_task_events WHERE task_id='step2-iso' AND kind='task/node_done'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(node_done, 1);
 }
 
 #[tokio::test]
