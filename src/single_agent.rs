@@ -39,12 +39,18 @@ mod virtual_frame;
 mod tests_step1;
 #[cfg(test)]
 mod tests_step2;
+#[cfg(test)]
+mod tests_step3;
 
 #[cfg(test)]
 use host_tools::{business_tool, business_tool_inner};
 
 /// Production loops have no step cap; tests pass small bounds of their own.
 pub(crate) const NO_ROUND_LIMIT: usize = usize::MAX;
+
+fn default_next_ref_id() -> usize {
+    1
+}
 
 /// Durable runtime window for the v2 Context-as-Code driver.
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -57,6 +63,8 @@ pub(crate) struct Window {
     pub(crate) program_task: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) task_node_id: Option<String>,
+    #[serde(default = "default_next_ref_id")]
+    pub(crate) next_ref_id: usize,
 }
 
 /// Per-invocation host session context shared by the agent driver, host tool
@@ -280,6 +288,7 @@ pub(crate) async fn run_task_with_resource(
     // Every new user turn ALWAYS starts with a brand-new empty JS VM!
     let libs = library_compile_scope(&s, &w);
     w.program = Some(Runtime::new_repl(libs.clone())?);
+    w.next_ref_id = 1;
     w.context_doc.begin_turn(turn, &prompt);
     save_window(&s, &w).await?;
 
@@ -391,8 +400,12 @@ async fn execute_js_step(
     }
 
     let node = format!("step_{}_{}", s.turn, step);
-    let (final_state, external_tool_calls, virtual_receipts) =
-        drive_vm_segment(s, &mut runtime, libs, &node, step, allow_shell).await?;
+    if w.next_ref_id == 0 {
+        w.next_ref_id = 1;
+    }
+    let (final_state, external_tool_calls, hints) =
+        drive_vm_segment(s, &mut runtime, libs, &node, step, allow_shell, &mut w.next_ref_id)
+            .await?;
     let logs = runtime.logs_since(log_start);
 
     match final_state {
@@ -409,7 +422,7 @@ async fn execute_js_step(
                     &pre_fps,
                     &logs,
                     None,
-                    &virtual_receipts,
+                    &hints,
                 );
                 finish_turn_with_reply(s, w, step, answer).await?;
                 return Ok(true);
@@ -423,7 +436,7 @@ async fn execute_js_step(
                         &pre_fps,
                         &logs,
                         None,
-                        &virtual_receipts,
+                        &hints,
                     );
                     finish_turn_with_reply(s, w, step, reply_md).await?;
                     return Ok(true);
@@ -439,7 +452,7 @@ async fn execute_js_step(
                     &pre_fps,
                     &logs,
                     Some(note),
-                    &virtual_receipts,
+                    &hints,
                 );
                 w.program = Some(runtime);
                 save_window(s, w).await?;
@@ -456,7 +469,7 @@ async fn execute_js_step(
                 &pre_fps,
                 &logs,
                 note,
-                &virtual_receipts,
+                &hints,
             );
             w.program = Some(runtime);
             save_window(s, w).await?;
@@ -507,7 +520,7 @@ async fn finish_turn_with_reply(
 /// Execute one prepared JS segment in `runtime` until it returns or fails,
 /// proxying host tool traps into Rust `host_tools` and spawning isolated
 /// `@virtual` calls (including concurrent `Promise.all` fan-out via `JoinSet`).
-/// Returns `(terminal_state, external_call_count, virtual_receipt_lines)`.
+/// Returns `(terminal_state, external_call_count, segment_context_hints)`.
 async fn drive_vm_segment(
     s: &Session<'_>,
     runtime: &mut Runtime,
@@ -515,9 +528,10 @@ async fn drive_vm_segment(
     node: &str,
     step: usize,
     allow_shell: bool,
-) -> Result<(State, usize, Vec<String>)> {
+    next_ref_id: &mut usize,
+) -> Result<(State, usize, context_doc::SegmentContextHints)> {
     let mut external_tool_calls = 0usize;
-    let mut virtual_receipts = Vec::new();
+    let mut hints = context_doc::SegmentContextHints::default();
     let mut inflight_virtual: tokio::task::JoinSet<
         Result<(String, Value, bool, virtual_frame::VirtualCallReceipt)>,
     > = tokio::task::JoinSet::new();
@@ -534,7 +548,7 @@ async fn drive_vm_segment(
                     match action.kind {
                         ActionKind::Tool { name, args } => {
                             external_tool_calls += 1;
-                            let (result, is_error) = proxy_rust_tool(
+                            let (mut result, is_error) = proxy_rust_tool(
                                 s,
                                 libs,
                                 node,
@@ -545,6 +559,9 @@ async fn drive_vm_segment(
                                 allow_shell,
                             )
                             .await?;
+                            if !is_error {
+                                context_doc::tag_resource_handle(&mut result, next_ref_id);
+                            }
                             runtime.resume_action(&action.id, result, is_error)?;
                         }
                         ActionKind::ParallelReads { operations } => {
@@ -552,7 +569,7 @@ async fn drive_vm_segment(
                             let mut items = Vec::with_capacity(operations.len());
                             for (idx, (name, args)) in operations.into_iter().enumerate() {
                                 let call_id = format!("{}-p{idx}", action.id);
-                                let (res, is_err) = proxy_rust_tool(
+                                let (mut res, is_err) = proxy_rust_tool(
                                     s,
                                     libs,
                                     node,
@@ -563,6 +580,9 @@ async fn drive_vm_segment(
                                     false,
                                 )
                                 .await?;
+                                if !is_err {
+                                    context_doc::tag_resource_handle(&mut res, next_ref_id);
+                                }
                                 items.push(json!({"failed": is_err, "value": res}));
                             }
                             runtime.resume_action(&action.id, Value::Array(items), false)?;
@@ -573,6 +593,20 @@ async fn drive_vm_segment(
                             captured,
                         } => {
                             external_tool_calls += 1;
+                            for a in &args {
+                                context_doc::collect_delegated_markers(
+                                    a,
+                                    &mut hints.delegated_refs,
+                                    &mut hints.delegated_content_hashes,
+                                );
+                            }
+                            for v in captured.values() {
+                                context_doc::collect_delegated_markers(
+                                    v,
+                                    &mut hints.delegated_refs,
+                                    &mut hints.delegated_content_hashes,
+                                );
+                            }
                             let spec = build_virtual_spec(
                                 runtime,
                                 &action.id,
@@ -630,19 +664,19 @@ async fn drive_vm_segment(
             }
             ConcurrentState::Waiting => {
                 let Some(joined) = inflight_virtual.join_next().await else {
-                    return Ok((State::Waiting, external_tool_calls, virtual_receipts));
+                    return Ok((State::Waiting, external_tool_calls, hints));
                 };
                 let (action_id, value, is_error, receipt) = joined??;
-                virtual_receipts.push(receipt.format_line());
+                hints.virtual_receipts.push(receipt.format_line());
                 runtime.resume_action(&action_id, value, is_error)?;
             }
             ConcurrentState::Returned(val) => {
                 inflight_virtual.abort_all();
-                return Ok((State::Returned(val), external_tool_calls, virtual_receipts));
+                return Ok((State::Returned(val), external_tool_calls, hints));
             }
             ConcurrentState::Failed(err) => {
                 inflight_virtual.abort_all();
-                return Ok((State::Failed(err), external_tool_calls, virtual_receipts));
+                return Ok((State::Failed(err), external_tool_calls, hints));
             }
         }
     }

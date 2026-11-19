@@ -20,7 +20,7 @@
 use crate::agent_program::Runtime;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Max chars printed verbatim in permanent Append-Only `// =>` receipts.
 /// Also acts as the anti-cheating threshold lock: slicing > 2KB will NOT dump
@@ -32,6 +32,94 @@ pub const PEEK_FULL_LIMIT_CHARS: usize = 24_000;
 
 /// Multi-turn history budget before dropping oldest completed turns in a batch.
 pub const HISTORY_BUDGET_CHARS: usize = 48_000;
+
+/// Minimum length at which a duplicate inline binding in the same step folds
+/// into `(same as <earlierVar>)` to avoid wasting permanent trace tokens.
+const INLINE_DEDUP_MIN_CHARS: usize = 120;
+
+/// Context hints collected during one VM segment execution:
+/// - `virtual_receipts`: factual `[virtual ...]` summary lines emitted by child frames.
+/// - `delegated_refs` / `delegated_content_hashes`: Resource Handles (and large text
+///   payloads) passed into `@virtual` calls in the SAME step, so the outer parent skips
+///   expanding their raw bodies into `EPHEMERAL_PEEK` (Pass-by-Handle zero outer bloat).
+#[derive(Clone, Debug, Default)]
+pub struct SegmentContextHints {
+    pub virtual_receipts: Vec<String>,
+    pub delegated_refs: BTreeSet<String>,
+    pub delegated_content_hashes: BTreeSet<u64>,
+}
+
+/// Fast deterministic FNV-1a 64-bit hash used for content deduplication & handle matching.
+pub(super) fn fnv1a64(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Attach a monotonic `"__ref": "Ref#N"` handle tag to file-read results and
+/// large command outputs so they act as first-class Lazy Resource Handles.
+pub(super) fn tag_resource_handle(value: &mut Value, next_ref_id: &mut usize) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if obj.contains_key("__ref") {
+        return;
+    }
+    let is_file = obj.get("path").and_then(Value::as_str).is_some()
+        && obj.get("content").and_then(Value::as_str).is_some();
+    let is_large_cmd = obj.contains_key("exit_code")
+        && (obj
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .count()
+            + obj
+                .get("stderr")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .chars()
+                .count()
+            > INLINE_LIMIT_CHARS);
+    if is_file || is_large_cmd {
+        let id = *next_ref_id;
+        *next_ref_id += 1;
+        obj.insert("__ref".into(), Value::String(format!("Ref#{id}")));
+    }
+}
+
+/// Recursively collect any `"__ref"` handle IDs and large string hashes (`> 2KB`)
+/// passed into a `@virtual` call (via args or `@uses` captures).
+pub(super) fn collect_delegated_markers(
+    value: &Value,
+    refs: &mut BTreeSet<String>,
+    hashes: &mut BTreeSet<u64>,
+) {
+    match value {
+        Value::String(s) => {
+            if s.chars().count() > INLINE_LIMIT_CHARS {
+                hashes.insert(fnv1a64(s));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_delegated_markers(item, refs, hashes);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(r) = map.get("__ref").and_then(Value::as_str) {
+                refs.insert(r.to_owned());
+            }
+            for v in map.values() {
+                collect_delegated_markers(v, refs, hashes);
+            }
+        }
+        _ => {}
+    }
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ContextDocument {
@@ -114,10 +202,11 @@ impl ContextDocument {
         header.push_str(" {");
 
         let mut peek_sections = Vec::new();
+        let mut tracker = PeekTracker::for_virtual_param();
         if !params.is_empty() {
             header.push_str("\n  // bound params:");
             for (name, val) in params {
-                let (receipt, peek) = format_binding_three_tier(name, val);
+                let (receipt, peek) = format_binding_three_tier(name, val, &mut tracker);
                 for line in receipt.lines() {
                     header.push_str("\n  ");
                     header.push_str(line);
@@ -130,7 +219,7 @@ impl ContextDocument {
         if !captures.is_empty() {
             header.push_str("\n  // captured (@uses):");
             for (name, val) in captures {
-                let (receipt, peek) = format_binding_three_tier(name, val);
+                let (receipt, peek) = format_binding_three_tier(name, val, &mut tracker);
                 for line in receipt.lines() {
                     header.push_str("\n  ");
                     header.push_str(line);
@@ -177,12 +266,12 @@ impl ContextDocument {
         pre_fingerprints: &BTreeMap<String, String>,
         console_logs: &[String],
         extra_note: Option<String>,
-        virtual_receipts: &[String],
+        hints: &SegmentContextHints,
     ) {
         let (mut receipts, peek_sections) =
-            format_segment_feedback(runtime, pre_fingerprints, console_logs);
-        if !virtual_receipts.is_empty() {
-            let mut combined = virtual_receipts.to_vec();
+            format_segment_feedback(runtime, pre_fingerprints, console_logs, hints);
+        if !hints.virtual_receipts.is_empty() {
+            let mut combined = hints.virtual_receipts.clone();
             combined.extend(receipts);
             receipts = combined;
         }
@@ -205,8 +294,9 @@ impl ContextDocument {
         console_logs: &[String],
         error: &Value,
     ) {
+        let empty_hints = SegmentContextHints::default();
         let (receipts, peek_sections) =
-            format_segment_feedback(runtime, pre_fingerprints, console_logs);
+            format_segment_feedback(runtime, pre_fingerprints, console_logs, &empty_hints);
         let err_summary = error["message"]
             .as_str()
             .or_else(|| error["error"].as_str())
@@ -348,13 +438,129 @@ fn build_ephemeral_peek(sections: Vec<String>, error_block: Option<String>) -> O
     Some(out)
 }
 
+/// Per-step tracker for `EPHEMERAL_PEEK` deduplication and Pass-by-Handle suppression.
+struct PeekTracker<'a> {
+    delegated_refs: Option<&'a BTreeSet<String>>,
+    delegated_hashes: Option<&'a BTreeSet<u64>>,
+    seen_refs: BTreeSet<String>,
+    seen_hashes: BTreeSet<u64>,
+    is_virtual_param: bool,
+}
+
+impl<'a> PeekTracker<'a> {
+    fn from_hints(hints: &'a SegmentContextHints) -> Self {
+        Self {
+            delegated_refs: Some(&hints.delegated_refs),
+            delegated_hashes: Some(&hints.delegated_content_hashes),
+            seen_refs: BTreeSet::new(),
+            seen_hashes: BTreeSet::new(),
+            is_virtual_param: false,
+        }
+    }
+
+    fn for_virtual_param() -> Self {
+        Self {
+            delegated_refs: None,
+            delegated_hashes: None,
+            seen_refs: BTreeSet::new(),
+            seen_hashes: BTreeSet::new(),
+            is_virtual_param: true,
+        }
+    }
+
+    fn is_delegated(&self, ref_id: Option<&str>, text_hash: Option<u64>) -> bool {
+        if let Some(r) = ref_id
+            && self.delegated_refs.is_some_and(|set| set.contains(r))
+        {
+            return true;
+        }
+        if let Some(h) = text_hash
+            && self.delegated_hashes.is_some_and(|set| set.contains(&h))
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Returns `true` if this resource should be expanded in `EPHEMERAL_PEEK`
+    /// (neither delegated to `@virtual` in the same step nor already peeked by an alias).
+    fn claim_peek(&mut self, ref_id: Option<&str>, text_hash: Option<u64>) -> bool {
+        if self.is_delegated(ref_id, text_hash) {
+            return false;
+        }
+        if let Some(r) = ref_id
+            && !self.seen_refs.insert(r.to_owned())
+        {
+            return false;
+        }
+        if let Some(h) = text_hash
+            && !self.seen_hashes.insert(h)
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Returns `true` if `value` contains at least one large resource (`__ref` or
+    /// `> 2KB` text) and EVERY such resource inside it was already delegated to
+    /// `@virtual` or already expanded in this step's `EPHEMERAL_PEEK`.
+    fn container_already_covered(&self, value: &Value) -> bool {
+        fn visit(v: &Value, t: &PeekTracker<'_>, found_any: &mut bool, all_covered: &mut bool) {
+            if !*all_covered {
+                return;
+            }
+            match v {
+                Value::String(s) if s.chars().count() > INLINE_LIMIT_CHARS => {
+                    *found_any = true;
+                    let h = fnv1a64(s);
+                    let covered = t.is_delegated(None, Some(h)) || t.seen_hashes.contains(&h);
+                    if !covered {
+                        *all_covered = false;
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        visit(item, t, found_any, all_covered);
+                    }
+                }
+                Value::Object(map) => {
+                    if let Some(r) = map.get("__ref").and_then(Value::as_str) {
+                        *found_any = true;
+                        let h = map
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .map(fnv1a64);
+                        let covered = t.is_delegated(Some(r), h)
+                            || t.seen_refs.contains(r)
+                            || h.is_some_and(|hh| t.seen_hashes.contains(&hh));
+                        if !covered {
+                            *all_covered = false;
+                        }
+                        return;
+                    }
+                    for val in map.values() {
+                        visit(val, t, found_any, all_covered);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found_any = false;
+        let mut all_covered = true;
+        visit(value, self, &mut found_any, &mut all_covered);
+        found_any && all_covered
+    }
+}
+
 fn format_segment_feedback(
     runtime: &Runtime,
     pre_fingerprints: &BTreeMap<String, String>,
     console_logs: &[String],
+    hints: &SegmentContextHints,
 ) -> (Vec<String>, Vec<String>) {
     let mut receipts = Vec::new();
     let mut peek_sections = Vec::new();
+    let mut tracker = PeekTracker::from_hints(hints);
 
     if !console_logs.is_empty() {
         let joined = console_logs.join("\n");
@@ -366,7 +572,10 @@ fn format_segment_feedback(
             receipts.push(format!(
                 "// => console = [{line_count} lines, {chars} chars]"
             ));
-            peek_sections.push(format_peek_string("console", &joined, None));
+            let h = fnv1a64(&joined);
+            if tracker.claim_peek(None, Some(h)) {
+                peek_sections.push(format_peek_string("console", &joined, None));
+            }
         }
     }
 
@@ -390,11 +599,27 @@ fn format_segment_feedback(
         }
     }
 
+    // Fold duplicate large inline values in the same step (e.g. `auditResults = audits`
+    // or `$_ = JSON.stringify(summaries)`) so permanent `// =>` stays clean and concise.
+    let mut seen_inline: BTreeMap<String, String> = BTreeMap::new();
+
     for name in changed_names {
         let Some(value) = live_values.get(&name) else {
             continue;
         };
-        let (receipt, peek) = format_binding_three_tier(&name, value);
+        let canonical = canonical_inline_key(value);
+        if let Some(key) = &canonical
+            && let Some(orig) = seen_inline.get(key)
+        {
+            receipts.push(format!("// => {name} = (same as {orig})"));
+            continue;
+        }
+        let (receipt, peek) = format_binding_three_tier(&name, value, &mut tracker);
+        if peek.is_none()
+            && let Some(key) = canonical
+        {
+            seen_inline.entry(key).or_insert_with(|| name.clone());
+        }
         receipts.push(receipt);
         if let Some(p) = peek {
             peek_sections.push(p);
@@ -404,42 +629,86 @@ fn format_segment_feedback(
     (receipts, peek_sections)
 }
 
-/// Three-tier value formatter:
+/// Canonical string key for same-step duplicate inline folding.
+/// Normalizes `JSON.stringify(x)` strings to the same canonical JSON as `x`
+/// when `x` is a JSON array/object so `JSON.stringify(summaries)` folds onto `summaries`.
+fn canonical_inline_key(value: &Value) -> Option<String> {
+    let key = match value {
+        Value::String(s) => {
+            if s.chars().count() < INLINE_DEDUP_MIN_CHARS || s.chars().count() > INLINE_LIMIT_CHARS {
+                return None;
+            }
+            if (s.starts_with('{') || s.starts_with('['))
+                && let Ok(parsed) = serde_json::from_str::<Value>(s)
+            {
+                serde_json::to_string(&parsed).unwrap_or_else(|_| s.clone())
+            } else {
+                s.clone()
+            }
+        }
+        other => {
+            let s = serde_json::to_string(other).ok()?;
+            if s.chars().count() < INLINE_DEDUP_MIN_CHARS || s.chars().count() > INLINE_LIMIT_CHARS {
+                return None;
+            }
+            s
+        }
+    };
+    Some(key)
+}
+
+/// Three-tier value formatter with Lazy Resource Handle awareness:
 /// - Tier 1 (`<= 2,000` chars): verbatim in permanent `// =>` receipt.
-/// - Tier 2 (`2,000 < chars <= 24,000` chars): one-line signature in `// =>`,
-///   full line-numbered content in `EPHEMERAL_PEEK`.
-/// - Tier 3 (`> 24,000` chars): one-line signature in `// =>`, high-entropy
-///   structural index (symbols / error lines + tail / schema + sample) in `EPHEMERAL_PEEK`.
-fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<String>) {
-    // 1. Special case: file read object `{ path, content: string, ... }`
+/// - Tier 2 (`2,000 < chars <= 24,000` chars): one-line handle signature in `// =>`,
+///   full line-numbered content in `EPHEMERAL_PEEK` (suppressed if delegated to `@virtual`
+///   or already expanded by an alias in the same step!).
+/// - Tier 3 (`> 24,000` chars): one-line handle signature in `// =>`, high-entropy
+///   structural index in `EPHEMERAL_PEEK` (for demand paging via `.slice()` / `.grep()`).
+fn format_binding_three_tier(
+    name: &str,
+    value: &Value,
+    tracker: &mut PeekTracker<'_>,
+) -> (String, Option<String>) {
+    // 1. File Resource Handle `{ path, content: string, __ref?: string, ... }`
+    //    (Inside `@virtual` bound params, also auto-dereference `{ file, content }` pairs!)
     if let Some(obj) = value.as_object()
-        && let (Some(path), Some(content)) = (
-            obj.get("path").and_then(Value::as_str),
-            obj.get("content").and_then(Value::as_str),
-        )
+        && let Some(content) = obj.get("content").and_then(Value::as_str)
+        && let Some(path) = obj
+            .get("path")
+            .and_then(Value::as_str)
+            .or_else(|| tracker.is_virtual_param.then(|| obj.get("file").and_then(Value::as_str)).flatten())
     {
+        let ref_id = obj.get("__ref").and_then(Value::as_str);
         let content_chars = content.chars().count();
         let line_count = content.lines().count().max(usize::from(!content.is_empty()));
         if content_chars <= INLINE_LIMIT_CHARS {
-            let label = format!("{name} (File {path:?}, {line_count} lines)");
+            let ref_part = ref_id.map(|r| format!("{r}, ")).unwrap_or_default();
+            let label = format!("{name} (File {path:?}, {ref_part}{line_count} lines)");
             return (format_comment_block(&label, &add_line_numbers(content, 1)), None);
         }
+        let ref_part = ref_id.map(|r| format!(" | {r}")).unwrap_or_default();
         let sig = format!(
-            "// => {name} = [File({path:?}) | {line_count} lines, {content_chars} chars]"
+            "// => {name} = [File({path:?}){ref_part} | {line_count} lines, {content_chars} chars | .slice() .grep() .outline()]"
         );
-        let peek = format_peek_string(
-            &format!("{name}.content ({path})"),
-            content,
-            Some(path),
-        );
-        return (sig, Some(peek));
+        let h = fnv1a64(content);
+        let peek = if tracker.claim_peek(ref_id, Some(h)) {
+            Some(format_peek_string(
+                &format!("{name}.content ({path})"),
+                content,
+                Some(path),
+            ))
+        } else {
+            None
+        };
+        return (sig, peek);
     }
 
-    // 2. Special case: shell command output `{ exit_code, stdout, stderr, ... }`
+    // 2. Command Resource Handle `{ exit_code, stdout, stderr, __ref?: string, ... }`
     if let Some(obj) = value.as_object()
         && obj.contains_key("exit_code")
         && (obj.contains_key("stdout") || obj.contains_key("stderr"))
     {
+        let ref_id = obj.get("__ref").and_then(Value::as_str);
         let exit = obj["exit_code"].clone();
         let stdout = obj.get("stdout").and_then(Value::as_str).unwrap_or("");
         let stderr = obj.get("stderr").and_then(Value::as_str).unwrap_or("");
@@ -456,18 +725,24 @@ fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<Strin
             let label = format!("{name} (exit_code={exit})");
             return (format_comment_block(&label, &combined), None);
         }
+        let ref_part = ref_id.map(|r| format!(" | {r}")).unwrap_or_default();
         let sig = format!(
-            "// => {name} = [CommandResult(exit_code={exit}) | {lines} lines, {chars} chars]"
+            "// => {name} = [CommandResult(exit_code={exit}){ref_part} | {lines} lines, {chars} chars | .slice() .grep() .tail()]"
         );
-        let peek = if chars <= PEEK_FULL_LIMIT_CHARS {
-            format!(
-                "// [{name} FULL OUTPUT (exit_code={exit}, {lines} lines)]:\n{}",
-                add_line_numbers(&combined, 1)
-            )
+        let h = fnv1a64(&combined);
+        let peek = if tracker.claim_peek(ref_id, Some(h)) {
+            if chars <= PEEK_FULL_LIMIT_CHARS {
+                Some(format!(
+                    "// [{name} FULL OUTPUT (exit_code={exit}, {lines} lines)]:\n{}",
+                    add_line_numbers(&combined, 1)
+                ))
+            } else {
+                Some(format_large_log_index(name, &exit, &combined))
+            }
         } else {
-            format_large_log_index(name, &exit, &combined)
+            None
         };
-        return (sig, Some(peek));
+        return (sig, peek);
     }
 
     // 3. Plain string
@@ -486,15 +761,57 @@ fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<Strin
         let sig = format!(
             "// => {name} = [string | {lines} lines, {chars} chars | > 2KB not inlined]"
         );
-        let peek = format_peek_string(name, text, None);
-        return (sig, Some(peek));
+        let h = fnv1a64(text);
+        let peek = if tracker.claim_peek(None, Some(h)) {
+            Some(format_peek_string(name, text, None))
+        } else {
+            None
+        };
+        return (sig, peek);
     }
 
-    // 4. Array
+    // 4. Array (with compact summary for Array of File Resource Handles!)
     if let Some(arr) = value.as_array() {
         if arr.is_empty() {
             return (format!("// => {name} = [] (Empty: 0 items)"), None);
         }
+        // Check if every element is a File Resource Handle (`{ path, content }`).
+        let all_file_handles = arr.iter().all(|item| {
+            item.as_object().is_some_and(|o| {
+                o.get("path").and_then(Value::as_str).is_some()
+                    && o.get("content").and_then(Value::as_str).is_some()
+            })
+        });
+        if all_file_handles {
+            let summaries: Vec<String> = arr
+                .iter()
+                .map(|item| {
+                    let p = item["path"].as_str().unwrap_or("");
+                    match item.get("__ref").and_then(Value::as_str) {
+                        Some(r) => format!("{r}({p:?})"),
+                        None => format!("File({p:?})"),
+                    }
+                })
+                .collect();
+            let sig = format!(
+                "// => {name} = [Array({}) of Handles: {}]",
+                arr.len(),
+                summaries.join(", ")
+            );
+            // Expand only handles that are neither delegated to `@virtual` nor already peeked.
+            let mut peeks = Vec::new();
+            for (idx, item) in arr.iter().enumerate() {
+                let p = item["path"].as_str().unwrap_or("");
+                let c = item["content"].as_str().unwrap_or("");
+                let r = item.get("__ref").and_then(Value::as_str);
+                if c.chars().count() > INLINE_LIMIT_CHARS && tracker.claim_peek(r, Some(fnv1a64(c))) {
+                    peeks.push(format_peek_string(&format!("{name}[{idx}].content ({p})"), c, Some(p)));
+                }
+            }
+            let peek = if peeks.is_empty() { None } else { Some(peeks.join("\n\n")) };
+            return (sig, peek);
+        }
+
         let serialized = serde_json::to_string(value).unwrap_or_default();
         let chars = serialized.chars().count();
         if chars <= INLINE_LIMIT_CHARS {
@@ -505,6 +822,9 @@ fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<Strin
             "// => {name} = [Array({}) | itemShape: {shape} | {chars} chars]",
             arr.len()
         );
+        if tracker.container_already_covered(value) {
+            return (sig, None);
+        }
         let peek = if chars <= PEEK_FULL_LIMIT_CHARS {
             let pretty = serde_json::to_string_pretty(value).unwrap_or(serialized);
             format!("// [{name} FULL Array({})]:\n{pretty}", arr.len())
@@ -532,6 +852,9 @@ fn format_binding_three_tier(name: &str, value: &Value) -> (String, Option<Strin
     let sig = format!(
         "// => {name} = [Object {{ {keys_summary} }} | {chars} chars]"
     );
+    if tracker.container_already_covered(value) {
+        return (sig, None);
+    }
     let peek = if chars <= PEEK_FULL_LIMIT_CHARS {
         let pretty = serde_json::to_string_pretty(value).unwrap_or(serialized);
         format!("// [{name} FULL Object]:\n{pretty}")
@@ -606,13 +929,13 @@ fn format_large_source_index(label: &str, text: &str, path_hint: Option<&str>) -
         .join("\n");
     let title = path_hint.unwrap_or(label);
     let sym_block = if symbols.is_empty() {
-        "  (no top-level symbol lines matched; use `.split(\"\\n\").filter(...)` or regex in JS)".into()
+        "  (no top-level symbol lines matched; use `.grep(pattern)` or `.slice(start, end)` on the handle)".into()
     } else {
         symbols.join("\n")
     };
     format!(
         "// [{label} LARGE INDEX ({title}, {total} lines, {chars} chars) — too large for full peek]\n\
-         // Use JS on the live variable (e.g. `.split(\"\\n\").slice(start, end).join(\"\\n\")`) to inspect exact lines:\n\
+         // Page in exact lines on demand via handle methods: `.slice(start, end)`, `.slice([[s1, e1], [s2, e2]])`, `.grep(pattern, ctx)`, or `.outline()`:\n\
          // Symbols / Sections:\n{sym_block}\n\
          // Head (L1..L{}):\n{head}\n\
          // Tail (L{}..L{total}):\n{tail}",

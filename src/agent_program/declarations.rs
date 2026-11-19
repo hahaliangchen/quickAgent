@@ -293,13 +293,33 @@ pub fn static_library_header(libraries: &Libraries) -> String {
     );
     out.push_str(&directory(libraries));
     out.push('\n');
+    if libraries.contains_key("io") || libraries.contains_key("process") {
+        out.push_str(
+            "interface ResourceHandle {\n\
+               __ref?: string;\n\
+               path: string;\n\
+               content: string;\n\
+               complete: boolean;\n\
+               bytes: number;\n\
+               total_lines: number;\n\
+               /** 1-based inclusive line slice, e.g. f.slice(30, 55) or multi-range f.slice([[1, 10], [33, 45]]). */\n\
+               slice(startLine: number | [number, number][], endLine?: number): string;\n\
+               /** Fast in-memory search (case-insensitive string or RegExp) with contextLines (default 1). */\n\
+               grep(pattern: string | RegExp, contextLines?: number): string;\n\
+               /** Structural symbol/heading outline with 1-based line numbers. */\n\
+               outline(): string;\n\
+               head(lines?: number): string;\n\
+               tail(lines?: number): string;\n\
+             }\n\n",
+        );
+    }
     for (library, methods) in libraries {
         out.push_str(&format!("declare namespace {library} {{\n"));
         for (method, target) in methods {
             let sig = match target.as_str() {
-                "read_file" => "args: { path: string; max_chars?: number; max_bytes?: number }): { path: string; content: string; complete: boolean; bytes: number; total_lines: number }",
-                "read_file_lines" => "args: { path: string; start_line: number; end_line: number; max_chars?: number }): { path: string; content: string; complete: boolean; total_lines: number; next_start_line: number | null }",
-                "read_file_chunk" => "args: { path: string; byte_offset?: number; start_line?: number; max_bytes?: number; max_lines?: number }): { content: string; eof: boolean; next_byte_offset: number | null }",
+                "read_file" => "args: { path: string; max_chars?: number; max_bytes?: number }): ResourceHandle",
+                "read_file_lines" => "args: { path: string; start_line: number; end_line: number; max_chars?: number }): ResourceHandle & { next_start_line: number | null }",
+                "read_file_chunk" => "args: { path: string; byte_offset?: number; start_line?: number; max_bytes?: number; max_lines?: number }): ResourceHandle & { eof: boolean; next_byte_offset: number | null }",
                 "list_dir" => "args: { path?: string; recursive?: boolean; max_depth?: number; glob?: string; exclude?: string; max_entries?: number }): { entries: Array<{ path: string; kind: string; size_bytes?: number; modified_at?: string }>; truncated: boolean }",
                 "search_text" => "args: { query: string; path?: string; regex?: boolean; glob?: string; exclude?: string; context_lines?: number; max_matches?: number }): { matches: Array<{ path: string; line: number; text: string }>; truncated: boolean }",
                 "write_file" => "args: { path: string; content: string }): { path: string; bytes: number }",

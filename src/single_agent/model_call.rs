@@ -27,7 +27,7 @@ Each response MUST be **exactly ONE** of the two modes below — NEVER both in t
   - Short results (`<= 2KB`) print verbatim in permanent `// =>` comments below your code.
   - Medium results (`2KB..=24KB`) leave a compact `[File(...) | ...]` / `[Object ...]` signature in `// =>` and expand in full (with line numbers) inside `EPHEMERAL_PEEK` at the bottom for ONE step only.
   - Large results (`> 24KB`) show a high-entropy index (symbols / error lines + tail / schema) in `EPHEMERAL_PEEK`.
-- **Code-as-Projection**: `EPHEMERAL_PEEK` disappears on the next step. After reading `EPHEMERAL_PEEK`, if you still need specific lines for further work, pin only those critical lines into a small JS variable (`<= 2KB`, e.g. `const bug = f.content.split("\n").slice(60, 75).join("\n");`). If you already have everything needed to answer the user, you may jump straight to Mode 2 (`return <<<`).
+- **Lazy Resource Handles & Code-as-Projection**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with built-in zero-I/O paging methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. `EPHEMERAL_PEEK` disappears on the next step — pin only the lines you still need into a small variable (`<= 2KB`, e.g. `const bug = f.slice(61, 75);`), or jump straight to Mode 2 (`return <<<`) if you already have everything needed.
 
 ### Mode 2: Finish turn and reply to the user
 - ONLY after you have real observed evidence (never before reading the target files), start your response with `return <<<` on line 1, followed immediately by raw Markdown until EOF.
@@ -36,7 +36,7 @@ Each response MUST be **exactly ONE** of the two modes below — NEVER both in t
 
 ## Ordinary JS Functions vs Isolated `@virtual` Functions
 - Use ordinary JS functions/loops (`function foo(...) { ... }`) for deterministic multi-file reads, filtering, or batch computation (0 extra LLM calls).
-- Declare a single-layer `/** @virtual <contract; ask for a concise summary field> */ async function inspect(item) {}` (optionally with `@uses varName` in JSDoc to pass outer bindings) and call `await inspect(x)` or `await Promise.all(items.map(inspect))` when isolated semantic judgment or parallel fan-out is needed. Prefer passing lightweight file paths/identifiers into `@virtual` functions so each child calls `io.read(...)` inside its own isolated frame instead of pre-loading raw file contents into the parent scope. Each `@virtual` call runs in its own isolated non-shell stack frame, discards its intermediate context on `return`, and leaves a factual `[virtual ...]` receipt + return value in your `// =>` trace.
+- Declare a single-layer `/** @virtual <contract; ask for a concise summary field> */ async function inspect(item) {}` (optionally with `@uses varName` in JSDoc to pass outer bindings) and call `await inspect(x)` or `await Promise.all(items.map(inspect))` when isolated semantic judgment or parallel fan-out is needed. Pass file paths OR `ResourceHandle` objects (`const f = io.read(...); await inspect(f);`) directly — handles passed to `@virtual` stay compact (`Ref#N`) in your outer trace without expanding raw file contents, and auto-dereference inside the isolated child frame. Each `@virtual` call runs in its own isolated non-shell stack frame, discards its intermediate context on `return`, and leaves a factual `[virtual ...]` receipt + return value in your `// =>` trace.
 
 ## Per-Turn Clean VM
 When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.
@@ -45,10 +45,10 @@ When a turn finishes, its VM is completely destroyed. Each new user turn starts 
 [Model Response 1 — ONLY read the file, then STOP]:
 const f = io.read({ path: "src/auth.rs" });
 
-[Host executes Step 1 and shows `// => f = [File("src/auth.rs") | ...]` + `EPHEMERAL_PEEK` full file with line numbers]
+[Host executes Step 1 and shows `// => f = [File("src/auth.rs") | Ref#1 | ...]` + `EPHEMERAL_PEEK` full file with line numbers]
 
-[Model Response 2 — pin key lines in JS (optional) OR jump straight to `return <<<`]:
-const verifyFn = f.content.split("\n").slice(60, 75).join("\n");
+[Model Response 2 — pin key lines via handle `.slice()` (optional) OR jump straight to `return <<<`]:
+const verifyFn = f.slice(61, 75);
 
 [Host executes Step 2, pins the 15 lines in `// =>`, and wipes `EPHEMERAL_PEEK`]
 

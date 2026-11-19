@@ -2966,7 +2966,18 @@ impl Runtime {
                                 let args=eval(&args,locals,&mut self.heap)?;
                                 let args=super::js_functions::apply_args(&self.heap,args)?;
                                 if !super::vm_eval::callable(&self.heap,&callee) {
-                                    if let Some(label)=label {let label=eval(&label,locals,&mut self.heap)?;bail!("TypeError: {} is not a function",super::js_value::to_string(&self.heap,&label)?);}
+                                    if let Some(label)=label {
+                                        let label=eval(&label,locals,&mut self.heap)?;
+                                        let name=super::js_value::to_string(&self.heap,&label)?;
+                                        if callee == VmValue::Undefined
+                                            && let VmValue::Reference(id) = receiver
+                                            && let Some(val) = super::js_methods::try_resource_handle_method(&mut self.heap, id, &name, &args)?
+                                        {
+                                            self.store(destination.clone(), val)?;
+                                            return Ok(None);
+                                        }
+                                        bail!("TypeError: {} is not a function",name);
+                                    }
                                 }
                                 match self.invoke_receiver(callee,receiver,args,destination.clone())? {Some(kind)=>kind,None=>return Ok(None)}
                             }

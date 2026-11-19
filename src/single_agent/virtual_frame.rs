@@ -15,7 +15,7 @@
 
 use super::{
     Session,
-    context_doc::{ContextDocument, INLINE_LIMIT_CHARS},
+    context_doc::{self, ContextDocument, INLINE_LIMIT_CHARS, SegmentContextHints},
     model_call,
 };
 use crate::agent_program::{Runtime, State, libraries::Libraries, runtime::ActionKind};
@@ -143,6 +143,7 @@ pub(super) async fn execute_virtual_call(
     let mut files_read = BTreeSet::new();
     let mut files_written = BTreeSet::new();
     let mut steps_used = 0usize;
+    let mut next_ref_id = 1usize;
 
     for sub_step in 1..=VIRTUAL_MAX_ROUNDS {
         if child_session.cancel.is_cancelled() {
@@ -204,6 +205,7 @@ pub(super) async fn execute_virtual_call(
             &leaf_libs,
             &node,
             sub_step,
+            &mut next_ref_id,
             &mut files_read,
             &mut files_written,
         )
@@ -237,7 +239,14 @@ pub(super) async fn execute_virtual_call(
                     // `runtime` and `doc` drop right here -> instant Stack-Frame GC!
                     return Ok((val, false, receipt));
                 }
-                doc.record_completed_segment(source, &runtime, &pre_fps, &logs, None, &[]);
+                doc.record_completed_segment(
+                    source,
+                    &runtime,
+                    &pre_fps,
+                    &logs,
+                    None,
+                    &SegmentContextHints::default(),
+                );
             }
             State::Failed(err) => {
                 // Explicit `throw new Error(...)` or unhandled error in child frame
@@ -275,6 +284,7 @@ async fn drive_leaf_vm(
     leaf_libs: &Libraries,
     node: &str,
     step: usize,
+    next_ref_id: &mut usize,
     files_read: &mut BTreeSet<String>,
     files_written: &mut BTreeSet<String>,
 ) -> Result<(State, usize)> {
@@ -288,7 +298,7 @@ async fn drive_leaf_vm(
                 ActionKind::Tool { name, args } => {
                     external_calls += 1;
                     record_file_touch(&name, &args, files_read, files_written);
-                    let (result, is_error) = if is_shell_tool(&name) {
+                    let (mut result, is_error) = if is_shell_tool(&name) {
                         (
                             json!({
                                 "code": "VIRTUAL_SHELL_FORBIDDEN",
@@ -309,6 +319,9 @@ async fn drive_leaf_vm(
                         )
                         .await?
                     };
+                    if !is_error {
+                        context_doc::tag_resource_handle(&mut result, next_ref_id);
+                    }
                     runtime.resume(result, is_error)?;
                 }
                 ActionKind::ParallelReads { operations } => {
@@ -317,7 +330,7 @@ async fn drive_leaf_vm(
                     for (idx, (name, args)) in operations.into_iter().enumerate() {
                         record_file_touch(&name, &args, files_read, files_written);
                         let call_id = format!("{}-p{idx}", action.id);
-                        let (res, is_err) = if is_shell_tool(&name) {
+                        let (mut res, is_err) = if is_shell_tool(&name) {
                             (
                                 json!({"code": "VIRTUAL_SHELL_FORBIDDEN", "error": "shell forbidden in @virtual"}),
                                 true,
@@ -335,6 +348,9 @@ async fn drive_leaf_vm(
                             )
                             .await?
                         };
+                        if !is_err {
+                            context_doc::tag_resource_handle(&mut res, next_ref_id);
+                        }
                         items.push(json!({"failed": is_err, "value": res}));
                     }
                     runtime.resume(Value::Array(items), false)?;
@@ -390,9 +406,35 @@ fn record_file_touch(
 fn format_args_preview(params: &[(String, Value)]) -> String {
     params
         .iter()
-        .map(|(_, v)| compact_value_preview(v, 48))
+        .map(|(_, v)| format_single_arg_preview(v))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn format_single_arg_preview(value: &Value) -> String {
+    if let Some(obj) = value.as_object() {
+        // First-class Lazy Resource Handle (`{ __ref, path, ... }` or `{ __ref, exit_code, ... }`)
+        if let Some(ref_id) = obj.get("__ref").and_then(Value::as_str) {
+            if let Some(path) = obj.get("path").and_then(Value::as_str) {
+                return format!("{ref_id}({path:?})");
+            }
+            if let Some(code) = obj.get("exit_code") {
+                return format!("{ref_id}(exit={code})");
+            }
+            return ref_id.to_owned();
+        }
+        // Ad-hoc `{ file/path, content }` object with large content -> never leak raw file text into receipt!
+        if let Some(content) = obj.get("content").and_then(Value::as_str)
+            && content.chars().count() > 80
+            && let Some(path) = obj
+                .get("path")
+                .or_else(|| obj.get("file"))
+                .and_then(Value::as_str)
+        {
+            return format!("{{ file: {path:?}, content: <{}c> }}", content.chars().count());
+        }
+    }
+    compact_value_preview(value, 48)
 }
 
 fn compact_value_preview(value: &Value, max_chars: usize) -> String {
