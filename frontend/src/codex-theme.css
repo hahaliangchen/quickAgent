@@ -6,8 +6,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap');
 
 :root {
-  /* QuickAgent emerald geometric emblem: crisp teal-green on light, bright mint on dark. */
+  /* QuickAgent emerald 4-leaf geometric emblem */
   --brand-mark: #1d9e75;
+  --brand-mark-secondary: #127c5c;
 
   /* Ultra-smooth font stack */
   --codex-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
@@ -15,29 +16,30 @@
     'Source Han Sans CN', sans-serif;
   --dsw-font-family: var(--codex-font-sans);
 
-  /* 3-tier cool-neutral Light surface hierarchy: Dock (#f3f4f6) -> Sidebar (#f7f8fa) -> Canvas (#ffffff) */
-  --codex-bg-main: #ffffff;
-  --codex-dock-bg: #f3f4f6;
-  --codex-sidebar-bg: #f7f8fa;
-  --codex-panel-bg: #f8f9fb;
+  /* Borderless Paper Light surface hierarchy: airy neutral snow paper with subtle tonal steps */
+  --codex-bg-main: #fafafb;
+  --codex-dock-bg: #ffffff;
+  --codex-sidebar-bg: #f6f7f9;
+  --codex-panel-bg: #f6f7f9;
   --codex-card-bg: #ffffff;
 
-  /* Crisp, high-contrast neutral text */
-  --codex-text-primary: #111827;
-  --codex-text-secondary: #374151;
-  --codex-text-muted: #6b7280;
+  /* Crisp charcoal ink hierarchy */
+  --codex-text-primary: #18181b;
+  --codex-text-secondary: #3f3f46;
+  --codex-text-muted: #71717a;
 
-  --codex-border-subtle: #e2e5ea;
-  --codex-card-border: #d0d5dd;
-  --codex-accent-border: rgba(29, 158, 117, 0.34);
-  --codex-hover-bg: #eceff3;
-  --codex-active-pill: #e3f4ec;
-  --codex-active-hover: #d5ede2;
+  /* Whisper-subtle hairlines (reserved for form inputs & menus; layout shell is borderless) */
+  --codex-border-subtle: rgba(15, 23, 42, 0.06);
+  --codex-card-border: rgba(15, 23, 42, 0.09);
+  --codex-accent-border: rgba(29, 158, 117, 0.24);
+  --codex-hover-bg: #eef0f3;
+  --codex-active-pill: #e6f4ee;
+  --codex-active-hover: #d8eee4;
   /* Emerald brand accent */
   --codex-blue-primary: #1d9e75;
-  --codex-blue-hover: #0f6e56;
+  --codex-blue-hover: #137d5b;
   --sprout-strong: #0f6e56;
-  --sprout-soft: #e3f4ec;
+  --sprout-soft: #e6f4ee;
   --codex-amber-circle: #d97706;
   --codex-amber-bg: #fef3c7;
   --codex-amber-border: #fde68a;
@@ -57,56 +59,58 @@
   --theme-ring-mid: #5dcaa5;
   --theme-ring-high: #d97706;
 
-  /* Harmonize DSH tokens with QuickAgent surface hierarchy */
-  --dsw-alias-bg-base: #ffffff;
-  --dsw-specific-sidebar-fill: #f7f8fa;
-  --dsw-specific-bubble: #f3f4f6;
-  --dsw-alias-border-l2: #d0d5dd;
-  --dsw-alias-border-l3: #e2e5ea;
-  --dsw-alias-label-primary: #111827;
-  --dsw-alias-label-secondary: #374151;
-  --dsw-alias-label-tertiary: #6b7280;
-  --dsw-alias-interactive-bg-hover: #eceff3;
+  /* Harmonize DSH tokens with Borderless Paper aesthetic */
+  --dsw-alias-bg-base: #fafafb;
+  --dsw-specific-sidebar-fill: #f6f7f9;
+  --dsw-specific-bubble: #f1f3f6;
+  --dsw-alias-border-l2: rgba(15, 23, 42, 0.09);
+  --dsw-alias-border-l3: rgba(15, 23, 42, 0.06);
+  --dsw-alias-label-primary: #18181b;
+  --dsw-alias-label-secondary: #3f3f46;
+  --dsw-alias-label-tertiary: #71717a;
+  --dsw-alias-interactive-bg-hover: #eef0f3;
   --dsw-alias-state-business-primary: #1d9e75;
 }
 
 body[data-ds-dark-theme] {
-  --brand-mark: #34d399;
-  --codex-bg-main: #18191d;
-  --codex-dock-bg: #111214;
-  --codex-sidebar-bg: #15171a;
-  --codex-panel-bg: #141619;
-  --codex-card-bg: #1e2025;
-  --codex-text-primary: #f4f4f5;
-  --codex-text-secondary: #e4e4e7;
-  --codex-text-muted: #9ca3af;
-  --codex-border-subtle: #2b2e35;
-  --codex-card-border: #363a44;
-  --codex-accent-border: rgba(52, 211, 153, 0.42);
-  --codex-hover-bg: #22252b;
-  --codex-active-pill: #163329;
-  --codex-active-hover: #1d4034;
-  --codex-blue-primary: #1d9e75;
-  --codex-blue-hover: #25b585;
-  --sprout-strong: #5dcaa5;
-  --sprout-soft: #163329;
+  /* Borderless Dark Ink-Paper (warm matte charcoal paper + muted mint ink) */
+  --brand-mark: #4cb894;
+  --brand-mark-secondary: #2d9170;
+  --codex-bg-main: #1b1a18;
+  --codex-dock-bg: #151412;
+  --codex-sidebar-bg: #161513;
+  --codex-panel-bg: #181715;
+  --codex-card-bg: #23221f;
+  --codex-text-primary: #ece9e2;
+  --codex-text-secondary: #d5d1c8;
+  --codex-text-muted: #8a867e;
+  --codex-border-subtle: rgba(255, 250, 240, 0.05);
+  --codex-card-border: rgba(255, 250, 240, 0.08);
+  --codex-accent-border: rgba(76, 184, 148, 0.30);
+  --codex-hover-bg: #242320;
+  --codex-active-pill: #202d27;
+  --codex-active-hover: #273730;
+  --codex-blue-primary: #2b8a6b;
+  --codex-blue-hover: #35a27e;
+  --sprout-strong: #64cca8;
+  --sprout-soft: #202d27;
   --codex-amber-circle: #f59e0b;
   --codex-amber-bg: #78350f33;
   --codex-amber-border: #b45309;
-  --codex-leaf-border: #0f6e56;
-  --codex-leaf-bg: #0f6e5622;
+  --codex-leaf-border: #1e4d3b;
+  --codex-leaf-bg: #1e2d27;
   --theme-on-soft: #e1f5ee;
-  --theme-soft-border: #2d5a47;
+  --theme-soft-border: #2a473b;
 
-  --dsw-alias-bg-base: #18191d;
-  --dsw-specific-sidebar-fill: #15171a;
-  --dsw-alias-border-l2: #363a44;
-  --dsw-alias-border-l3: #2b2e35;
-  --dsw-alias-label-primary: #f4f4f5;
-  --dsw-alias-label-secondary: #e4e4e7;
-  --dsw-alias-label-tertiary: #9ca3af;
-  --dsw-alias-interactive-bg-hover: #22252b;
-  --dsw-alias-state-business-primary: #1d9e75;
+  --dsw-alias-bg-base: #1b1a18;
+  --dsw-specific-sidebar-fill: #161513;
+  --dsw-alias-border-l2: rgba(255, 250, 240, 0.08);
+  --dsw-alias-border-l3: rgba(255, 250, 240, 0.05);
+  --dsw-alias-label-primary: #ece9e2;
+  --dsw-alias-label-secondary: #d5d1c8;
+  --dsw-alias-label-tertiary: #8a867e;
+  --dsw-alias-interactive-bg-hover: #242320;
+  --dsw-alias-state-business-primary: #2b8a6b;
 }
 
 /* ==========================================================================
@@ -149,11 +153,11 @@ html body[data-ds-dark-theme] {
   --dsw-static-deepseek-900: #14261f;
 }
 html body:not([data-ds-dark-theme]) {
-  --dsw-specific-bubble: #f5f6f7;
-  --dsw-specific-sidebar-nav-item-active-accent: #f3f5f5;
+  --dsw-specific-bubble: #f1f3f6;
+  --dsw-specific-sidebar-nav-item-active-accent: #e6f4ee;
 }
 html body[data-ds-dark-theme] {
-  --dsw-specific-bubble: #1c2b25;
-  --dsw-specific-bubble-highlight: #24493a;
-  --dsw-specific-sidebar-nav-item-active-accent: #163329;
+  --dsw-specific-bubble: #242320;
+  --dsw-specific-bubble-highlight: #2a2925;
+  --dsw-specific-sidebar-nav-item-active-accent: #202d27;
 }

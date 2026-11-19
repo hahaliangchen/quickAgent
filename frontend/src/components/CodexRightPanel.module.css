@@ -3,8 +3,8 @@
   min-width: 300px;
   height: 100vh;
   flex: none;
-  background: var(--codex-panel-bg, #fbfbfb);
-  border-left: 1px solid var(--codex-border-subtle, #efefef);
+  background: var(--codex-panel-bg, #f6f7f9);
+  border-left: none;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -16,7 +16,7 @@
 
 :global(body[data-ds-dark-theme]) .panel {
   background: var(--codex-panel-bg);
-  border-left-color: var(--codex-border-subtle);
+  border-left: none;
 }
 
 .header {
@@ -24,13 +24,13 @@
   padding: 0 16px;
   display: flex;
   align-items: center;
-  border-bottom: 1px solid var(--codex-border-subtle, #e6e8ec);
+  border-bottom: none;
   box-sizing: border-box;
   flex-shrink: 0;
 }
 
 :global(body[data-ds-dark-theme]) .header {
-  border-bottom-color: var(--codex-border-subtle);
+  border-bottom: none;
 }
 
 .titleRow {
