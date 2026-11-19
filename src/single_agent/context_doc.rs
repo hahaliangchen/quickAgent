@@ -155,8 +155,13 @@ impl ContextDocument {
     /// without mutating the immutable `segments` prefix.
     pub fn set_rejection(&mut self, code: &str, message: &str) {
         if let Some(turn) = self.active_turn_mut() {
+            let hint = if turn.virtual_header.is_some() {
+                "Fix and resubmit JavaScript statements, or finish with native JS `return { ..., summary: \"...\" };`."
+            } else {
+                "Fix and resubmit JavaScript statements, or start with `return <<<` to give your final Markdown reply."
+            };
             turn.ephemeral_peek = Some(format!(
-                "// [REJECTED ({code}) — executed: false; nothing ran]\n// {message}\n// Fix and resubmit JavaScript statements, or start with `return <<<` to give your final Markdown reply."
+                "// [REJECTED ({code}) — executed: false; nothing ran]\n// {message}\n// {hint}"
             ));
         }
     }

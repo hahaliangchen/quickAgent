@@ -36,7 +36,7 @@ Each response MUST be **exactly ONE** of the two modes below — NEVER both in t
 
 ## Ordinary JS Functions vs Isolated `@virtual` Functions
 - Use ordinary JS functions/loops (`function foo(...) { ... }`) for deterministic multi-file reads, filtering, or batch computation (0 extra LLM calls).
-- Declare a single-layer `/** @virtual <contract; ask for a concise summary field> */ async function inspect(item) {}` (optionally with `@uses varName` in JSDoc to pass outer bindings) and call `await inspect(x)` or `await Promise.all(items.map(inspect))` when isolated semantic judgment or parallel fan-out is needed. Each `@virtual` call runs in its own isolated non-shell stack frame, discards its intermediate context on `return`, and leaves a factual `[virtual ...]` receipt + return value in your `// =>` trace.
+- Declare a single-layer `/** @virtual <contract; ask for a concise summary field> */ async function inspect(item) {}` (optionally with `@uses varName` in JSDoc to pass outer bindings) and call `await inspect(x)` or `await Promise.all(items.map(inspect))` when isolated semantic judgment or parallel fan-out is needed. Prefer passing lightweight file paths/identifiers into `@virtual` functions so each child calls `io.read(...)` inside its own isolated frame instead of pre-loading raw file contents into the parent scope. Each `@virtual` call runs in its own isolated non-shell stack frame, discards its intermediate context on `return`, and leaves a factual `[virtual ...]` receipt + return value in your `// =>` trace.
 
 ## Per-Turn Clean VM
 When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.

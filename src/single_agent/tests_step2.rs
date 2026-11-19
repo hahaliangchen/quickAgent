@@ -312,3 +312,256 @@ async fn step2_virtual_promise_all_true_concurrency_file_edit_and_try_catch() {
         vec!["并发处理 3 个文件完成，并正确捕获了虚函数异常。"]
     );
 }
+
+fn tool_call_count(root: &Path, task_id: &str, name: &str) -> usize {
+    let conn = agent_service::open_db(root).unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM agent_task_events WHERE task_id=?1 AND kind='tool/call' AND json_extract(data,'$.name')=?2",
+        params![task_id, name],
+        |r| r.get::<_, usize>(0),
+    )
+    .unwrap()
+}
+
+/// Live real-model integration test for Step 2 (opt-in via `--ignored`):
+/// Concurrent `@virtual` + `Promise.all` security audit of 3 >2KB Rust files,
+/// verifying strict isolation, Stack-Frame GC, factual `[virtual ...]` receipts,
+/// and printing human-readable parent + child contexts.
+///
+/// Env overrides:
+/// - `LIVE_PROVIDER` / `LIVE_MODEL` / `LIVE_EFFORT` (outer frame)
+/// - `LIVE_DELEGATE_PROVIDER` / `LIVE_DELEGATE_MODEL` / `LIVE_DELEGATE_EFFORT` (optional child frame)
+#[tokio::test]
+#[ignore]
+async fn live_step2_virtual_parallel_audit() {
+    let ws = TestWorkspace::new();
+    std::fs::create_dir_all(ws.path().join("src")).unwrap();
+
+    let pad = |tag: &str, n: usize| -> String {
+        (1..=n)
+            .map(|i| format!("// {tag} padding note {i:03}: standard internal module commentary\n"))
+            .collect()
+    };
+
+    let auth_rs = format!(
+        "//! JWT & session validator.\n// SENTINEL_ONLY_CHILD_AUTH_SEES\n{}\
+         pub fn verify_token(token: &str, secret: &str, now_ts: u64) -> Option<String> {{\n\
+         \x20\x20\x20\x20let parts: Vec<&str> = token.split('.').collect();\n\
+         \x20\x20\x20\x20if parts.len() != 3 {{ return None; }}\n\
+         \x20\x20\x20\x20// Accepts alg=none without checking signature!\n\
+         \x20\x20\x20\x20if parts[0].contains(\"none\") {{ return Some(parts[1].to_string()); }}\n\
+         \x20\x20\x20\x20let expected = format!(\"{{}}{{}}{{}}\", parts[0], parts[1], secret);\n\
+         \x20\x20\x20\x20if parts[2] == expected {{ let _ = now_ts; return Some(parts[1].to_string()); }}\n\
+         \x20\x20\x20\x20None\n\
+         }}\n{}",
+        pad("auth", 30),
+        pad("auth-tail", 20),
+    );
+
+    let db_rs = format!(
+        "//! User query helper.\n// SENTINEL_ONLY_CHILD_DB_SEES\n{}\
+         pub fn build_user_query(username: &str, limit_raw: &str) -> (String, usize) {{\n\
+         \x20\x20\x20\x20// Raw string interpolation -> SQL injection!\n\
+         \x20\x20\x20\x20let sql = format!(\"SELECT id, email FROM users WHERE name = '{{}}'\", username);\n\
+         \x20\x20\x20\x20// Unchecked unwrap on untrusted user input -> DoS panic!\n\
+         \x20\x20\x20\x20let limit: usize = limit_raw.parse().unwrap();\n\
+         \x20\x20\x20\x20(sql, limit)\n\
+         }}\n{}",
+        pad("db", 30),
+        pad("db-tail", 20),
+    );
+
+    let cache_rs = format!(
+        "//! Safe bounded in-memory TTL cache.\n// SENTINEL_ONLY_CHILD_CACHE_SEES\n\
+         use std::collections::HashMap;\n\
+         use std::sync::RwLock;\n\
+         use std::time::{{Duration, Instant}};\n{}\
+         pub struct SafeCache {{\n\
+         \x20\x20\x20\x20inner: RwLock<HashMap<String, (String, Instant)>>,\n\
+         \x20\x20\x20\x20max_entries: usize,\n\
+         }}\n\
+         impl SafeCache {{\n\
+         \x20\x20\x20\x20pub fn new(max_entries: usize) -> Self {{\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20Self {{ inner: RwLock::new(HashMap::new()), max_entries }}\n\
+         \x20\x20\x20\x20}}\n\
+         \x20\x20\x20\x20pub fn get(&self, key: &str) -> Option<String> {{\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let guard = self.inner.read().ok()?;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let (val, expires_at) = guard.get(key)?;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if Instant::now() < *expires_at {{ Some(val.clone()) }} else {{ None }}\n\
+         \x20\x20\x20\x20}}\n\
+         \x20\x20\x20\x20pub fn insert(&self, key: String, val: String, ttl: Duration) -> bool {{\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20let Ok(mut guard) = self.inner.write() else {{ return false; }};\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if guard.len() >= self.max_entries && !guard.contains_key(&key) {{ return false; }}\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20guard.insert(key, (val, Instant::now() + ttl));\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20true\n\
+         \x20\x20\x20\x20}}\n\
+         }}\n{}",
+        pad("cache", 30),
+        pad("cache-tail", 20),
+    );
+
+    std::fs::write(ws.path().join("src/auth.rs"), &auth_rs).unwrap();
+    std::fs::write(ws.path().join("src/db.rs"), &db_rs).unwrap();
+    std::fs::write(ws.path().join("src/cache.rs"), &cache_rs).unwrap();
+
+    let config = crate::ai_proxy::load_config(&crate::ai_proxy::config_path())
+        .expect("failed to load ~/.config/grow/providers.yml");
+    let mut state = agent_service::tests::test_state(ws.path(), "127.0.0.1:0".parse().unwrap());
+    crate::ai_proxy::apply_agent_config(&mut state, &config);
+
+    if let Ok(prov) = std::env::var("LIVE_PROVIDER")
+        && let Some(route) = state.provider_routes.get(&prov).cloned()
+    {
+        state.provider_name = prov;
+        state.provider_url = route.url;
+        state.api_key = route.api_key;
+        state.model_map = route.models;
+    }
+    let model = std::env::var("LIVE_MODEL").unwrap_or_else(|_| state.default_model.clone());
+    let effort = std::env::var("LIVE_EFFORT").unwrap_or_else(|_| "low".into());
+    state.reasoning_effort = Some(effort.clone());
+
+    // Explicitly control delegate routing so tests don't accidentally hit an unintended default.
+    let del_prov = std::env::var("LIVE_DELEGATE_PROVIDER").ok();
+    let del_model = std::env::var("LIVE_DELEGATE_MODEL").ok();
+    let del_effort = std::env::var("LIVE_DELEGATE_EFFORT").ok();
+    if del_prov.is_some() || del_model.is_some() {
+        state.delegate_agent_settings = crate::model_settings::ModelSettings {
+            provider: del_prov,
+            model: del_model,
+            reasoning_effort: del_effort.or_else(|| Some(effort.clone())),
+            ..Default::default()
+        };
+    } else {
+        state.delegate_agent_settings = Default::default();
+    }
+
+    println!(
+        "=== LIVE STEP2 TEST ===\nouter: provider={} model={} effort={:?}\ndelegate: provider={:?} model={:?}\nfiles: auth.rs={}c db.rs={}c cache.rs={}c",
+        state.provider_name,
+        model,
+        state.reasoning_effort,
+        state.delegate_agent_settings.provider,
+        state.delegate_agent_settings.model,
+        auth_rs.chars().count(),
+        db_rs.chars().count(),
+        cache_rs.chars().count(),
+    );
+
+    let task_id = "live-step2-virtual-audit";
+    init_task_row(ws.path(), task_id);
+
+    let cancel = CancellationToken::new();
+    let cancel_watchdog = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(240)).await;
+        cancel_watchdog.cancel();
+    });
+
+    let started = std::time::Instant::now();
+    let run_res = run_task(
+        state,
+        task_id.into(),
+        model,
+        "请对 src/auth.rs、src/db.rs、src/cache.rs 这三个文件做并发安全审计（只读分析，不要修改任何文件）。请定义一个 `@virtual` 异步函数并用 `Promise.all` 并发审查这三个文件，每个子函数返回结构化结果和简洁 `summary`，最后汇总成一份清晰的安全审计报告给用户。".into(),
+        6,
+        cancel,
+        1,
+        false,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    println!("\n=== run_task result ({elapsed:.2?}): {run_res:?} ===");
+
+    let conn = agent_service::open_db(ws.path()).unwrap();
+
+    // Dump all recorded model requests (both `agent` and `virtual`) for inspection!
+    let mut virtual_req_count = 0usize;
+    let mut virtual_frames = std::collections::BTreeSet::new();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT id, actor, step, node_id, metadata, request_json FROM agent_request_contexts WHERE task_id=?1 ORDER BY id",
+    ) {
+        let rows: Vec<(i64, String, i64, String, String, String)> = stmt
+            .query_map([task_id], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        println!("\n=== RECORDED REQUEST CONTEXTS ({} total) ===", rows.len());
+        for (id, actor, step, node_id, meta_raw, req_raw) in &rows {
+            let meta: Value = serde_json::from_str(meta_raw).unwrap_or_default();
+            let req: Value = serde_json::from_str(req_raw).unwrap_or_default();
+            let scope = meta["context_scope"].as_str().unwrap_or("");
+            let sys = req["messages"][0]["content"].as_str().unwrap_or("");
+            let user = req["messages"][1]["content"].as_str().unwrap_or("");
+            let has_tools = req.get("tools").is_some();
+            let has_process_dts = sys.contains("declare namespace process");
+            println!(
+                "\n--- [req #{id}] actor={actor} step={step} node={node_id} scope={scope} tools={has_tools} has_process_dts={has_process_dts} ---"
+            );
+            assert!(!has_tools, "request #{id} must have zero JSON tools");
+            if actor == "virtual" {
+                virtual_req_count += 1;
+                virtual_frames.insert(scope.to_owned());
+                assert!(
+                    !has_process_dts,
+                    "virtual frame #{id} MUST NOT receive process.* .d.ts!"
+                );
+                // Print full user trace for virtual frames (concise single-frame view)
+                println!("{user}");
+            } else {
+                println!("{user}");
+            }
+        }
+    }
+
+    if let Ok(raw_win) = conn.query_row(
+        "SELECT state FROM agent_runtime_windows WHERE task_id=?1 AND scope='main'",
+        [task_id],
+        |r| r.get::<_, String>(0),
+    ) {
+        let win: super::Window = serde_json::from_str(&raw_win).unwrap();
+        let wire = win.context_doc.render_conversation_messages();
+        let final_user = wire[0]["content"].as_str().unwrap_or("");
+        println!("\n=== FINAL OUTER USER #1 TRACE ===\n{final_user}");
+        if let Some(a) = wire.get(1) {
+            println!("\n=== FINAL ASSISTANT #1 ===\n{}", a["content"].as_str().unwrap_or(""));
+        }
+
+        // Stack-Frame GC assertion: raw file sentinels read ONLY inside `@virtual`
+        // frames MUST NEVER appear in the outer main trace!
+        assert!(
+            !final_user.contains("SENTINEL_ONLY_CHILD_AUTH_SEES")
+                && !final_user.contains("SENTINEL_ONLY_CHILD_DB_SEES")
+                && !final_user.contains("SENTINEL_ONLY_CHILD_CACHE_SEES"),
+            "child raw file contents leaked into outer trace!"
+        );
+        assert!(
+            final_user.contains("[virtual "),
+            "outer trace must contain factual `[virtual ...]` receipts!"
+        );
+    }
+
+    run_res.expect("live step2 run_task failed");
+    assert_eq!(tool_call_count(ws.path(), task_id, "write_file"), 0);
+    assert_eq!(tool_call_count(ws.path(), task_id, "edit_file"), 0);
+    assert!(
+        virtual_frames.len() >= 3,
+        "expected >= 3 distinct @virtual frames, got {} (total virtual reqs: {})",
+        virtual_frames.len(),
+        virtual_req_count
+    );
+    let replies = assistant_messages(ws.path(), task_id);
+    assert_eq!(replies.len(), 1);
+    let reply = &replies[0];
+    assert!(reply.contains("auth.rs") && reply.contains("db.rs") && reply.contains("cache.rs"));
+}
