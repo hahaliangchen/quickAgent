@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn repl_segments_share_bindings_and_record_last_expression() {
+    let mut runtime = Runtime::new_repl(super::libraries::builtin()).unwrap();
+    let first = runtime
+        .append_segment("const evidence = {content: 'a\\nb'}; evidence", super::libraries::builtin(), false)
+        .unwrap();
+    assert!(matches!(first, State::Returned(_)));
+    assert_eq!(runtime.named_bindings()["evidence"]["content"], "a\nb");
+    assert_eq!(runtime.named_bindings()["$_"]["content"], "a\nb");
+
+    let second = runtime
+        .append_segment("const lines = evidence.content.split('\\n').length; lines", super::libraries::builtin(), false)
+        .unwrap();
+    assert!(matches!(second, State::Returned(_)));
+    assert_eq!(runtime.named_bindings()["lines"], 2);
+}
+
+#[test]
+fn failed_segment_rolls_back_uninitialized_tdz_binding() {
+    let mut runtime = Runtime::new_repl(super::libraries::builtin()).unwrap();
+    let _ = runtime
+        .append_segment("function badCall(){ throw new Error('boom'); } const x = 1; const y = badCall();", super::libraries::builtin(), false)
+        .unwrap();
+    assert!(!runtime.named_bindings().contains_key("y"));
+    let state = runtime
+        .append_segment("const y = 2; y", super::libraries::builtin(), false)
+        .unwrap();
+    assert!(matches!(state, State::Returned(_)));
+    assert_eq!(runtime.named_bindings()["y"], 2);
+}
+
+#[test]
 fn bindings_a_local_named_tools_is_an_ordinary_variable() {
     assert_eq!(returned(runtime(r#"function main(){
       const tools = [];

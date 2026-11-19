@@ -682,20 +682,6 @@ mod tests {
         let plugin_calls = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
         let vision_bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let rounds = Arc::new(AtomicUsize::new(0));
-        let ids_in = |body: &Value, prefix: &str| -> Vec<String> {
-            let pattern = regex::Regex::new(&format!(r"{prefix}\d+-\d+-\d+")).unwrap();
-            let mut ids = Vec::<String>::new();
-            for found in pattern.find_iter(&body.to_string()) {
-                if !ids.iter().any(|id| id == found.as_str()) {
-                    ids.push(found.as_str().to_owned());
-                }
-            }
-            ids
-        };
-        let call = |name: &str, args: Value, n: usize| {
-            json!({"role":"assistant","content":null,
-            "tool_calls":[{"id":format!("c{n}"),"type":"function","function":{"name":name,"arguments":args.to_string()}}]})
-        };
         let app = Router::new()
             .route("/api/plugin/{method}", post({
                 let plugin_calls = plugin_calls.clone();
@@ -736,18 +722,15 @@ mod tests {
                             return Json(json!({"choices":[{"message":{"role":"assistant","content":VISION},"finish_reason":"stop"}]}));
                         }
                         if body["messages"].to_string().contains("WAIT_PLAN_TEST") {
-                            let args = json!({"source":"const lib = require(\"review_lab\");\ntry { await lib.render({slides:[99]}); } catch (e) { console.log('should not continue'); }"});
-                            return Json(json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"write-wait","type":"function","function":{"name":"write_program","arguments":args.to_string()}}]}}]}));
+                            let src = "<run>\nconst lib = require(\"review_lab\");\ntry { await lib.render({slides:[99]}); } catch (e) { console.log('should not continue'); }\n</run>";
+                            return Json(json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":src}}]}));
                         }
                         let n = rounds.fetch_add(1, Ordering::SeqCst);
-                        let message = match n {
-                            0 => call("create_task", json!({"goal":"Render and review page 1"}), n),
-                            1 => call("review_lab__render", json!({"slides":[1,2]}), n),
-                            2 => call("analyze_images", json!({"artifact_ids":ids_in(&body, "visual-"),"question":"I just changed the subtitle."}), n),
-                            3 => call("review_lab__record", json!({"analysis_ids":ids_in(&body, "analysis-")}), n),
-                            _ => json!({"role":"assistant","content":"Page 1 reviewed."}),
+                        let content = match n {
+                            0 => "<run>\nconst rl = require(\"review_lab\");\nconst rendered = await rl.render({slides:[1,2]});\nconst ids = rendered.images.map(i => i.artifact_id);\nconst rev = await vision.analyze_images({artifact_ids: ids, question: \"I just changed the subtitle.\"});\nawait rl.record({analysis_ids: [rev.analysis_id]});\n</run>",
+                            _ => "Page 1 reviewed.",
                         };
-                        Json(json!({"choices":[{"finish_reason":if message["tool_calls"].is_array(){"tool_calls"}else{"stop"},"message":message}]}))
+                        Json(json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":content}}]}))
                     }
                 }
             }));

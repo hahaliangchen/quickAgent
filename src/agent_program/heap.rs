@@ -343,6 +343,67 @@ impl Heap {
         Ok(())
     }
 
+    /// Register a lexical name before executing an appended REPL segment.
+    /// Existing names are deliberately reused.  The parser still rejects a
+    /// duplicate declaration inside one segment, while a later segment gets
+    /// the V8-console behaviour of updating the live binding.
+    pub(super) fn declare_segment_binding(
+        &mut self,
+        environment: HeapId,
+        name: &str,
+        uninitialized: bool,
+    ) -> Result<Option<(VmValue, bool)>> {
+        let was_readonly = self
+            .readonly_bindings
+            .get_mut(&environment)
+            .is_some_and(|set| set.remove(name));
+        let (bindings, dead) = self.environment_mut(environment)?;
+        let previous = (!dead.contains(name))
+            .then(|| bindings.get(name).cloned().map(|v| (v, was_readonly)))
+            .flatten();
+        bindings.entry(name.to_owned()).or_insert(VmValue::Undefined);
+        if uninitialized {
+            dead.insert(name.to_owned());
+        } else {
+            dead.remove(name);
+        }
+        Ok(previous)
+    }
+
+    /// Remove or restore a binding that remained in its temporal dead zone
+    /// after a segment failed.  Previously initialized bindings from earlier
+    /// segments are restored intact rather than erased.
+    pub(super) fn rollback_segment_binding(
+        &mut self,
+        environment: HeapId,
+        name: &str,
+        previous: Option<(VmValue, bool)>,
+    ) -> Result<()> {
+        let removed_tdz = {
+            let (bindings, dead) = self.environment_mut(environment)?;
+            if dead.remove(name) {
+                match &previous {
+                    Some((prev_value, _)) => {
+                        bindings.insert(name.to_owned(), prev_value.clone());
+                    }
+                    None => {
+                        bindings.remove(name);
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if removed_tdz && let Some((_, true)) = previous {
+            self.readonly_bindings
+                .entry(environment)
+                .or_default()
+                .insert(name.to_owned());
+        }
+        Ok(())
+    }
+
     fn export_json(
         &self,
         value: &VmValue,

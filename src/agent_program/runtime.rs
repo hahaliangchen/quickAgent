@@ -197,6 +197,17 @@ pub struct Runtime {
     started_at_ms: i64,
     #[serde(default = "program_time_limit")]
     time_limit_ms: i64,
+    /// Pre-segment state for lexical names declared in the currently executing
+    /// append-only segment, so TDZ rollback restores earlier values instead of
+    /// deleting them.
+    #[serde(default)]
+    active_segment_rollback: BTreeMap<String, Option<(VmValue, bool)>>,
+    /// Pre-injected static library namespaces (excluded from user variable overlays
+    /// unless shadowed by user code).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    builtin_namespaces: BTreeMap<String, HeapId>,
+    #[serde(default)]
+    next_segment: u64,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ActionScope {
@@ -345,6 +356,9 @@ impl Runtime {
                 for id in chain.iter().rev() {
                     for (name, value) in self.heap.initialized_bindings(*id).unwrap_or_default() {
                         if name.starts_with("$$") || name.starts_with('\0') { continue; }
+                        if self.builtin_namespaces.get(&name).is_some_and(|b| value == VmValue::Reference(*b)) {
+                            continue;
+                        }
                         // Undefined and functions are not data, but they still
                         // shadow any outer variable of the same name.
                         if self.heap.json_absent(&value) {
@@ -365,6 +379,23 @@ impl Runtime {
             } else {
                 bindings.extend(frame.locals.iter().filter(|(name, _)| !is_temp(name))
                     .map(|(name, value)| (name.clone(), value.clone())));
+            }
+        }
+        // A completed REPL segment has no active frame, but its module scope
+        // remains the durable source of bindings for the next segment.
+        if self.frames.is_empty() {
+            if let Some(environment) = self.module_env {
+                for (name, value) in self.heap.initialized_bindings(environment).unwrap_or_default() {
+                    if name.starts_with("$$") || name.starts_with('\0') { continue; }
+                    if self.builtin_namespaces.get(&name).is_some_and(|b| value == VmValue::Reference(*b)) {
+                        continue;
+                    }
+                    if self.heap.json_absent(&value) {
+                        bindings.remove(&name);
+                    } else {
+                        bindings.insert(name, export(&value));
+                    }
+                }
             }
         }
         bindings
@@ -395,7 +426,7 @@ impl Runtime {
             return;
         }
         if self.heap.json_absent(value)
-            || matches!(value, VmValue::Reference(id) if bare_required_ids.contains(id))
+            || matches!(value, VmValue::Reference(id) if bare_required_ids.contains(id) || self.builtin_namespaces.values().any(|b| b == id))
         {
             scope.remove(name);
             return;
@@ -817,6 +848,9 @@ impl Runtime {
             line_instructions: BTreeMap::new(),
             started_at_ms: chrono::Utc::now().timestamp_millis(),
             time_limit_ms: PROGRAM_TIME_LIMIT_MS,
+            active_segment_rollback: BTreeMap::new(),
+            builtin_namespaces: BTreeMap::new(),
+            next_segment: 0,
         })
     }
     /// Virtual calls become durable AI task scopes; ordinary calls use frames.
@@ -834,6 +868,336 @@ impl Runtime {
         let mut runtime = Self::new_with_scope(program, entry, args, inherited_scope)?;
         runtime.scoped_calls = true;
         Ok(runtime)
+    }
+
+    /// Create an empty persistent REPL frame. The first appended segment is
+    /// compiled into the same module environment.
+    pub fn new_repl(libraries: super::libraries::Libraries) -> Result<Self> {
+        Self::new_repl_with_scope(libraries, BTreeMap::new())
+    }
+
+    /// Create a persistent REPL frame pre-populated with explicit parameters /
+    /// `@uses` captured bindings (used for `@virtual` child frames; main turns
+    /// pass an empty map so every user turn starts with a clean VM).
+    pub fn new_repl_with_scope(
+        libraries: super::libraries::Libraries,
+        initial_bindings: BTreeMap<String, Value>,
+    ) -> Result<Self> {
+        let program = super::compiler::compile_segment(
+            "",
+            "__repl_bootstrap",
+            libraries.clone(),
+            BTreeSet::new(),
+        )?;
+        let mut runtime = Self::new(program, "__repl_bootstrap", Vec::new())?;
+        runtime.scoped_calls = true;
+        runtime.install_static_libraries(&libraries)?;
+        if let Some(environment) = runtime.module_env {
+            for (name, json_val) in initial_bindings {
+                if super::libraries::identifier(&name) {
+                    let vm_val = runtime.heap.from_json(&json_val)?;
+                    runtime.heap.define_binding(environment, &name, vm_val)?;
+                }
+            }
+        }
+        runtime.frames.clear();
+        runtime.finished = true;
+        runtime.result = Value::Null;
+        Ok(runtime)
+    }
+
+    /// Context-as-code starts with the host namespaces already bound in the
+    /// module environment. The values are native method objects, so calls
+    /// still become the ordinary permission-checked `Action::Tool` effects.
+    pub fn install_static_libraries(
+        &mut self,
+        libraries: &super::libraries::Libraries,
+    ) -> Result<()> {
+        let environment = self.module_env.context("REPL module environment is missing")?;
+        for (library, methods) in libraries {
+            if !super::libraries::identifier(library) {
+                continue;
+            }
+            let mut properties = methods
+                .iter()
+                .map(|(method, tool)| {
+                    self.heap
+                        .native(&format!("tool:{tool}"))
+                        .map(|native| (method.clone(), VmValue::Reference(native)))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if library == "host" {
+                for js_method in ["context", "tools"] {
+                    if !properties.iter().any(|(existing, _)| existing == js_method) {
+                        let native = self.heap.native(&format!("library:host:{js_method}"))?;
+                        properties.push((js_method.to_owned(), VmValue::Reference(native)));
+                    }
+                }
+            }
+            if let Some(&existing_obj) = self.builtin_namespaces.get(library)
+                && self.heap.lookup_binding(environment, library).ok()
+                    == Some(VmValue::Reference(existing_obj))
+            {
+                for (method, value) in properties {
+                    self.heap.raw_set_property(existing_obj, method, value)?;
+                }
+                continue;
+            }
+            let object = self.heap.allocate(super::heap::HeapNode::Object(properties))?;
+            if self.heap.binding_names(environment)?.iter().any(|existing| existing == library) {
+                continue;
+            }
+            self.heap.define_binding(
+                environment,
+                library,
+                VmValue::Reference(object),
+            )?;
+            self.builtin_namespaces.insert(library.clone(), object);
+        }
+        Ok(())
+    }
+
+    /// Compile and install one top-level code segment onto the live module
+    /// environment without advancing execution yet (caller drives `next()` or
+    /// `next_concurrent()`). Compilation errors leave the live VM untouched.
+    pub fn prepare_segment(
+        &mut self,
+        source: &str,
+        libraries: super::libraries::Libraries,
+        is_virtual_leaf: bool,
+    ) -> Result<String> {
+        ensure!(!source.trim().is_empty(), "code segment must not be empty");
+        ensure!(self.pending.is_none(), "cannot append while a host action is pending");
+        let environment = self.module_env.context("REPL module environment is missing")?;
+        let external_names = self.heap.binding_names(environment)?.into_iter().collect::<BTreeSet<_>>();
+        let entry = format!("__segment_{}", self.next_segment.saturating_add(1));
+        let mut segment = super::compiler::compile_segment(source, &entry, libraries, external_names)?;
+        if is_virtual_leaf && segment.functions.values().any(|fn_def| fn_def.virtual_task) {
+            anyhow::bail!(
+                "VIRTUAL_LAYER_LIMIT: @virtual functions are single-layer terminal helpers and cannot declare nested @virtual or @module functions"
+            );
+        }
+        let function = segment.functions.remove(&entry).context("compiled segment entry missing")?;
+
+        let mut new_top_level_functions = Vec::new();
+        for (id, mut fn_def) in segment.functions {
+            if id.starts_with("$$") {
+                continue;
+            }
+            if fn_def.virtual_task {
+                for req_lib in self.required.keys() {
+                    if !fn_def.leaf_libraries.contains(req_lib) {
+                        fn_def.leaf_libraries.push(req_lib.clone());
+                    }
+                }
+            }
+            if !id.contains('/') && !fn_def.module {
+                new_top_level_functions.push(id.clone());
+            }
+            self.heap.register_function_length(&id, fn_def.length);
+            self.heap.register_constructor(&id, fn_def.constructable);
+            self.heap.register_generator(&id, fn_def.is_generator, fn_def.is_async);
+            self.program.functions.insert(id, fn_def);
+        }
+
+        let mut rollback = BTreeMap::new();
+        for name in &function.vars {
+            let _ = self.heap.declare_segment_binding(environment, name, false)?;
+        }
+        for name in &function.lexical {
+            let prev = self.heap.declare_segment_binding(environment, name, true)?;
+            rollback.insert(name.clone(), prev);
+        }
+        let _ = self.heap.declare_segment_binding(environment, "$_", false)?;
+        self.heap.define_binding(environment, "\0explicit_return", VmValue::Boolean(false))?;
+        self.heap.define_binding(environment, "\0has_last_expr", VmValue::Boolean(false))?;
+
+        // Allocate closures only for functions newly declared in this segment so
+        // existing closures keep referential identity (`fn === fn`).
+        for id in new_top_level_functions {
+            let closure = self.heap.allocate(super::heap::HeapNode::Closure {
+                function: id.clone(),
+                environment,
+            })?;
+            self.heap.define_binding(environment, &id, super::heap::VmValue::Reference(closure))?;
+            self.builtin_namespaces.remove(&id);
+        }
+        for name in function.vars.iter().chain(function.lexical.iter()) {
+            if !matches!(name.as_str(), "$_" | "\0explicit_return" | "\0has_last_expr") {
+                self.builtin_namespaces.remove(name);
+            }
+        }
+
+        self.program.functions.insert(entry.clone(), function);
+        if !self.program.source.is_empty() {
+            self.program.source.push('\n');
+        }
+        self.program.source.push_str(source);
+
+        // Clean any leftover queues from an earlier aborted segment before starting.
+        self.frames.clear();
+        self.promises.clear_pending_jobs();
+        self.timers.clear();
+        self.microtasks.clear();
+        self.forwarding.clear();
+        self.adopting.clear();
+        self.reactions.clear();
+        self.async_promises.clear();
+        self.throw_sites.clear();
+        self.async_actions.clear();
+        self.active_async_action = None;
+        self.active_reaction = None;
+        self.active_async_batch.clear();
+        self.inflight_async.clear();
+        self.pending = None;
+        self.finished = false;
+        self.result = Value::Null;
+        self.error = None;
+        self.root_result = None;
+        self.rejected_console = None;
+        self.refresh_instruction_segment();
+        self.next_segment = self.next_segment.saturating_add(1);
+        self.active_segment_rollback = rollback;
+        self.frames.push(Frame {
+            function: entry.clone(),
+            pc: 0,
+            locals: BTreeMap::new(),
+            vm_locals: Some(BTreeMap::new()),
+            env: Some(environment),
+            destination: None,
+            handlers: Vec::new(),
+            handler_envs: Vec::new(),
+            completion: None,
+            executor: None,
+            origin: Vec::new(),
+            task_callback: false,
+            constructed: None,
+            diagnostic_at: None,
+            work_origin: None,
+            derived_env: None,
+            super_env: None,
+            generator: None,
+            generator_function: None,
+        });
+        Ok(entry)
+    }
+
+    /// Append and execute one top-level code segment in the live module
+    /// environment. Host actions and suspensions use the ordinary Runtime ABI.
+    pub fn append_segment(
+        &mut self,
+        source: &str,
+        libraries: super::libraries::Libraries,
+        allow_return: bool,
+    ) -> Result<State> {
+        self.prepare_segment(source, libraries, allow_return)?;
+        Ok(self.next())
+    }
+
+    pub fn segment_returned_explicitly(&self) -> bool {
+        self.module_env
+            .and_then(|env| self.heap.lookup_binding(env, "\0explicit_return").ok())
+            == Some(VmValue::Boolean(true))
+    }
+
+    pub fn segment_evaluated_expr(&self) -> bool {
+        self.module_env
+            .and_then(|env| self.heap.lookup_binding(env, "\0has_last_expr").ok())
+            == Some(VmValue::Boolean(true))
+    }
+
+    fn is_user_visible_binding(&self, environment: HeapId, name: &str, value: &VmValue) -> bool {
+        if name.starts_with("$$")
+            || name.starts_with('\0')
+            || name.starts_with("$temp")
+            || matches!(name, "this" | "arguments")
+        {
+            return false;
+        }
+        if let Some(builtin_id) = self.builtin_namespaces.get(name)
+            && value == &VmValue::Reference(*builtin_id)
+        {
+            return false;
+        }
+        let _ = environment;
+        true
+    }
+
+    /// Compact fingerprints of live user-defined module bindings, used to split
+    /// `last_step_bindings` (new/modified) from `older_locals` (unchanged).
+    pub fn user_binding_fingerprints(&self) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        let Some(environment) = self.module_env else { return out };
+        for (name, value) in self.heap.initialized_bindings(environment).unwrap_or_default() {
+            if name == "$_" || !self.is_user_visible_binding(environment, &name, &value) {
+                continue;
+            }
+            let fp = match &value {
+                VmValue::Reference(id) => format!("ref:{id:?}:{}", super::js_value::inspect_older_binding(&self.heap, &value)),
+                _ => super::js_value::inspect_older_binding(&self.heap, &value),
+            };
+            out.insert(name, fp);
+        }
+        out
+    }
+
+    /// Partition live user bindings into `last_step_bindings` (3-tier inspection)
+    /// and `older_locals` (compact signature) relative to a pre-segment snapshot.
+    pub fn partition_overlay_bindings(
+        &self,
+        pre_fingerprints: &BTreeMap<String, String>,
+        max_inline_chars: usize,
+    ) -> (BTreeMap<String, super::js_value::BindingInspection>, BTreeMap<String, String>) {
+        const STEP_BUDGET_CHARS: usize = 48_000;
+        let mut last_step = BTreeMap::new();
+        let mut older = BTreeMap::new();
+        let mut used_step_chars = 0usize;
+        let Some(environment) = self.module_env else { return (last_step, older) };
+        let show_last_expr = self.segment_evaluated_expr() || self.segment_returned_explicitly();
+
+        for (name, value) in self.heap.initialized_bindings(environment).unwrap_or_default() {
+            if !self.is_user_visible_binding(environment, &name, &value) {
+                continue;
+            }
+            if name == "$_" {
+                if show_last_expr && value != VmValue::Undefined {
+                    let cap = max_inline_chars.min(STEP_BUDGET_CHARS.saturating_sub(used_step_chars).max(2_000));
+                    let inspected = super::js_value::inspect_binding(&self.heap, &value, cap);
+                    used_step_chars = used_step_chars.saturating_add(inspected.preview.chars().count());
+                    last_step.insert(name, inspected);
+                }
+                continue;
+            }
+            let current_fp = match &value {
+                VmValue::Reference(id) => format!("ref:{id:?}:{}", super::js_value::inspect_older_binding(&self.heap, &value)),
+                _ => super::js_value::inspect_older_binding(&self.heap, &value),
+            };
+            if pre_fingerprints.get(&name) != Some(&current_fp) {
+                let cap = max_inline_chars.min(STEP_BUDGET_CHARS.saturating_sub(used_step_chars).max(2_000));
+                let inspected = super::js_value::inspect_binding(&self.heap, &value, cap);
+                used_step_chars = used_step_chars.saturating_add(inspected.preview.chars().count());
+                last_step.insert(name, inspected);
+            } else {
+                older.insert(name, format!("{} [live in JS binding]", super::js_value::inspect_older_binding(&self.heap, &value)));
+            }
+        }
+        (last_step, older)
+    }
+
+    pub fn logs_len(&self) -> usize {
+        self.logs.len()
+    }
+
+    pub fn logs_since(&self, start: usize) -> Vec<String> {
+        self.logs.get(start..).map(|s| s.to_vec()).unwrap_or_default()
+    }
+
+    pub fn stack_snapshot(&self) -> Vec<String> {
+        self.frames
+            .iter()
+            .filter(|frame| !frame.function.starts_with("$$"))
+            .map(|frame| format!("{}@pc{}", frame.function, frame.pc))
+            .collect()
     }
 
     /// A frame for `name` with its own environment below `parent`: parameters,
@@ -1881,6 +2245,18 @@ impl Runtime {
         roots.extend(self.heap.generators.iter().filter(|(_,g)|g.pending()).map(|(id,_)|VmValue::Reference(*id)));
         roots.extend(self.async_promises.iter().copied().map(VmValue::Reference));
         roots.extend(self.root_result.iter().cloned());
+        roots.extend(
+            self.active_segment_rollback
+                .values()
+                .flatten()
+                .map(|(v, _)| v.clone()),
+        );
+        roots.extend(
+            self.builtin_namespaces
+                .values()
+                .copied()
+                .map(VmValue::Reference),
+        );
         roots.extend(self.async_actions.iter().map(|action| VmValue::Reference(action.promise)));
         roots.extend(self.active_async_action.iter().map(|action| VmValue::Reference(action.promise)));
         roots.extend(self.active_reaction.iter().map(|action| VmValue::Reference(action.promise)));
@@ -2049,6 +2425,19 @@ impl Runtime {
     }
     pub fn next(&mut self) -> State {
         let state = self.run_until_suspended();
+        if matches!(state, State::Returned(_) | State::Failed(_)) {
+            if matches!(state, State::Failed(_)) {
+                if let Some(environment) = self.module_env {
+                    for (name, previous) in std::mem::take(&mut self.active_segment_rollback) {
+                        let _ = self.heap.rollback_segment_binding(environment, &name, previous);
+                    }
+                } else {
+                    self.active_segment_rollback.clear();
+                }
+            } else {
+                self.active_segment_rollback.clear();
+            }
+        }
         // The host snapshots a suspended program, so leave no garbage in it.
         // Actions hold JSON only; everything they resume into is rooted.
         if matches!(state, State::Action(_) | State::Waiting) && self.heap.has_uncollected()

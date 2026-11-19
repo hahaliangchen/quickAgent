@@ -51,3 +51,6 @@ Not available
 
 Execution limits
 The default budget is 2,000,000 user-work units between completed host interactions and a 30-minute whole-program wall deadline, including waits and pauses. Prelude internals are billed by entry and iteration; user callbacks are metered normally. Independent physical-step checks preserve the deadline. Snapshots retain limits and remaining work; restoring or pure microtasks do not refill the budget. Exhaustion reports user-source location/hot_lines and keeps completed effects. Read the actual diagnostic before revising remaining work; never replay an external write whose outcome is unknown.
+## Context-as-Code protocol
+
+Execution steps use one plain-text `<run>...</run>` block. A complete Markdown response without `<run>` closes the current turn. The host keeps code segments in a persistent VM only within the current user turn and creates a blank VM for the next turn. Reuse the smallest read-only fragment from earlier turns and verify current state before any side effect. Host libraries are injected as structured JavaScript APIs and business JSON tool schemas are omitted from model requests.

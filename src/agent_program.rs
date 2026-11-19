@@ -23,7 +23,8 @@ mod values;
 
 #[cfg(test)]
 pub use compiler::{compile, compile_body, compile_entry};
-pub use compiler::{compile_body_with_scope, compile_with_libraries, probe_as_entry, required_libraries, uncalled_functions};
+#[allow(unused_imports)]
+pub use compiler::{compile_body_with_scope, compile_segment, compile_with_libraries, probe_as_entry, required_libraries, uncalled_functions};
 pub use runtime::{Action, Runtime, State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

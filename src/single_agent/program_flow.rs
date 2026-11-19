@@ -85,6 +85,16 @@ pub(super) fn compile_static_libraries(
 ) -> agent_program::libraries::Libraries {
     static_libraries_with(s, definitions, shell_code_allowed(s, w))
 }
+pub(super) fn leaf_repl_libraries(
+    s: &Session<'_>,
+    definitions: &[Value],
+) -> agent_program::libraries::Libraries {
+    let mut libs = catalog_with_execution(s, definitions, false);
+    let host = libs.entry("host".into()).or_default();
+    host.entry("contracts".into()).or_insert_with(|| "read_tool_contracts".into());
+    host.entry("guide".into()).or_insert_with(|| "read_program_guide".into());
+    libs
+}
 /// The host's own libraries, which source imports from host: and compiles against.
 pub(super) fn static_libraries(
     s: &Session<'_>,
@@ -209,10 +219,11 @@ fn link(s: &Session<'_>, definitions: &[Value], spec: &str) -> (Value, bool) {
                 true,
             );
         }
+        let catalog = library_catalog(s, definitions);
         return (
             json!({
                 "library": spec,
-                "methods": {},
+                "methods": catalog.get("host").cloned().unwrap_or_default(),
                 "library_methods": ["context", "tools"],
             }),
             false,
@@ -677,6 +688,7 @@ pub(super) fn role(w: &Window) -> Role {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     tools.extend(found_tools(&w.messages));
+    tools.extend(w.discovered_leaf_tools.iter().cloned());
     tools.retain(|tool| !is_shell_tool(tool));
     Role::Leaf(tools)
 }
@@ -917,7 +929,14 @@ fn main_program(s: &Session<'_>) -> Result<Value> {
 }
 /// Keep every captured record with how the program ended (design guide §4).
 async fn record_end(s: &Session<'_>, w: &Window, ended: &str, detail: Value) -> Result<()> {
-    let console = printed(w);
+    record_end_with_logs(s, &printed(w), ended, detail).await
+}
+async fn record_end_with_logs(
+    s: &Session<'_>,
+    console: &[String],
+    ended: &str,
+    detail: Value,
+) -> Result<()> {
     let program = main_program(s)?;
     append(s, "program/end", json!({"turn":s.turn,"program":program["file"],"position":program["position"],
         "ended":ended,"console":console,"detail":detail}), false).await?;
@@ -1177,21 +1196,31 @@ pub(super) fn install_scoped(
 /// Code in reply text is never run, so an example written for the user stays
 /// an answer. Err when the call's arguments carry no source.
 pub(super) fn written_source(message: &Value) -> Option<std::result::Result<String, String>> {
-    let call = message["tool_calls"].as_array()?.iter().find(|call| call["function"]["name"] == WRITE_PROGRAM)?;
-    let arguments = call["function"]["arguments"].as_str().unwrap_or("");
-    Some(
-        serde_json::from_str::<Value>(arguments)
-            .ok()
-            .and_then(|args| args["source"].as_str().map(str::to_owned))
-            .ok_or_else(|| "write_program needs {\"source\": \"<the complete program>\"}".to_owned()),
-    )
+    if let Some(call) = message["tool_calls"]
+        .as_array()
+        .and_then(|calls| calls.iter().find(|call| call["function"]["name"] == WRITE_PROGRAM))
+    {
+        let arguments = call["function"]["arguments"].as_str().unwrap_or("");
+        return Some(
+            serde_json::from_str::<Value>(arguments)
+                .ok()
+                .and_then(|args| args["source"].as_str().map(str::to_owned))
+                .ok_or_else(|| "write_program needs {\"source\": \"<the complete program>\"}".to_owned()),
+        );
+    }
+    if let Some(text) = message["content"].as_str()
+        && let crate::model_stream::RunSubmission::Run { source } =
+            crate::model_stream::parse_run_submission(text, None)
+    {
+        return Some(Ok(source));
+    }
+    None
 }
 /// Test fixtures written when programs came in reply text: a fixture reply's
 /// ```js block becomes the write_program call that now carries a program, and
 /// the words around it stay the reply's text.
 #[cfg(test)]
 pub(crate) fn fixture_reply(content: &str) -> Value {
-    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let mut words = Vec::new();
     let mut source = None;
     let mut lines = content.lines();
@@ -1217,9 +1246,12 @@ pub(crate) fn fixture_reply(content: &str) -> Value {
         return json!({"role":"assistant","content":content});
     };
     let words = words.join("\n").trim().to_owned();
-    let id = format!("write-{}", CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    json!({"role":"assistant","content":if words.is_empty(){Value::Null}else{json!(words)},
-        "tool_calls":[{"id":id,"type":"function","function":{"name":WRITE_PROGRAM,"arguments":json!({"source":source}).to_string()}}]})
+    let rendered = if words.is_empty() {
+        format!("<run>\n{source}\n</run>")
+    } else {
+        format!("{words}\n<run>\n{source}\n</run>")
+    };
+    json!({"role":"assistant","content":rendered})
 }
 /// A fixture reply as a chat completion response.
 #[cfg(test)]
@@ -1916,6 +1948,29 @@ pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window, step: usize, blo
     // How to resume is for the AI; the user's copy says only that it paused.
     let hint = if blocker.is_some() { super::blockers::RESUME_HINT } else { INTERJECTION_RESUME_HINT };
     text = format!("{text}\n{hint}");
+    if blocker.is_none() && w.context_doc.is_some() {
+        let message = json!({"role":"assistant","content":text.clone()});
+        let seq = append(
+            s,
+            "assistant/message",
+            json!({"actor":"program","turn":s.turn,"step":step,"message":{"role":"assistant","content":shown}}),
+            s.is_primary(),
+        )
+        .await?;
+        w.messages.push(sourced(message, s.task, seq));
+        w.program_value = None;
+        w.repl_segment_active = false;
+        let defs = super::program_definitions(s, w, super::tools(s, w));
+        let libs = compile_static_libraries(s, w, &defs, false);
+        w.repl_runtime = Some(Runtime::new_repl(libs)?);
+        if let Some(doc) = w.context_doc.as_mut() {
+            doc.set_paused_program_hint(Some(json!({
+                "stopped_at": stopped_at,
+                "message": text,
+            })));
+        }
+        return save(s, w).await;
+    }
     end_program(s, w, step, Value::Null, text, Some(shown)).await?;
     if blocker.is_none() {
         // The turn goes on: the main AI may answer the message with a new program.
@@ -1951,11 +2006,57 @@ async fn finish_probe(s: &Session<'_>, w: &mut Window, outcome: Result<Value, Va
     Ok(Round::Continue)
 }
 
-async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value) -> Result<Round> {
+async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, mut value: Value) -> Result<Round> {
     if w.module_probe {
         return finish_probe(s, w, Ok(value)).await;
     }
-    if w.program_task.is_none() {
+    if w.program_task.is_none() && !super::paused_programs::is_previous(w) {
+        if w.repl_segment_active && w.context_doc.is_some() {
+            let output = w
+                .program
+                .as_ref()
+                .map(|p| p.logs_since(w.segment_log_start))
+                .unwrap_or_default();
+            let text = outcome(s, &output, Ok(&value))?;
+            let preview = format!("[event_seq: 000000]\n{text}");
+            let message = json!({"role":"user","name":"program_result","content":preview});
+            let (required, fits) = delivery_capacity(s, w, &message);
+            if !fits {
+                let chars = console_chars(&output);
+                let reference = archive_program_output(s, w, &value).await?;
+                return Box::pin(failed_program(
+                    s,
+                    w,
+                    step,
+                    output_capacity_error(s, required, reference, &chars, Some(&value)),
+                ))
+                .await;
+            }
+            record_end_with_logs(s, &output, "completed", json!({"result": value})).await?;
+            let runtime = w.program.take().expect("active REPL segment runtime");
+            w.repl_segment_active = false;
+            w.program_value = None;
+            let script_file = main_program(s)?["file"]
+                .as_str()
+                .unwrap_or("turn.js")
+                .to_owned();
+            if let Some(doc) = w.context_doc.as_mut() {
+                doc.settle_segment_completed(&runtime, &w.pre_segment_bindings, output.clone(), None);
+                doc.maybe_checkpoint(&script_file, &runtime, crate::context_document::RECENT_CODE_CHARS);
+            }
+            let seq = append(
+                s,
+                "program/result",
+                json!({"turn": s.turn, "step": step, "task_node_id": w.task_node_id, "result": value, "output": text}),
+                false,
+            )
+            .await?;
+            let delivered = format!("[event_seq: {seq}]\n{text}");
+            w.messages.push(sourced(json!({"role":"user","name":"program_result","content":delivered}), s.task, seq));
+            w.repl_runtime = Some(runtime);
+            save(s, w).await?;
+            return Ok(Round::Continue);
+        }
         // A successful main program is one piece of work, not necessarily the
         // end of the user's task. Give its actual result back to its author.
         let output = printed(w);
@@ -1969,9 +2070,6 @@ async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value
             return Box::pin(failed_program(s, w, step, output_capacity_error(s, required, reference, &chars, Some(&value)))).await;
         }
         record_end(s, w, "completed", json!({"result": value})).await?;
-        // A completed main program must not be scheduled again. The old
-        // persistent-console handoff used `take()` here; one-shot runners
-        // clear the active runtime explicitly before returning to the model.
         w.program = None;
         w.program_value = None;
         let seq = append(s, "program/result", json!({"turn": s.turn, "step": step, "task_node_id": w.task_node_id, "result": value, "output": text}), false).await?;
@@ -1980,6 +2078,123 @@ async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value
         save(s, w).await?;
         return Ok(Round::Continue);
     }
+
+    // REPL exploration / scoped-edit segments inside Fix or Implement frames:
+    if w.repl_segment_active && !super::paused_programs::is_previous(w) && matches!(role(w), Role::Fix | Role::Implement) && value.get("$task_error").is_none() {
+        let output = w
+            .program
+            .as_ref()
+            .map(|p| p.logs_since(w.segment_log_start))
+            .unwrap_or_default();
+        let runtime = w.program.take().expect("active REPL runtime");
+        w.repl_segment_active = false;
+        w.program_value = None;
+        let (inspected, _) = runtime.partition_overlay_bindings(&w.pre_segment_bindings, 16_000);
+        let bindings_view: BTreeMap<String, Value> = inspected
+            .into_iter()
+            .map(|(k, info)| (k, json!({"preview": info.preview, "chars": info.chars, "truncated": info.truncated})))
+            .collect();
+        let obs = json!({
+            "status": "completed",
+            "console": output,
+            "bindings": bindings_view,
+        });
+        let seq = append(s, "program/probe_result", obs.clone(), false).await?;
+        w.messages.push(sourced(
+            json!({"role":"user","name":"module_probe_result","content":obs.to_string()}),
+            s.task,
+            seq,
+        ));
+        w.repl_runtime = Some(runtime);
+        save(s, w).await?;
+        return Ok(Round::Continue);
+    }
+
+    // `@virtual` Leaf frame executing `<run>` sub-segments:
+    if matches!(role(w), Role::Leaf(_)) && w.repl_segment_active {
+        let explicit_return = w
+            .program
+            .as_ref()
+            .is_some_and(|p| p.segment_returned_explicitly());
+        if !explicit_return && value.get("$task_error").is_none() {
+            let output = w
+                .program
+                .as_ref()
+                .map(|p| p.logs_since(w.segment_log_start))
+                .unwrap_or_default();
+            let runtime = w.program.take().expect("active leaf REPL runtime");
+            w.repl_segment_active = false;
+            w.program_value = None;
+            if let Some(doc) = w.context_doc.as_mut() {
+                doc.settle_segment_completed(&runtime, &w.pre_segment_bindings, output, None);
+            } else {
+                let (inspected, older) = runtime.partition_overlay_bindings(&w.pre_segment_bindings, 16_000);
+                let bindings_view: BTreeMap<String, Value> = inspected
+                    .into_iter()
+                    .map(|(k, info)| (k, json!({"preview": info.preview, "chars": info.chars, "truncated": info.truncated})))
+                    .collect();
+                let obs = json!({"status":"segment_completed","console":output,"bindings":bindings_view,"older_locals":older});
+                let seq = append(s, "program/result", obs.clone(), false).await?;
+                w.messages.push(sourced(
+                    json!({"role":"user","name":"leaf_segment_overlay","content":obs.to_string()}),
+                    s.task,
+                    seq,
+                ));
+            }
+            w.repl_runtime = Some(runtime);
+            let defs = super::tools(s, w);
+            let req = super::window_request(s, w, &defs);
+            if w.input_tokens(s, &req).saturating_add(4096) >= s.input_budget {
+                w.repl_runtime = None;
+                w.context_doc = None;
+                let overflow_err = json!({"$task_error":{
+                    "name":"ContextOverflow",
+                    "code":"CONTEXT_OVERFLOW",
+                    "message":"this function's context ran out before it finished; split the work into smaller calls",
+                    "completed_writes":completed_writes(s, w)?
+                }});
+                let text = serde_json::to_string(&overflow_err)?;
+                return end_program(s, w, step, overflow_err, text, None).await;
+            }
+            save(s, w).await?;
+            return Ok(Round::Continue);
+        }
+        // Explicit `return <value>;` (or `$task_error`) completes the `@virtual` leaf!
+        if value.get("$task_error").is_none()
+            && let Some(obj) = value.as_object_mut()
+            && let Some(raw_slices) = obj.remove("$slices")
+        {
+            if !raw_slices.is_array() {
+                let err = json!({"$task_error":{"code":"HANDOFF_SLICE_INVALID","message":"$slices must be an array"}});
+                let text = serde_json::to_string(&err)?;
+                w.repl_runtime = None;
+                w.repl_segment_active = false;
+                w.context_doc = None;
+                return end_program(s, w, step, err, text, None).await;
+            }
+            match super::build_handoff_slices(
+                s.state.workspace.root(),
+                s.task,
+                &json!({ "slices": raw_slices }),
+            ) {
+                Ok(resolved) => {
+                    obj.insert("slices".to_owned(), Value::Array(resolved));
+                }
+                Err(slice_err) => {
+                    let err = json!({"$task_error":{"code":"HANDOFF_SLICE_INVALID","message":format!("{slice_err:#}")}});
+                    let text = serde_json::to_string(&err)?;
+                    w.repl_runtime = None;
+                    w.repl_segment_active = false;
+                    w.context_doc = None;
+                    return end_program(s, w, step, err, text, None).await;
+                }
+            }
+        }
+        w.repl_runtime = None;
+        w.repl_segment_active = false;
+        w.context_doc = None;
+    }
+
     let (text, shown) = if w.program_task.is_some() {
         (serde_json::to_string(&value)?, None)
     } else {
@@ -1994,14 +2209,27 @@ async fn return_value(s: &Session<'_>, w: &mut Window, step: usize, value: Value
 async fn end_program(s: &Session<'_>, w: &mut Window, step: usize, value: Value, text: String, shown: Option<String>) -> Result<Round> {
     w.program_value = Some(value);
     w.program = None;
-    let message = json!({"role":"assistant","content":text});
+    w.repl_segment_active = false;
+    let shown_text = shown.unwrap_or_else(|| text.clone());
+    let message = json!({"role":"assistant","content":text.clone()});
+    let surface_main = s.is_primary() && w.program_task.is_none();
     let seq = append(
         s,
-        "assistant/message",
-        json!({"actor":"program","turn":s.turn,"step":step,"message":{"role":"assistant","content":shown.unwrap_or_else(|| text.clone())}}),
-        s.is_primary(),
+        if w.program_task.is_none() && !super::paused_programs::is_previous(w) {
+            "assistant/message"
+        } else {
+            "assistant/draft"
+        },
+        json!({"actor":"program","turn":s.turn,"step":step,"message":{"role":"assistant","content":shown_text}}),
+        surface_main,
     )
     .await?;
+    if w.program_task.is_none() && !super::paused_programs::is_previous(w) {
+        w.repl_runtime = None;
+        if let Some(doc) = w.context_doc.as_mut() {
+            let _ = doc.finish_turn(seq, &text);
+        }
+    }
     w.messages.push(sourced(message.clone(), s.task, seq));
     save(s, w).await?;
     Ok(Round::Exchange(
@@ -2020,11 +2248,19 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
     if error["code"] == "PROGRAM_CANCELLED" && w.program_task.is_none() {
         stop_unfinished(s, w).await?;
         w.program = None;
+        w.repl_segment_active = false;
         w.program_value = None;
         save(s, w).await?;
         return Ok(Round::Continue);
     }
-    let mut console = printed(w);
+    let mut console = if w.repl_segment_active {
+        w.program
+            .as_ref()
+            .map(|p| p.logs_since(w.segment_log_start))
+            .unwrap_or_default()
+    } else {
+        printed(w)
+    };
     let record_chars = console_chars(&console);
     let diagnostic = json!({"role":"user","name":"program_diagnostic",
         "content":json!({"error":error,"console":console}).to_string()});
@@ -2074,38 +2310,96 @@ async fn failed_program(s: &Session<'_>, w: &mut Window, step: usize, mut error:
             super::modules::AfterFailure::Rerun | super::modules::AfterFailure::Fixing => Ok(Round::Rewrite),
             super::modules::AfterFailure::Fail => return_value(s, w, step, json!({"$task_error":error})).await,
         }
+    } else if !rises && w.repl_segment_active && !super::paused_programs::is_previous(w) && matches!(role(w), Role::Fix | Role::Implement) {
+        let runtime = w.program.take().expect("active REPL runtime");
+        w.repl_segment_active = false;
+        let diagnostic = json!({
+            "code": "SEGMENT_RUNTIME_ERROR",
+            "executed": true,
+            "error": error,
+            "console": console,
+            "instruction": "The <run> segment threw an error; completed side effects remain applied. Submit a corrected <run> segment."
+        });
+        let seq = append(s, "program/runtime_error", json!({"diagnostic":diagnostic}), false).await?;
+        w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
+        w.repl_runtime = Some(runtime);
+        save(s, w).await?;
+        Ok(Round::Rewrite)
+    } else if !rises && w.repl_segment_active && matches!(role(w), Role::Leaf(_)) {
+        let runtime = w.program.take().expect("active leaf REPL runtime");
+        w.repl_segment_active = false;
+        if let Some(doc) = w.context_doc.as_mut() {
+            doc.settle_segment_failed(
+                &runtime,
+                &w.pre_segment_bindings,
+                error.clone(),
+                console.clone(),
+                crate::context_document::SegmentStatus::FailedAfterEffect,
+            );
+        } else {
+            let diagnostic = json!({"code":"SEGMENT_RUNTIME_ERROR","executed":true,"error":error,"console":console});
+            let seq = append(s, "program/runtime_error", json!({"diagnostic":diagnostic}), false).await?;
+            w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
+        }
+        w.repl_runtime = Some(runtime);
+        save(s, w).await?;
+        Ok(Round::Rewrite)
     } else if !rises && role(w) == Role::Implement && w.program_task.as_ref().is_some_and(|task| task["role"] == "implement") {
         // AI-written code is not right every time: its author gets the
         // error and what already ran, and rewrites it or gives up.
         w.program = None;
+        w.repl_segment_active = false;
         let diagnostic = json!({"code":"FUNCTION_RUNTIME_ERROR","executed":true,"error":error,
             "completed_writes":completed_writes(s, w)?,"console":console,
-            "instruction":"Your implementation stopped with this error. Call write_program with the corrected complete implementation; it runs from its start, so do not redo the listed writes unless the contract needs them redone. If the contract cannot be met, reply with {\"$task_error\":{\"message\":\"concrete cause\"}} instead."});
+            "instruction":"Your implementation stopped with this error. Submit a <run> block with the corrected complete implementation; it runs from its start, so do not redo the listed writes unless the contract needs them redone. If the contract cannot be met, reply with {\"$task_error\":{\"message\":\"concrete cause\"}} instead."});
         let seq = append(s, "program/runtime_error", json!({"diagnostic":diagnostic}), false).await?;
         w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
         save(s, w).await?;
         Ok(Round::Rewrite)
     } else if w.program_task.is_some() {
         // A runtime failure throws to the caller, as in JavaScript.
+        w.repl_segment_active = false;
         return_value(s, w, step, json!({"$task_error":error})).await
     } else if !rises {
+        if w.repl_segment_active && w.context_doc.is_some() {
+            record_end_with_logs(s, &console, "error", json!({"error": error})).await?;
+            let mut diagnostic = json!({"code":"PROGRAM_RUNTIME_ERROR","executed":true,"program":main_program(s)?,"error":error,
+                "completed_writes":turn_writes(s)?,"console":console});
+            if !stopped.is_empty() {
+                diagnostic["stopped_calls"] = json!(stopped);
+            }
+            let seq = append(s, "program/runtime_error", json!({"diagnostic":diagnostic,"turn":s.turn,"main":true}), false).await?;
+            w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
+            let runtime = w.program.take().expect("active REPL runtime");
+            w.repl_segment_active = false;
+            if let Some(doc) = w.context_doc.as_mut() {
+                doc.settle_segment_failed(
+                    &runtime,
+                    &w.pre_segment_bindings,
+                    error,
+                    console,
+                    crate::context_document::SegmentStatus::FailedAfterEffect,
+                );
+            }
+            w.repl_runtime = Some(runtime);
+            save(s, w).await?;
+            return Ok(Round::Rewrite);
+        }
         // The main program heals without an artificial rewrite cap: the
         // main AI gets the error and the files already written, and can keep
         // fixing, switch approaches, or explain in plain text why to stop.
         record_end(s, w, "error", json!({"error":error})).await?;
         let mut diagnostic = json!({"code":"PROGRAM_RUNTIME_ERROR","executed":true,"program":main_program(s)?,"error":error,
             "completed_writes":turn_writes(s)?,"console":console,
-            "instruction":"Your program stopped with this error. Call write_program with the corrected complete program; it runs from its start, so do not redo the listed writes unless the task needs them redone. If the task cannot be done, tell the user why in plain text instead."});
+            "instruction":"Your program stopped with this error. Submit a <run> block with the corrected code; do not redo the listed writes unless the task needs them redone. If the task cannot be done, tell the user why in plain text instead."});
         if !stopped.is_empty() {
             diagnostic["stopped_calls"] = json!(stopped);
             diagnostic["stopped_note"] = json!("These calls were still running when the program stopped; they were stopped before their next step and returned nothing.");
         }
         let seq = append(s, "program/runtime_error", json!({"diagnostic":diagnostic,"turn":s.turn,"main":true}), false).await?;
         w.messages.push(sourced(json!({"role":"user","name":"program_diagnostic","content":diagnostic.to_string()}), s.task, seq));
-        // The failed main runtime is terminal for this round. Leaving it in
-        // the window makes run_rounds call `next` forever without asking the
-        // model for a rewrite.
         w.program = None;
+        w.repl_segment_active = false;
         save(s, w).await?;
         Ok(Round::Rewrite)
     } else {
@@ -2182,8 +2476,8 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
     };
     match state {
         State::Waiting => unreachable!(),
-        State::Failed(error) => failed_program(s, w, step, error).await,
-        State::Returned(value) => return_value(s, w, step, value).await,
+        State::Failed(error) => Box::pin(failed_program(s, w, step, error)).await,
+        State::Returned(value) => Box::pin(return_value(s, w, step, value)).await,
         State::Action(action) => {
             let at = json!(action.at);
             let (name, args) = match &action.kind {
@@ -2251,7 +2545,7 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
             // Resuming runs the paused program first; when the user speaks
             // again it pauses once more and this step stays pending.
             if call.name == super::paused_programs::RESUME && w.resumed.is_none() {
-                let Some(resumed) = super::paused_programs::resume(s, w).await? else {
+                let Some(resumed) = Box::pin(super::paused_programs::resume(s, w)).await? else {
                     return Ok(Round::Continue);
                 };
                 w.resumed = Some(resumed);
@@ -2264,6 +2558,100 @@ pub(super) async fn next(s: &Session<'_>, w: &mut Window, step: usize) -> Result
             }
             let definitions = super::program_definitions(s, w, super::tools(s, w));
             let done = Box::pin(super::execute_call(s, w, &definitions, &node, step, &call, 1, Some(&at))).await?;
+            if !done.is_error
+                && let Some((ref name, enable, scope)) = done.skill_change
+            {
+                if enable {
+                    w.active_skills.insert(name.clone());
+                    if let Some(scope) = scope {
+                        w.active_skill_scopes.insert(name.clone(), scope);
+                    }
+                } else {
+                    w.active_skills.remove(name);
+                    w.active_skill_scopes.remove(name);
+                }
+                if w.program.is_some() {
+                    let updated_defs = super::program_definitions(s, w, super::tools(s, w));
+                    let updated_libs = if matches!(role(w), Role::Leaf(_)) {
+                        leaf_repl_libraries(s, &updated_defs)
+                    } else {
+                        compile_static_libraries(s, w, &updated_defs, role(w) != Role::Main)
+                    };
+                    if let Some(rt) = w.program.as_mut() {
+                        let _ = rt.install_static_libraries(&updated_libs);
+                    }
+                }
+            }
+            if call.name == FIND && !done.is_error {
+                for tool in done.result["methods"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m["tool"].as_str())
+                {
+                    if !is_shell_tool(tool) {
+                        w.discovered_leaf_tools.insert(tool.to_owned());
+                    }
+                }
+                if matches!(role(w), Role::Leaf(_)) && w.program.is_some() {
+                    let updated_defs = super::tools(s, w);
+                    let updated_libs = leaf_repl_libraries(s, &updated_defs);
+                    if let Some(rt) = w.program.as_mut() {
+                        let _ = rt.install_static_libraries(&updated_libs);
+                    }
+                }
+            }
+            if !done.is_error
+                && matches!(call.name.as_str(), "view_image" | "read_asset")
+                && done.result["artifact_id"].is_string()
+            {
+                let mut image = json!({
+                    "role": "user",
+                    "_turn": s.turn,
+                    "content": [{"type": "image_ref", "artifact_id": done.result["artifact_id"], "view_original": true}]
+                });
+                if let Some(reference) = &done.asset_reference {
+                    image = crate::context_assets::tagged(image, reference);
+                    image["_asset_state"] = json!("image_selected");
+                }
+                w.messages.push(image);
+            }
+            if let Some(doc) = w.context_doc.as_mut() {
+                let catalog = library_catalog(s, &definitions);
+                let method_label = agent_program::libraries::public_name(&catalog, &call.name)
+                    .unwrap_or_else(|| call.name.clone());
+                let asset_id = done
+                    .asset_reference
+                    .as_ref()
+                    .and_then(|r| r["asset_id"].as_str())
+                    .or_else(|| done.result.pointer("/output_asset/asset_id").and_then(Value::as_str))
+                    .map(str::to_owned);
+                let exit_code = done.result.get("exit_code").and_then(Value::as_i64);
+                let chars = Some(done.result.to_string().chars().count());
+                doc.record_effect(crate::context_document::EffectReceipt {
+                    effect_id: call.call_id.clone(),
+                    event_seq: done.seq,
+                    call: method_label,
+                    outcome: if done.is_error { "error".into() } else { "ok".into() },
+                    exit_code,
+                    asset_id,
+                    chars,
+                });
+            }
+            if call.name == ASK && !done.is_error {
+                let question = done.result["question"].as_str().unwrap_or("").to_owned();
+                let function = w.program_task.as_ref().map(|task| task["name"].clone()).unwrap_or(Value::Null);
+                let waiting_err = json!({
+                    "name": "WaitingForUser",
+                    "code": WAITING,
+                    "question": question,
+                    "function": function,
+                    "message": "the function is waiting for the user's answer",
+                });
+                resolve(s, w, &action, waiting_err, true, done.seq)?;
+                super::checkpoint_program(s, w, true).await?;
+                return Ok(Round::Continue);
+            }
             if done.result["host_denied"] == true && done.result["code"] == WAITING && w.program_task.is_none() {
                 // A plugin's explicit user-confirmation boundary stops the
                 // main program even if its JavaScript would catch errors.
@@ -2971,18 +3359,43 @@ mod tests {
             .as_array()
             .into_iter()
             .flatten()
-            .any(|m| m["name"] == "program_result")
+            .any(|m| {
+                m["name"] == "program_result"
+                    || (m["role"] == "user"
+                        && m["content"].as_str().is_some_and(|t| {
+                            t.contains("// --- Executed Program (")
+                                && !t.contains("VIRTUAL CALL BOUNDARY")
+                        }))
+            })
     }
     fn role_of(body: &Value) -> String {
-        if body["messages"].as_array().unwrap().iter().any(|m| m["name"] == super::super::modules::FIX_INPUT) {
+        let msgs = body["messages"].as_array().unwrap();
+        if msgs.iter().any(|m| m["name"] == super::super::modules::FIX_INPUT) {
             return "fix".into();
         }
-        body["messages"].as_array().unwrap().iter().find(|m| m["name"] == "program_task_input")
-            .map(|m| serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap()["role"].as_str().unwrap().to_owned())
-            .unwrap_or_else(|| "main".into())
+        if let Some(m) = msgs.iter().find(|m| m["name"] == "program_task_input") {
+            return serde_json::from_str::<Value>(m["content"].as_str().unwrap()).unwrap()["role"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        }
+        if msgs.iter().any(|m| {
+            m["role"] == "user"
+                && m["content"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("VIRTUAL CALL BOUNDARY"))
+        }) {
+            return "leaf".into();
+        }
+        "main".into()
     }
     fn tool_names(body: &Value) -> Vec<String> {
-        body["tools"].as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap().to_owned()).collect()
+        body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t["function"]["name"].as_str().map(str::to_owned))
+            .collect()
     }
     fn reply(content: String) -> Value {
         fixture_completion(&content)
@@ -5295,8 +5708,28 @@ mod tests {
         let messages = body["messages"].as_array().unwrap();
         let current = messages.iter().rposition(|m| m["role"] == "user" && m.get("name").is_none())?;
         Some(json!(messages[..current].iter()
-            .filter(|m| m["name"] == super::super::task_frames::CHAT_HISTORY || (m["role"] == "assistant" && m["tool_calls"].is_null()))
-            .map(|m| json!([m["role"], m["content"]])).collect::<Vec<_>>()))
+            .filter_map(|m| {
+                if m["name"] == super::super::task_frames::CHAT_HISTORY {
+                    return Some(json!(["user", m["content"]]));
+                }
+                if m["role"] == "user" && m.get("name").is_none() {
+                    let words = m["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .split("\n\n// --- Executed Program")
+                        .next()
+                        .unwrap_or("")
+                        .split("\n\n// [Archived turn-")
+                        .next()
+                        .unwrap_or("");
+                    return Some(json!(["user", words]));
+                }
+                if m["role"] == "assistant" && m["tool_calls"].is_null() {
+                    return Some(json!(["assistant", m["content"]]));
+                }
+                None
+            })
+            .collect::<Vec<_>>()))
     }
 
     #[tokio::test]

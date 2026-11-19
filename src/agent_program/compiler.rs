@@ -62,6 +62,8 @@ struct Compiler {
     leaf_libraries: Vec<String>,
     /// Private class names are lowered to per-class collision-free keys.
     private_names: BTreeMap<String, String>,
+    /// True only on the top-level module compiler of an appended REPL segment.
+    segment_root: bool,
 }
 
 /// The library a `require("ppt")` call names: one string argument.
@@ -970,6 +972,7 @@ impl Compiler {
             leaf_tools: self.leaf_tools.clone(),
             leaf_libraries: self.leaf_libraries.clone(),
             private_names: self.private_names.clone(),
+            segment_root: false,
         };
         let mut params = Vec::new();
         let mut parameter_lexical = Vec::new();
@@ -2475,7 +2478,15 @@ impl Compiler {
                     Expr::Undefined
                 };
                 let value = if self.async_generator && r.arg.is_some() { self.await_value(value, r.span) } else { value };
-                let value = if self.finalizers.is_empty() { value } else { self.snapshot(r.span, value) };
+                let value = if self.segment_root || !self.finalizers.is_empty() {
+                    self.snapshot(r.span, value)
+                } else {
+                    value
+                };
+                if self.segment_root {
+                    self.emit(r.span, Op::Set("\0explicit_return".into(), Expr::Value(json!(true))));
+                    self.emit(r.span, Op::Set("$_".into(), value.clone()));
+                }
                 self.emit_finalizers(None, r.span)?;
                 self.emit(r.span, Op::Return(value));
             }
@@ -2782,7 +2793,7 @@ pub fn compile(source: &str) -> Result<Program> {
 pub(super) fn compile_conformance(source: &str) -> Result<Program> {
     let names=["assert","__test262CheckThrown","$DONE","compareArray"]
         .into_iter().map(str::to_owned).collect();
-    link_prelude(compile_inner(source,super::ENTRY,false,super::libraries::Libraries::new(),names,false)?)
+    link_prelude(compile_inner(source,super::ENTRY,false,super::libraries::Libraries::new(),names,false,false)?)
 }
 
 #[cfg(test)]
@@ -2800,7 +2811,22 @@ pub fn compile_with_libraries(
     source: &str,
     libraries: super::libraries::Libraries,
 ) -> Result<Program> {
-    link_prelude(compile_inner(source, super::ENTRY, false, libraries, BTreeSet::new(), false)?)
+    link_prelude(compile_inner(source, super::ENTRY, false, libraries, BTreeSet::new(), false, false)?)
+}
+
+/// Compile one top-level REPL segment.  A segment is a module entry whose
+/// lexical environment is supplied by the caller, so declarations can be
+/// appended to a live Runtime without wrapping them in a short-lived helper
+/// function.  The entry name is intentionally supplied by the caller to keep
+/// segment ids stable in the context document.
+pub fn compile_segment(
+    source: &str,
+    entry: &str,
+    libraries: super::libraries::Libraries,
+    external_names: BTreeSet<String>,
+) -> Result<Program> {
+    ensure!(!entry.is_empty(), "segment entry must not be empty");
+    link_prelude(compile_inner(source, entry, false, libraries, external_names, false, true)?)
 }
 
 /// A declared function nothing calls or passes on is work the author meant to
@@ -2910,7 +2936,7 @@ pub fn compile_body_with_scope(
     libraries: super::libraries::Libraries,
     external_names: BTreeSet<String>,
 ) -> Result<Program> {
-    let program = link_prelude(compile_inner(source, entry, true, libraries, external_names, false)?)?;
+    let program = link_prelude(compile_inner(source, entry, true, libraries, external_names, false, false)?)?;
     ensure!(
         !program.functions[entry].virtual_task,
         "the implementation of {entry} needs a real body; its original contract annotation is optional, while empty helpers declare AI work"
@@ -2927,7 +2953,7 @@ pub fn compile_entry_with_libraries(
     entry: &str,
     libraries: super::libraries::Libraries,
 ) -> Result<Program> {
-    link_prelude(compile_inner(source, entry, false, libraries, BTreeSet::new(), false)?)
+    link_prelude(compile_inner(source, entry, false, libraries, BTreeSet::new(), false, false)?)
 }
 fn compile_inner(
     source: &str,
@@ -2936,6 +2962,7 @@ fn compile_inner(
     libraries: super::libraries::Libraries,
     external_names: BTreeSet<String>,
     internal: bool,
+    segment: bool,
 ) -> Result<Program> {
     ensure!(
         source.len() <= 100_000,
@@ -3033,7 +3060,7 @@ fn compile_inner(
     }
     // Main programs are one-shot top-level scripts. Module implementations
     // still compile against their named entry function.
-    let implicit_entry = !refinement && entry == super::ENTRY;
+    let implicit_entry = (!refinement && entry == super::ENTRY) || segment;
     for item in module.body {
         match item {
             ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
@@ -3283,8 +3310,25 @@ fn compile_inner(
         all_declarations.0.iter().map(|f| Ok((f.function.span.lo.0, contract_of(f)?))).collect::<Result<BTreeMap<_, _>>>()?,
     );
     // A @virtual is limited to what the source declaring it imports, whether
-    // that source is a main program or a module.
-    let leaf_tools = Some(imported_tools.clone());
+    // that source is a main program or a module. In an appended REPL segment
+    // without explicit imports, pre-injected non-shell libraries are in scope.
+    let leaf_tools = if segment && !has_import && requires.libraries.is_empty() {
+        Some(
+            libraries
+                .iter()
+                .filter(|(lib, _)| !matches!(lib.as_str(), "process" | "session" | "previous"))
+                .flat_map(|(_, methods)| methods.values().cloned())
+                .filter(|tool| {
+                    !crate::project_process::is_execution(tool)
+                        && tool != crate::shell_process::READ_ONLY
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        )
+    } else {
+        Some(imported_tools.clone())
+    };
     let leaf_libraries = requires.libraries.iter().cloned().collect::<Vec<_>>();
     let virtuals = contracts
         .iter()
@@ -3306,7 +3350,17 @@ fn compile_inner(
     let mut module_scope = function_bindings.clone();
     if implicit_entry || module_init {
         let init_id = if implicit_entry { entry } else { super::MODULE_INIT };
-        let module_vars = var_names(&top_level);
+        let mut module_vars = var_names(&top_level);
+        // A segment keeps the value of its last bare expression in the
+        // DevTools-style `$_` binding.  It is an ordinary module binding so
+        // the next segment can read it without a host round trip.
+        if segment {
+            for special in ["$_", "\0explicit_return", "\0has_last_expr"] {
+                if !module_vars.iter().any(|name| name == special) {
+                    module_vars.push(special.into());
+                }
+            }
+        }
         let module_lexical = lexical_names(&top_level);
         let mut c = Compiler {
             map: map.clone(),
@@ -3336,6 +3390,7 @@ fn compile_inner(
             leaf_tools: leaf_tools.clone(),
             leaf_libraries: leaf_libraries.clone(),
             private_names: BTreeMap::new(),
+            segment_root: segment && implicit_entry,
         };
         for name in &module_vars {
             c.declare(name, true, module.span)?;
@@ -3351,8 +3406,16 @@ fn compile_inner(
         }
         c.scopes[0].extend(function_bindings.clone());
         module_scope = c.scopes[0].clone();
-        for stmt in &top_level {
-            c.stmt(stmt)?;
+        let last_idx = top_level.len().saturating_sub(1);
+        for (idx, stmt) in top_level.iter().enumerate() {
+            if segment && idx == last_idx && let ast::Stmt::Expr(expr) = stmt {
+                let value = c.lower(&expr.expr)?;
+                let value = c.snapshot(expr.span, value);
+                c.emit(expr.span, Op::Set("\0has_last_expr".into(), Expr::Value(json!(true))));
+                c.emit(expr.span, Op::Set("$_".into(), value));
+            } else {
+                c.stmt(stmt)?;
+            }
         }
         c.emit(module.span, Op::Return(Expr::Undefined));
         functions.extend(std::mem::take(&mut c.nested));
@@ -3415,6 +3478,7 @@ fn compile_inner(
             leaf_tools: leaf_tools.clone(),
             leaf_libraries: leaf_libraries.clone(),
             private_names: BTreeMap::new(),
+            segment_root: false,
         };
         let mut params = Vec::new();
         let mut parameter_names = Vec::new();
@@ -3571,7 +3635,7 @@ fn link_prelude(mut program: Program) -> Result<Program> {
 }
 
 pub(super) fn compile_prelude() -> Result<Program> {
-    compile_inner(super::prelude::SOURCE, "$$map", false, super::libraries::Libraries::new(), BTreeSet::new(), true)
+    compile_inner(super::prelude::SOURCE, "$$map", false, super::libraries::Libraries::new(), BTreeSet::new(), true, false)
 }
 
 fn block_is_virtual_placeholder(body: &ast::BlockStmt) -> (bool, bool) {

@@ -1548,6 +1548,8 @@ pub(crate) async fn consume_model_stream_observed(
     let mut bytes = response.bytes_stream();
     let mut delta_text = String::new();
     let mut delta_reasoning = String::new();
+    let mut run_gate = crate::model_stream::RunStreamGate::default();
+    let mut run_code_chars = 0usize;
     let mut last_flush = Instant::now();
     let mut flushed = false;
     let mut tool_dirty = false;
@@ -1576,7 +1578,15 @@ pub(crate) async fn consume_model_stream_observed(
             // drops this future before a complete tool call is delivered.
             log.decoded(&accumulator.stats());
         }
-        delta_text.push_str(&delta.text);
+        for gate_event in run_gate.push(&delta.text) {
+            match gate_event {
+                crate::model_stream::RunStreamEvent::ReplyDelta(text) => delta_text.push_str(&text),
+                crate::model_stream::RunStreamEvent::RunProgress(code) => {
+                    run_code_chars = run_code_chars.saturating_add(code.chars().count());
+                    tool_dirty = true;
+                }
+            }
+        }
         delta_reasoning.push_str(&delta.reasoning);
         tool_dirty |= delta.tool_call;
         let tool_due = tool_dirty && (!flushed || last_tool_flush.elapsed() >= Duration::from_millis(500));
@@ -1588,12 +1598,21 @@ pub(crate) async fn consume_model_stream_observed(
             if let Some(log) = diagnostics {
                 log.phase("event_persistence");
             }
+            let tool_progress = if tool_dirty {
+                if run_gate.is_code() {
+                    json!([{"name": "run", "arguments_chars": run_code_chars}])
+                } else {
+                    accumulator.tool_progress()
+                }
+            } else {
+                Value::Null
+            };
             emit(
                 root,
                 task_id,
                 "assistant/delta",
                 json!({"turn":turn,"step":step,"task_node_id":frame,"text":delta_text,"reasoning":delta_reasoning,
-                    "tool_progress": if tool_dirty { accumulator.tool_progress() } else { Value::Null }}),
+                    "tool_progress": tool_progress}),
             )
             .await?;
             delta_text.clear();
@@ -1601,6 +1620,11 @@ pub(crate) async fn consume_model_stream_observed(
             if tool_dirty { last_tool_flush = Instant::now(); tool_dirty = false; }
             last_flush = Instant::now();
             flushed = true;
+        }
+    }
+    for gate_event in run_gate.finish() {
+        if let crate::model_stream::RunStreamEvent::ReplyDelta(text) = gate_event {
+            delta_text.push_str(&text);
         }
     }
     if !delta_text.is_empty() || !delta_reasoning.is_empty() {

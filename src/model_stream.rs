@@ -17,6 +17,228 @@ pub const REASONING_ITEMS: &str = "_reasoning_items";
 /// transport replay data, never part of the conversation the model reads.
 pub const THINKING_BLOCKS: &str = "_thinking_blocks";
 
+/// The code-only response protocol used by the context-as-code agent loop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunSubmission {
+    Run { source: String },
+    Reply { markdown: String },
+    Rejected { code: &'static str, message: String },
+}
+
+fn strip_markdown_fences_keep_lengths(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            out.push_str(&" ".repeat(line.len()));
+            continue;
+        }
+        if in_fence {
+            for ch in line.chars() {
+                out.push(if ch == '\n' { '\n' } else { ' ' });
+            }
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Parse one completed model response without interpreting Markdown code
+/// fences. Only an exact `<run>...</run>` block outside Markdown fences is executable.
+pub fn parse_run_submission(text: &str, finish_reason: Option<&str>) -> RunSubmission {
+    if finish_reason == Some("length") {
+        let code = if text.contains("<run") {
+            "OUTPUT_TRUNCATED"
+        } else {
+            "REPLY_TRUNCATED"
+        };
+        return RunSubmission::Rejected {
+            code,
+            message: "The model response was truncated at the output token limit. Resubmit a shorter <run> block or continue your final reply concisely.".into(),
+        };
+    }
+    let trimmed = text.trim_start();
+    let scan_target = if trimmed.starts_with("<run") {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(strip_markdown_fences_keep_lengths(text))
+    };
+    let opener = scan_target.match_indices("<run").find_map(|(index, _)| {
+        let end = scan_target[index + 4..].find('>')?;
+        scan_target[index + 4..index + 4 + end]
+            .chars()
+            .all(char::is_whitespace)
+            .then_some((index, index + 4 + end))
+    });
+    let open_count = scan_target
+        .match_indices("<run")
+        .filter(|(index, _)| {
+            scan_target[*index + 4..]
+                .find('>')
+                .is_some_and(|end| scan_target[*index + 4..*index + 4 + end].chars().all(char::is_whitespace))
+        })
+        .count();
+    let close_count = scan_target.match_indices("</run>").count();
+    if open_count == 0 && close_count == 0 {
+        return if trimmed.starts_with("<run") {
+            RunSubmission::Rejected {
+                code: "OUTPUT_TRUNCATED",
+                message: "The <run> block is incomplete. Resubmit the complete execution block.".into(),
+            }
+        } else {
+            RunSubmission::Reply { markdown: text.to_owned() }
+        };
+    }
+    if open_count == 1 && close_count == 0 {
+        return RunSubmission::Rejected {
+            code: "OUTPUT_TRUNCATED",
+            message: "The <run> block is incomplete. Resubmit the complete execution block.".into(),
+        };
+    }
+    if open_count != 1 || close_count != 1 {
+        return RunSubmission::Rejected {
+            code: "MULTIPLE_RUN_BLOCKS",
+            message: "Output exactly one <run>...</run> block per execution step.".into(),
+        };
+    }
+    let (opener_start, opener_end) = opener.unwrap();
+    let start = opener_end + 1;
+    let end = scan_target.find("</run>").unwrap();
+    if end < start {
+        return RunSubmission::Rejected {
+            code: "OUTPUT_TRUNCATED",
+            message: "The <run> block is incomplete.".into(),
+        };
+    }
+    let outside = format!("{}{}", &text[..opener_start], &text[end + 6..]);
+    if !outside.trim().is_empty() {
+        return RunSubmission::Rejected {
+            code: "MIXED_RUN_AND_REPLY",
+            message: "Output only <run>...</run> when executing code. Send the final Markdown reply in a separate step.".into(),
+        };
+    }
+    let inner = &text[start..end];
+    let inner = inner
+        .strip_prefix("\r\n")
+        .or_else(|| inner.strip_prefix('\n'))
+        .unwrap_or(inner);
+    let inner = inner
+        .strip_suffix("\r\n")
+        .or_else(|| inner.strip_suffix('\n'))
+        .unwrap_or(inner);
+    RunSubmission::Run { source: inner.to_owned() }
+}
+
+/// Remove legacy business-tool fields when projecting a context document to
+/// a provider. The durable message history is left untouched.
+pub fn code_only_request(mut body: Value) -> Value {
+    if let Some(object) = body.as_object_mut() {
+        object.remove("tools");
+        object.remove("tool_choice");
+        object.remove("parallel_tool_calls");
+    }
+    body
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunStreamEvent {
+    RunProgress(String),
+    ReplyDelta(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum GateMode {
+    #[default]
+    Undecided,
+    Code,
+    Reply,
+}
+
+/// UTF-8-safe five-character look-ahead gate. It keeps `<run` private until
+/// the tag is identified, while ordinary Markdown replies (including multi-byte
+/// UTF-8 CJK characters) stream immediately once the prefix is known not to be
+/// an executable `<run>` block.
+#[derive(Default)]
+pub struct RunStreamGate {
+    pending: String,
+    mode: GateMode,
+}
+
+impl RunStreamGate {
+    pub fn is_code(&self) -> bool {
+        self.mode == GateMode::Code
+    }
+
+    pub fn push(&mut self, chunk: &str) -> Vec<RunStreamEvent> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+        match self.mode {
+            GateMode::Reply => return vec![RunStreamEvent::ReplyDelta(chunk.to_owned())],
+            GateMode::Code => return vec![RunStreamEvent::RunProgress(chunk.to_owned())],
+            GateMode::Undecided => {}
+        }
+        self.pending.push_str(chunk);
+        let mut events = Vec::new();
+        let Some((run_start, first_char)) = self
+            .pending
+            .char_indices()
+            .find(|(_, ch)| !ch.is_whitespace())
+        else {
+            // Only whitespace seen so far; hold briefly until first non-whitespace char.
+            return events;
+        };
+        if first_char != '<' {
+            self.mode = GateMode::Reply;
+            events.push(RunStreamEvent::ReplyDelta(std::mem::take(&mut self.pending)));
+            return events;
+        }
+        let candidate = &self.pending[run_start..];
+        if "<run".starts_with(candidate) {
+            // Partial prefix "<", "<r", "<ru", or "<run": wait for next char.
+            return events;
+        }
+        if !candidate.starts_with("<run") {
+            self.mode = GateMode::Reply;
+            events.push(RunStreamEvent::ReplyDelta(std::mem::take(&mut self.pending)));
+            return events;
+        }
+        let after_run = &candidate[4..];
+        let Some(fifth) = after_run.chars().next() else {
+            return events;
+        };
+        if fifth == '>' || fifth.is_whitespace() {
+            if let Some(gt_offset) = after_run.find('>') {
+                self.mode = GateMode::Code;
+                let rest = self.pending.split_off(run_start + 4 + gt_offset + 1);
+                self.pending.clear();
+                if !rest.is_empty() {
+                    events.push(RunStreamEvent::RunProgress(rest));
+                }
+            }
+            return events;
+        }
+        self.mode = GateMode::Reply;
+        events.push(RunStreamEvent::ReplyDelta(std::mem::take(&mut self.pending)));
+        events
+    }
+
+    pub fn finish(&mut self) -> Vec<RunStreamEvent> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        let event = match self.mode {
+            GateMode::Code => RunStreamEvent::RunProgress(std::mem::take(&mut self.pending)),
+            GateMode::Undecided | GateMode::Reply => {
+                RunStreamEvent::ReplyDelta(std::mem::take(&mut self.pending))
+            }
+        };
+        vec![event]
+    }
+}
+
 /// The event kinds of an Anthropic Messages stream that carry the answer.
 const MESSAGES_EVENTS: [&str; 6] = [
     "message_start",
@@ -105,8 +327,10 @@ pub fn responses_request(chat: &Value) -> Value {
         json!({"type":"function","name":function["name"],"description":function["description"],"parameters":function["parameters"],"strict":false})
     }).collect::<Vec<_>>();
     let mut body = json!({"model":chat["model"],"input":input,"stream":true,"store":false,
-        "include":["reasoning.encrypted_content"],
-        "parallel_tool_calls":chat.get("parallel_tool_calls").cloned().unwrap_or(json!(false))});
+        "include":["reasoning.encrypted_content"]});
+    if chat.get("tools").is_some() || chat.get("parallel_tool_calls").is_some() {
+        body["parallel_tool_calls"] = chat.get("parallel_tool_calls").cloned().unwrap_or(json!(false));
+    }
     if let Some(text) = instructions {
         body["instructions"] = json!(text);
     }
@@ -1267,6 +1491,46 @@ mod tests {
         let huge = tool_event(0, Some("schedule_task"), &"x".repeat(5000));
         let error = feed(&[huge.as_bytes()]).err().unwrap();
         assert_eq!(stream_error_code(&error), Some("ARGUMENTS_TOO_LARGE"));
+    }
+
+    #[test]
+    fn run_protocol_rejects_mixed_output_and_preserves_markdown() {
+        assert_eq!(parse_run_submission("<run>const x = 1;</run>", Some("stop")), RunSubmission::Run { source: "const x = 1;".into() });
+        assert!(matches!(parse_run_submission("done\n<run>const x = 1;</run>", Some("stop")), RunSubmission::Rejected { code: "MIXED_RUN_AND_REPLY", .. }));
+        assert_eq!(parse_run_submission("```js\nconst x = 1;\n```", Some("stop")), RunSubmission::Reply { markdown: "```js\nconst x = 1;\n```".into() });
+        assert!(matches!(parse_run_submission("<run>const", Some("length")), RunSubmission::Rejected { code: "OUTPUT_TRUNCATED", .. }));
+        assert!(matches!(parse_run_submission("<run>const", Some("stop")), RunSubmission::Rejected { code: "OUTPUT_TRUNCATED", .. }));
+        assert_eq!(parse_run_submission("<run\n>const x = 1;</run>", Some("stop")), RunSubmission::Run { source: "const x = 1;".into() });
+    }
+
+    #[test]
+    fn run_stream_gate_waits_for_five_character_prefix() {
+        let mut gate = RunStreamGate::default();
+        assert!(gate.push("<r").is_empty());
+        assert_eq!(gate.push("un>").len(), 0);
+        assert_eq!(gate.push("x")[0], RunStreamEvent::RunProgress("x".into()));
+        let mut newline = RunStreamGate::default();
+        assert!(newline.push("<run").is_empty());
+        assert_eq!(newline.push("\n>").len(), 0);
+        assert_eq!(newline.push("x")[0], RunStreamEvent::RunProgress("x".into()));
+        let mut spaced = RunStreamGate::default();
+        assert!(spaced.push("  <r").is_empty());
+        assert_eq!(spaced.push("un>").len(), 0);
+        assert_eq!(spaced.push("x")[0], RunStreamEvent::RunProgress("x".into()));
+        let mut reply = RunStreamGate::default();
+        let events = reply.push("hello");
+        assert_eq!(events[0], RunStreamEvent::ReplyDelta("hello".into()));
+        assert!(reply.finish().is_empty());
+
+        // Multi-byte UTF-8 Chinese characters must never panic on char boundaries.
+        let mut chinese = RunStreamGate::default();
+        assert_eq!(chinese.push("你好世界"), vec![RunStreamEvent::ReplyDelta("你好世界".into())]);
+        assert_eq!(chinese.push("！再测试"), vec![RunStreamEvent::ReplyDelta("！再测试".into())]);
+        assert!(chinese.finish().is_empty());
+
+        // Markdown fenced examples mentioning <run> stay plain Markdown replies.
+        let fenced_md = "示例用法：\n```xml\n<run>\nconst a = 1;\n</run>\n```\n以上是示例。";
+        assert_eq!(parse_run_submission(fenced_md, Some("stop")), RunSubmission::Reply { markdown: fenced_md.into() });
     }
 }
 

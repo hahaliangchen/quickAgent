@@ -46,3 +46,15 @@ declare module "host" {
   export function context(): HostContextSnapshot;
   export function tools(): HostToolsSnapshot;
 }
+
+// Context-as-code requests use one plain-text <run>...</run> block. These
+// control-plane calls are available through the injected host namespace and
+// still return structured host actions at runtime.
+declare namespace host {
+  function contracts(args?: unknown): unknown;
+  function find_methods(args?: unknown): unknown;
+  function guide(args?: unknown): unknown;
+  function list_skills(args?: unknown): unknown;
+  function read_skill(args: {name: string}): unknown;
+  function ask_user(args: unknown): unknown;
+}

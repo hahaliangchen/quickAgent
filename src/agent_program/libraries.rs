@@ -162,6 +162,17 @@ pub fn builtin() -> Libraries {
             "refresh_asset",
             "propose_project_note",
         ])),
+        // Model-facing control-plane methods are regular host-library calls
+        // in the context-as-code ABI. They still resolve to the existing
+        // permission-checked tool handlers.
+        ("host".into(), named(&[
+            ("contracts", "read_tool_contracts"),
+            ("find_methods", "find_library_methods"),
+            ("guide", "read_program_guide"),
+            ("list_skills", "list_skills"),
+            ("read_skill", "read_skill"),
+            ("ask_user", "ask_user"),
+        ])),
     ])
 }
 /// Only tools present in this frame's catalog are published. Colliding plugin
@@ -275,7 +286,6 @@ pub fn valid_namespace(name: &str) -> bool {
     identifier(name) && !reserved(name) && name != "host" && !builtin().contains_key(name)
 }
 /// The AI loop's own tools, called directly and never a library's method.
-#[cfg(test)]
 pub fn control(name: &str) -> bool {
     matches!(
         name,

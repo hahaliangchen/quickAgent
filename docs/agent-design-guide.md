@@ -386,6 +386,25 @@ Agent 的核心提示词始终保留；插件 Skill 是本插件业务如何做�
 51. 统一外层 `handoff_step` 与内层 `@virtual` 叶子为纯 JS 作用域 + 零重写 `slices` 模型（2026-11-17）。(一) 彻底退休 `Window::main_context` KV 状态袋、`step_trail` 与 `main_context_patch`，改为 `Window::handoff_entries: Vec<Value>`（总预算按 FIFO 淘汰最早条目，单条超限报 `HANDOFF_OVER_LIMIT`）与可选 `summary`；每次 `handoff_step` 只在窗口尾部追加一条不可变的 `virtual_step_handoff` 消息，既贴合 `mainContext += selfContext.slice(...)` 的纯词法作用域心智，也让历史步骤消息跨步、跨轮保持字节级不变以命中 KV 前缀缓存。(二) 内层 `@virtual` 叶子（`Role::Leaf`）工具结果同样暴露 `event_seq`，叶子返回 JSON 对象里的 `"$slices"` 在离开叶子前由宿主统一用 `build_handoff_slices` 解析成 `"slices"`（切片无效走 `FUNCTION_RESULT_INVALID` 诊断修正），实现内外统一的零重写证据切片传递。
 52. 放宽上下文与交付软上限，对齐串联顶层虚函数模型并修复 `program_result` 水位与清窗闭环（2026-11-17）。(一) 放宽直接工具与 `handoff_step` 预算（单次工具 `32k..128k` tokens、单轮 `64k..256k` tokens，`handoff_entries` 总预算放宽至 192 KiB、切片放宽至 128 KiB / 48 条），`program_result` 软上限设为 `input_budget / 4`（按 `.chars().count()` 计 Unicode 字符数，超限归档 `program_output_asset` 并附 `result_field_chars`），不设 `host.digest` 等暗箱摘要。(二) 去掉写死的 `180k / 240k` 封顶，`maybe_require_step_wrap` 统一放宽至整窗 `80%`（`input_budget * 4 / 5`，`>= 3` 轮且可回收增量 `>= input_budget / 12`）与紧急 `87.5%`（`input_budget * 7 / 8`），`program_result`（附 `[event_seq: N]`）回主循环同样纳入检查并在 `handoff_step` 时压为一行带 `event_seq` 的 `program_record`（支持按 `event_seq` 切片）。(三) 主提示词去掉“1–4 步强制转编排”的紧箍咒，外层朴素循环与 `write_program` 函数分割按需自然选用。
 
+## 11. 上下文即代码、动态函数栈与每轮清空重建 VM（2026-11-18）
+
+详细规范见 [`docs/context-as-code-design.md`](context-as-code-design.md)。核心运行契约如下：
+
+1. **按用户轮次配对（`ContextDocument`）与每轮强制重建空白 VM**：
+   - 每个用户请求构成一对标准 `(user #t, assistant #t)` 消息：活动轮次的 `user #t` 承载用户原话、只追加不回改的已执行代码段列表 `CodeSegment`（`c1..cm`）以及尾部的临时运行态视图 `ExecutionOverlay`；轮次完成发出最终原生 Markdown `assistant #t` 时，宿主剥离尾部 `ExecutionOverlay`、将本轮代码落盘至会话文件夹，并**无条件销毁本轮 `Runtime` 虚拟机**。
+   - 下一轮用户请求到来时，宿主通过 `Runtime::new_repl` 创建全新的空白 VM（零跨轮变量/函数作用域污染）。前序轮次的 `[system, user #1, assistant #1, ...]` 保持字节级不可变，100% 命中跨轮 Prefix KV Cache；跨轮回溯只需从上文前轮代码中摘抄最小只读片段重新求值，严禁重放已完成的文件写入或外部副作用命令（大输出与命令回执通过单行 `// [receipt ...]` 锚点配合 `session.read_asset` 按需读取）。
+2. **轮内增量段编译、三档存活绑定透视与 TDZ 安全回滚**：
+   - 同一用户轮次内，每次 `<run>...</run>` 通过 `Runtime::prepare_segment` 在同一词法模块环境上增量编译执行：完整数据继续保留在当前轮次的 JS `Heap` 中供后续代码段直接切片、过滤和计算（如 `raw.slice(...)`），无需重复读盘或调 `read_asset`；尾随裸表达式结果写入 `$_`。
+   - `ExecutionOverlay` 将本步新增/变更绑定（`last_step_bindings`）按三档透视（`<= 16 KB` 完整内联、`16–96 KB` 首尾预览并标注存活于 JS 绑定、`> 96 KB` 元数据与 `sha256` + 2 KB 头部），未变更的前序绑定自动退化为单行紧凑签名（`older_locals`），内置静态命名空间不混入用户局部变量视图。
+   - 语法/编译期拒绝（`SOURCE_REJECTED`、`executed: false`）绝不污染已执行代码段列表；运行期中途抛错（`FailedAfterEffect`）仅回滚当前段尚未完成初始化的 TDZ 绑定（若重声明覆盖前段同名变量则精确恢复前段原值），已落地的外部副作用记录在 `last_step_effects` 供下一步修复段衔接。
+3. **普通 JS 函数零 Token 闭环与单层 `@virtual` 临时子栈**：
+   - 普通 JS 函数与循环在 Rust VM 内一次跑完（0 额外模型调用），中间大文本随函数返回自然出栈。
+   - 单层 `@virtual` 异步调用冻结父帧前缀，通过 `Runtime::new_repl_with_scope` 预绑定位置实参与 `@uses` 闭包变量，在消息底部压入临时 `ChildFrameStack`（严禁 `process.*` shell 能力与嵌套 `@virtual`，严禁裸 Markdown 回复 `VIRTUAL_RETURN_REQUIRED`）；子帧通过 `<run>\nreturn <json_value>;\n</run>`（或 `host.ask_user` / `$task_error`）返回时，整个子栈与子帧中间读取内容从上下文尾部彻底移除，主帧前缀缓存毫发无损。
+4. **零 JSON Schema 纯文本协议与流式前瞻门控**：
+   - `window_request` + `model_stream::code_only_request` 在所有线上模型请求中彻底移除 `tools`、`tool_choice` 与 `parallel_tool_calls`；`io`、`git`、`process`、`host`、`session` 等静态库声明通过 `program_tool_headers` 注入，运行期仍走宿主结构化 `Action` 权限、沙箱与审计管线。
+   - 执行步只允许单个 `<run>...</run>` 块（混写正文报 `MIXED_RUN_AND_REPLY`、多块报 `MULTIPLE_RUN_BLOCKS`、长度截断报 `OUTPUT_TRUNCATED`，均为 `executed: false`）；`RunStreamGate` 按 UTF-8 字符边界做流式前瞻门控，`<run>` 代码流转为 `tool_progress` 而不向聊天界面泄漏原始代码，普通 Markdown 回复流正常实时增量推送。
+   - 覆盖全部核心不变量的端到端 `run_task` 验收矩阵位于 `src/context_acceptance_tests.rs`。
+
 ## 12. 尚未决定
 
 - 是否需要独立的结论复核机制仍待真实任务数据决定；本轮仅改善完整证据交付和提示，不增加固定复核调用。

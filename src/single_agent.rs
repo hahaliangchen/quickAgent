@@ -134,6 +134,18 @@ pub(crate) struct Window {
     pub(super) step_rounds_in_scope: usize,
     #[serde(default, skip_serializing_if = "is_false")]
     pub(super) step_handoff_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) context_doc: Option<crate::context_document::ContextDocument>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) repl_runtime: Option<crate::agent_program::Runtime>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) pre_segment_bindings: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub(super) segment_log_start: usize,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(super) repl_segment_active: bool,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) discovered_leaf_tools: BTreeSet<String>,
 }
 
 pub(super) const HANDOFF_STEP: &str = "handoff_step";
@@ -409,6 +421,14 @@ fn tools(s: &Session<'_>, w: &Window) -> Vec<Value> {
     // The main AI finds methods to read and run with while it gets to know the task.
     if program_flow::role(w) == program_flow::Role::Main && s.is_primary() {
         definitions.push(handoff_step_tool());
+    }
+    if program_flow::role(w) == program_flow::Role::Main {
+        if !definitions.iter().any(|t| t["function"]["name"] == program_flow::ASK) {
+            definitions.push(program_flow::ask_tool());
+        }
+        if s.plugin.is_some() && !definitions.iter().any(|t| t["function"]["name"] == program_flow::FIND) {
+            definitions.push(program_flow::find_main_tool());
+        }
     }
     if program_flow::role(w) == program_flow::Role::Main && s.plugin.is_none() {
         definitions.push(program_flow::find_main_tool());
@@ -1232,6 +1252,7 @@ fn main_publishes(
     name: &str,
 ) -> bool {
     name == "read_session_history"
+        || crate::agent_program::libraries::control(name)
         || crate::agent_program::libraries::public_name(libraries, name).is_none()
         || (s.plugin.is_none()
             && (name == "read_asset"
@@ -1261,6 +1282,8 @@ fn page_allows(s: &Session<'_>, name: &str) -> bool {
             | "list_context_assets"
             | "write_program"
             | "handoff_step"
+            | "find_library_methods"
+            | "ask_user"
     ) || crate::function_frames::is_tool(name)
         || s.state
             .tool_catalog
@@ -1294,19 +1317,33 @@ fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str)
         }
         anyhow::bail!("PLUGIN_SCOPE_DENIED: tool {name} does not belong to this conversation's plugin");
     }
+    if program_flow::role(w) == program_flow::Role::Fix {
+        ensure!(
+            matches!(
+                name,
+                "edit_file"
+                    | "read_file"
+                    | "read_file_lines"
+                    | "read_tool_contracts"
+                    | "read_program_guide"
+            ),
+            "TOOL_UNAVAILABLE: {name}; fix the module by editing its file with io.edit"
+        );
+    }
     // Calls the AI makes itself; a running program's steps are its code's.
     if w.program.is_none() {
         match program_flow::role(w) {
             program_flow::Role::Implement => ensure!(
                 matches!(name, "read_tool_contracts" | "read_program_guide" | "read_skill" | "write_program"),
-                "TOOL_UNAVAILABLE: {name}; implement this function as code with write_program"
+                "TOOL_UNAVAILABLE: {name}; implement this function as code inside <run>...</run>"
             ),
             program_flow::Role::Fix => ensure!(
                 matches!(name, "edit_file" | "read_tool_contracts" | "read_program_guide"),
                 "TOOL_UNAVAILABLE: {name}; fix the module by editing its file with edit_file"
             ),
             program_flow::Role::Leaf(_) => ensure!(
-                definitions.iter().any(|tool| tool["function"]["name"] == name),
+                definitions.iter().any(|tool| tool["function"]["name"] == name)
+                    || matches!(name, "read_tool_contracts" | "read_program_guide"),
                 "TOOL_UNAVAILABLE: {name}; use the given tools or find_library_methods"
             ),
             // Outside a program the main AI can use its published tools directly.
@@ -1316,6 +1353,11 @@ fn validate_tool(s: &Session<'_>, w: &Window, definitions: &[Value], name: &str)
                 "TOOL_UNAVAILABLE: {name}; use one of your own tools, or call a library method from program code"
             ),
         }
+    }
+    if matches!(program_flow::role(w), program_flow::Role::Leaf(_))
+        && matches!(name, "read_tool_contracts" | "read_program_guide")
+    {
+        return Ok(());
     }
     if definitions
         .iter()
@@ -1548,15 +1590,13 @@ fn asset_index(s: &Session<'_>, messages: &[Value]) -> Option<Value> {
     Some(message)
 }
 fn host_context_snapshot(s: &Session<'_>, w: &Window, definitions: &[Value]) -> Value {
-    let req = request(s, &w.messages, definitions);
+    let req = window_request(s, w, definitions);
     let cache_key = req["prompt_cache_key"]
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| crate::model_transport::affinity(s.task, &s.scope));
-    let tools: Vec<String> = req["tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let tools: Vec<String> = definitions
+        .iter()
         .filter_map(|d| d["function"]["name"].as_str().map(str::to_owned))
         .collect();
     let libraries: Vec<String> = program_flow::library_catalog(s, definitions)
@@ -1573,6 +1613,52 @@ fn host_context_snapshot(s: &Session<'_>, w: &Window, definitions: &[Value]) -> 
         "prompt_cache_key": cache_key,
         "workspace_root": workspace_root,
     })
+}
+
+pub(super) fn window_request(s: &Session<'_>, w: &Window, definitions: &[Value]) -> Value {
+    if let Some(doc) = &w.context_doc {
+        let mut projected = Vec::new();
+        let base_prompt = if doc.standalone_leaf {
+            program_flow::LEAF_PROMPT
+        } else {
+            MAIN_PROMPT
+        };
+        projected.push(json!({"role": "system", "content": base_prompt}));
+        projected.extend(doc.render_conversation_messages());
+        for m in &w.messages {
+            let is_skill_delivery = m.get(skill_scope::DELIVERED).is_some()
+                || m["name"] == "saved_asset";
+            let is_external_change = m["name"] == external_changes::NAME;
+            let is_module_announce = m.get(modules::ANNOUNCED).is_some();
+            let is_current_turn_image = m["_turn"].as_u64() == Some(s.turn as u64)
+                && m["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_ref"));
+            if is_skill_delivery || is_external_change || is_module_announce || is_current_turn_image {
+                projected.push(m.clone());
+            }
+        }
+        let mut body = if !doc.standalone_leaf {
+            let mut main_session = s.clone();
+            main_session.scope = "main".into();
+            main_session.task_node_id = None;
+            let mut main_view = Window::default();
+            main_view.resumable = w.resumable.clone();
+            main_view.active_skills = w.active_skills.clone();
+            main_view.active_skill_scopes = w.active_skill_scopes.clone();
+            let main_defs = program_definitions(&main_session, &main_view, tools(&main_session, &main_view));
+            request(&main_session, &projected, &main_defs)
+        } else {
+            request(s, &projected, definitions)
+        };
+        if w.program_task.is_some()
+            && let Some(msgs) = body["messages"].as_array_mut()
+        {
+            msgs.retain(|m| m["name"] != "plugin_instructions");
+        }
+        return crate::model_stream::code_only_request(body);
+    }
+    crate::model_stream::code_only_request(request(s, &w.messages, definitions))
 }
 
 fn host_tools_snapshot(s: &Session<'_>, definitions: &[Value]) -> Value {
@@ -1680,6 +1766,18 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
                 2.min(wire.len()),
                 json!({"role":"system","name":"program_tool_headers","content":headers}),
             );
+        } else {
+            let leaf_libs = program_flow::leaf_repl_libraries(s, definitions);
+            let mut headers = crate::agent_program::declarations::directory(&leaf_libs);
+            headers.push_str(&crate::agent_program::declarations::core_methods(&leaf_libs, definitions));
+            wire.insert(
+                1.min(wire.len()),
+                json!({"role":"system","name":"program_environment","content":crate::agent_program::ENVIRONMENT}),
+            );
+            wire.insert(
+                2.min(wire.len()),
+                json!({"role":"system","name":"program_tool_headers","content":headers}),
+            );
         }
     }
     // Plugin instructions are a session-owned system layer, rebuilt outside
@@ -1762,6 +1860,7 @@ fn request(s: &Session<'_>, messages: &[Value], definitions: &[Value]) -> Value 
             object.remove(INDEXED);
             object.remove(skill_scope::DELIVERED);
             object.remove(external_changes::ANNOUNCED);
+            object.remove("_turn");
             // Reasoning items are replayed on the Responses wire only.
             if !responses_wire(s) {
                 object.remove(crate::model_stream::REASONING_ITEMS);
@@ -1916,7 +2015,7 @@ fn messages_wire(s: &Session<'_>) -> bool {
 /// later request keeps where the history holds it. A model without the
 /// declaration keeps publishing just the scope's tools.
 fn announce_scope_tools(s: &Session<'_>, w: &mut Window, body: &mut Value) {
-    if !records_activations(s) {
+    if !records_activations(s) || body.get("tools").is_none() {
         return;
     }
     let active = body["tools"]
@@ -1996,7 +2095,7 @@ async fn model_round(
     if let Some(index) = asset_index(s, &w.messages) {
         w.messages.push(index);
     }
-    let mut body = request(s, &w.messages, definitions);
+    let mut body = window_request(s, w, definitions);
     if let Some(error) = body
         .as_object_mut()
         .unwrap()
@@ -2105,7 +2204,14 @@ async fn model_round(
                     .header("x-client-request-id", node.as_str())
                     .header(
                         "x-agent-affinity",
-                        crate::model_transport::affinity(s.task, &s.scope),
+                        crate::model_transport::affinity(
+                            s.task,
+                            if w.context_doc.as_ref().is_some_and(|d| !d.standalone_leaf) {
+                                "main"
+                            } else {
+                                &s.scope
+                            },
+                        ),
                     )
                     .send()
                     .await?;
@@ -2206,13 +2312,22 @@ async fn model_round(
             "raw_estimated_input_tokens":estimate(&body),"calibrated_input_tokens":w.input_tokens(s,&body),
             "usage":usage,"input_budget":s.input_budget,"max_tokens":body["max_tokens"]}), false).await?;
     }
-    // While checks are outstanding, buffer the model reply until we know it
-    // is an action/progress message rather than an unverified final answer.
+    // While checks are outstanding or when a <run> block / child reply arrives,
+    // keep the model response as an internal draft rather than surfacing it as
+    // a user-visible chat answer.
+    let finish_reason = stats["finish_reason"].as_str();
+    let submission = crate::model_stream::parse_run_submission(
+        message["content"].as_str().unwrap_or(""),
+        finish_reason,
+    );
+    let is_final_reply = matches!(submission, crate::model_stream::RunSubmission::Reply { .. }) && !cut_off;
     let no_calls = crate::model_stream::tool_calls(&message).is_empty();
     let awaiting_async = no_calls
         && (has_visual_jobs(s, w)?
             || !pending_plugin_jobs(s, w)?.is_empty());
-    let provisional = no_calls && (s.scope.starts_with("node:") || awaiting_async);
+    let interjected = s.is_primary() && w.parallel_root.is_none() && interjection_pending(s).await?;
+    let provisional = (!is_final_reply && no_calls)
+        || (no_calls && (s.scope.starts_with("node:") || program_flow::role(w) != program_flow::Role::Main || awaiting_async || interjected));
     // The user sees the main AI's words, not the program it runs: that is
     // kept as the program's own record.
     let shown = (program_flow::role(w) == program_flow::Role::Main).then(|| program_flow::shown_reply(&message)).flatten();
@@ -3182,6 +3297,12 @@ async fn deliver_interjections(s: &Session<'_>, w: &mut Window) -> Result<bool> 
         if messages.is_empty() {
             return Ok(None);
         }
+        if let Some(doc) = next.context_doc.as_mut() {
+            for m in &messages {
+                let text = crate::session_history::message_text(&m["content"]);
+                doc.append_interjection(&text);
+            }
+        }
         next.messages.extend(messages);
         let updated = tx.execute(
             "UPDATE agent_runtime_windows SET state=?3 WHERE task_id=?1 AND scope=?2",
@@ -3232,6 +3353,9 @@ async fn deliver_plugin_jobs(s: &Session<'_>, w: &mut Window) -> Result<bool> {
         }
         let output = json!({"tool":tool,"task_id":job,"original_call_id":call_id,"result":result});
         let seq = append(s, "tool/async_result", json!({"task_node_id":owner,"actor":"tool","turn":s.turn,"tool":tool,"original_call_id":call_id,"meta":{"result":output}}), false).await?;
+        if let Some(doc) = w.context_doc.as_mut() {
+            doc.append_async_note(format!("Async plugin completion (seq={seq}): {output}"));
+        }
         w.messages.push(sourced(
             json!({"role":"user","name":"tool_completion","content":output.to_string()}),
             s.task,
@@ -3320,7 +3444,8 @@ fn spawn_call(children: &mut tokio::task::JoinSet<Result<()>>, s: &Session<'_>, 
             plugin, state: &state, task: &task, model: &model, turn, cancel: &cancel,
             ban_execution, scope, parent: None, input_budget: budget };
         let mut child = child;
-        match Box::pin(run_loop(&session, &mut child, NO_ROUND_LIMIT, false)).await {
+        let limit = if cfg!(test) { 64 } else { NO_ROUND_LIMIT };
+        match Box::pin(run_loop(&session, &mut child, limit, false)).await {
             Ok(LoopResult::Answer | LoopResult::Paused | LoopResult::Stopped) => Ok(()),
             // The user stopped the turn: the call's frames stay as they are,
             // for the next turn to resume or discard (design guide §7.4).
@@ -3381,7 +3506,7 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
     let mut async_children = children;
     // The context in view is the current task's; create_task and finish switch it.
     let mut current = s.clone();
-    'round: while model_rounds < max_rounds {
+    'round: while w.program.is_some() || model_rounds < max_rounds {
         current.task_node_id = w.task_node_id.clone();
         let s = &current;
         // A call whose program ended with an error stops before its next
@@ -3420,7 +3545,7 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
                 continue;
             }
             let ends_turn = blocked.is_some();
-            program_flow::pause_main(s, w, step, blocked).await?;
+            Box::pin(program_flow::pause_main(s, w, step, blocked)).await?;
             // A blocker's outcome is the turn's answer: the user acts next.
             if ends_turn {
                 return Ok(LoopResult::Answer);
@@ -3497,6 +3622,7 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
         };
         let execution = s.clone();
         let s = &execution;
+        let from_program_return = node.starts_with("program_return_");
         let calls = crate::model_stream::tool_calls(&message);
         // The program stopped while this reply was on its way: run none of it.
         if !top && frame_interrupted(s, w).await? {
@@ -3506,11 +3632,22 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             while async_children.join_next().await.is_some() {}
             return Ok(LoopResult::Stopped);
         }
+        // Context-as-Code response dispatcher for all model replies without legacy JSON tool_calls:
+        if !from_program_return && calls.is_empty() {
+            match Box::pin(dispatch_run_submission(s, w, &definitions, &message, &node, step, cut_off)).await? {
+                RunDispatch::NextRound => continue 'round,
+                RunDispatch::SwitchScope(scope) => {
+                    current.scope = scope;
+                    continue 'round;
+                }
+                RunDispatch::Finished(res) => return Ok(res),
+            }
+        }
         // Nothing runs from a reply that reached the output limit or has a
         // call whose arguments are not valid JSON; the AI is told whether it
         // was cut off or what is wrong in the JSON, and calls again.
         if cut_off || calls.iter().any(|call| serde_json::from_str::<Value>(&call.arguments).is_err()) {
-            cut_off_reply(s, w, &calls, &node, step, cut_off).await?;
+            Box::pin(cut_off_reply(s, w, &calls, &node, step, cut_off)).await?;
             continue;
         }
         // The main AI was told to stop for the user and called tools anyway:
@@ -3924,7 +4061,7 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
             let seq = append(s, "assistant/message", json!({"actor":"host","turn":s.turn,"message":message}), false).await?;
             w.messages.push(sourced(message.clone(), s.task, seq));
             save(s, w).await?;
-            if let Some((scope, frame)) = task_frames::finish(s, w, &message).await? {
+            if let Some((scope, frame)) = Box::pin(task_frames::finish(s, w, &message)).await? {
                 *w = frame;
                 current.scope = scope;
                 continue;
@@ -3935,6 +4072,542 @@ fn run_rounds<'a, 'b: 'a>(s: &'a Session<'b>, w: &'a mut Window, max_rounds: usi
     }
     Ok(LoopResult::Limit)
     })
+}
+
+enum RunDispatch {
+    NextRound,
+    SwitchScope(String),
+    Finished(LoopResult),
+}
+
+async fn dispatch_run_submission(
+    s: &Session<'_>,
+    w: &mut Window,
+    definitions: &[Value],
+    message: &Value,
+    node: &str,
+    step: usize,
+    cut_off: bool,
+) -> Result<RunDispatch> {
+    let submission = crate::model_stream::parse_run_submission(
+        message["content"].as_str().unwrap_or(""),
+        cut_off.then_some("length"),
+    );
+    match submission {
+        crate::model_stream::RunSubmission::Rejected { code, message: reason } => {
+            let full_message = if matches!(code, "OUTPUT_TRUNCATED" | "REPLY_TRUNCATED") {
+                let (_, advice) = cut_off_advice(
+                    program_flow::output_split(s, node),
+                    "Split the work into smaller <run>...</run> segments, or generate repeated parts inside a JS loop.",
+                );
+                format!("{reason} {advice}")
+            } else {
+                reason
+            };
+            let event_kind = if cut_off { "assistant/cut_off" } else { "program/source_invalid" };
+            let diagnostic = json!({
+                "code": code,
+                "executed": false,
+                "error": full_message,
+                "instruction": full_message,
+            });
+            let seq = append(
+                s,
+                event_kind,
+                json!({"actor": s.actor(), "turn": s.turn, "step": step, "nodeId": node, "diagnostic": diagnostic}),
+                false,
+            )
+            .await?;
+            if let Some(doc) = w.context_doc.as_mut() {
+                doc.reject_submission(code, &full_message);
+            } else {
+                w.messages.push(sourced(
+                    json!({"role": "user", "name": "program_diagnostic", "content": diagnostic.to_string()}),
+                    s.task,
+                    seq,
+                ));
+            }
+            save(s, w).await?;
+            Ok(RunDispatch::NextRound)
+        }
+        crate::model_stream::RunSubmission::Run { source } => {
+            Box::pin(dispatch_run_code(s, w, definitions, message, source, step)).await
+        }
+        crate::model_stream::RunSubmission::Reply { markdown } => {
+            Box::pin(dispatch_run_reply(s, w, message, markdown)).await
+        }
+    }
+}
+
+async fn dispatch_run_code(
+    s: &Session<'_>,
+    w: &mut Window,
+    definitions: &[Value],
+    message: &Value,
+    mut source: String,
+    step: usize,
+) -> Result<RunDispatch> {
+    if w.program_task.is_none()
+        && w.program.is_none()
+        && let Some(blocker) = blockers::pending(s, w)
+    {
+        let report = blockers::report(&blocker);
+        let host_msg = json!({"role": "assistant", "content": report});
+        let seq = append(
+            s,
+            "assistant/message",
+            json!({"actor": "host", "turn": s.turn, "step": step, "message": host_msg}),
+            s.is_primary(),
+        )
+        .await?;
+        if let Some(doc) = w.context_doc.as_mut() {
+            doc.reject_submission("NOT_RUN", "the turn stopped for the user; this <run> block did not execute");
+            let _ = doc.finish_turn(seq, blockers::report(&blocker));
+        }
+        w.repl_runtime = None;
+        w.messages.push(sourced(host_msg, s.task, seq));
+        save(s, w).await?;
+        return Ok(RunDispatch::Finished(LoopResult::Answer));
+    }
+    #[cfg(test)]
+    {
+        let mut tmp_args = json!({"source": source});
+        documented_examples::replay_paths(s, &mut tmp_args);
+        if let Some(updated) = tmp_args["source"].as_str() {
+            source = updated.to_owned();
+        }
+    }
+    match program_flow::role(w) {
+        program_flow::Role::Main => {
+            let prog_defs = program_definitions(s, w, definitions.to_vec());
+            let main_libs = program_flow::compile_static_libraries(s, w, &prog_defs, false);
+            if w.repl_runtime.is_none() {
+                w.repl_runtime = Some(agent_program::Runtime::new_repl(main_libs.clone())?);
+            }
+            if let Some(rt) = w.repl_runtime.as_mut() {
+                rt.install_static_libraries(&main_libs)?;
+            }
+            let pre = w.repl_runtime.as_ref().unwrap().user_binding_fingerprints();
+            let log_start = w.repl_runtime.as_ref().unwrap().logs_len();
+            let prepared = w
+                .repl_runtime
+                .as_mut()
+                .unwrap()
+                .prepare_segment(&source, main_libs.clone(), false);
+            match prepared {
+                Err(error) => {
+                    let args = json!({"source": source});
+                    let mut diagnostic = program_flow::source_error("segment", &args, &error);
+                    if let Some(name) = undeclared_name(&format!("{error:#}"))
+                        && let Some(hint) = modules::undeclared_hint(s.state.workspace.root(), s.task, name)?
+                    {
+                        diagnostic["saved_declaration"] = json!(hint);
+                    }
+                    let seq = append(s, "program/source_invalid", json!({"diagnostic": diagnostic}), false).await?;
+                    let err_text = diagnostic["error"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("{error:#}"));
+                    let full_err = match diagnostic.get("saved_declaration").and_then(Value::as_str) {
+                        Some(hint) => format!("{err_text}\nSaved module declaration hint:\n{hint}"),
+                        None => err_text,
+                    };
+                    if let Some(doc) = w.context_doc.as_mut() {
+                        doc.reject_submission("SOURCE_REJECTED", full_err);
+                    } else {
+                        w.messages.push(sourced(
+                            json!({"role": "user", "name": "program_diagnostic", "content": diagnostic.to_string()}),
+                            s.task,
+                            seq,
+                        ));
+                    }
+                    save(s, w).await?;
+                    Ok(RunDispatch::NextRound)
+                }
+                Ok(_) => {
+                    let root = s.state.workspace.root();
+                    if w.context_doc.is_none() {
+                        let mut doc = crate::context_document::ContextDocument::new(main_libs);
+                        doc.begin_turn(1, "")?;
+                        w.context_doc = Some(doc);
+                    }
+                    let existing_file = w
+                        .context_doc
+                        .as_ref()
+                        .and_then(|d| d.active_turn())
+                        .and_then(|t| t.saved_script_file.clone());
+                    if let Some(doc) = w.context_doc.as_mut() {
+                        let _ = doc.record_segment_start(&source);
+                    }
+                    let rel_path = if let Some(file_name) = existing_file {
+                        let chat_dir = host_folder::chat_dir(root, s.task)?;
+                        if let Some(doc) = w.context_doc.as_mut() {
+                            let _ = doc.archive_script(&chat_dir, &file_name);
+                        }
+                        chat_dir
+                            .join(&file_name)
+                            .strip_prefix(root)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or(file_name)
+                    } else {
+                        use crate::session_history::turn_record::request_stem;
+                        let stem_src = w
+                            .context_doc
+                            .as_ref()
+                            .and_then(|d| d.active_turn())
+                            .map(|t| t.user_text.clone())
+                            .unwrap_or_default();
+                        let name = request_stem(&stem_src).unwrap_or_else(|| format!("turn-{}", s.turn));
+                        let saved = host_folder::write_program(root, s.task, &name, &source)?;
+                        let basename = saved.rsplit(['/', '\\']).next().unwrap_or(&saved).to_owned();
+                        if let Some(doc) = w.context_doc.as_mut()
+                            && let Some(turn_doc) = doc.active_turn_mut()
+                        {
+                            turn_doc.saved_script_file = Some(basename.clone());
+                        }
+                        if let Ok(chat_dir) = host_folder::chat_dir(root, s.task)
+                            && let Some(doc) = w.context_doc.as_mut()
+                        {
+                            let _ = doc.archive_script(&chat_dir, &basename);
+                        }
+                        saved
+                    };
+                    let saved_flow = if s.plugin.is_none() {
+                        project_flows::save(s, w, &source).ok()
+                    } else {
+                        None
+                    };
+                    let plan = program_flow::execution_plan(&source);
+                    append(
+                        s,
+                        "program/start",
+                        json!({
+                            "turn": s.turn,
+                            "function": Value::Null,
+                            "source": source,
+                            "path": rel_path,
+                            "saved_flow": saved_flow,
+                            "plan": plan,
+                        }),
+                        false,
+                    )
+                    .await?;
+                    w.pre_segment_bindings = pre;
+                    w.segment_log_start = log_start;
+                    w.repl_segment_active = true;
+                    w.program = w.repl_runtime.take();
+                    save(s, w).await?;
+                    Ok(RunDispatch::NextRound)
+                }
+            }
+        }
+        program_flow::Role::Leaf(_) => {
+            let leaf_libs = program_flow::leaf_repl_libraries(s, definitions);
+            if w.repl_runtime.is_none() {
+                w.repl_runtime = Some(agent_program::Runtime::new_repl_with_scope(
+                    leaf_libs.clone(),
+                    w.scope_values.clone(),
+                )?);
+            }
+            if let Some(rt) = w.repl_runtime.as_mut() {
+                rt.install_static_libraries(&leaf_libs)?;
+            }
+            let pre = w.repl_runtime.as_ref().unwrap().user_binding_fingerprints();
+            let log_start = w.repl_runtime.as_ref().unwrap().logs_len();
+            let prepared = w
+                .repl_runtime
+                .as_mut()
+                .unwrap()
+                .prepare_segment(&source, leaf_libs, true);
+            match prepared {
+                Err(error) => {
+                    let err_msg = format!("{error:#}");
+                    let code = if err_msg.contains("VIRTUAL_LAYER_LIMIT") {
+                        "VIRTUAL_LAYER_LIMIT"
+                    } else {
+                        "SOURCE_REJECTED"
+                    };
+                    let diagnostic = json!({"code": code, "executed": false, "error": err_msg});
+                    let seq = append(s, "program/source_invalid", json!({"diagnostic": diagnostic}), false).await?;
+                    if let Some(doc) = w.context_doc.as_mut() {
+                        doc.reject_submission(code, err_msg);
+                    } else {
+                        w.messages.push(sourced(
+                            json!({"role": "user", "name": "program_diagnostic", "content": diagnostic.to_string()}),
+                            s.task,
+                            seq,
+                        ));
+                    }
+                    save(s, w).await?;
+                    Ok(RunDispatch::NextRound)
+                }
+                Ok(_) => {
+                    if let Some(doc) = w.context_doc.as_mut() {
+                        let _ = doc.record_segment_start(&source);
+                    }
+                    let function = w.program_task.as_ref().map(|t| t["name"].clone()).unwrap_or(Value::Null);
+                    append(
+                        s,
+                        "program/start",
+                        json!({"turn": s.turn, "function": function, "source": source}),
+                        false,
+                    )
+                    .await?;
+                    w.pre_segment_bindings = pre;
+                    w.segment_log_start = log_start;
+                    w.repl_segment_active = true;
+                    w.program = w.repl_runtime.take();
+                    save(s, w).await?;
+                    Ok(RunDispatch::NextRound)
+                }
+            }
+        }
+        program_flow::Role::Implement => {
+            let args = json!({"source": source});
+            match program_flow::install_scoped(s, w, &args, true) {
+                Ok(receipt) => {
+                    let function = w.program_task.as_ref().map(|task| task["name"].clone()).unwrap_or(Value::Null);
+                    let plan = program_flow::execution_plan(&source);
+                    append(
+                        s,
+                        "program/start",
+                        json!({"turn": s.turn, "receipt": receipt, "function": function, "source": source, "plan": plan}),
+                        false,
+                    )
+                    .await?;
+                    modules::authored(s, w, &source).await?;
+                    program_flow::clear_failed_program_attempts(w, message, &source);
+                    w.repl_segment_active = false;
+                    save(s, w).await?;
+                    Ok(RunDispatch::NextRound)
+                }
+                Err(body_err) => {
+                    let fn_name = w
+                        .program_task
+                        .as_ref()
+                        .and_then(|t| t["name"].as_str())
+                        .unwrap_or("");
+                    let looks_like_probe = !fn_name.is_empty()
+                        && !source.contains(&format!("function {fn_name}"));
+                    if looks_like_probe {
+                        let prog_defs = program_definitions(s, w, definitions.to_vec());
+                        let impl_libs = program_flow::compile_static_libraries(s, w, &prog_defs, true);
+                        if w.repl_runtime.is_none() {
+                            w.repl_runtime = Some(agent_program::Runtime::new_repl(impl_libs.clone())?);
+                        }
+                        if let Some(rt) = w.repl_runtime.as_mut() {
+                            rt.install_static_libraries(&impl_libs)?;
+                        }
+                        let pre = w.repl_runtime.as_ref().unwrap().user_binding_fingerprints();
+                        let log_start = w.repl_runtime.as_ref().unwrap().logs_len();
+                        if w.repl_runtime
+                            .as_mut()
+                            .unwrap()
+                            .prepare_segment(&source, impl_libs, false)
+                            .is_ok()
+                        {
+                            w.pre_segment_bindings = pre;
+                            w.segment_log_start = log_start;
+                            w.repl_segment_active = true;
+                            w.program = w.repl_runtime.take();
+                            save(s, w).await?;
+                            return Ok(RunDispatch::NextRound);
+                        }
+                    }
+                    let diagnostic = program_flow::source_error("module", &args, &body_err);
+                    let seq = append(s, "program/source_invalid", json!({"diagnostic": diagnostic}), false).await?;
+                    w.messages.push(sourced(
+                        json!({"role": "user", "name": "program_diagnostic", "content": diagnostic.to_string()}),
+                        s.task,
+                        seq,
+                    ));
+                    save(s, w).await?;
+                    Ok(RunDispatch::NextRound)
+                }
+            }
+        }
+        program_flow::Role::Fix => {
+            let fix_libs = program_flow::compile_static_libraries(s, w, definitions, false);
+            if w.repl_runtime.is_none() {
+                w.repl_runtime = Some(agent_program::Runtime::new_repl(fix_libs.clone())?);
+            }
+            if let Some(rt) = w.repl_runtime.as_mut() {
+                rt.install_static_libraries(&fix_libs)?;
+            }
+            let pre = w.repl_runtime.as_ref().unwrap().user_binding_fingerprints();
+            let log_start = w.repl_runtime.as_ref().unwrap().logs_len();
+            match w
+                .repl_runtime
+                .as_mut()
+                .unwrap()
+                .prepare_segment(&source, fix_libs, false)
+            {
+                Ok(_) => {
+                    w.pre_segment_bindings = pre;
+                    w.segment_log_start = log_start;
+                    w.repl_segment_active = true;
+                    w.program = w.repl_runtime.take();
+                    save(s, w).await?;
+                    Ok(RunDispatch::NextRound)
+                }
+                Err(error) => {
+                    let diagnostic = json!({
+                        "code": "SOURCE_REJECTED",
+                        "executed": false,
+                        "error": format!("{error:#}"),
+                        "instruction": "Edit the saved module inside <run>...</run> using io.edit({path, edits}), then reply with one short sentence."
+                    });
+                    let seq = append(s, "program/source_invalid", json!({"diagnostic": diagnostic}), false).await?;
+                    w.messages.push(sourced(
+                        json!({"role": "user", "name": "program_diagnostic", "content": diagnostic.to_string()}),
+                        s.task,
+                        seq,
+                    ));
+                    save(s, w).await?;
+                    Ok(RunDispatch::NextRound)
+                }
+            }
+        }
+    }
+}
+
+async fn dispatch_run_reply(
+    s: &Session<'_>,
+    w: &mut Window,
+    message: &Value,
+    markdown: String,
+) -> Result<RunDispatch> {
+    if !pending_plugin_jobs(s, w)?.is_empty() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(900);
+        while !deliver_plugin_jobs(s, w).await? {
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "PLUGIN_TASK_TIMEOUT: a background plugin task did not finish"
+            );
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(1000)) => {}
+                _ = s.cancel.cancelled() => anyhow::bail!("cancelled"),
+            }
+        }
+        return Ok(RunDispatch::NextRound);
+    }
+    if has_visual_jobs(s, w)? {
+        while has_visual_jobs(s, w)? {
+            deliver_visual_jobs(s, w).await?;
+            if !has_visual_jobs(s, w)? {
+                break;
+            }
+            tokio::select! {
+                _ = s.cancel.cancelled() => anyhow::bail!("cancelled"),
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
+        return Ok(RunDispatch::NextRound);
+    }
+    let role = program_flow::role(w);
+    let gives_up = serde_json::from_str::<Value>(markdown.trim())
+        .ok()
+        .is_some_and(|value| value.get("$task_error").is_some());
+    if matches!(role, program_flow::Role::Leaf(_)) && !gives_up {
+        let instruction = "Inside a @virtual function, do not output plain text or Markdown. Execute `<run>\\nreturn <json_value>;\\n</run>` matching the function contract (or `return {\"$task_error\": {\"message\": \"...\"}}` if impossible, or `host.ask_user({\"question\": \"...\"})`).";
+        let diagnostic = json!({
+            "code": "VIRTUAL_RETURN_REQUIRED",
+            "executed": false,
+            "instruction": instruction,
+        });
+        let seq = append(s, "program/result_invalid", json!({"diagnostic": diagnostic}), false).await?;
+        if let Some(doc) = w.context_doc.as_mut() {
+            doc.reject_submission("VIRTUAL_RETURN_REQUIRED", instruction);
+        } else {
+            w.messages.push(sourced(
+                json!({"role": "user", "name": "function_result_diagnostic", "content": diagnostic.to_string()}),
+                s.task,
+                seq,
+            ));
+        }
+        save(s, w).await?;
+        return Ok(RunDispatch::NextRound);
+    }
+    if role == program_flow::Role::Fix && !gives_up {
+        let diagnostic = if program_flow::js_marker(message) {
+            Some(json!({
+                "code": "MODULE_EDIT_REQUIRED",
+                "executed": false,
+                "instruction": "Code in a reply is not applied. Edit the module inside <run>io.edit(...)</run>, then reply with one short sentence saying what you changed."
+            }))
+        } else {
+            modules::fixed(s, w).await?
+        };
+        if let Some(diagnostic) = diagnostic {
+            let seq = append(s, "program/source_invalid", json!({"diagnostic": diagnostic}), false).await?;
+            w.messages.push(sourced(
+                json!({"role": "user", "name": "program_diagnostic", "content": diagnostic.to_string()}),
+                s.task,
+                seq,
+            ));
+            save(s, w).await?;
+            return Ok(RunDispatch::NextRound);
+        }
+    }
+    if role == program_flow::Role::Implement && w.program.is_none() && w.program_value.is_none() && !gives_up {
+        let diagnostic = json!({
+            "code": "FUNCTION_IMPLEMENTATION_REQUIRED",
+            "executed": false,
+            "instruction": "Implement this function as code inside <run>...</run>. Plain reply text is not executed."
+        });
+        let seq = append(s, "program/source_invalid", json!({"diagnostic": diagnostic}), false).await?;
+        w.messages.push(sourced(
+            json!({"role": "user", "name": "program_diagnostic", "content": diagnostic.to_string()}),
+            s.task,
+            seq,
+        ));
+        save(s, w).await?;
+        return Ok(RunDispatch::NextRound);
+    }
+    ensure!(!markdown.trim().is_empty(), "model returned an empty answer");
+    if s.is_primary()
+        && w.parallel_root.is_none()
+        && !program_flow::in_program(w)
+        && deliver_interjections(s, w).await?
+    {
+        return Ok(RunDispatch::NextRound);
+    }
+    if role == program_flow::Role::Main {
+        let reply_seq = w
+            .messages
+            .last()
+            .and_then(|m| m["source"]["seq"].as_i64())
+            .unwrap_or(0);
+        if let Ok(chat_dir) = host_folder::chat_dir(s.state.workspace.root(), s.task)
+            && let Some(doc) = w.context_doc.as_mut()
+        {
+            let file_opt = doc.active_turn().and_then(|t| t.saved_script_file.clone());
+            if let Some(file_name) = file_opt {
+                let _ = doc.archive_script(&chat_dir, &file_name);
+            }
+            let _ = doc.finish_turn(reply_seq, &markdown);
+        }
+        // Unconditionally destroy the per-turn VM when the turn finishes!
+        w.repl_runtime = None;
+        w.program = None;
+        w.repl_segment_active = false;
+        w.pre_segment_bindings.clear();
+        w.segment_log_start = 0;
+        save(s, w).await?;
+    } else {
+        w.repl_runtime = None;
+        w.context_doc = None;
+        w.repl_segment_active = false;
+    }
+    if paused_programs::is_previous(w) {
+        save(s, w).await?;
+        return Ok(RunDispatch::Finished(LoopResult::Answer));
+    }
+    if let Some((scope, frame)) = Box::pin(task_frames::finish(s, w, message)).await? {
+        *w = frame;
+        return Ok(RunDispatch::SwitchScope(scope));
+    }
+    Ok(RunDispatch::Finished(LoopResult::Answer))
 }
 
 /// A reply cut off at the model's output limit: the service reported a
@@ -4707,6 +5380,7 @@ pub(crate) async fn run_task_with_resource(
     ban_execution: bool,
     program_resource: Option<String>,
 ) -> Result<()> {
+    Box::pin(async move {
     let mut s = Session {
         agent_id: None,
         task_node_id: None,
@@ -4753,8 +5427,15 @@ pub(crate) async fn run_task_with_resource(
         let saved = saved
             .map(|raw| serde_json::from_str::<Window>(&raw))
             .transpose()?;
-        let refresh = active.node_id == crate::function_frames::ROOT
-            || (code_session && task_frames::can_refresh_main_window(&active, saved.as_ref()));
+        let same_turn_recovery = saved.as_ref().is_some_and(|w| {
+            w.context_doc
+                .as_ref()
+                .is_some_and(|d| d.active_turn().is_some_and(|t| t.turn == turn))
+                && (w.program.is_some() || w.repl_runtime.is_some())
+        });
+        let refresh = !same_turn_recovery
+            && (active.node_id == crate::function_frames::ROOT
+                || (code_session && task_frames::can_refresh_main_window(&active, saved.as_ref())));
         tx.commit()?;
         if refresh {
             return Ok((None, saved, active.node_id, scope));
@@ -4785,7 +5466,7 @@ pub(crate) async fn run_task_with_resource(
     let mut w = match saved {
         Some(saved) => saved,
         None => {
-            let fresh = task_frames::fresh_main_window(&s, previous.as_ref(), memory).await?;
+            let fresh = task_frames::fresh_main_window(&s, previous.as_ref(), memory.clone()).await?;
             append(&s,"context/main_reset",json!({"turn":turn,"chat_files":fresh.messages.iter().any(|m|m["name"]==task_frames::CHAT_FILES),
                 "chat_history":fresh.messages.iter().filter(|m|m["name"]==task_frames::CHAT_HISTORY).count(),
                 "carried_skills":fresh.active_skills}),false).await?;
@@ -4839,35 +5520,103 @@ pub(crate) async fn run_task_with_resource(
         (Some(changed), Some(dropped)) => Some(format!("{changed}\n{dropped}")),
         (changed, dropped) => changed.or(dropped),
     };
-    append(&s,"turn/start",start,false).await?;
-    let expanded = if s.plugin.is_some() {
-        prompt.clone()
-    } else {
-        crate::composer_catalog::expand_prompt(state.workspace.root(), &prompt)
-    };
-    let expanded = match &environment_notice {
-        Some(notice) => format!("{notice}\n\n{expanded}"),
-        None => expanded,
-    };
-    let admitted = crate::attachments::admitted(state.workspace.root(), &task, turn)?;
-    let model_content = if admitted.iter().any(|part| part["type"] != "text") {
-        json!(crate::attachments::model_content(
-            state.workspace.root(),
-            &task,
-            turn,
-            &expanded
-        )?)
-    } else {
-        json!(expanded)
-    };
-    let message = json!({"role":"user","content":model_content});
-    let user_content = if admitted.is_empty() {
-        json!([{"type":"text","text":prompt}])
-    } else {
-        json!(admitted)
-    };
-    let seq=append(&s,"user/message",json!({"task_id":task,"turn":turn,"model_content":model_content,"message":{"id":agent_service::uuid_like(),"role":"user","content":user_content}}),true).await?;
-    w.messages.push(sourced(message, &task, seq));
+    let resuming_same_turn = w
+        .context_doc
+        .as_ref()
+        .is_some_and(|d| d.active_turn().is_some_and(|t| t.turn == turn))
+        && (w.program.is_some() || w.repl_runtime.is_some());
+    if !resuming_same_turn {
+        append(&s,"turn/start",start,false).await?;
+        let expanded = if s.plugin.is_some() {
+            prompt.clone()
+        } else {
+            crate::composer_catalog::expand_prompt(state.workspace.root(), &prompt)
+        };
+        let expanded = match &environment_notice {
+            Some(notice) => format!("{notice}\n\n{expanded}"),
+            None => expanded,
+        };
+        let admitted = crate::attachments::admitted(state.workspace.root(), &task, turn)?;
+        let model_content = if admitted.iter().any(|part| part["type"] != "text") {
+            json!(crate::attachments::model_content(
+                state.workspace.root(),
+                &task,
+                turn,
+                &expanded
+            )?)
+        } else {
+            json!(expanded)
+        };
+        let message = json!({"role":"user","content":model_content});
+        let user_content = if admitted.is_empty() {
+            json!([{"type":"text","text":prompt}])
+        } else {
+            json!(admitted)
+        };
+        let seq=append(&s,"user/message",json!({"task_id":task,"turn":turn,"model_content":model_content,"message":{"id":agent_service::uuid_like(),"role":"user","content":user_content}}),true).await?;
+        w.messages.push(sourced(message, &task, seq));
+        if s.scope == "main" && w.program_task.is_none() {
+            // Unconditionally start every new user turn with a brand-new empty VM!
+            w.repl_runtime = None;
+            w.program = None;
+            w.repl_segment_active = false;
+            w.pre_segment_bindings.clear();
+            w.segment_log_start = 0;
+
+            let prog_defs = program_definitions(&s, &w, tools(&s, &w));
+            let main_libs = program_flow::compile_static_libraries(&s, &w, &prog_defs, false);
+            w.repl_runtime = Some(agent_program::Runtime::new_repl(main_libs.clone())?);
+
+            if w.context_doc.is_none() {
+                let mut seeded = crate::context_document::ContextDocument::new(main_libs.clone());
+                let mut hist_turn = 0usize;
+                let mut pending_user: Option<String> = None;
+                for m in &memory {
+                    if m["role"] == "user" && m["name"] == task_frames::CHAT_HISTORY {
+                        if let Some(prev_u) = pending_user.take() {
+                            hist_turn += 1;
+                            let _ = seeded.begin_turn_with_number(hist_turn, 0, prev_u, Vec::new());
+                            let _ = seeded.finish_turn(0, "[Turn ended]");
+                        }
+                        pending_user = m["content"].as_str().map(str::to_owned);
+                    } else if m["role"] == "assistant"
+                        && let Some(prev_u) = pending_user.take()
+                    {
+                        hist_turn += 1;
+                        let _ = seeded.begin_turn_with_number(hist_turn, 0, prev_u, Vec::new());
+                        let _ = seeded.finish_turn(0, m["content"].as_str().unwrap_or(""));
+                    }
+                }
+                if let Some(prev_u) = pending_user.take() {
+                    hist_turn += 1;
+                    let _ = seeded.begin_turn_with_number(hist_turn, 0, prev_u, Vec::new());
+                    let _ = seeded.finish_turn(0, "[Turn ended]");
+                }
+                w.context_doc = Some(seeded);
+            }
+
+            let attachment_blocks = model_content
+                .as_array()
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter(|part| part["type"] != "text")
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if let Some(doc) = w.context_doc.as_mut() {
+                doc.set_libraries(main_libs);
+                doc.begin_turn_with_number(turn, seq, &expanded, attachment_blocks)?;
+                if w.resumable.is_some() {
+                    doc.set_paused_program_hint(Some(json!({
+                        "resumable": true,
+                        "instruction": "A program from the previous turn was paused/stopped and is kept for this turn only. If the user wants to continue it, run `import * as previous from \"host:previous/promises\"; await previous.resume();` inside <run>...</run>; otherwise write fresh code."
+                    })));
+                }
+            }
+        }
+    }
     save(&s, &w).await?;
     if task_frames::no_task(&s, &w) {
         task_frames::open_main_task(&s, &mut w, &prompt).await?;
@@ -4881,6 +5630,14 @@ pub(crate) async fn run_task_with_resource(
         w.messages.push(sourced(assistant.clone(), &task, event));
         submit_program(&s, &mut w, &assistant, &call, "plugin-program", 0).await?;
         ensure!(w.program.is_some(), "plugin program could not be installed; see program diagnostic");
+        if let Some(program) = w.program.as_ref()
+            && let Some(doc) = w.context_doc.as_mut()
+        {
+            let _ = doc.record_segment_start(&program.program.source);
+            w.repl_segment_active = true;
+            w.repl_runtime = None;
+            save(&s, &w).await?;
+        }
     }
     let outcome = run_loop(&s, &mut w, max_rounds, true).await;
     // A turn the user stopped keeps its program for the next turn, where the
@@ -4957,6 +5714,7 @@ pub(crate) async fn run_task_with_resource(
     // The outcome and terminal status are already durable. The supervisor only
     // handles errors before this terminal commit (or a task panic).
     Ok(())
+    }).await
 }
 
 #[cfg(test)]

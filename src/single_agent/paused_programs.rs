@@ -135,6 +135,9 @@ pub(super) async fn pause_main(s: &Session<'_>, w: &mut Window, blocked: bool) -
     previous.messages = Vec::new();
     previous.program_value = None;
     previous.parallel_root = None;
+    previous.repl_segment_active = false;
+    previous.repl_runtime = None;
+    previous.context_doc = None;
     let (task, turn) = (s.task.to_owned(), s.turn);
     // Writes after this point are ones the paused program has not seen.
     let clock = super::managed_files::write_clock(s.state.workspace.root(), &task)?;
@@ -248,7 +251,8 @@ pub(super) async fn resume(s: &Session<'_>, w: &Window) -> Result<Option<(Value,
     resumed.spawn(async move {
         let session = Session { agent_id, task_node_id: frame.task_node_id.clone(), plugin, state: &state, task: &task,
             model: &model, turn, cancel: &cancel, ban_execution, scope: start_scope, parent, input_budget };
-        let result = run_loop(&session, &mut frame, super::NO_ROUND_LIMIT, false).await;
+        let limit = if cfg!(test) { 64 } else { super::NO_ROUND_LIMIT };
+        let result = run_loop(&session, &mut frame, limit, false).await;
         (result, frame)
     });
     let (result, frame) = resumed.join_next().await.context("resumed program task missing")?.context("resumed program task failed")?;

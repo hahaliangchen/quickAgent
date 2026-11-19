@@ -284,6 +284,55 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
     result
 }
 
+/// Lightweight declaration prelude for the code-only transport. It carries
+/// stable library names and typed method shapes without emitting JSON Schema
+/// tool definitions on the wire.
+pub fn static_library_header(libraries: &Libraries) -> String {
+    let mut out = String::from(
+        "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n",
+    );
+    out.push_str(&directory(libraries));
+    out.push('\n');
+    for (library, methods) in libraries {
+        out.push_str(&format!("declare namespace {library} {{\n"));
+        for (method, target) in methods {
+            let sig = match target.as_str() {
+                "read_file" => "args: { path: string; max_chars?: number; max_bytes?: number }): { path: string; content: string; complete: boolean; bytes: number; total_lines: number }",
+                "read_file_lines" => "args: { path: string; start_line: number; end_line: number; max_chars?: number }): { path: string; content: string; complete: boolean; total_lines: number; next_start_line: number | null }",
+                "read_file_chunk" => "args: { path: string; byte_offset?: number; start_line?: number; max_bytes?: number; max_lines?: number }): { content: string; eof: boolean; next_byte_offset: number | null }",
+                "list_dir" => "args: { path?: string; recursive?: boolean; max_depth?: number; glob?: string; exclude?: string; max_entries?: number }): { entries: Array<{ path: string; kind: string; size_bytes?: number; modified_at?: string }>; truncated: boolean }",
+                "search_text" => "args: { query: string; path?: string; regex?: boolean; glob?: string; exclude?: string; context_lines?: number; max_matches?: number }): { matches: Array<{ path: string; line: number; text: string }>; truncated: boolean }",
+                "write_file" => "args: { path: string; content: string }): { path: string; bytes: number }",
+                "edit_file" => "args: { path: string; old_text: string; new_text: string; replace_all?: boolean }): { path: string; replacements: number }",
+                "replace_range" => "args: { path: string; start_line: number; end_line: number; replacement: string; expected_old_text?: string }): { path: string }",
+                "workspace_info" => "args?: { workspace_root?: string }): { root: string }",
+                "git_status" => "args?: { paths?: string[]; include_untracked?: boolean; max_entries?: number }): { head: string; branch: string; clean: boolean; staged: unknown[]; modified: unknown[]; untracked: unknown[] }",
+                "git_diff" => "args?: { rev_range?: string; staged?: boolean; paths?: string[]; stat_only?: boolean; unified?: number; max_lines?: number }): { diff: string; files: unknown[]; truncated: boolean }",
+                "git_log" => "args?: { rev_range?: string; max_count?: number; paths?: string[] }): { commits: unknown[] }",
+                "run_readonly_command" => "args: { cmd: string; workdir?: string; timeout_ms?: number }): { exit_code: number; stdout: string; stderr: string }",
+                "exec_command" => "args: { cmd: string; workdir?: string; yield_time_ms?: number; max_output_tokens?: number }): { exit_code: number | null; running: boolean; session_id?: string; stdout: string; stderr: string }",
+                "read_tool_contracts" => "args: { library?: string; methods?: string[]; overview?: boolean }): { declarations?: string; overview?: string }",
+                "find_library_methods" => "args: { query: string }): { methods: Array<{ library: string; method: string; description: string }> }",
+                "read_program_guide" => "args?: { section?: string }): { guide: string; builtin_contracts: string }",
+                "list_skills" => "args?: {}): Array<{ name: string; description: string }>",
+                "read_skill" => "args: { name: string }): { name: string; content: string }",
+                "ask_user" => "args: { question: string }): never",
+                "read_session_history" => "args: { programs?: boolean; directory?: string; program?: string; turn?: number; event_seq?: number; start_line?: number; end_line?: number; output?: boolean }): unknown",
+                "read_asset" => "args: { asset_id?: string; seq?: number; char_offset?: number; max_chars?: number }): unknown",
+                "resume_previous_program" => "args?: {}): Promise<unknown>",
+                _ => "args?: Record<string, unknown>): unknown",
+            };
+            out.push_str(&format!("  function {method}({sig};\n"));
+        }
+        if library == "host" {
+            out.push_str("  function context(): { messages: unknown[]; tools: string[] };\n");
+            out.push_str("  function tools(): { tools: string[]; libraries: Record<string, unknown> };\n");
+        }
+        out.push_str("}\n");
+    }
+    out
+}
+
 /// The default table of contents. List only libraries available in this frame.
 pub fn directory(libraries: &Libraries) -> String {
     let process_purpose = if libraries
@@ -308,6 +357,7 @@ pub fn directory(libraries: &Libraries) -> String {
             ("vision", "View and analyze images."),
         ]),
         ("Conversation and saved material", &[
+            ("host", "Inspect library/tool contracts, search methods, read language guide, load skills, or ask the user."),
             ("attachments", "Read user attachments."),
             ("memory", "Look up and record work, architecture, or symbol knowledge."),
             ("session", "Read conversation history, saved flows, and saved tool results."),
@@ -770,5 +820,15 @@ mod tests {
         );
         assert!(compact.len() < declarations.len());
         parse(&declarations);
+    }
+
+    #[test]
+    fn context_as_code_header_contains_host_without_json_schemas() {
+        let libs = libraries::builtin();
+        let header = static_library_header(&libs);
+        assert!(header.contains("declare namespace host"));
+        assert!(header.contains("function contracts"));
+        assert!(!header.contains("read_file"));
+        assert!(!header.contains("parameters"));
     }
 }

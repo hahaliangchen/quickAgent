@@ -488,3 +488,9 @@ for await (const result of summarize(batches)) summaries.push(result);
 私有字段、实例/static 私有方法及 getter/setter（含 async、生成器）具有每次类求值独立的身份；#x in o 检查自有私有品牌，非对象右值抛 TypeError。私有访问可用于更新、复合赋值、可选链和解构目标，访问外来对象或原型继承来的实例抛 TypeError；未声明或重复私有声明在编译期拒绝。私有方法不可写，只有 getter 的访问器不可写，只有 setter 的访问器不可读；重复初始化报 TypeError。私有槽独立于普通属性，freeze/preventExtensions 不阻止添加或修改私有字段，Object.keys、Reflect.ownKeys、getOwnPropertyNames/Symbols、JSON、assign 和展开都不暴露私有成员。
 
 类初始化器、计算键、私有身份及槽值和方法都在 VM 堆中持久化，参与 GC；字段初始化、私有访问器和 static 块中的宿主调用可挂起恢复，不重做已完成的初始化。Proxy、BigInt、eval/动态 Function 仍在本轮范围之外；本轮验证和剩余差异见 [阶段 8 报告](../tests/vm/REPORT-stage8.md)。
+
+## Context-as-Code 增量段与动态调用栈
+
+活动轮次通过 `Runtime::new_repl`（或虚函数子帧的 `Runtime::new_repl_with_scope`）建立词法模块环境，并通过 `prepare_segment` / `append_segment` 在同一轮次内增量追加顶层 JavaScript 代码段。每段代码可复读写前段声明的 `const`/`let`/`var`/`function` 绑定（支持跨段同名重新声明与 TDZ 异常时对前段已初始化值的精确恢复），尾随裸表达式写入 `$_`，显式顶层 `return` 记录在内部完成标志中供 `@virtual` 子帧判定返回时机。宿主动作继续以结构化 `Action` 暂停与存盘恢复。
+
+模型交互采用零 JSON Schema 的纯文本协议：执行步输出单个 `<run>...</run>` 代码块（混写正文、多块或输出截断在执行前原样拦截），最终回复输出无 `<run>` 的原生 Markdown；宿主在 `window_request` 中通过 `code_only_request` 移除 `tools`、`tool_choice` 与 `parallel_tool_calls`，并将 `io`、`git`、`process`、`host`（含 `contracts`、`find_methods`、`guide`、`list_skills`、`read_skill`、`ask_user`、`context`、`tools`）、`session` 等静态库直接预绑定在模块作用域中。每轮结束发出 `assistant` 回复后立即销毁当前轮次的 `Runtime` VM，确保下一轮用户请求从零作用域起步。

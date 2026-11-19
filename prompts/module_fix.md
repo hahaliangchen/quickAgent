@@ -1,9 +1,15 @@
-Repair the saved JavaScript implementation of an abstract `@virtual` capability. `module_fix_input` supplies the implementation file, source, contract, current arguments, error location, output and completed writes; `skill_instructions` supplies relevant library instructions. Use the host's resumable Rust VM and published libraries.
+Repair the saved JavaScript `@module` implementation described in `module_fix_input` (which provides the module file `path`, current `source`, contract, arguments, error location, console output, and completed writes).
 
-Find the cause from the supplied evidence and edit only the supplied implementation file with `edit_file`. Keep the caller's behavior when the interface is sound. If the caller's inputs or result shape are wrong, report the required interface change instead of forcing stale data through a workaround. Preserve the capability's responsibility. It may use ordinary helpers and smaller `@virtual` capabilities when that makes the implementation clearer.
-
-For `INSTRUCTION_BUDGET_EXHAUSTED` or `PROGRAM_TIME_BUDGET_EXHAUSTED`, replace hand-written byte, encoding or parsing loops with built-ins or host libraries. Do not raise limits or split the same expensive loop. If comments claim an environment limit, verify it against the current run before keeping a workaround.
-
-When a host step is refused (`SECRET_FILE`, permission or user denial), or a request made with the user's credentials is rejected with HTTP 401 or 403, remove the invalid step or reach the result another permitted way. Do not catch the error and turn it into data. A web page that cannot be fetched (404, 403 and similar) is a source gap: record it and continue with other sources.
-
-You cannot run the implementation or tests directly; each edit is compiled and its diagnostics return to you. Preserve completed work and never replay uncertain external writes. Reply with one short sentence describing the fix, without claiming checks you did not run. If the contract cannot be met, return `{"$task_error":{"message":"concrete cause"}}`.
+Repair Rules:
+- Apply your targeted fix to the saved module file inside a single `<run>...</run>` block using `io.edit({ path, edits: [{ old_text, new_text }] })`:
+  ```xml
+  <run>
+  io.edit({
+    path: "<module_path_from_module_fix_input>",
+    edits: [{ old_text: "...", new_text: "..." }]
+  });
+  </run>
+  ```
+  Each `io.edit` compiles and validates the updated module file immediately and returns `{ compiles: true }` or exact syntax/compile diagnostics. You may only edit the supplied module file.
+- For `INSTRUCTION_BUDGET_EXHAUSTED` or `PROGRAM_TIME_BUDGET_EXHAUSTED`, replace expensive hand-written byte/parsing loops with built-ins or host library methods. For refused steps (`SECRET_FILE`, permission denial, HTTP 401/403), remove the invalid operation rather than catching and masking it. Preserve completed writes and never replay uncertain external effects.
+- Once `io.edit` succeeds (`compiles: true`), send one short plain-text sentence (without `<run>`) stating what you fixed so the host reruns the repaired module. If the contract cannot be met, reply with `{"$task_error":{"message":"concrete cause"}}`.

@@ -447,16 +447,98 @@ fn temporary_frame(s: &Session<'_>, parent: &Window, node: &Node) -> Result<Wind
     } else if let Some(scope) = task["scope"].as_object() {
         child.scope_values.extend(scope.iter().map(|(name, value)| (name.clone(), value.clone())));
     }
+    let has_custom_js_prefix = js_prefix.is_some();
     let mut frame_input = json!({"role":"user","name":"program_task_input","content":input.to_string(),"_frame_input":true});
     if let Some(meta) = js_meta {
         frame_input["_js_context_meta"] = meta;
     }
     child.messages.push(frame_input);
     child.program = super::program_flow::task_runtime(&task)?;
-    child.program_task = Some(task);
+    child.program_task = Some(task.clone());
 
     let mut session = s.clone();
     session.scope = tree::frame_scope(node);
+    if child.program.is_none() {
+        if task["role"] == "leaf" {
+            let mut initial_bindings = child.scope_values.clone();
+            if let (Some(params), Some(args)) = (task["parameters"].as_array(), task["arguments"].as_array()) {
+                for (param, arg) in params.iter().zip(args.iter()) {
+                    if let Some(name) = param.as_str() {
+                        initial_bindings.insert(name.to_owned(), arg.clone());
+                    }
+                }
+            }
+            let child_defs = super::tools(&session, &child);
+            let leaf_libs = super::program_flow::leaf_repl_libraries(&session, &child_defs);
+            child.repl_runtime = Some(crate::agent_program::Runtime::new_repl_with_scope(
+                leaf_libs.clone(),
+                initial_bindings,
+            )?);
+            if !has_custom_js_prefix {
+                let fn_name = task["name"].as_str().unwrap_or("virtual_fn").to_owned();
+                let summarize_val = |v: &Value| -> String {
+                    let s = v.to_string();
+                    let chars = s.chars().count();
+                    if chars <= 2_000 {
+                        s
+                    } else {
+                        let head: String = s.chars().take(1_200).collect();
+                        format!("{head}... ({chars} chars total, full value bound in JS local variable)")
+                    }
+                };
+                let mut params_preview = BTreeMap::new();
+                if let (Some(params), Some(args)) = (task["parameters"].as_array(), task["arguments"].as_array()) {
+                    for (param, arg) in params.iter().zip(args.iter()) {
+                        if let Some(name) = param.as_str() {
+                            params_preview.insert(name.to_owned(), summarize_val(arg));
+                        }
+                    }
+                }
+                let mut captures_preview = BTreeMap::new();
+                for key in ["scope", "captured"] {
+                    if let Some(map) = task[key].as_object() {
+                        for (k, v) in map {
+                            if !params_preview.contains_key(k) {
+                                captures_preview.insert(k.clone(), summarize_val(v));
+                            }
+                        }
+                    }
+                }
+                let contract = format!(
+                    "{} — {}",
+                    input["signature"].as_str().unwrap_or(&fn_name),
+                    task["description"].as_str().unwrap_or("Execute contract and return JSON value")
+                );
+                let stack = crate::context_document::ChildFrameStack {
+                    frame_id: format!("{fn_name}#{}", node.node_id),
+                    function_name: fn_name.clone(),
+                    contract,
+                    allowed_libraries: leaf_libs.keys().cloned().collect(),
+                    params: params_preview,
+                    captures: captures_preview,
+                    sub_segments: Vec::new(),
+                    next_sub_seq: 1,
+                    pending_rejection: None,
+                    overlay: None,
+                };
+                let mut doc = if let Some(mut inherited_doc) = parent.context_doc.clone() {
+                    inherited_doc.set_libraries(leaf_libs);
+                    inherited_doc
+                } else {
+                    let mut standalone = crate::context_document::ContextDocument::new(leaf_libs);
+                    standalone.standalone_leaf = true;
+                    standalone.begin_turn(1, format!("Execute @virtual function {fn_name}"))?;
+                    standalone
+                };
+                doc.enter_child_frame(stack);
+                child.context_doc = Some(doc);
+            }
+        } else if task["role"] == "implement" {
+            let child_defs = super::tools(&session, &child);
+            let impl_libs = super::program_flow::compile_static_libraries(&session, &child, &child_defs, true);
+            child.repl_runtime = Some(crate::agent_program::Runtime::new_repl(impl_libs)?);
+        }
+    }
     fit_input_bodies(&session, &mut child)?;
     Ok(child)
 }
@@ -855,6 +937,8 @@ pub(super) async fn fresh_main_window(
     window.active_skill_scopes = previous.active_skill_scopes.clone();
     window.token_calibration = previous.token_calibration.clone();
     window.handoff_entries = previous.handoff_entries.clone();
+    window.context_doc = previous.context_doc.clone();
+    window.resumable = previous.resumable.clone();
     for id in
         crate::context_assets::active_instruction_ids(&previous.messages, &previous.active_skills)
     {
