@@ -1,6 +1,15 @@
 # Agent 设计
 
-更新：2026-11-17。**本文是当前设计的唯一依据。** 代码、面向 AI 的提示词、Skill、测试和其他文档与本文冲突时，一律按本文修改。标注「待实现」的部分，代码还没有做到；其他文档里的「当前」「已实现」只代表写作当时的状态。
+更新：2026-11-19。**本文与 [Context-as-Code v2 架构规范](context-as-code-design.md) 共同作为当前设计的唯一依据。** 代码、面向 AI 的提示词、Skill、测试和其他文档与二者冲突时，一律按规范修改。
+
+> **2026-11-19 架构升级说明（Context-as-Code v2，已落地实施）**：
+> 主驱动已全面升级为 **Context-as-Code v2**（完整规范见 [docs/context-as-code-design.md](context-as-code-design.md)），以下核心契约优先于下文历史章节中的旧描述：
+> - **零 JSON Schema `tools`、零 `write_program` / `handoff_step` 双轨壳**：模型直接续写 `async function executeTask() {` 中的裸 JavaScript（工具声明在静态 `.d.ts` 中由 Rust 代理执行），以 `return <<<` 零转义 Markdown 终结符或纯内存 JS `return` 结束本轮；仅当本步 `external_tool_calls == 0` 才终止循环（含外部调用时的抢跑 `return <<<` 触发 First-Trap Truncation 丢弃）。
+> - **每轮全新空 VM + 不可变追加式 `// =>` + 单步 `EPHEMERAL_PEEK`**：短值（`<= 2KB`）进永久 `// =>`（同一步重复别名折叠），中值（`2KB..=24KB`）单步带行号展开并跨别名去重，大值（`> 24KB`）给高熵索引并自动归档 `asset_id` 供跨轮 `session.read_asset` 取回；轮末剥离 `EPHEMERAL_PEEK` 并销毁 VM。
+> - **惰性资源句柄（`ResourceHandle`）**：文件读取与大命令输出自带 `Ref#N` 与 `.slice()`（支持多区间）、`.grep()`、`.outline()`、`.head()`、`.tail()`；传给 `@virtual` 时外层零展开、子帧自动解引用。
+> - **内外同构隔离 `@virtual` 帧**：子帧使用同一套纯 JS + `.d.ts` + `// =>` + `EPHEMERAL_PEEK` 引擎，剥离 `process`/`session`/`ask_user`、禁止嵌套 `@virtual`，支持 `Promise.all` 真并发与 `delegate_agent_settings` 异构模型路由，返回即 GC 并在父轨迹留 `[virtual ...]` 事实回执。
+> - **跨会话复用与优雅交互**：支持 `require("<lib>")` / `require("<lib>/promises")` 加载内置预设与 `.agents/skills/<name>/modules/*.js`，支持 `host.ask_user` 优雅挂起（`NEEDS_USER`）、`host_folder` `turn-NN.js` 归档与 `rewind` 回滚。
+> - 下文关于权限审批、沙箱边界、技能目录结构与管理文件基线等通用原则继续有效。
 
 ## 1. 出发点
 

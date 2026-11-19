@@ -24,6 +24,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 const MAX_LIBRARY_CALL_DEPTH: usize = 4;
+const MAX_LIBRARY_ACTIONS: usize = 256;
 
 /// Resolve `require("<library>")` (or `require("<library>/promises")`) into the
 /// method descriptor expected by `Runtime::link`.
@@ -212,6 +213,7 @@ fn execute_orchestration_call<'a>(
         let mut files_read = BTreeSet::new();
         let mut files_written = BTreeSet::new();
         let mut next_ref_id = 1usize;
+        let mut action_count = 0usize;
         let node = format!("lib_{library}_{method}_{parent_step}");
 
         let (val, is_err) = loop {
@@ -221,6 +223,17 @@ fn execute_orchestration_call<'a>(
             match runtime.next_concurrent() {
                 ConcurrentState::Actions(actions) => {
                     for action in actions {
+                        action_count += 1;
+                        if action_count > MAX_LIBRARY_ACTIONS {
+                            return Ok((
+                                json!({
+                                    "code": "LIBRARY_ACTION_LIMIT",
+                                    "message": format!("Library {library}.{method} exceeded {MAX_LIBRARY_ACTIONS} host actions"),
+                                }),
+                                true,
+                                Some(format!("// => [library {library}.{method} | failed: action limit]")),
+                            ));
+                        }
                         let scope_vars = action.scope_variables().cloned();
                         match action.kind {
                             ActionKind::Tool { name, args } => {
