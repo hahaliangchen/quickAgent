@@ -167,7 +167,7 @@
   position: relative;
 }
 
-/* Layer 2: Floating Card with refined Light/Dark elevation */
+/* Layer 2: Floating Card — crisp 1px hairline border over heavy diffuse shadows */
 .card {
   position: relative;
   z-index: 2;
@@ -176,40 +176,40 @@
   min-width: 0;
   box-sizing: border-box;
   background: var(--codex-card-bg, #ffffff);
-  border: 1px solid var(--codex-card-border, #d8dce3);
-  border-radius: 18px;
-  box-shadow: 0 4px 20px rgba(17, 24, 39, 0.06), 0 1px 3px rgba(17, 24, 39, 0.04);
+  border: 1px solid var(--codex-card-border, #d0d5dd);
+  border-radius: 16px;
+  box-shadow: 0 2px 10px rgba(17, 24, 39, 0.04);
   padding: 12px 16px 10px 16px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  transition: border-color 0.2s cubic-bezier(0.2, 0, 0, 1), box-shadow 0.2s cubic-bezier(0.2, 0, 0, 1);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .card:hover {
-  border-color: #c5cbd6;
-  box-shadow: 0 6px 24px rgba(17, 24, 39, 0.09), 0 1px 4px rgba(17, 24, 39, 0.05);
+  border-color: #b8c0cc;
+  box-shadow: 0 3px 12px rgba(17, 24, 39, 0.06);
 }
 
 .card:focus-within {
-  border-color: color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 55%, var(--codex-card-border, #d8dce3));
-  box-shadow: 0 6px 26px rgba(29, 158, 117, 0.10), 0 0 0 3px rgba(29, 158, 117, 0.08);
+  border-color: var(--codex-blue-primary, #1d9e75);
+  box-shadow: 0 2px 12px rgba(29, 158, 117, 0.08);
 }
 
 :global(body[data-ds-dark-theme]) .card {
   background: var(--codex-card-bg, #1e2025);
-  border-color: var(--codex-card-border, #32353e);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.36);
+  border-color: var(--codex-card-border, #363a44);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.24);
 }
 
 :global(body[data-ds-dark-theme]) .card:hover {
-  border-color: #3f434e;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.44);
+  border-color: #464b58;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.3);
 }
 
 :global(body[data-ds-dark-theme]) .card:focus-within {
-  border-color: rgba(52, 211, 153, 0.45);
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5), 0 0 0 3px rgba(29, 158, 117, 0.14);
+  border-color: rgba(52, 211, 153, 0.55);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.34);
 }
 
 /* Hero composer: slightly more breathing room so it anchors the centered page. */

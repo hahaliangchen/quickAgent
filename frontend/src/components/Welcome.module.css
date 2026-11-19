@@ -84,13 +84,13 @@
   font-weight: 600;
   letter-spacing: -0.015em;
   line-height: 1.3;
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 18%, transparent);
+  box-shadow: inset 0 0 0 1px var(--codex-accent-border, rgba(29, 158, 117, 0.34));
 }
 
 :global(body[data-ds-dark-theme]) .workspace {
   background: rgba(22, 51, 41, 0.85);
   color: #5dcaa5;
-  box-shadow: inset 0 0 0 1px rgba(93, 202, 165, 0.2);
+  box-shadow: inset 0 0 0 1px var(--codex-accent-border, rgba(52, 211, 153, 0.42));
 }
 
 .composerWrap {
@@ -113,7 +113,7 @@
   height: 36px;
   padding: 0 14px;
   border-radius: 10px;
-  border: 1px solid var(--codex-border-subtle, #e6e8ec);
+  border: 1px solid var(--codex-card-border, #d0d5dd);
   background: var(--codex-panel-bg, #f8f9fb);
   color: var(--codex-text-secondary, #374151);
   font-family: inherit;
@@ -121,14 +121,13 @@
   font-weight: 500;
   line-height: 1;
   cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
 }
 
 .starterChip:hover:not(:disabled) {
   background: var(--codex-card-bg, #ffffff);
-  border-color: color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 40%, var(--codex-card-border, #d8dce3));
+  border-color: var(--codex-accent-border, rgba(29, 158, 117, 0.34));
   color: var(--codex-text-primary, #111827);
-  box-shadow: 0 2px 8px rgba(17, 24, 39, 0.06);
   transform: translateY(-1px);
 }
 
@@ -143,15 +142,14 @@
 
 :global(body[data-ds-dark-theme]) .starterChip {
   background: #1c1e24;
-  border-color: #2c2f36;
+  border-color: var(--codex-card-border, #363a44);
   color: #d4d4d8;
 }
 
 :global(body[data-ds-dark-theme]) .starterChip:hover:not(:disabled) {
   background: #23262e;
-  border-color: rgba(93, 202, 165, 0.35);
+  border-color: var(--codex-accent-border, rgba(52, 211, 153, 0.42));
   color: #f4f4f5;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
 }
 
 .starterIcon {

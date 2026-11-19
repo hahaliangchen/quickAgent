@@ -56,11 +56,13 @@
 .dockBtn.active {
   background: var(--codex-active-pill, #e3f4ec);
   color: var(--codex-blue-primary, #1d9e75);
+  box-shadow: inset 0 0 0 1px var(--codex-accent-border, rgba(29, 158, 117, 0.34));
 }
 
 :global(body[data-ds-dark-theme]) .dockBtn.active {
   background: var(--codex-active-pill, #163329);
   color: var(--brand-mark, #34d399);
+  box-shadow: inset 0 0 0 1px var(--codex-accent-border, rgba(52, 211, 153, 0.42));
 }
 
 .avatarWrapper {
