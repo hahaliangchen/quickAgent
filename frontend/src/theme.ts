@@ -3,16 +3,16 @@ import sproutIcon from './assets/windmill-mark.svg'
 
 const KEY = 'agent-theme'
 
-export type ThemeMode = 'light' | 'dark' | 'system' | 'garden'
+export type ThemeMode = 'light' | 'dark' | 'system'
 
 export function getThemeMode(): ThemeMode {
   const stored = localStorage.getItem(KEY)
-  if (stored === 'light' || stored === 'dark' || stored === 'system' || stored === 'garden') return stored
+  if (stored === 'light' || stored === 'dark' || stored === 'system') return stored
   return 'system'
 }
 
 function prefersDark(mode: ThemeMode = getThemeMode()): boolean {
-  if (mode === 'dark' || mode === 'light' || mode === 'garden') return mode === 'dark'
+  if (mode === 'dark' || mode === 'light') return mode === 'dark'
   return matchMedia('(prefers-color-scheme: dark)').matches
 }
 
@@ -21,7 +21,6 @@ export const brandIcon = (): string => sproutIcon
 
 export function applyStoredTheme(): void {
   document.body.toggleAttribute('data-ds-dark-theme', prefersDark())
-  document.body.toggleAttribute('data-garden-theme', getThemeMode() === 'garden')
   // The colour theme switch is gone; drop what an earlier version stored.
   localStorage.removeItem('agent-palette')
 }
@@ -30,7 +29,6 @@ export function setThemeMode(mode: ThemeMode): boolean {
   localStorage.setItem(KEY, mode)
   const dark = prefersDark(mode)
   document.body.toggleAttribute('data-ds-dark-theme', dark)
-  document.body.toggleAttribute('data-garden-theme', mode === 'garden')
   return dark
 }
 

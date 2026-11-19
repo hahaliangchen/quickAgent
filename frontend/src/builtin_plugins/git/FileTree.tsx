@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { Icon } from '../../components/WorkbenchIcon.tsx'
-import gardenLogo from '../../assets/illustrations/garden-logo.png'
 import { iconUrl, loadIconTheme, type IconTheme } from './icons.ts'
 import { WORKSPACE_PATH_TYPE } from '../../codeChat.ts'
 import css from './style.module.css'
@@ -26,8 +25,7 @@ function build(paths: readonly string[]): Folder {
 const WIDTH_KEY = 'git_tree_width'
 function savedWidth(): number {
   try { const saved = Number(localStorage.getItem(WIDTH_KEY)); if (saved) return Math.min(520, Math.max(180, saved)) } catch {}
-  // The garden design draws the tree as a wider card.
-  return document.body.hasAttribute('data-garden-theme') ? 310 : 260
+  return 260
 }
 
 const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare
@@ -131,8 +129,6 @@ export function FileTree({ repository, paths, truncated, changes, active, onOpen
   const rootOpen = !!needle || open.has('')
   return <aside className={css.tree} style={{ width }} aria-label="文件">
     <div className={css.treeResizer} title="拖动调整宽度" onPointerDown={resize} />
-    {/* Only the garden theme shows the brand above the card, where the sidebar would be. */}
-    <div className={css.treeBrand}><img src={gardenLogo} alt="QuickAgent" draggable={false} /></div>
     <div className={css.treeCard}>
     <div className={css.treeHead}>
       <h2>文件</h2>

@@ -153,7 +153,7 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
   useEffect(() => () => codeChat.setCurrent(undefined), [])
   const synced = data?.upstream && data.ahead === 0 && data.behind === 0
 
-  return <div className={css.root} data-garden-page="git">
+  return <div className={css.root}>
     {data && files && <FileTree repository={data.repository} paths={files.paths} truncated={files.truncated} changes={changeCodes}
       active={codeFile?.path} onOpen={path => setCodeFile({ path, commit: null })} dragPath={toWorkspace} />}
     <div className={css.content}>
@@ -162,7 +162,6 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
         <Icon name="folder" size={20} />
         <h1 title={data?.root ?? workspaceRoot}>{data?.repository ?? workspaceRoot.split(/[\\/]/).pop()}</h1>
         {data?.head && <span className={css.branchPill}><BranchIcon />{data.head}</span>}
-        <span className={css.tuft} aria-hidden="true" />
       </div>
       <div className={css.actions}>
         <button type="button" className={css.ghost} disabled={!!busy} onClick={() => { void load() }} title="刷新"><Icon name="refresh" size={15} />刷新</button>

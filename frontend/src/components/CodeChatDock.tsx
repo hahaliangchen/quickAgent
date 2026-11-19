@@ -20,8 +20,7 @@ function rememberedTask(workspace: string): string | undefined {
 const WIDTH_KEY = 'code_chat_width'
 function savedWidth(): number {
   try { const saved = Number(localStorage.getItem(WIDTH_KEY)); if (saved) return Math.min(720, Math.max(320, saved)) } catch {}
-  // The garden design gives the chat a wider card.
-  return document.body.hasAttribute('data-garden-theme') ? 460 : 400
+  return 400
 }
 const MODEL_KEY = 'code_chat_model'
 const modelKey = (model: Pick<CatalogModel, 'provider' | 'id'>) => `${model.provider}/${model.id}`
@@ -72,7 +71,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
       if (fallback.provider && fallback.model) setDefaultModel(`${fallback.provider}/${fallback.model}`)
     }, () => {})
   }, [open])
-  // A page beside the panel can leave room for it (the garden theme floats the panel over the page's edge).
+  // A page beside the panel can leave room for it via --code-chat-width.
   useLayoutEffect(() => {
     const host = panel.current?.parentElement
     if (!open || !host) return
