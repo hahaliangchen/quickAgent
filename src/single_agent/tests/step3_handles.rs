@@ -1,87 +1,22 @@
-//! Step 3 verification tests: Lazy Resource Handles (`.slice()` / multi-range `.slice([[s,e],...])` /
+//! Step 3 unit tests: Lazy Resource Handles (`.slice()` / multi-range `.slice([[s,e],...])` /
 //! `.grep()` / `.outline()` / `.head()` / `.tail()`), Demand Paging on `> 24KB` files,
 //! Pass-by-Handle zero outer expansion + `@virtual` Auto-Dereference, `EPHEMERAL_PEEK`
 //! cross-binding deduplication, and same-step inline alias folding.
 
-use super::run_task;
+use super::{TestWorkspace, assistant_messages, completion, init_task_row, tool_call_count};
 use crate::agent_service::{self, AgentServiceState};
+use crate::single_agent::run_task;
 use axum::{Json, Router, routing::post};
-use rusqlite::params;
-use serde_json::{Value, json};
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+use serde_json::Value;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 use tokio_util::sync::CancellationToken;
 
-struct TestWorkspace(PathBuf);
-
-impl TestWorkspace {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("cac-v2-step3-{}", agent_service::uuid_like()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn completion(content: &str) -> Value {
-    json!({
-        "choices": [{
-            "finish_reason": "stop",
-            "message": {
-                "role": "assistant",
-                "content": content,
-            }
-        }]
-    })
-}
-
-fn init_task_row(root: &Path, task_id: &str) {
-    let conn = agent_service::open_db(root).unwrap();
-    conn.execute(
-        "INSERT OR IGNORE INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES (?1,'','fake','running',0,0)",
-        params![task_id],
-    )
-    .unwrap();
-}
-
-fn tool_call_count(root: &Path, task_id: &str, name: &str) -> usize {
-    let conn = agent_service::open_db(root).unwrap();
-    conn.query_row(
-        "SELECT COUNT(*) FROM agent_task_events WHERE task_id=?1 AND kind='tool/call' AND json_extract(data,'$.name')=?2",
-        params![task_id, name],
-        |r| r.get::<_, usize>(0),
-    )
-    .unwrap()
-}
-
-fn assistant_messages(root: &Path, task_id: &str) -> Vec<String> {
-    let conn = agent_service::open_db(root).unwrap();
-    conn.prepare(
-        "SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE task_id=?1 AND kind='assistant/message' ORDER BY seq",
-    )
-    .unwrap()
-    .query_map(params![task_id], |r| r.get::<_, String>(0))
-    .unwrap()
-    .map(Result::unwrap)
-    .collect()
-}
-
 #[tokio::test]
 async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step3");
     std::fs::create_dir_all(ws.path().join("src")).unwrap();
 
     // Build a > 28KB file (> 24KB PEEK_FULL_LIMIT_CHARS -> Tier 3 LARGE INDEX!)
@@ -211,7 +146,7 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
 
 #[tokio::test]
 async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_dedup() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step3");
     std::fs::create_dir_all(ws.path().join("src")).unwrap();
 
     let pad = |tag: &str| -> String {
@@ -352,7 +287,7 @@ async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_de
 
 #[tokio::test]
 async fn step3_ephemeral_peek_deduplicates_aliases_in_same_step() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step3");
     let content: String = (1..=60)
         .map(|i| format!("// UNIQUE_LINE_MARKER_{i:03} padding text to exceed 2KB inline threshold\n"))
         .collect();

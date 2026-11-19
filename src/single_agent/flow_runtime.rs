@@ -11,7 +11,7 @@
 //! deterministic sibling calls as well as isolated Layer-2 `@virtual` helpers,
 //! and emits a compact factual `[library ...]` receipt into the caller's trace.
 
-use super::{Session, context_doc, virtual_frame};
+use super::{Session, context_doc, tool_proxy, virtual_frame, vm_driver};
 use crate::agent_program::{
     Runtime,
     libraries::Libraries,
@@ -238,7 +238,7 @@ fn execute_orchestration_call<'a>(
                         match action.kind {
                             ActionKind::Tool { name, args } => {
                                 record_touch(&name, &args, &mut files_read, &mut files_written);
-                                let (mut res, failed) = super::proxy_rust_tool(
+                                let (mut res, failed) = tool_proxy::proxy_rust_tool(
                                     &lib_session,
                                     libs,
                                     &node,
@@ -259,7 +259,7 @@ fn execute_orchestration_call<'a>(
                                 for (idx, (name, args)) in operations.into_iter().enumerate() {
                                     record_touch(&name, &args, &mut files_read, &mut files_written);
                                     let call_id = format!("{}-p{idx}", action.id);
-                                    let (mut res, failed) = super::proxy_rust_tool(
+                                    let (mut res, failed) = tool_proxy::proxy_rust_tool(
                                         &lib_session,
                                         libs,
                                         &node,
@@ -327,7 +327,7 @@ fn execute_orchestration_call<'a>(
                                     .await?;
                                     runtime.resume_action(&action.id, res, failed)?;
                                 } else {
-                                    let vspec = super::build_virtual_spec(
+                                    let vspec = vm_driver::build_virtual_spec(
                                         &runtime,
                                         &action.id,
                                         &call_name,

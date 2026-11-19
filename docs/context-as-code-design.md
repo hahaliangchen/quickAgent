@@ -107,9 +107,11 @@
 | 模块 | 职责 | 验证套件 |
 | --- | --- | --- |
 | [src/model_stream.rs](../src/model_stream.rs) | 裸 JS / `return <<<` / `CodeAndReply` / 非 JS 围栏守卫 | `model_stream::tests::run_` |
-| [src/single_agent/context_doc.rs](../src/single_agent/context_doc.rs) | 不可变追加轨迹、三级 `// =>`、`EPHEMERAL_PEEK` 去重、别名折叠 | [tests_step1.rs](../src/single_agent/tests_step1.rs), [tests_step3.rs](../src/single_agent/tests_step3.rs) |
-| [src/single_agent/model_call.rs](../src/single_agent/model_call.rs) | 零 `tools` Wire 请求构建、静态 `.d.ts` 与编排库声明 | [tests_step1.rs](../src/single_agent/tests_step1.rs) |
-| [src/single_agent/virtual_frame.rs](../src/single_agent/virtual_frame.rs) | 同构隔离 `@virtual` 帧、异构路由、栈帧 GC、事实回执 | [tests_step2.rs](../src/single_agent/tests_step2.rs) |
-| [src/agent_program/js_methods.rs](../src/agent_program/js_methods.rs) | `ResourceHandle` `.slice()`/`.grep()`/`.outline()`/`.head()`/`.tail()` | [tests_step3.rs](../src/single_agent/tests_step3.rs), `agent_program::tests::` |
-| [src/single_agent/flow_runtime.rs](../src/single_agent/flow_runtime.rs) | `require("<lib>")` / `ActionKind::LibraryCall` / `host.*` | [tests_step4.rs](../src/single_agent/tests_step4.rs) |
-| [src/single_agent.rs](../src/single_agent.rs) | v2 主循环、First-Trap Truncation、`Promise.all`、`ask_user`、资产归档 | [tests_step1.rs](../src/single_agent/tests_step1.rs) ~ [tests_step4.rs](../src/single_agent/tests_step4.rs) |
+| [src/single_agent/context_doc/mod.rs](../src/single_agent/context_doc/mod.rs) | 不可变追加轨迹与 Wire 渲染（配套 `format.rs`、`indexers.rs`） | [step1_protocol.rs](../src/single_agent/tests/step1_protocol.rs), [step3_handles.rs](../src/single_agent/tests/step3_handles.rs) |
+| [src/single_agent/model_call.rs](../src/single_agent/model_call.rs) | 零 `tools` Wire 请求构建、静态 `.d.ts` 与编排库声明 | [step1_protocol.rs](../src/single_agent/tests/step1_protocol.rs) |
+| [src/single_agent/virtual_frame.rs](../src/single_agent/virtual_frame.rs) | 同构隔离 `@virtual` 帧、异构路由、栈帧 GC、事实回执 | [step2_virtual.rs](../src/single_agent/tests/step2_virtual.rs), [live_models.rs](../src/single_agent/tests/live_models.rs) |
+| [src/agent_program/resource_handle.rs](../src/agent_program/resource_handle.rs) | `ResourceHandle` `.slice()`/`.grep()`/`.outline()`/`.head()`/`.tail()` | [step3_handles.rs](../src/single_agent/tests/step3_handles.rs), `agent_program::tests::` |
+| [src/single_agent/flow_runtime.rs](../src/single_agent/flow_runtime.rs) | `require("<lib>")` / `ActionKind::LibraryCall` / `host.*` | [step4_durability.rs](../src/single_agent/tests/step4_durability.rs) |
+| [src/single_agent/vm_driver.rs](../src/single_agent/vm_driver.rs) | VM 片段驱动、`Promise.all` 并发 `JoinSet`、同步/异步分流与并发护栏 | [step2_virtual.rs](../src/single_agent/tests/step2_virtual.rs), [step4_durability.rs](../src/single_agent/tests/step4_durability.rs) |
+| [src/single_agent/tool_proxy.rs](../src/single_agent/tool_proxy.rs) | Rust 宿主工具代理、`ask_user`、`> 24KB` 持久化资产归档 | [step4_durability.rs](../src/single_agent/tests/step4_durability.rs) |
+| [src/single_agent.rs](../src/single_agent.rs) | v2 顶层会话主循环、First-Trap Truncation、每轮 VM 生命周期 | [tests/mod.rs](../src/single_agent/tests/mod.rs) |

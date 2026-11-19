@@ -2971,7 +2971,7 @@ impl Runtime {
                                         let name=super::js_value::to_string(&self.heap,&label)?;
                                         if callee == VmValue::Undefined
                                             && let VmValue::Reference(id) = receiver
-                                            && let Some(val) = super::js_methods::try_resource_handle_method(&mut self.heap, id, &name, &args)?
+                                            && let Some(val) = super::resource_handle::try_method(&mut self.heap, id, &name, &args)?
                                         {
                                             self.store(destination.clone(), val)?;
                                             return Ok(None);

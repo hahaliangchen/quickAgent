@@ -1,93 +1,23 @@
-//! Step 4 verification tests:
+//! Step 4 unit tests:
 //! 1. Large result (> 24KB) durable `asset_id` archival + cross-turn `session.read_asset(...)`
-//!    after Turn 1 VM destruction.
-//! 2. Cross-session process code reuse via `require("batch-files")` (built-in preset) and
-//!    `require("audit-kit")` (project skill in `.agents/skills/audit-kit/modules/*.js`) +
-//!    `host.tools()`, with factual `[library ...]` receipts.
-//! 3. `host.ask_user({ question })` graceful turn handoff (`NEEDS_USER` -> `agent/needs_user`
-//!    event + assistant question + clean VM teardown + Turn 2 continuation).
-//! 4. `host_folder` turn `.js` archival (`turn-01.js`, `turn-02.js`) + `crate::rewind::rewind`
-//!    file rollback & `Window.context_doc` state restoration.
+//! 2. Cross-session process code reuse via `require("batch-files")` & project skill modules
+//! 3. `host.ask_user({ question })` graceful turn handoff (`NEEDS_USER`)
+//! 4. `host_folder` turn `.js` archival + `crate::rewind::rewind` round-trip verification
 
-use super::{host_folder, run_task};
+use super::{TestWorkspace, assistant_messages, completion, extract_asset_id, init_task_row};
 use crate::agent_service::{self, AgentServiceState};
+use crate::single_agent::{host_folder, run_task};
 use axum::{Json, Router, routing::post};
-use rusqlite::params;
-use serde_json::{Value, json};
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+use serde_json::Value;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 use tokio_util::sync::CancellationToken;
 
-struct TestWorkspace(PathBuf);
-
-impl TestWorkspace {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("cac-v2-step4-{}", agent_service::uuid_like()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn completion(content: &str) -> Value {
-    json!({
-        "choices": [{
-            "finish_reason": "stop",
-            "message": {
-                "role": "assistant",
-                "content": content,
-            }
-        }]
-    })
-}
-
-fn init_task_row(root: &Path, task_id: &str) {
-    let conn = agent_service::open_db(root).unwrap();
-    conn.execute(
-        "INSERT OR IGNORE INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES (?1,'','fake','running',0,0)",
-        params![task_id],
-    )
-    .unwrap();
-}
-
-fn assistant_messages(root: &Path, task_id: &str) -> Vec<String> {
-    let conn = agent_service::open_db(root).unwrap();
-    conn.prepare(
-        "SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE task_id=?1 AND kind='assistant/message' ORDER BY seq",
-    )
-    .unwrap()
-    .query_map(params![task_id], |r| r.get::<_, String>(0))
-    .unwrap()
-    .map(Result::unwrap)
-    .collect()
-}
-
-fn extract_asset_id(text: &str) -> Option<String> {
-    let marker = "asset: ";
-    let start = text.find(marker)? + marker.len();
-    let rest = &text[start..];
-    let end = rest
-        .find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
-        .unwrap_or(rest.len());
-    Some(rest[..end].to_owned())
-}
-
 #[tokio::test]
 async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step4");
     std::fs::create_dir_all(ws.path().join("src")).unwrap();
 
     // Create a > 28KB file so `io.read` automatically archives it to durable `asset_id`!
@@ -201,7 +131,7 @@ async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
 
 #[tokio::test]
 async fn step4_cross_session_code_reuse_require_preset_and_project_skill_modules() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step4");
     std::fs::create_dir_all(ws.path().join("src")).unwrap();
     std::fs::write(ws.path().join("src/one.rs"), "pub fn one() { /* TODO_MARKER_1 */ }\n").unwrap();
     std::fs::write(ws.path().join("src/two.rs"), "pub fn two() { /* TODO_MARKER_2 */ }\n").unwrap();
@@ -309,7 +239,7 @@ async fn step4_cross_session_code_reuse_require_preset_and_project_skill_modules
 
 #[tokio::test]
 async fn step4_host_ask_user_pauses_turn_gracefully_and_resumes_on_next_turn() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step4");
     std::fs::write(ws.path().join("deploy.json"), "{\"targets\":[\"staging\",\"prod\"]}\n").unwrap();
     init_task_row(ws.path(), "step4-ask");
 
@@ -408,7 +338,7 @@ async fn step4_host_ask_user_pauses_turn_gracefully_and_resumes_on_next_turn() {
 
 #[tokio::test]
 async fn step4_host_folder_turn_js_archive_and_rewind_roundtrip() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step4");
     std::fs::write(ws.path().join("state.txt"), "v0").unwrap();
     init_task_row(ws.path(), "step4-rewind");
 

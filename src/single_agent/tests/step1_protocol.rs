@@ -1,134 +1,18 @@
-//! Step 1 end-to-end verification tests for Context-as-Code v2:
-//!
-//! Proves on a real code-analysis task (real Rust file on disk + real Rust JS VM
-//! + real Rust `host_tools` proxy + mock Axum HTTP provider):
-//! 1. Zero JSON tool schemas on the wire, replaced by `.d.ts` in `system`.
-//! 2. Model emits pure raw JavaScript (no JSON tool_calls, no `<run>` XML tags)
-//!    that traps the Rust JS VM and proxies into Rust `io.read` (`read_file`).
-//! 3. Three-tier feedback + `EPHEMERAL_PEEK` (阅后即焚):
-//!    - Medium 200-line file shows compact signature in permanent `// =>` and
-//!      expands with line numbers in `EPHEMERAL_PEEK`.
-//!    - Next step slices exact lines in JS memory (0 disk re-reads!), pinning
-//!      the ground-truth snippet permanently in `// =>` while `EPHEMERAL_PEEK`
-//!      vanishes completely.
-//!    - Byte-exact KV-cache prefix holds across every step AND across turns.
-//! 4. Anti-cheating lock: slicing `> 2KB` refuses to inline into permanent `// =>`.
-//! 5. `return <<<` Markdown final reply containing ```` ```js ```` example code
-//!    is never executed as JS and is delivered verbatim to the user.
-//! 6. Per-turn fresh VM: Turn 2 cannot reference Turn 1's variables and can
-//!    cleanly redeclare the same names.
+//! Step 1 unit tests: pure-JS + `return <<<` protocol, `.d.ts` Rust proxy,
+//! three-tier `// =>` + `EPHEMERAL_PEEK`, anti-cheating slice lock, per-turn fresh VM,
+//! and First-Trap Truncation termination rule.
 
-use super::run_task;
-use crate::agent_service::{self, AgentServiceState};
-use axum::{Json, Router, routing::post};
-use rusqlite::params;
-use serde_json::{Value, json};
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+use super::{
+    TestWorkspace, assistant_messages, completion, init_task_row, spawn_mock_provider,
+    split_stable_prefix, tool_call_count,
 };
+use crate::single_agent::run_task;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
-
-struct TestWorkspace(PathBuf);
-
-impl TestWorkspace {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("cac-v2-step1-{}", agent_service::uuid_like()));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn completion(content: &str) -> Value {
-    json!({
-        "choices": [{
-            "finish_reason": "stop",
-            "message": {
-                "role": "assistant",
-                "content": content,
-            }
-        }]
-    })
-}
-
-fn init_task_row(root: &Path, task_id: &str) {
-    let conn = agent_service::open_db(root).unwrap();
-    conn.execute(
-        "INSERT OR IGNORE INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES (?1,'','fake','running',0,0)",
-        params![task_id],
-    )
-    .unwrap();
-}
-
-async fn spawn_mock_provider(
-    root: &Path,
-    handler: impl Fn(usize, Value) -> Value + Send + Sync + 'static,
-) -> (AgentServiceState, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
-    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
-    let captured_ref = captured.clone();
-    let seq = Arc::new(AtomicUsize::new(0));
-    let handler = Arc::new(handler);
-    let app = Router::new().route(
-        "/v1/chat/completions",
-        post(move |Json(body): Json<Value>| {
-            let idx = seq.fetch_add(1, Ordering::SeqCst);
-            captured_ref.lock().unwrap().push(body.clone());
-            let resp = handler(idx, body);
-            async move { Json(resp) }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let state = agent_service::tests::test_state(root, listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    (state, captured, server)
-}
-
-fn tool_call_count(root: &Path, task_id: &str, tool_name: &str) -> i64 {
-    let conn = agent_service::open_db(root).unwrap();
-    conn.query_row(
-        "SELECT count(*) FROM agent_task_events WHERE task_id=?1 AND kind='tool/call' AND json_extract(data,'$.name')=?2",
-        params![task_id, tool_name],
-        |r| r.get(0),
-    )
-    .unwrap()
-}
-
-fn assistant_messages(root: &Path, task_id: &str) -> Vec<String> {
-    let conn = agent_service::open_db(root).unwrap();
-    conn.prepare(
-        "SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE task_id=?1 AND kind='assistant/message' ORDER BY seq",
-    )
-    .unwrap()
-    .query_map(params![task_id], |r| r.get::<_, String>(0))
-    .unwrap()
-    .map(Result::unwrap)
-    .collect()
-}
-
-fn split_stable_prefix(user_content: &str) -> &str {
-    user_content
-        .split("\n\n// === EPHEMERAL_PEEK")
-        .next()
-        .unwrap_or(user_content)
-}
 
 #[tokio::test]
 async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_heredoc() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step1");
     std::fs::create_dir_all(ws.path().join("src")).unwrap();
 
     // Create a ~120-line realistic Rust source file (> 2KB so it lands in Tier 2 EPHEMERAL_PEEK!)
@@ -260,7 +144,7 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
 
 #[tokio::test]
 async fn step1_anti_cheating_slice_lock_and_per_turn_fresh_vm() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step1");
     let big = "line_data_0123456789\n".repeat(180); // ~3,780 chars (> 2KB INLINE_LIMIT_CHARS)
     std::fs::write(ws.path().join("big.txt"), &big).unwrap();
     init_task_row(ws.path(), "step1-lock");
@@ -338,7 +222,7 @@ async fn step1_anti_cheating_slice_lock_and_per_turn_fresh_vm() {
 
 #[tokio::test]
 async fn step1_termination_rule_external_tools_continue_pure_memory_projection_finishes() {
-    let ws = TestWorkspace::new();
+    let ws = TestWorkspace::new("cac-v2-step1");
     std::fs::write(ws.path().join("sample.rs"), "pub fn bad() { unsafe_call(); }\n").unwrap();
     init_task_row(ws.path(), "step1-term");
 
@@ -387,144 +271,4 @@ async fn step1_termination_rule_external_tools_continue_pure_memory_projection_f
     assert_eq!(tool_call_count(ws.path(), "step1-term", "read_file"), 1);
     let replies = assistant_messages(ws.path(), "step1-term");
     assert_eq!(replies, vec!["Verified: `sample.rs` calls `unsafe_call()`."]);
-}
-
-/// Live real-model smoke test for Step 1 (opt-in via `--ignored`).
-/// Loads `~/.config/grow/providers.yml` (override with `LIVE_PROVIDER` / `LIVE_MODEL`),
-/// runs a real code-analysis task on a ~140-line Rust file, and prints the exact
-/// trace, tool proxy calls, rejections (if any), and final Markdown reply.
-#[tokio::test]
-#[ignore]
-async fn live_step1_analyze_real_code_file() {
-    let ws = TestWorkspace::new();
-    std::fs::create_dir_all(ws.path().join("src")).unwrap();
-
-    let mut auth_rs = String::from(
-        "//! Lightweight JWT & session token validator.\n\
-         use std::collections::HashMap;\n\n\
-         pub struct Claims {\n\
-         \x20\x20\x20\x20pub sub: String,\n\
-         \x20\x20\x20\x20pub role: String,\n\
-         \x20\x20\x20\x20pub exp: u64,\n\
-         }\n\n",
-    );
-    for i in 1..=55 {
-        auth_rs.push_str(&format!(
-            "// helper documentation line {i:03}: standard middleware pipeline notes for auth service\n"
-        ));
-    }
-    auth_rs.push_str(
-        "pub fn verify_token(token: &str, secret: &str, now_ts: u64) -> Option<Claims> {\n\
-         \x20\x20\x20\x20let parts: Vec<&str> = token.split('.').collect();\n\
-         \x20\x20\x20\x20if parts.len() != 3 {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20return None;\n\
-         \x20\x20\x20\x20}\n\
-         \x20\x20\x20\x20// BUG 1: ignores HMAC signature when header says alg=none\n\
-         \x20\x20\x20\x20if parts[0].contains(\"none\") {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20return decode_claims_unchecked(parts[1]);\n\
-         \x20\x20\x20\x20}\n\
-         \x20\x20\x20\x20// BUG 2: non-constant-time comparison & skips `claims.exp < now_ts` check\n\
-         \x20\x20\x20\x20let expected = compute_hmac(parts[0], parts[1], secret);\n\
-         \x20\x20\x20\x20if parts[2] == expected {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20let _ = now_ts;\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20return decode_claims_unchecked(parts[1]);\n\
-         \x20\x20\x20\x20}\n\
-         \x20\x20\x20\x20None\n\
-         }\n\n",
-    );
-    for i in 1..=50 {
-        auth_rs.push_str(&format!(
-            "// audit note {i:03}: internal helper stub for token serialization and logging\n"
-        ));
-    }
-    auth_rs.push_str(
-        "fn compute_hmac(_h: &str, _p: &str, _s: &str) -> String { String::new() }\n\
-         fn decode_claims_unchecked(_p: &str) -> Option<Claims> { None }\n",
-    );
-    std::fs::write(ws.path().join("src/auth.rs"), &auth_rs).unwrap();
-
-    let config = crate::ai_proxy::load_config(&crate::ai_proxy::config_path())
-        .expect("failed to load ~/.config/grow/providers.yml");
-    let mut state = agent_service::tests::test_state(ws.path(), "127.0.0.1:0".parse().unwrap());
-    crate::ai_proxy::apply_agent_config(&mut state, &config);
-    if let Ok(prov) = std::env::var("LIVE_PROVIDER")
-        && let Some(route) = state.provider_routes.get(&prov).cloned()
-    {
-        state.provider_name = prov;
-        state.provider_url = route.url;
-        state.api_key = route.api_key;
-        state.model_map = route.models;
-    }
-    let model = std::env::var("LIVE_MODEL").unwrap_or_else(|_| state.default_model.clone());
-    state.reasoning_effort = Some(
-        std::env::var("LIVE_EFFORT").unwrap_or_else(|_| "low".into()),
-    );
-    println!(
-        "=== LIVE STEP1 TEST ===\nprovider={} url={} model={} effort={:?} auth.rs={} chars",
-        state.provider_name,
-        state.provider_url,
-        model,
-        state.reasoning_effort,
-        auth_rs.chars().count()
-    );
-
-    let task_id = "live-step1-auth";
-    init_task_row(ws.path(), task_id);
-
-    let cancel = CancellationToken::new();
-    let cancel_watchdog = cancel.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(240)).await;
-        cancel_watchdog.cancel();
-    });
-
-    let run_res = run_task(
-        state,
-        task_id.into(),
-        model,
-        "请分析 src/auth.rs 中的鉴权逻辑，找出所有安全漏洞，并给出修复示例（只展示修复代码，不要修改文件）。".into(),
-        5,
-        cancel,
-        1,
-        false,
-    )
-    .await;
-    println!("\n=== run_task result: {run_res:?} ===");
-
-    let conn = agent_service::open_db(ws.path()).unwrap();
-    let mut stmt = conn
-        .prepare("SELECT seq, kind, data FROM agent_task_events WHERE task_id=?1 ORDER BY seq")
-        .unwrap();
-    let events: Vec<(i64, String, String)> = stmt
-        .query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-
-    println!("\n=== NON-DELTA EVENTS ===");
-    for (seq, kind, data) in &events {
-        if kind == "assistant/delta" {
-            continue;
-        }
-        let preview: String = data.chars().take(700).collect();
-        println!("  #{seq} [{kind}] {preview}");
-    }
-
-    if let Ok(raw_win) = conn.query_row(
-        "SELECT state FROM agent_runtime_windows WHERE task_id=?1 AND scope='main'",
-        [task_id],
-        |r| r.get::<_, String>(0),
-    ) {
-        let win: super::Window = serde_json::from_str(&raw_win).unwrap();
-        let wire = win.context_doc.render_conversation_messages();
-        println!("\n=== USER #1 TRACE ===\n{}", wire[0]["content"].as_str().unwrap_or(""));
-        if let Some(a) = wire.get(1) {
-            println!("\n=== FINAL ASSISTANT #1 ===\n{}", a["content"].as_str().unwrap_or(""));
-        }
-    }
-
-    run_res.expect("live run_task failed");
-    assert_eq!(tool_call_count(ws.path(), task_id, "write_file"), 0, "must not write files");
-    assert_eq!(tool_call_count(ws.path(), task_id, "edit_file"), 0, "must not edit files");
-    assert!(!assistant_messages(ws.path(), task_id).is_empty(), "must produce final assistant reply");
 }

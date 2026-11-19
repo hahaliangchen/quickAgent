@@ -315,7 +315,7 @@ async fn drive_leaf_vm(
                             true,
                         )
                     } else {
-                        super::proxy_rust_tool(
+                        super::tool_proxy::proxy_rust_tool(
                             s,
                             leaf_libs,
                             node,
@@ -344,7 +344,7 @@ async fn drive_leaf_vm(
                                 true,
                             )
                         } else {
-                            super::proxy_rust_tool(
+                            super::tool_proxy::proxy_rust_tool(
                                 s,
                                 leaf_libs,
                                 node,

@@ -14,6 +14,7 @@ pub(crate) mod declarations;
 pub(crate) mod libraries;
 mod promise;
 mod prelude;
+mod resource_handle;
 pub(crate) mod runtime;
 #[cfg(test)]
 mod tests;
