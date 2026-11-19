@@ -36,6 +36,25 @@ function compactRelativeTime(ts?: number): string {
   return `${d.getMonth() + 1}/${d.getDate()}`
 }
 
+function sessionSubStatus(task: Task): string {
+  if (task.awaiting_approval) return '待确认'
+  switch (task.status) {
+    case 'running': case 'cancelling': return '进行中'
+    case 'completed': return '已完成'
+    case 'failed': return '失败'
+    case 'interrupted': return '已中断'
+    case 'cancelled': return '已取消'
+    case 'max_steps': return '达步数上限'
+    case 'draft': return '草稿'
+  }
+}
+
+function shortModel(model?: string): string {
+  if (!model) return ''
+  const idx = model.lastIndexOf('/')
+  return idx >= 0 ? model.slice(idx + 1) : model
+}
+
 type Dialog = {kind: 'rename-task' | 'delete-task'; task: Task} | {kind: 'rename-project' | 'delete-project'; project: Project}
 function RowMenu({ label, items, onSelect }: {label: string; items: {id: string; label: string; danger?: boolean}[]; onSelect: (id: string) => void}) {
   const [open, setOpen] = useState(false)
@@ -127,29 +146,45 @@ export function Sidebar({
     const running = task.status === 'running' || task.status === 'cancelling'
     const isActive = task.task_id === currentId
     const timeText = compactRelativeTime(task.updated_at || task.created_at)
+    const statusText = sessionSubStatus(task)
+    const modelTag = shortModel(task.model)
     return <div key={task.task_id} className={clsx(css.itemRow, nested && css.nestedItemRow, isActive && css.sessionActive)}>
       <button type="button" className={nested ? css.sessionRow : css.recentRow} onClick={() => onSelect(task.task_id)} title={taskTitle(task)}>
-        <span className={css.sessionTitle}>{taskTitle(task)}{query.trim() && snippets.has(task.task_id) && <span className={css.searchSnippet}>{snippets.get(task.task_id)}</span>}</span>
-        {task.pinned && <span className={css.pinMark} aria-label="已置顶">⌃</span>}
-        {task.awaiting_approval
-          ? <span className={css.awaitingMark} title="等你确认是否运行命令">待确认</span>
-          : running
-            ? <span className={css.runningSpinner} aria-label="执行中">◌</span>
-            : (isActive || timeText) && (
-              <span className={css.sessionMeta}>
-                {isActive && <span className={css.activeDot} aria-hidden="true" />}
-                {timeText && <span className={css.sessionTime}>{timeText}</span>}
-              </span>
-            )}
+        {isActive && <span className={css.paperActiveDot} aria-hidden="true" />}
+        <span className={css.sessionTextCol}>
+          <span className={css.sessionMainLine}>
+            <span className={css.sessionTitle}>{taskTitle(task)}{query.trim() && snippets.has(task.task_id) && <span className={css.searchSnippet}>{snippets.get(task.task_id)}</span>}</span>
+            {task.pinned && <span className={css.pinMark} aria-label="已置顶">⌃</span>}
+            <span className={css.sessionMetaInline}>
+              {task.awaiting_approval
+                ? <span className={css.awaitingMark} title="等你确认是否运行命令">待确认</span>
+                : running
+                  ? <span className={css.runningSpinner} aria-label="执行中">◌</span>
+                  : (isActive || timeText) && (
+                    <span className={css.sessionMeta}>
+                      {isActive && <span className={css.activeDot} aria-hidden="true" />}
+                      {timeText && <span className={css.sessionTime}>{timeText}</span>}
+                    </span>
+                  )}
+            </span>
+          </span>
+          <span className={css.sessionSubLine}>
+            {(isActive || running) && <span className={css.subDot} aria-hidden="true" />}
+            <span>{running ? '进行中' : timeText || statusText}</span>
+            {!running && timeText && <><span>·</span><span>{modelTag || statusText}</span></>}
+          </span>
+        </span>
       </button>
-      <RowMenu label={`会话操作：${taskTitle(task)}`} items={[
-        {id:'rename', label:'重命名'}, {id:'pin', label: task.pinned ? '取消置顶' : '置顶'},
-        {id:'archive', label: task.archived ? '取消归档' : '归档'}, {id:'delete', label:'删除会话', danger:true},
-      ]} onSelect={id => {
-        if (id === 'rename') request({kind:'rename-task',task})
-        else if (id === 'delete') request({kind:'delete-task',task})
-        else void run(() => onUpdateSession?.(task.task_id, id === 'pin' ? {pinned:!task.pinned} : {archived:!task.archived}))
-      }} />
+      <div className={css.rowMenuOverlay}>
+        <RowMenu label={`会话操作：${taskTitle(task)}`} items={[
+          {id:'rename', label:'重命名'}, {id:'pin', label: task.pinned ? '取消置顶' : '置顶'},
+          {id:'archive', label: task.archived ? '取消归档' : '归档'}, {id:'delete', label:'删除会话', danger:true},
+        ]} onSelect={id => {
+          if (id === 'rename') request({kind:'rename-task',task})
+          else if (id === 'delete') request({kind:'delete-task',task})
+          else void run(() => onUpdateSession?.(task.task_id, id === 'pin' ? {pinned:!task.pinned} : {archived:!task.archived}))
+        }} />
+      </div>
     </div>
   }
   const renaming = dialog?.kind.startsWith('rename')
@@ -202,7 +237,9 @@ export function Sidebar({
               <span className={css.projectTitle}>{project.title}</span>
               {project.tasks.length > 0 && <span className={css.projectCount}>{project.tasks.length}</span>}
             </button>
-            <RowMenu label={`项目操作：${project.title}`} items={[{id:'notes', label:'项目备注'},{id:'memory', label:'AI 的记忆'},{id:'rename', label:'重命名'},{id:'delete',label:'移除项目',danger:true}]} onSelect={id => id === 'notes' ? setNotesProject(project) : id === 'memory' ? setMemoryProject(project) : request({kind:id === 'rename' ? 'rename-project' : 'delete-project',project})}/>
+            <div className={css.rowMenuOverlay}>
+              <RowMenu label={`项目操作：${project.title}`} items={[{id:'notes', label:'项目备注'},{id:'memory', label:'AI 的记忆'},{id:'rename', label:'重命名'},{id:'delete',label:'移除项目',danger:true}]} onSelect={id => id === 'notes' ? setNotesProject(project) : id === 'memory' ? setMemoryProject(project) : request({kind:id === 'rename' ? 'rename-project' : 'delete-project',project})}/>
+            </div>
           </div>
           {(!closed[project.path] || query.trim()) && <div className={css.projectSubList}>{project.tasks.map(task => sessionRow(task,true))}</div>}
         </div>)}
