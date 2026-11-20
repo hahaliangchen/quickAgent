@@ -20,15 +20,15 @@ async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
     let ws = TestWorkspace::new("cac-v2-step4");
     std::fs::create_dir_all(ws.path().join("src")).unwrap();
 
-    // Create a > 28KB file so `io.read` automatically archives it to durable `asset_id`!
+    // Create a > 70KB file so `io.read` automatically archives it to durable `asset_id`!
     let mut huge = String::from("//! HUGE_ARCHIVE_HEADER_TOKEN_98765\n");
-    for i in 2..=380 {
+    for i in 2..=820 {
         huge.push_str(&format!(
-            "// huge archival padding line {i:04}: testing durable cross-turn context_assets persistence\n"
+            "// huge archival padding line {i:04}: testing durable cross-turn context_assets persistence beyond 64kb\n"
         ));
     }
     huge.push_str("pub fn buried_symbol() -> u32 { 42 }\n");
-    assert!(huge.chars().count() > 28_000);
+    assert!(huge.chars().count() > 70_000);
     std::fs::write(ws.path().join("src/huge.rs"), &huge).unwrap();
     init_task_row(ws.path(), "step4-asset");
 

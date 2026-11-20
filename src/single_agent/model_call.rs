@@ -48,13 +48,12 @@ Each response MUST be **one** of the two actions below:
 ### Action 1: Execute the next JS statement(s) via `run_js({ code })`
 - Call `run_js` with raw JavaScript statements to append at the cursor inside `async function executeTask() { ...` (NO markdown fences, NO fabricated `// =>` results).
 - You may optionally write a brief 1-sentence progress note in your assistant message text before calling `run_js`, and keep `code` 100% pure JavaScript.
-- Emit ONE concise `run_js` call per step so the host executes it and returns real `// =>` / `EPHEMERAL_PEEK` output before your next step.
+- Emit ONE concise `run_js` call per step so the host executes it and appends the real `// =>` output permanently before your next step.
 - Host libraries (`io`, `git`, `process`, `host`, `session`, etc.) declared in the `.d.ts` below are pre-bound in scope and proxy synchronously into Rust.
 - All top-level variables (`const`, `let`, `function`) stay live in VM memory for the rest of the current user turn (do NOT re-declare variables that already succeeded in earlier steps):
-  - Short results (`<= 2KB`) print verbatim in permanent `// =>` comments below your code.
-  - Medium results (`2KB..=24KB`) leave a compact `[File(...) | ...]` / `[Object ...]` signature in `// =>` and expand in full (with line numbers) inside `EPHEMERAL_PEEK` at the bottom for ONE step only.
-  - Large results (`> 24KB`) show a high-entropy index (symbols / error lines + tail / schema) in `EPHEMERAL_PEEK`.
-- **Lazy Resource Handles & Code-as-Projection**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with built-in zero-I/O paging methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. `EPHEMERAL_PEEK` disappears on the next step — pin only the lines you still need into a small variable (`<= 2KB`, e.g. `const bug = f.slice(61, 75);`), or reply directly once you have everything needed.
+  - Results up to **`64KB`** per step print verbatim and **permanently** in `// =>` comments below your code — they stay visible for the entire turn, so do NOT re-read or re-slice content already shown in `// =>` above.
+  - Large files/results (`> 64KB`) stay live in VM memory as `ResourceHandle` (`Ref#N`) with a compact signature + structural/error index in `// =>`.
+- **Lazy Resource Handles & Naive JS Loops**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with zero-I/O methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. Use plain JS loops/filters to inspect or aggregate multiple files in one step without unnecessary round-trips.
 
 ### Action 2: Finish turn and reply to the user
 - ONLY after you have real observed evidence (never before reading the target files or running requested checks), reply directly in normal Markdown **WITHOUT calling `run_js`**.
@@ -66,7 +65,7 @@ Each response MUST be **one** of the two actions below:
 
 ## Per-Turn Clean VM & Cross-Turn Continuity
 - When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.
-- Large results (`> 24KB`) are automatically archived with an `asset: asset-...` id in permanent `// =>`; in later turns you can page them back via `session.read_asset({ asset_id, char_offset, max_chars })`.
+- Large results (`> 64KB`) are automatically archived with an `asset: asset-...` id in permanent `// =>`; in later turns you can page them back via `session.read_asset({ asset_id, char_offset, max_chars })`.
 - Reusable cross-session JS orchestration libraries (listed below the `.d.ts` when available) can be loaded with `const lib = require("<name>");`.
 - If you cannot proceed without user clarification, call `host.ask_user({ question: "..." });` inside `run_js` to pause the turn and deliver your question directly.
 
@@ -74,9 +73,9 @@ Each response MUST be **one** of the two actions below:
 [Step 1 — call `run_js`]:
 `run_js({ code: "const f = io.read({ path: \"src/auth.rs\" });" })`
 
-[Host executes Step 1 and appends `// => f = [File("src/auth.rs") | Ref#1 | ...]` + `EPHEMERAL_PEEK` full file with line numbers]
+[Host executes Step 1 and permanently appends `// => f (File "src/auth.rs", Ref#1, ...)` with numbered lines (up to 64KB), or a compact `Ref#1` + structural index if > 64KB]
 
-[Step 2 — call `run_js` to pin key lines via handle `.slice()` (optional) OR reply directly without `run_js`]:
+[Step 2 — if > 64KB, slice or grep exact lines via handle methods; otherwise jump straight to your final reply]:
 `run_js({ code: "const verifyFn = f.slice(61, 75);" })`
 
 [Step 3 — final Markdown reply WITHOUT calling `run_js`]:

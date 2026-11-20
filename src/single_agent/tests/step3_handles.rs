@@ -19,7 +19,7 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
     let ws = TestWorkspace::new("cac-v2-step3");
     std::fs::create_dir_all(ws.path().join("src")).unwrap();
 
-    // Build a > 28KB file (> 24KB PEEK_FULL_LIMIT_CHARS -> Tier 3 LARGE INDEX!)
+    // Build a > 70KB file (> 64KB INLINE_LIMIT_CHARS -> compact handle + LARGE INDEX!)
     let mut big_rs = String::from(
         "//! Big core engine header line 1.\n\
          //! Big core engine header line 2.\n\
@@ -36,15 +36,15 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
          \x20\x20\x20\x20input.starts_with(\"admin\")\n\
          }\n",
     );
-    for i in 264..=420 {
+    for i in 264..=780 {
         big_rs.push_str(&format!(
-            "// trailing engine commentary line {i:04}: additional module documentation notes for testing\n"
+            "// trailing engine commentary line {i:04}: additional module documentation notes for testing demand paging beyond 64kb\n"
         ));
     }
     big_rs.push_str("pub fn shutdown_engine() {}\n");
     assert!(
-        big_rs.chars().count() > 28_000,
-        "fixture must exceed 24KB Tier-3 threshold, got {} chars",
+        big_rs.chars().count() > 70_000,
+        "fixture must exceed 64KB inline cap, got {} chars",
         big_rs.chars().count()
     );
     std::fs::write(ws.path().join("src/big_engine.rs"), &big_rs).unwrap();
@@ -238,12 +238,12 @@ async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_de
                 }
 
                 // Inside `@virtual reviewHandle(h)`: verify Auto-Dereference!
-                // Child MUST receive clean line-numbered source code in Step 1 EPHEMERAL_PEEK (NOT escaped JSON!)
+                // Child MUST receive clean line-numbered source code inline (NOT escaped JSON!)
                 assert!(
-                    user.contains("EPHEMERAL_PEEK")
+                    !user.contains("EPHEMERAL_PEEK")
                         && user.contains("1: //! Module ")
                         && !user.contains("\"content\": \"//!"),
-                    "virtual child must auto-dereference handle into clean line-numbered view: {user}"
+                    "virtual child must auto-dereference handle into clean inline line-numbered view: {user}"
                 );
                 seen_children_ref.lock().unwrap().push(user.to_owned());
                 // Child uses handle's built-in `.grep()` directly on `h`!

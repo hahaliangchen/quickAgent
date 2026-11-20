@@ -56,40 +56,31 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
             )
         }
         1 => {
-            // 2. Verify permanent `// =>` has compact signature while `EPHEMERAL_PEEK` has full numbered file!
+            // 2. Verify <= 64KB file prints inline permanently with line numbers (NO EPHEMERAL_PEEK!).
             let user_msg = body["messages"][1]["content"].as_str().unwrap();
-            let stable = split_stable_prefix(user_msg);
             assert!(
-                stable.contains("// => authFile = [File(\"src/auth.rs\")"),
-                "permanent trace must keep compact neutral signature: {stable}"
+                !user_msg.contains("EPHEMERAL_PEEK"),
+                "EPHEMERAL_PEEK must be removed: {user_msg}"
             );
             assert!(
-                !stable.contains("decode_without_verify"),
-                "full file body must NOT pollute permanent trace: {stable}"
-            );
-            assert!(
-                user_msg.contains("EPHEMERAL_PEEK")
+                user_msg.contains("authFile (File \"src/auth.rs\", Ref#1")
                     && user_msg.contains("61: pub fn verify_token")
                     && user_msg.contains("63:     decode_without_verify(token).is_ok()"),
-                "EPHEMERAL_PEEK must expose full line-numbered file for 1 step: {user_msg}"
+                "<= 64KB file must appear permanently inline with line numbers: {user_msg}"
             );
 
             // Model projects ONLY lines 61..64 via JS from live heap (0 disk re-reads!)
             run_js("const verifyFn = authFile.content.split(\"\\n\").slice(60, 64).join(\"\\n\");")
         }
         2 => {
-            // 3. Verify EPHEMERAL_PEEK vanished completely and ONLY the 4-line slice is pinned in `// =>`!
+            // 3. Verify BOTH earlier file and new slice remain permanently visible (zero amnesia, pure Append-Only!)
             let user_msg = body["messages"][1]["content"].as_str().unwrap();
             assert!(
                 !user_msg.contains("EPHEMERAL_PEEK"),
-                "EPHEMERAL_PEEK must be wiped after pinning a <=2KB slice: {user_msg}"
+                "EPHEMERAL_PEEK must not appear: {user_msg}"
             );
             assert!(
-                !user_msg.contains("padding comment line 001"),
-                "old 120-line file content must be completely gone from prompt: {user_msg}"
-            );
-            assert!(
-                user_msg.contains("decode_without_verify(token).is_ok()"),
+                user_msg.contains("verifyFn:") && user_msg.contains("decode_without_verify(token).is_ok()"),
                 "pinned 4-line slice must live permanently in `// =>`: {user_msg}"
             );
 
@@ -147,22 +138,22 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
 #[tokio::test]
 async fn step1_anti_cheating_slice_lock_and_per_turn_fresh_vm() {
     let ws = TestWorkspace::new("cac-v2-step1");
-    let big = "line_data_0123456789\n".repeat(180); // ~3,780 chars (> 2KB INLINE_LIMIT_CHARS)
+    let big = "line_data_0123456789_padding_for_64kb_cap\n".repeat(1_700); // ~71,400 chars (> 64KB INLINE_LIMIT_CHARS)
     std::fs::write(ws.path().join("big.txt"), &big).unwrap();
     init_task_row(ws.path(), "step1-lock");
 
     let (state, captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
-        // Turn 1, step 1: read big.txt
+        // Turn 1, step 1: read big.txt (> 64KB)
         0 => run_js("const f = io.read({ path: \"big.txt\" });"),
-        // Turn 1, step 2: try to cheat by slicing the entire > 2KB content
-        1 => run_js("const cheatAll = f.content.slice(0, 3500);"),
-        // Turn 1, step 3: verify anti-cheating lock kept >2KB out of permanent `// =>`, then finish via native JS `return`!
+        // Turn 1, step 2: try to dump > 64KB slice -> must stay capped (> 64KB not inlined)
+        1 => run_js("const cheatAll = f.content.slice(0, 68000);"),
+        // Turn 1, step 3: verify 64KB cap kept >64KB slice out of permanent inline, then finish via native JS `return`!
         2 => {
             let user_msg = body["messages"][1]["content"].as_str().unwrap();
             let stable = split_stable_prefix(user_msg);
             assert!(
-                stable.contains("> 2KB not inlined"),
-                "anti-cheating lock must prevent >2KB slice from dumping into permanent trace: {stable}"
+                stable.contains("> 64KB not inlined"),
+                "64KB cap must prevent >64KB slice from dumping verbatim into permanent trace: {stable}"
             );
             run_js("return \"Turn 1 done cleanly.\";")
         }

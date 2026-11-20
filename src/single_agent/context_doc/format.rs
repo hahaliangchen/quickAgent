@@ -1,11 +1,18 @@
-//! Three-tier value formatter, Resource Handle tagging/delegation, `EPHEMERAL_PEEK`
-//! deduplication (`PeekTracker`), and same-step inline alias folding.
+//! Value formatter for Context-as-Code v2 pure Append-Only `// =>` receipts.
+//!
+//! - Results `<= 64KB` (`INLINE_LIMIT_CHARS`) are printed inline permanently in `// =>`
+//!   (within a per-step 64KB inline budget) so the model never suffers 1-step amnesia.
+//! - Results `> 64KB` stay live in VM memory as `ResourceHandle` (`Ref#N`) with a
+//!   compact permanent signature + high-entropy structural/error index so the model
+//!   can page/slice any section via `.slice()`, `.grep()`, `.outline()`, `.head()`, `.tail()`.
+//! - Handles passed to `@virtual` in the same step (Pass-by-Handle) keep compact
+//!   signatures in the outer trace and auto-dereference cleanly inside the child frame.
 
+use super::INLINE_LIMIT_CHARS;
 use super::indexers::{
     add_line_numbers, describe_item_shape, format_comment_block, format_large_array_index,
-    format_large_log_index, format_peek_string,
+    format_large_log_index, format_large_source_index,
 };
-use super::{INLINE_LIMIT_CHARS, PEEK_FULL_LIMIT_CHARS};
 use crate::agent_program::Runtime;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,11 +21,15 @@ use std::collections::{BTreeMap, BTreeSet};
 /// into `(same as <earlierVar>)` to avoid wasting permanent trace tokens.
 const INLINE_DEDUP_MIN_CHARS: usize = 120;
 
+/// Minimum length at which command outputs receive a `Ref#N` handle tag so
+/// `.slice()` / `.grep()` / `.tail()` are available on medium & large logs.
+const COMMAND_HANDLE_MIN_CHARS: usize = 4_000;
+
 /// Context hints collected during one VM segment execution:
 /// - `virtual_receipts`: factual `[virtual ...]` / `[library ...]` summary lines.
 /// - `delegated_refs` / `delegated_content_hashes`: Resource Handles (and large text
 ///   payloads) passed into `@virtual` calls in the SAME step, so the outer parent skips
-///   expanding their raw bodies into `EPHEMERAL_PEEK` (Pass-by-Handle zero outer bloat).
+///   expanding their raw bodies (Pass-by-Handle zero outer bloat).
 #[derive(Clone, Debug, Default)]
 pub struct SegmentContextHints {
     pub virtual_receipts: Vec<String>,
@@ -37,7 +48,7 @@ pub(in crate::single_agent) fn fnv1a64(text: &str) -> u64 {
 }
 
 /// Attach a monotonic `"__ref": "Ref#N"` handle tag to file-read results and
-/// large command outputs so they act as first-class Lazy Resource Handles.
+/// medium/large command outputs so they act as first-class Lazy Resource Handles.
 pub(in crate::single_agent) fn tag_resource_handle(value: &mut Value, next_ref_id: &mut usize) {
     let Some(obj) = value.as_object_mut() else {
         return;
@@ -60,7 +71,7 @@ pub(in crate::single_agent) fn tag_resource_handle(value: &mut Value, next_ref_i
                 .unwrap_or("")
                 .chars()
                 .count()
-            > INLINE_LIMIT_CHARS);
+            > COMMAND_HANDLE_MIN_CHARS);
     if is_file || is_large_cmd {
         let id = *next_ref_id;
         *next_ref_id += 1;
@@ -68,7 +79,7 @@ pub(in crate::single_agent) fn tag_resource_handle(value: &mut Value, next_ref_i
     }
 }
 
-/// Recursively collect any `"__ref"` handle IDs and large string hashes (`> 2KB`)
+/// Recursively collect any `"__ref"` handle IDs and large string hashes
 /// passed into a `@virtual` call (via args or `@uses` captures).
 pub(in crate::single_agent) fn collect_delegated_markers(
     value: &Value,
@@ -77,7 +88,7 @@ pub(in crate::single_agent) fn collect_delegated_markers(
 ) {
     match value {
         Value::String(s) => {
-            if s.chars().count() > INLINE_LIMIT_CHARS {
+            if s.chars().count() > 2_000 {
                 hashes.insert(fnv1a64(s));
             }
         }
@@ -98,22 +109,25 @@ pub(in crate::single_agent) fn collect_delegated_markers(
     }
 }
 
-/// Per-step tracker for `EPHEMERAL_PEEK` deduplication and Pass-by-Handle suppression.
-pub(super) struct PeekTracker<'a> {
+/// Per-step display tracker: enforces the 64KB per-step inline budget,
+/// deduplicates aliases within a step, and honors Pass-by-Handle delegation.
+pub(super) struct DisplayTracker<'a> {
     delegated_refs: Option<&'a BTreeSet<String>>,
     delegated_hashes: Option<&'a BTreeSet<u64>>,
     seen_refs: BTreeSet<String>,
     seen_hashes: BTreeSet<u64>,
+    remaining_inline_budget: usize,
     is_virtual_param: bool,
 }
 
-impl<'a> PeekTracker<'a> {
+impl<'a> DisplayTracker<'a> {
     pub(super) fn from_hints(hints: &'a SegmentContextHints) -> Self {
         Self {
             delegated_refs: Some(&hints.delegated_refs),
             delegated_hashes: Some(&hints.delegated_content_hashes),
             seen_refs: BTreeSet::new(),
             seen_hashes: BTreeSet::new(),
+            remaining_inline_budget: INLINE_LIMIT_CHARS,
             is_virtual_param: false,
         }
     }
@@ -124,6 +138,7 @@ impl<'a> PeekTracker<'a> {
             delegated_hashes: None,
             seen_refs: BTreeSet::new(),
             seen_hashes: BTreeSet::new(),
+            remaining_inline_budget: INLINE_LIMIT_CHARS,
             is_virtual_param: true,
         }
     }
@@ -142,9 +157,8 @@ impl<'a> PeekTracker<'a> {
         false
     }
 
-    /// Returns `true` if this resource should be expanded in `EPHEMERAL_PEEK`
-    /// (neither delegated to `@virtual` in the same step nor already peeked by an alias).
-    fn claim_peek(&mut self, ref_id: Option<&str>, text_hash: Option<u64>) -> bool {
+    /// Returns `true` if this resource has NOT been delegated or already expanded in this step.
+    fn claim_display(&mut self, ref_id: Option<&str>, text_hash: Option<u64>) -> bool {
         if self.is_delegated(ref_id, text_hash) {
             return false;
         }
@@ -161,16 +175,25 @@ impl<'a> PeekTracker<'a> {
         true
     }
 
-    /// Returns `true` if `value` contains at least one large resource (`__ref` or
-    /// `> 2KB` text) and EVERY such resource inside it was already delegated to
-    /// `@virtual` or already expanded in this step's `EPHEMERAL_PEEK`.
+    fn take_inline_budget(&mut self, chars: usize) -> bool {
+        if chars <= self.remaining_inline_budget {
+            self.remaining_inline_budget -= chars;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns `true` if `value` contains at least one resource (`__ref` or large text)
+    /// and EVERY such resource inside it was already delegated to `@virtual` or already
+    /// expanded earlier in this step.
     fn container_already_covered(&self, value: &Value) -> bool {
-        fn visit(v: &Value, t: &PeekTracker<'_>, found_any: &mut bool, all_covered: &mut bool) {
+        fn visit(v: &Value, t: &DisplayTracker<'_>, found_any: &mut bool, all_covered: &mut bool) {
             if !*all_covered {
                 return;
             }
             match v {
-                Value::String(s) if s.chars().count() > INLINE_LIMIT_CHARS => {
+                Value::String(s) if s.chars().count() > 2_000 => {
                     *found_any = true;
                     let h = fnv1a64(s);
                     let covered = t.is_delegated(None, Some(h)) || t.seen_hashes.contains(&h);
@@ -214,25 +237,27 @@ pub(super) fn format_segment_feedback(
     pre_fingerprints: &BTreeMap<String, String>,
     console_logs: &[String],
     hints: &SegmentContextHints,
-) -> (Vec<String>, Vec<String>) {
+) -> Vec<String> {
     let mut receipts = Vec::new();
-    let mut peek_sections = Vec::new();
-    let mut tracker = PeekTracker::from_hints(hints);
+    let mut tracker = DisplayTracker::from_hints(hints);
 
     if !console_logs.is_empty() {
         let joined = console_logs.join("\n");
         let chars = joined.chars().count();
-        if chars <= INLINE_LIMIT_CHARS {
+        let h = fnv1a64(&joined);
+        if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
+            tracker.seen_hashes.insert(h);
             receipts.push(format_comment_block("console", &joined));
         } else {
             let line_count = joined.lines().count();
-            receipts.push(format!(
-                "// => console = [{line_count} lines, {chars} chars]"
-            ));
-            let h = fnv1a64(&joined);
-            if tracker.claim_peek(None, Some(h)) {
-                peek_sections.push(format_peek_string("console", &joined, None));
+            let mut block = format!(
+                "// => console = [{line_count} lines, {chars} chars | > 64KB]"
+            );
+            if tracker.claim_display(None, Some(h)) {
+                block.push('\n');
+                block.push_str(&format_large_source_index("console", &joined, None));
             }
+            receipts.push(block);
         }
     }
 
@@ -267,19 +292,14 @@ pub(super) fn format_segment_feedback(
             receipts.push(format!("// => {name} = (same as {orig})"));
             continue;
         }
-        let (receipt, peek) = format_binding_three_tier(&name, value, &mut tracker);
-        if peek.is_none()
-            && let Some(key) = canonical
-        {
+        let receipt = format_binding(&name, value, &mut tracker);
+        if let Some(key) = canonical {
             seen_inline.entry(key).or_insert_with(|| name.clone());
         }
         receipts.push(receipt);
-        if let Some(p) = peek {
-            peek_sections.push(p);
-        }
     }
 
-    (receipts, peek_sections)
+    receipts
 }
 
 fn canonical_inline_key(value: &Value) -> Option<String> {
@@ -307,15 +327,51 @@ fn canonical_inline_key(value: &Value) -> Option<String> {
     Some(key)
 }
 
-pub(super) fn format_binding_three_tier(
+fn is_file_handle_obj(obj: &serde_json::Map<String, Value>, is_virtual_param: bool) -> bool {
+    obj.get("content").and_then(Value::as_str).is_some()
+        && (obj.get("path").and_then(Value::as_str).is_some()
+            || (is_virtual_param && obj.get("file").and_then(Value::as_str).is_some()))
+}
+
+fn file_handle_signature(obj: &serde_json::Map<String, Value>, is_virtual_param: bool) -> String {
+    let path = obj
+        .get("path")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            is_virtual_param
+                .then(|| obj.get("file").and_then(Value::as_str))
+                .flatten()
+        })
+        .unwrap_or("");
+    let content = obj.get("content").and_then(Value::as_str).unwrap_or("");
+    let content_chars = content.chars().count();
+    let line_count = content.lines().count().max(usize::from(!content.is_empty()));
+    let ref_part = obj
+        .get("__ref")
+        .and_then(Value::as_str)
+        .map(|r| format!(" | {r}"))
+        .unwrap_or_default();
+    let asset_part = obj
+        .get("__asset_id")
+        .and_then(Value::as_str)
+        .map(|id| format!(" | asset: {id}"))
+        .unwrap_or_default();
+    format!(
+        "[File({path:?}){ref_part} | {line_count} lines, {content_chars} chars{asset_part} | .slice() .grep() .outline()]"
+    )
+}
+
+pub(super) fn format_binding(
     name: &str,
     value: &Value,
-    tracker: &mut PeekTracker<'_>,
-) -> (String, Option<String>) {
+    tracker: &mut DisplayTracker<'_>,
+) -> String {
     // 1. File Resource Handle `{ path, content: string, __ref?: string, ... }`
     if let Some(obj) = value.as_object()
-        && let Some(content) = obj.get("content").and_then(Value::as_str)
-        && let Some(path) = obj
+        && is_file_handle_obj(obj, tracker.is_virtual_param)
+    {
+        let content = obj.get("content").and_then(Value::as_str).unwrap_or("");
+        let path = obj
             .get("path")
             .and_then(Value::as_str)
             .or_else(|| {
@@ -324,35 +380,33 @@ pub(super) fn format_binding_three_tier(
                     .then(|| obj.get("file").and_then(Value::as_str))
                     .flatten()
             })
-    {
+            .unwrap_or("");
         let ref_id = obj.get("__ref").and_then(Value::as_str);
         let content_chars = content.chars().count();
         let line_count = content.lines().count().max(usize::from(!content.is_empty()));
-        if content_chars <= INLINE_LIMIT_CHARS {
-            let ref_part = ref_id.map(|r| format!("{r}, ")).unwrap_or_default();
-            let label = format!("{name} (File {path:?}, {ref_part}{line_count} lines)");
-            return (format_comment_block(&label, &add_line_numbers(content, 1)), None);
-        }
-        let ref_part = ref_id.map(|r| format!(" | {r}")).unwrap_or_default();
-        let asset_part = obj
-            .get("__asset_id")
-            .and_then(Value::as_str)
-            .map(|id| format!(" | asset: {id}"))
-            .unwrap_or_default();
         let sig = format!(
-            "// => {name} = [File({path:?}){ref_part} | {line_count} lines, {content_chars} chars{asset_part} | .slice() .grep() .outline()]"
+            "// => {name} = {}",
+            file_handle_signature(obj, tracker.is_virtual_param)
         );
         let h = fnv1a64(content);
-        let peek = if tracker.claim_peek(ref_id, Some(h)) {
-            Some(format_peek_string(
-                &format!("{name}.content ({path})"),
-                content,
-                Some(path),
-            ))
-        } else {
-            None
-        };
-        return (sig, peek);
+
+        // Pass-by-Handle: if delegated to `@virtual` in this same step, stay compact in outer trace!
+        if tracker.is_delegated(ref_id, Some(h)) {
+            return sig;
+        }
+        // Already displayed earlier in the same step (alias): stay compact!
+        if !tracker.claim_display(ref_id, Some(h)) {
+            return sig;
+        }
+        if content_chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(content_chars) {
+            let ref_part = ref_id.map(|r| format!("{r}, ")).unwrap_or_default();
+            let label = format!("{name} (File {path:?}, {ref_part}{line_count} lines)");
+            return format_comment_block(&label, &add_line_numbers(content, 1));
+        }
+        return format!(
+            "{sig}\n{}",
+            format_large_source_index(&format!("{name}.content ({path})"), content, Some(path))
+        );
     }
 
     // 2. Command Resource Handle `{ exit_code, stdout, stderr, __ref?: string, ... }`
@@ -373,10 +427,6 @@ pub(super) fn format_binding_three_tier(
         };
         let chars = combined.chars().count();
         let lines = combined.lines().count();
-        if chars <= INLINE_LIMIT_CHARS {
-            let label = format!("{name} (exit_code={exit})");
-            return (format_comment_block(&label, &combined), None);
-        }
         let ref_part = ref_id.map(|r| format!(" | {r}")).unwrap_or_default();
         let asset_part = obj
             .get("__asset_id")
@@ -387,19 +437,14 @@ pub(super) fn format_binding_three_tier(
             "// => {name} = [CommandResult(exit_code={exit}){ref_part} | {lines} lines, {chars} chars{asset_part} | .slice() .grep() .tail()]"
         );
         let h = fnv1a64(&combined);
-        let peek = if tracker.claim_peek(ref_id, Some(h)) {
-            if chars <= PEEK_FULL_LIMIT_CHARS {
-                Some(format!(
-                    "// [{name} FULL OUTPUT (exit_code={exit}, {lines} lines)]:\n{}",
-                    add_line_numbers(&combined, 1)
-                ))
-            } else {
-                Some(format_large_log_index(name, &exit, &combined))
-            }
-        } else {
-            None
-        };
-        return (sig, peek);
+        if !tracker.claim_display(ref_id, Some(h)) {
+            return sig;
+        }
+        if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
+            let label = format!("{name} (exit_code={exit})");
+            return format_comment_block(&label, &combined);
+        }
+        return format!("{sig}\n{}", format_large_log_index(name, &exit, &combined));
     }
 
     // 3. Plain string
@@ -407,36 +452,32 @@ pub(super) fn format_binding_three_tier(
         let chars = text.chars().count();
         let lines = text.lines().count().max(usize::from(!text.is_empty()));
         if text.is_empty() {
-            return (format!("// => {name} = \"\" (Empty string)"), None);
-        }
-        if chars <= INLINE_LIMIT_CHARS {
-            if text.contains('\n') {
-                return (format_comment_block(name, text), None);
-            }
-            return (format!("// => {name} = {text:?}"), None);
+            return format!("// => {name} = \"\" (Empty string)");
         }
         let sig = format!(
-            "// => {name} = [string | {lines} lines, {chars} chars | > 2KB not inlined]"
+            "// => {name} = [string | {lines} lines, {chars} chars | > 64KB not inlined]"
         );
         let h = fnv1a64(text);
-        let peek = if tracker.claim_peek(None, Some(h)) {
-            Some(format_peek_string(name, text, None))
-        } else {
-            None
-        };
-        return (sig, peek);
+        if chars > 2_000 && !tracker.claim_display(None, Some(h)) {
+            return format!("// => {name} = [string | {lines} lines, {chars} chars | already shown]");
+        }
+        if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
+            if text.contains('\n') {
+                return format_comment_block(name, text);
+            }
+            return format!("// => {name} = {text:?}");
+        }
+        return format!("{sig}\n{}", format_large_source_index(name, text, None));
     }
 
     // 4. Array (with compact summary for Array of File Resource Handles)
     if let Some(arr) = value.as_array() {
         if arr.is_empty() {
-            return (format!("// => {name} = [] (Empty: 0 items)"), None);
+            return format!("// => {name} = [] (Empty: 0 items)");
         }
         let all_file_handles = arr.iter().all(|item| {
-            item.as_object().is_some_and(|o| {
-                o.get("path").and_then(Value::as_str).is_some()
-                    && o.get("content").and_then(Value::as_str).is_some()
-            })
+            item.as_object()
+                .is_some_and(|o| is_file_handle_obj(o, tracker.is_virtual_param))
         });
         if all_file_handles {
             let summaries: Vec<String> = arr
@@ -449,52 +490,101 @@ pub(super) fn format_binding_three_tier(
                     }
                 })
                 .collect();
-            let sig = format!(
+            let mut out = format!(
                 "// => {name} = [Array({}) of Handles: {}]",
                 arr.len(),
                 summaries.join(", ")
             );
-            let mut peeks = Vec::new();
             for (idx, item) in arr.iter().enumerate() {
                 let p = item["path"].as_str().unwrap_or("");
                 let c = item["content"].as_str().unwrap_or("");
                 let r = item.get("__ref").and_then(Value::as_str);
-                if c.chars().count() > INLINE_LIMIT_CHARS && tracker.claim_peek(r, Some(fnv1a64(c))) {
-                    peeks.push(format_peek_string(&format!("{name}[{idx}].content ({p})"), c, Some(p)));
+                let h = fnv1a64(c);
+                if tracker.claim_display(r, Some(h)) {
+                    let chars = c.chars().count();
+                    if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
+                        out.push('\n');
+                        out.push_str(&format_comment_block(
+                            &format!("{name}[{idx}] (File {p:?})"),
+                            &add_line_numbers(c, 1),
+                        ));
+                    } else if chars > INLINE_LIMIT_CHARS {
+                        out.push('\n');
+                        out.push_str(&format_large_source_index(
+                            &format!("{name}[{idx}].content ({p})"),
+                            c,
+                            Some(p),
+                        ));
+                    }
                 }
             }
-            let peek = if peeks.is_empty() { None } else { Some(peeks.join("\n\n")) };
-            return (sig, peek);
+            return out;
         }
 
         let serialized = serde_json::to_string(value).unwrap_or_default();
         let chars = serialized.chars().count();
-        if chars <= INLINE_LIMIT_CHARS {
-            return (format!("// => {name} = {serialized}"), None);
+        if tracker.container_already_covered(value) {
+            let shape = describe_item_shape(&arr[0]);
+            return format!(
+                "// => {name} = [Array({}) | itemShape: {shape} | {chars} chars]",
+                arr.len()
+            );
+        }
+        if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
+            return format!("// => {name} = {serialized}");
         }
         let shape = describe_item_shape(&arr[0]);
         let sig = format!(
             "// => {name} = [Array({}) | itemShape: {shape} | {chars} chars]",
             arr.len()
         );
-        if tracker.container_already_covered(value) {
-            return (sig, None);
-        }
-        let peek = if chars <= PEEK_FULL_LIMIT_CHARS {
-            let pretty = serde_json::to_string_pretty(value).unwrap_or(serialized);
-            format!("// [{name} FULL Array({})]:\n{pretty}", arr.len())
-        } else {
-            format_large_array_index(name, arr, &shape)
-        };
-        return (sig, Some(peek));
+        return format!("{sig}\n{}", format_large_array_index(name, arr, &shape));
     }
 
-    // 5. Generic Object / Primitive
+    // 5. Dictionary of File Resource Handles `{ key: ResourceHandle, ... }`
+    if let Some(map) = value.as_object()
+        && !map.is_empty()
+        && map.values().all(|v| {
+            v.as_object()
+                .is_some_and(|o| is_file_handle_obj(o, tracker.is_virtual_param))
+        })
+    {
+        let mut lines = vec![format!("// => {name} = {{ // Map({}) of ResourceHandles", map.len())];
+        for (k, v) in map {
+            let obj = v.as_object().unwrap();
+            lines.push(format!(
+                "//   {k:?}: {}",
+                file_handle_signature(obj, tracker.is_virtual_param)
+            ));
+        }
+        lines.push("// }".into());
+        // If total content fits easily within remaining 64KB budget (and not delegated), expand inline!
+        let total_content_chars: usize = map
+            .values()
+            .filter_map(|v| v.get("content").and_then(Value::as_str))
+            .map(|c| c.chars().count())
+            .sum();
+        if total_content_chars <= tracker.remaining_inline_budget {
+            for (k, v) in map {
+                let obj = v.as_object().unwrap();
+                let c = obj.get("content").and_then(Value::as_str).unwrap_or("");
+                let p = obj.get("path").and_then(Value::as_str).unwrap_or(k);
+                let r = obj.get("__ref").and_then(Value::as_str);
+                let h = fnv1a64(c);
+                if tracker.claim_display(r, Some(h)) && tracker.take_inline_budget(c.chars().count()) {
+                    lines.push(format_comment_block(
+                        &format!("{name}[{k:?}] (File {p:?})"),
+                        &add_line_numbers(c, 1),
+                    ));
+                }
+            }
+        }
+        return lines.join("\n");
+    }
+
+    // 6. Generic Object / Primitive
     let serialized = serde_json::to_string(value).unwrap_or_default();
     let chars = serialized.chars().count();
-    if chars <= INLINE_LIMIT_CHARS {
-        return (format!("// => {name} = {serialized}"), None);
-    }
     let keys_summary = value
         .as_object()
         .map(|m| {
@@ -514,18 +604,16 @@ pub(super) fn format_binding_three_tier(
         "// => {name} = [Object {{ {keys_summary} }} | {chars} chars{asset_part}]"
     );
     if tracker.container_already_covered(value) {
-        return (sig, None);
+        return sig;
     }
-    let peek = if chars <= PEEK_FULL_LIMIT_CHARS {
-        let pretty = serde_json::to_string_pretty(value).unwrap_or(serialized);
-        format!("// [{name} FULL Object]:\n{pretty}")
-    } else {
-        let head: String = serialized.chars().take(1_500).collect();
-        format!(
-            "// [{name} LARGE Object Index ({chars} chars) — keys: {keys_summary}]:\n\
-             // Slice/filter `{name}` directly in JS (or pass `{name}` to a `@virtual` helper).\n\
-             // head preview: {head}..."
-        )
-    };
-    (sig, Some(peek))
+    if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
+        return format!("// => {name} = {serialized}");
+    }
+    let head: String = serialized.chars().take(1_500).collect();
+    format!(
+        "{sig}\n\
+         // [{name} LARGE Object Index ({chars} chars) — keys: {keys_summary}]:\n\
+         // Slice/filter `{name}` directly in JS (or pass `{name}` to a `@virtual` helper).\n\
+         // head preview: {head}..."
+    )
 }

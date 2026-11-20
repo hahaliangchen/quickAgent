@@ -1,22 +1,8 @@
-//! High-entropy Tier-3 indexers and formatting helpers for `EPHEMERAL_PEEK`
-//! (symbol outlines, command error/tail summaries, array schema samples, and
-//! line-numbered text views).
+//! High-entropy structural indexers and formatting helpers for oversized values
+//! (`> 64KB`: symbol outlines, command error/tail summaries, array schema samples,
+//! and line-numbered text views).
 
-use super::PEEK_FULL_LIMIT_CHARS;
 use serde_json::Value;
-
-pub(super) fn format_peek_string(label: &str, text: &str, path_hint: Option<&str>) -> String {
-    let chars = text.chars().count();
-    let lines = text.lines().count().max(usize::from(!text.is_empty()));
-    if chars <= PEEK_FULL_LIMIT_CHARS {
-        format!(
-            "// [{label} FULL VIEW ({lines} lines, {chars} chars)]:\n{}",
-            add_line_numbers(text, 1)
-        )
-    } else {
-        format_large_source_index(label, text, path_hint)
-    }
-}
 
 pub(super) fn format_large_source_index(
     label: &str,
@@ -74,7 +60,7 @@ pub(super) fn format_large_source_index(
         symbols.join("\n")
     };
     format!(
-        "// [{label} LARGE INDEX ({title}, {total} lines, {chars} chars) — too large for full peek]\n\
+        "// [{label} LARGE INDEX ({title}, {total} lines, {chars} chars) — > 64KB]\n\
          // Page in exact lines on demand via handle methods: `.slice(start, end)`, `.slice([[s1, e1], [s2, e2]])`, `.grep(pattern, ctx)`, or `.outline()`:\n\
          // Symbols / Sections:\n{sym_block}\n\
          // Head (L1..L{}):\n{head}\n\
