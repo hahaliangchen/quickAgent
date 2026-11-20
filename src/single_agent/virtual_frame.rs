@@ -33,6 +33,7 @@ pub(super) struct VirtualCallSpec {
     pub contract: String,
     pub params: Vec<(String, Value)>,
     pub captures: BTreeMap<String, Value>,
+    pub partial_locals: Vec<(String, Value)>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +75,7 @@ pub(super) fn leaf_libraries(parent_libs: &Libraries) -> Libraries {
     let mut libs = parent_libs.clone();
     libs.remove("process");
     libs.remove("session");
+    libs.remove("previous");
     libs
 }
 
@@ -261,16 +263,26 @@ async fn run_virtual_loop(
         input_budget: crate::model_settings::input_budget(state_ref, &child_model),
     };
 
-    // Pre-populate child VM scope with bound parameters and `@uses` captures.
+    // Pre-populate child VM scope with bound parameters, `@uses` captures,
+    // and any local variables precomputed by a partial `@virtual` JS prefix.
     let mut initial_bindings: BTreeMap<String, Value> = spec.captures.clone();
     for (name, val) in &spec.params {
+        initial_bindings.insert(name.clone(), val.clone());
+    }
+    for (name, val) in &spec.partial_locals {
         initial_bindings.insert(name.clone(), val.clone());
     }
     let mut runtime = Runtime::new_repl_with_scope(leaf_libs.clone(), initial_bindings)?;
 
     // Build a completely isolated single-turn ContextDocument for this frame ONLY.
     let mut doc = ContextDocument::default();
-    doc.begin_virtual_frame(&spec.signature, &spec.contract, &spec.params, &spec.captures);
+    doc.begin_virtual_frame(
+        &spec.signature,
+        &spec.contract,
+        &spec.params,
+        &spec.captures,
+        &spec.partial_locals,
+    );
 
     let mut files_read = BTreeSet::new();
     let mut files_written = BTreeSet::new();
@@ -294,17 +306,21 @@ async fn run_virtual_loop(
         .await?;
 
         let submission = model_call::parse_virtual_submission(&reply);
+        let assistant_msg = Some(reply.assistant_message.clone());
+        let call_id = reply.primary_call_id();
 
         let source = match submission {
             crate::model_stream::RunSubmission::Reply { .. } => {
-                doc.set_rejection(
+                doc.record_rejection(
+                    assistant_msg,
+                    call_id,
                     "VIRTUAL_TOOL_REQUIRED",
                     "Inside a `@virtual` function, call `run_js({ code })` and finish with native JS `return { ..., summary: \"...\" };`.",
                 );
                 continue;
             }
             crate::model_stream::RunSubmission::Rejected { code, message } => {
-                doc.set_rejection(code, &message);
+                doc.record_rejection(assistant_msg, call_id, code, &message);
                 continue;
             }
             crate::model_stream::RunSubmission::CodeAndReply { source, .. } => source,
@@ -323,7 +339,7 @@ async fn run_virtual_loop(
             } else {
                 "COMPILE_ERROR"
             };
-            doc.set_rejection(code, &msg);
+            doc.record_rejection(assistant_msg, call_id, code, &msg);
             continue;
         }
 
@@ -375,15 +391,27 @@ async fn run_virtual_loop(
                     &logs,
                     None,
                     &SegmentContextHints::default(),
+                    assistant_msg,
+                    call_id,
                 );
             }
             State::Failed(err) => {
                 // Explicit `throw new Error(...)` or unhandled error in child frame
                 // can either be recovered in the next sub-step or propagated if fatal.
-                doc.record_failed_segment(source, &runtime, &pre_fps, &logs, &err);
+                doc.record_failed_segment(
+                    source,
+                    &runtime,
+                    &pre_fps,
+                    &logs,
+                    &err,
+                    assistant_msg,
+                    call_id,
+                );
             }
             State::Action(_) | State::Waiting => {
-                doc.set_rejection(
+                doc.record_rejection(
+                    assistant_msg,
+                    call_id,
                     "VIRTUAL_UNSUPPORTED_SUSPENSION",
                     "Nested async virtual calls are forbidden inside `@virtual` frames.",
                 );
@@ -463,28 +491,36 @@ async fn drive_leaf_vm(
                 }
                 ActionKind::ParallelReads { operations } => {
                     external_calls += operations.len();
-                    let mut items = Vec::with_capacity(operations.len());
-                    for (idx, (name, args)) in operations.into_iter().enumerate() {
-                        record_file_touch(&name, &args, files_read, files_written);
-                        let call_id = format!("{}-p{idx}", action.id);
-                        let (mut res, is_err) = if is_shell_tool(&name) {
-                            (
-                                json!({"code": "VIRTUAL_SHELL_FORBIDDEN", "error": "shell forbidden in @virtual"}),
-                                true,
-                            )
-                        } else {
-                            super::tool_proxy::proxy_rust_tool(
-                                s,
-                                leaf_libs,
-                                node,
-                                step,
-                                &call_id,
-                                &name,
-                                args,
-                                false,
-                            )
-                            .await?
-                        };
+                    for (name, args) in &operations {
+                        record_file_touch(name, args, files_read, files_written);
+                    }
+                    let base_id = action.id.clone();
+                    let futs = operations.into_iter().enumerate().map(|(idx, (name, args))| {
+                        let call_id = format!("{base_id}-p{idx}");
+                        async move {
+                            if is_shell_tool(&name) {
+                                Ok::<(Value, bool), anyhow::Error>((
+                                    json!({"code": "VIRTUAL_SHELL_FORBIDDEN", "error": "shell forbidden in @virtual"}),
+                                    true,
+                                ))
+                            } else {
+                                super::tool_proxy::proxy_rust_tool(
+                                    s,
+                                    leaf_libs,
+                                    node,
+                                    step,
+                                    &call_id,
+                                    &name,
+                                    args,
+                                    false,
+                                )
+                                .await
+                            }
+                        }
+                    });
+                    let results = futures::future::try_join_all(futs).await?;
+                    let mut items = Vec::with_capacity(results.len());
+                    for (mut res, is_err) in results {
                         if !is_err {
                             context_doc::tag_resource_handle(&mut res, next_ref_id);
                         }
@@ -506,7 +542,7 @@ async fn drive_leaf_vm(
                         )?;
                     }
                 }
-                ActionKind::Call { name, .. } => {
+                ActionKind::Call { name, .. } | ActionKind::Task { name, .. } => {
                     runtime.resume(
                         json!({
                             "code": "VIRTUAL_LAYER_LIMIT",

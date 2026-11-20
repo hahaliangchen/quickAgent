@@ -153,6 +153,83 @@ pub(super) fn split_stable_prefix(user_content: &str) -> &str {
         .unwrap_or(user_content)
 }
 
+/// Concatenate all non-system messages (`user`, `assistant`, `tool`) in a wire request
+/// for quick content assertions in tests.
+pub(super) fn all_messages_text(body: &Value) -> String {
+    let mut parts = Vec::new();
+    for msg in body["messages"].as_array().into_iter().flatten().skip(1) {
+        if let Some(c) = msg["content"].as_str() {
+            parts.push(c.to_owned());
+        }
+        if let Some(calls) = msg["tool_calls"].as_array() {
+            for c in calls {
+                if let Some(args) = c["function"]["arguments"].as_str() {
+                    parts.push(args.to_owned());
+                }
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// Return the `content` of the latest `role == "tool"` message in `body["messages"]`.
+pub(super) fn last_tool_output(body: &Value) -> &str {
+    body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|m| m["role"] == "tool")
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("")
+}
+
+/// Assert that `later["messages"]` strictly extends `earlier["messages"]` with 100%
+/// byte-identical earlier elements (proving native multi-turn KV-cache prefix stability).
+pub(super) fn assert_prefix_immutable(earlier: &Value, later: &Value) {
+    let a = earlier["messages"].as_array().unwrap();
+    let b = later["messages"].as_array().unwrap();
+    assert!(
+        b.len() >= a.len(),
+        "later request shrunk ({} < {})",
+        b.len(),
+        a.len()
+    );
+    for (idx, (ma, mb)) in a.iter().zip(b.iter()).enumerate() {
+        assert_eq!(
+            ma, mb,
+            "message[{idx}] mutated across steps, breaking KV-cache prefix!"
+        );
+    }
+}
+
+/// Assert every `assistant(tool_calls)` message is immediately followed by matching
+/// `tool(tool_call_id)` messages with exact ID alignment.
+pub(super) fn assert_valid_tool_pairing(body: &Value) {
+    let msgs = body["messages"].as_array().unwrap();
+    let mut i = 0;
+    while i < msgs.len() {
+        let role = msgs[i]["role"].as_str().unwrap_or("");
+        if role == "assistant"
+            && let Some(calls) = msgs[i]["tool_calls"].as_array()
+            && !calls.is_empty()
+        {
+            for (offset, call) in calls.iter().enumerate() {
+                let expected_id = call["id"].as_str().expect("tool call id");
+                let tool_msg = msgs
+                    .get(i + 1 + offset)
+                    .unwrap_or_else(|| panic!("missing tool response for {expected_id}: {msgs:?}"));
+                assert_eq!(tool_msg["role"], "tool");
+                assert_eq!(tool_msg["tool_call_id"], expected_id);
+            }
+            i += 1 + calls.len();
+            continue;
+        }
+        assert_ne!(role, "tool", "orphan tool message at index {i}: {msgs:?}");
+        i += 1;
+    }
+}
+
 pub(super) fn extract_asset_id(text: &str) -> Option<String> {
     let marker = "asset: ";
     let start = text.find(marker)? + marker.len();

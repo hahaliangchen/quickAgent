@@ -1139,6 +1139,25 @@ impl Compiler {
                 }
             }
             ast::Expr::Member(m) => {
+                // Support Node-style `<lib>.promises.<method>` (e.g. `io.promises.read`,
+                // `process.promises.run_readonly`, `git.promises.status`) for Promise.all.
+                if let (ast::Expr::Member(inner), ast::MemberProp::Ident(method)) = (&*m.obj, &m.prop)
+                    && let (ast::Expr::Ident(namespace), ast::MemberProp::Ident(sub)) = (&*inner.obj, &inner.prop)
+                    && sub.sym.as_ref() == "promises"
+                    && self.resolve(namespace.sym.as_ref()).is_none()
+                    && let Some(methods) = self.libraries.get(namespace.sym.as_ref())
+                {
+                    return match methods.get(method.sym.as_ref()) {
+                        Some(tool) => Ok(Some(Expr::Native(format!("tool:async-tool:{tool}")))),
+                        None => self.error(
+                            m.span,
+                            &format!(
+                                "unknown async library method {}.promises.{}; use the published library catalog",
+                                namespace.sym, method.sym
+                            ),
+                        ),
+                    };
+                }
                 let (ast::Expr::Ident(namespace), ast::MemberProp::Ident(property)) = (&*m.obj, &m.prop)
                 else {
                     return Ok(None);
@@ -3355,7 +3374,7 @@ fn compile_inner(
         // DevTools-style `$_` binding.  It is an ordinary module binding so
         // the next segment can read it without a host round trip.
         if segment {
-            for special in ["$_", "\0explicit_return", "\0has_last_expr"] {
+            for special in ["$_", "\0explicit_return", "\0has_last_expr", "\0expr_sinks"] {
                 if !module_vars.iter().any(|name| name == special) {
                     module_vars.push(special.into());
                 }
@@ -3408,11 +3427,32 @@ fn compile_inner(
         module_scope = c.scopes[0].clone();
         let last_idx = top_level.len().saturating_sub(1);
         for (idx, stmt) in top_level.iter().enumerate() {
-            if segment && idx == last_idx && let ast::Stmt::Expr(expr) = stmt {
-                let value = c.lower(&expr.expr)?;
-                let value = c.snapshot(expr.span, value);
-                c.emit(expr.span, Op::Set("\0has_last_expr".into(), Expr::Value(json!(true))));
-                c.emit(expr.span, Op::Set("$_".into(), value));
+            if segment && let ast::Stmt::Expr(expr) = stmt {
+                let is_query = is_bare_query_expr(&expr.expr);
+                if is_query || idx == last_idx {
+                    let value = c.lower(&expr.expr)?;
+                    let value = c.snapshot(expr.span, value);
+                    if is_query {
+                        let tmp = c.temp();
+                        c.emit(
+                            expr.span,
+                            Op::Append {
+                                target: "\0expr_sinks".into(),
+                                items: vec![value.clone()],
+                                destination: tmp,
+                            },
+                        );
+                    }
+                    if idx == last_idx {
+                        c.emit(
+                            expr.span,
+                            Op::Set("\0has_last_expr".into(), Expr::Value(json!(true))),
+                        );
+                        c.emit(expr.span, Op::Set("$_".into(), value));
+                    }
+                } else {
+                    c.stmt(stmt)?;
+                }
             } else {
                 c.stmt(stmt)?;
             }
@@ -3680,4 +3720,49 @@ fn emit_virtual_task_tail(
         ),
     );
     c.emit(span, Op::Return(Expr::Variable(dest)));
+}
+
+/// Returns `true` if a top-level segment expression statement is a bare query
+/// expression whose value should be captured as a dataflow sink (e.g.
+/// `ppF.slice(280,305); shellF.slice(780,825);` or `({ a, b })`), excluding
+/// assignments, updates, `console.*` prints, and container-mutating calls.
+fn is_bare_query_expr(mut expr: &ast::Expr) -> bool {
+    while let ast::Expr::Paren(p) = expr {
+        expr = &p.expr;
+    }
+    match expr {
+        ast::Expr::Assign(_) | ast::Expr::Update(_) => false,
+        ast::Expr::Unary(u) if u.op == ast::UnaryOp::Void => false,
+        ast::Expr::Call(call) => {
+            if let ast::Callee::Expr(callee) = &call.callee
+                && let ast::Expr::Member(member) = &**callee
+            {
+                if let ast::Expr::Ident(obj) = &*member.obj
+                    && obj.sym.as_ref() == "console"
+                {
+                    return false;
+                }
+                if let ast::MemberProp::Ident(prop) = &member.prop
+                    && matches!(
+                        prop.sym.as_ref(),
+                        "push"
+                            | "pop"
+                            | "shift"
+                            | "unshift"
+                            | "splice"
+                            | "sort"
+                            | "reverse"
+                            | "set"
+                            | "add"
+                            | "delete"
+                            | "clear"
+                    )
+                {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => true,
+    }
 }

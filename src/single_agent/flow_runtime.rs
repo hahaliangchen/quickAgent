@@ -255,21 +255,31 @@ fn execute_orchestration_call<'a>(
                                 runtime.resume_action(&action.id, res, failed)?;
                             }
                             ActionKind::ParallelReads { operations } => {
-                                let mut items = Vec::with_capacity(operations.len());
-                                for (idx, (name, args)) in operations.into_iter().enumerate() {
-                                    record_touch(&name, &args, &mut files_read, &mut files_written);
-                                    let call_id = format!("{}-p{idx}", action.id);
-                                    let (mut res, failed) = tool_proxy::proxy_rust_tool(
-                                        &lib_session,
-                                        libs,
-                                        &node,
-                                        parent_step,
-                                        &call_id,
-                                        &name,
-                                        args,
-                                        false,
-                                    )
-                                    .await?;
+                                for (name, args) in &operations {
+                                    record_touch(name, args, &mut files_read, &mut files_written);
+                                }
+                                let base_id = action.id.clone();
+                                let futs = operations.into_iter().enumerate().map(|(idx, (name, args))| {
+                                    let call_id = format!("{base_id}-p{idx}");
+                                    let lib_session = &lib_session;
+                                    let node = &node;
+                                    async move {
+                                        tool_proxy::proxy_rust_tool(
+                                            lib_session,
+                                            libs,
+                                            node,
+                                            parent_step,
+                                            &call_id,
+                                            &name,
+                                            args,
+                                            allow_shell,
+                                        )
+                                        .await
+                                    }
+                                });
+                                let results = futures::future::try_join_all(futs).await?;
+                                let mut items = Vec::with_capacity(results.len());
+                                for (mut res, failed) in results {
                                     if !failed {
                                         context_doc::tag_resource_handle(&mut res, &mut next_ref_id);
                                     }
@@ -351,6 +361,35 @@ fn execute_orchestration_call<'a>(
                                     }
                                     runtime.resume_action(&action.id, vval, vfailed)?;
                                 }
+                            }
+                            ActionKind::Task {
+                                name: call_name,
+                                description,
+                                input,
+                            } => {
+                                let vspec = vm_driver::build_virtual_spec_for_task(
+                                    &runtime,
+                                    &action.id,
+                                    &call_name,
+                                    &description,
+                                    input,
+                                    scope_vars.as_ref(),
+                                );
+                                let (vval, vfailed, vreceipt) =
+                                    virtual_frame::execute_virtual_call(
+                                        &lib_session,
+                                        libs,
+                                        vspec,
+                                        parent_step,
+                                    )
+                                    .await?;
+                                for f in vreceipt.files_read {
+                                    files_read.insert(f);
+                                }
+                                for f in vreceipt.files_written {
+                                    files_written.insert(f);
+                                }
+                                runtime.resume_action(&action.id, vval, vfailed)?;
                             }
                             other => {
                                 runtime.resume_action(

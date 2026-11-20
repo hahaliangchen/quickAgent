@@ -289,7 +289,9 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
 /// tool definitions on the wire.
 pub fn static_library_header(libraries: &Libraries) -> String {
     let mut out = String::from(
-        "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n",
+        "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n\
+         // IMPORTANT: Pre-bound `io.*`, `git.*`, `process.*` methods are SYNCHRONOUS.\n\
+         // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`, `process.promises.run_readonly`) or `require(\"<lib>/promises\")`.\n",
     );
     out.push_str(&directory(libraries));
     out.push('\n');
@@ -349,6 +351,11 @@ pub fn static_library_header(libraries: &Libraries) -> String {
         if library == "host" {
             out.push_str("  function context(): { messages: unknown[]; tools: string[] };\n");
             out.push_str("  function tools(): { tools: string[]; libraries: Record<string, unknown> };\n");
+        }
+        if matches!(library.as_str(), "io" | "git" | "process") {
+            out.push_str(&format!(
+                "  /** Async Promise-returning versions of all `{library}.*` methods for `Promise.all` concurrency. */\n  const promises: Record<string, (args?: Record<string, unknown>) => Promise<any>>;\n"
+            ));
         }
         out.push_str("}\n");
     }

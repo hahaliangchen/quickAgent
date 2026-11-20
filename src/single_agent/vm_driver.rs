@@ -69,20 +69,26 @@ pub(super) async fn drive_vm_segment(
                         }
                         ActionKind::ParallelReads { operations } => {
                             external_tool_calls += operations.len();
-                            let mut items = Vec::with_capacity(operations.len());
-                            for (idx, (name, args)) in operations.into_iter().enumerate() {
-                                let call_id = format!("{}-p{idx}", action.id);
-                                let (mut res, is_err) = tool_proxy::proxy_rust_tool(
-                                    s,
-                                    libs,
-                                    node,
-                                    step,
-                                    &call_id,
-                                    &name,
-                                    args,
-                                    false,
-                                )
-                                .await?;
+                            let base_id = action.id.clone();
+                            let futs = operations.into_iter().enumerate().map(|(idx, (name, args))| {
+                                let call_id = format!("{base_id}-p{idx}");
+                                async move {
+                                    tool_proxy::proxy_rust_tool(
+                                        s,
+                                        libs,
+                                        node,
+                                        step,
+                                        &call_id,
+                                        &name,
+                                        args,
+                                        allow_shell,
+                                    )
+                                    .await
+                                }
+                            });
+                            let results = futures::future::try_join_all(futs).await?;
+                            let mut items = Vec::with_capacity(results.len());
+                            for (mut res, is_err) in results {
                                 if !is_err {
                                     context_doc::tag_resource_handle(&mut res, next_ref_id);
                                 }
@@ -163,6 +169,65 @@ pub(super) async fn drive_vm_segment(
                                 captured,
                                 scope_vars.as_ref(),
                             );
+                            if !is_async_inflight {
+                                let (val, is_err, receipt) = virtual_frame::execute_virtual_call(
+                                    s, libs, spec, step,
+                                )
+                                .await?;
+                                hints.virtual_receipts.push(receipt.format_line());
+                                runtime.resume_action(&action.id, val, is_err)?;
+                                continue;
+                            }
+                            guard_spawn(&mut spawned_ids, &mut inflight_jobs, &action.id)?;
+                            let action_id = spec.action_id.clone();
+                            let owned = OwnedSession::from_parent(s, libs);
+                            inflight_jobs.spawn(async move {
+                                let parent_s = owned.as_session();
+                                let (val, is_err, receipt) = virtual_frame::execute_virtual_call(
+                                    &parent_s,
+                                    &owned.libs,
+                                    spec,
+                                    step,
+                                )
+                                .await?;
+                                Ok((action_id, val, is_err, Some(receipt.format_line())))
+                            });
+                        }
+                        ActionKind::Task {
+                            name,
+                            description,
+                            input,
+                        } => {
+                            external_tool_calls += 1;
+                            let spec = build_virtual_spec_for_task(
+                                runtime,
+                                &action.id,
+                                &name,
+                                &description,
+                                input,
+                                scope_vars.as_ref(),
+                            );
+                            for (_, v) in &spec.params {
+                                context_doc::collect_delegated_markers(
+                                    v,
+                                    &mut hints.delegated_refs,
+                                    &mut hints.delegated_content_hashes,
+                                );
+                            }
+                            for v in spec.captures.values() {
+                                context_doc::collect_delegated_markers(
+                                    v,
+                                    &mut hints.delegated_refs,
+                                    &mut hints.delegated_content_hashes,
+                                );
+                            }
+                            for (_, v) in &spec.partial_locals {
+                                context_doc::collect_delegated_markers(
+                                    v,
+                                    &mut hints.delegated_refs,
+                                    &mut hints.delegated_content_hashes,
+                                );
+                            }
                             if !is_async_inflight {
                                 let (val, is_err, receipt) = virtual_frame::execute_virtual_call(
                                     s, libs, spec, step,
@@ -287,20 +352,10 @@ pub(super) fn build_virtual_spec(
     action_id: &str,
     fn_name: &str,
     args: Vec<Value>,
-    mut captured: BTreeMap<String, Value>,
-    scope_vars: Option<&BTreeMap<String, Value>>,
+    captured: BTreeMap<String, Value>,
+    _scope_vars: Option<&BTreeMap<String, Value>>,
 ) -> virtual_frame::VirtualCallSpec {
     let fn_def = runtime.program.functions.get(fn_name);
-    // Only merge `scope_vars` for partial `@virtual` functions that executed local
-    // prefix JS statements inside their own body before suspending; for ordinary
-    // `@virtual` declarations, `captured` already holds ONLY explicit `@uses` bindings.
-    if fn_def.is_some_and(|f| f.partial_virtual)
-        && let Some(vars) = scope_vars
-    {
-        for (k, v) in vars {
-            captured.entry(k.clone()).or_insert_with(|| v.clone());
-        }
-    }
     let param_names: Vec<String> = fn_def
         .map(|f| f.params.clone())
         .unwrap_or_else(|| (0..args.len()).map(|i| format!("arg{i}")).collect());
@@ -328,5 +383,111 @@ pub(super) fn build_virtual_spec(
         contract,
         params,
         captures: captured,
+        partial_locals: Vec::new(),
+    }
+}
+
+/// Build a `VirtualCallSpec` for a partial `@virtual` function whose JS prefix
+/// fell through to `ActionKind::Task`. Preserves strict Stack-Frame Isolation:
+/// only the function's own parameters, explicit `@uses` captures, and local
+/// variables declared inside the function body enter the isolated child frame
+/// (unrelated outer `executeTask()` bindings never leak).
+pub(super) fn build_virtual_spec_for_task(
+    runtime: &Runtime,
+    action_id: &str,
+    fn_name: &str,
+    description: &str,
+    input: Value,
+    scope_vars: Option<&BTreeMap<String, Value>>,
+) -> virtual_frame::VirtualCallSpec {
+    let fn_def = runtime.program.functions.get(fn_name);
+    let input_obj = input.as_object();
+
+    let mut params = Vec::new();
+    let mut param_display = Vec::new();
+    let mut seen_names = BTreeSet::new();
+    if let Some(f) = fn_def {
+        for p in &f.params {
+            if agent_program::libraries::identifier(p) {
+                let val = input_obj
+                    .and_then(|m| m.get(p))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                params.push((p.clone(), val));
+                param_display.push(p.clone());
+                seen_names.insert(p.clone());
+            }
+        }
+    } else if let Some(obj) = input_obj {
+        for (k, v) in obj {
+            if agent_program::libraries::identifier(k) {
+                params.push((k.clone(), v.clone()));
+                param_display.push(k.clone());
+                seen_names.insert(k.clone());
+            }
+        }
+    }
+
+    let mut captures = BTreeMap::new();
+    if let Some(f) = fn_def {
+        for u in &f.uses {
+            let val = input_obj
+                .and_then(|m| m.get(u))
+                .or_else(|| scope_vars.and_then(|sv| sv.get(u)))
+                .cloned()
+                .unwrap_or(Value::Null);
+            captures.insert(u.clone(), val);
+            seen_names.insert(u.clone());
+        }
+    }
+
+    let mut partial_locals = Vec::new();
+    if let (Some(f), Some(vars)) = (fn_def, scope_vars)
+        && f.partial_virtual
+    {
+        for local_name in f
+            .parameter_lexical
+            .iter()
+            .chain(f.lexical.iter())
+            .chain(f.vars.iter())
+        {
+            if !agent_program::libraries::identifier(local_name)
+                || !seen_names.insert(local_name.clone())
+            {
+                continue;
+            }
+            if let Some(val) = vars.get(local_name) {
+                partial_locals.push((local_name.clone(), val.clone()));
+            }
+        }
+    }
+
+    let async_prefix = if fn_def.is_some_and(|f| f.is_async) {
+        "async "
+    } else {
+        ""
+    };
+    let signature = format!(
+        "{async_prefix}function {fn_name}({})",
+        param_display.join(", ")
+    );
+    let contract = fn_def
+        .map(|f| f.description.trim().to_owned())
+        .filter(|d| !d.is_empty())
+        .or_else(|| {
+            let trimmed = description.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        })
+        .unwrap_or_else(|| {
+            format!("Complete `{fn_name}` and return a JSON object with a concise `summary` field.")
+        });
+    virtual_frame::VirtualCallSpec {
+        action_id: action_id.to_owned(),
+        fn_name: fn_name.to_owned(),
+        signature,
+        contract,
+        params,
+        captures,
+        partial_locals,
     }
 }

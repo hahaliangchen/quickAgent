@@ -16,6 +16,10 @@ use super::indexers::{
 use crate::agent_program::Runtime;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use swc_common::{FileName, SourceMap, sync::Lrc};
+use swc_ecma_ast as ast;
+use swc_ecma_parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer};
+use swc_ecma_visit::{Visit, VisitWith};
 
 /// Minimum length at which a duplicate inline binding in the same step folds
 /// into `(same as <earlierVar>)` to avoid wasting permanent trace tokens.
@@ -233,10 +237,12 @@ impl<'a> DisplayTracker<'a> {
 }
 
 pub(super) fn format_segment_feedback(
+    source: &str,
     runtime: &Runtime,
     pre_fingerprints: &BTreeMap<String, String>,
     console_logs: &[String],
     hints: &SegmentContextHints,
+    ignore_trailing_return: bool,
 ) -> Vec<String> {
     let mut receipts = Vec::new();
     let mut tracker = DisplayTracker::from_hints(hints);
@@ -261,30 +267,42 @@ pub(super) fn format_segment_feedback(
         }
     }
 
-    let current_fps = runtime.user_binding_fingerprints();
     let live_values = runtime.named_bindings();
-    let show_last_expr = runtime.segment_evaluated_expr() || runtime.segment_returned_explicitly();
+    let _ = pre_fingerprints;
 
-    let mut changed_names: Vec<String> = current_fps
-        .iter()
-        .filter(|(name, fp)| pre_fingerprints.get(*name) != Some(*fp))
-        .map(|(name, _)| name.clone())
-        .collect();
+    // Dataflow Sink rule:
+    // 1. Any binding consumed by a later statement in this step is an intermediate
+    //    value -> stays silent in live VM memory (zero context clutter).
+    // 2. Any binding declared/mutated in this step and NOT consumed later is a
+    //    dataflow sink -> display it.
+    // 3. All bare non-assignment query expressions (e.g. `ppF.slice(...); shellF.slice(...);`
+    //    or `({ a, b })`) are explicit query sinks -> display all of them.
+    let sink_names = dataflow_sink_bindings(source, ignore_trailing_return);
+    let expr_sinks = runtime.segment_expr_sinks();
 
-    if show_last_expr && live_values.contains_key("$_") && !changed_names.contains(&"$_".to_owned()) {
-        let suppress_dup = changed_names.len() == 1
-            && live_values.get("$_") == live_values.get(&changed_names[0]);
-        if !suppress_dup {
-            changed_names.push("$_".to_owned());
+    let mut items_to_display: Vec<(String, Value)> = Vec::new();
+    for name in sink_names {
+        if let Some(val) = live_values.get(&name) {
+            items_to_display.push((name, val.clone()));
         }
+    }
+
+    if expr_sinks.len() == 1 {
+        items_to_display.push(("$_".to_owned(), expr_sinks.into_iter().next().unwrap()));
+    } else if expr_sinks.len() > 1 {
+        for (idx, val) in expr_sinks.into_iter().enumerate() {
+            items_to_display.push((format!("$_{}", idx + 1), val));
+        }
+    } else if !ignore_trailing_return
+        && runtime.segment_returned_explicitly()
+        && let Some(val) = live_values.get("$_")
+    {
+        items_to_display.push(("$_".to_owned(), val.clone()));
     }
 
     let mut seen_inline: BTreeMap<String, String> = BTreeMap::new();
 
-    for name in changed_names {
-        let Some(value) = live_values.get(&name) else {
-            continue;
-        };
+    for (name, value) in &items_to_display {
         let canonical = canonical_inline_key(value);
         if let Some(key) = &canonical
             && let Some(orig) = seen_inline.get(key)
@@ -292,7 +310,7 @@ pub(super) fn format_segment_feedback(
             receipts.push(format!("// => {name} = (same as {orig})"));
             continue;
         }
-        let receipt = format_binding(&name, value, &mut tracker);
+        let receipt = format_binding(name, value, &mut tracker);
         if let Some(key) = canonical {
             seen_inline.entry(key).or_insert_with(|| name.clone());
         }
@@ -300,6 +318,369 @@ pub(super) fn format_segment_feedback(
     }
 
     receipts
+}
+
+/// Analyze top-level statement dataflow and return all top-level bindings declared
+/// or mutated in `source` that are NOT read/consumed by any later statement in the
+/// same segment (preserving order of their final definition/mutation).
+fn dataflow_sink_bindings(source: &str, ignore_trailing_return: bool) -> Vec<String> {
+    let map: Lrc<SourceMap> = Default::default();
+    let file = map.new_source_file(
+        FileName::Custom("segment.js".into()).into(),
+        source.to_owned(),
+    );
+    let mut parser = Parser::new_from(Lexer::new(
+        Syntax::Es(EsSyntax {
+            allow_return_outside_function: true,
+            ..Default::default()
+        }),
+        Default::default(),
+        StringInput::from(&*file),
+        None,
+    ));
+    let Ok(module) = parser.parse_module() else {
+        return Vec::new();
+    };
+    let mut stmts: Vec<&ast::Stmt> = module
+        .body
+        .iter()
+        .filter_map(|item| match item {
+            ast::ModuleItem::Stmt(stmt) if !matches!(stmt, ast::Stmt::Empty(_)) => Some(stmt),
+            _ => None,
+        })
+        .collect();
+    if ignore_trailing_return
+        && stmts
+            .last()
+            .is_some_and(|s| matches!(s, ast::Stmt::Return(_)))
+    {
+        stmts.pop();
+    }
+    if stmts.is_empty() {
+        return Vec::new();
+    }
+
+    // Per-statement: (defined/mutated top-level bindings, identifiers read in this statement).
+    let mut stmt_defs: Vec<Vec<String>> = Vec::with_capacity(stmts.len());
+    let mut stmt_reads: Vec<BTreeSet<String>> = Vec::with_capacity(stmts.len());
+
+    for stmt in &stmts {
+        let mut defs = Vec::new();
+        match stmt {
+            ast::Stmt::Decl(ast::Decl::Var(var_decl)) => {
+                for decl in &var_decl.decls {
+                    collect_pat_idents(&decl.name, &mut defs);
+                }
+            }
+            ast::Stmt::Decl(_) | ast::Stmt::Return(_) => {}
+            other => {
+                let mut collector = MutatedIdentCollector::default();
+                other.visit_with(&mut collector);
+                defs.extend(collector.names);
+            }
+        }
+        let mut reader = ReadIdentCollector::default();
+        stmt.visit_with(&mut reader);
+        stmt_defs.push(defs);
+        stmt_reads.push(reader.reads);
+    }
+
+    // Record the last statement index where each variable was defined/mutated.
+    let mut last_def_at: BTreeMap<String, usize> = BTreeMap::new();
+    let mut def_order: Vec<(String, usize)> = Vec::new();
+    for (idx, defs) in stmt_defs.iter().enumerate() {
+        for name in defs {
+            last_def_at.insert(name.clone(), idx);
+            def_order.push((name.clone(), idx));
+        }
+    }
+
+    // Suffix union of all identifiers read in statements strictly after `idx`.
+    let mut suffix_reads: Vec<BTreeSet<String>> = vec![BTreeSet::new(); stmts.len() + 1];
+    for idx in (0..stmts.len()).rev() {
+        let mut combined = suffix_reads[idx + 1].clone();
+        combined.extend(stmt_reads[idx].iter().cloned());
+        suffix_reads[idx] = combined;
+    }
+
+    let mut sinks = Vec::new();
+    let mut emitted = BTreeSet::new();
+    for (name, idx) in def_order {
+        if last_def_at.get(&name) != Some(&idx) {
+            continue;
+        }
+        let consumed_later = suffix_reads[idx + 1].contains(&name);
+        if !consumed_later && emitted.insert(name.clone()) {
+            sinks.push(name);
+        }
+    }
+    sinks
+}
+
+#[derive(Default)]
+struct ReadIdentCollector {
+    reads: BTreeSet<String>,
+    shadowed: Vec<BTreeSet<String>>,
+}
+
+impl ReadIdentCollector {
+    fn is_shadowed(&self, name: &str) -> bool {
+        self.shadowed.iter().any(|scope| scope.contains(name))
+    }
+
+    fn record_read(&mut self, name: &str) {
+        if !self.is_shadowed(name) {
+            self.reads.insert(name.to_owned());
+        }
+    }
+
+    fn visit_pat_expressions(&mut self, pat: &ast::Pat) {
+        match pat {
+            ast::Pat::Ident(_) => {}
+            ast::Pat::Array(arr) => {
+                for elem in arr.elems.iter().flatten() {
+                    self.visit_pat_expressions(elem);
+                }
+            }
+            ast::Pat::Object(obj) => {
+                for prop in &obj.props {
+                    match prop {
+                        ast::ObjectPatProp::KeyValue(kv) => {
+                            if let ast::PropName::Computed(c) = &kv.key {
+                                c.expr.visit_with(self);
+                            }
+                            self.visit_pat_expressions(&kv.value);
+                        }
+                        ast::ObjectPatProp::Assign(assign) => {
+                            if let Some(val) = &assign.value {
+                                val.visit_with(self);
+                            }
+                        }
+                        ast::ObjectPatProp::Rest(rest) => self.visit_pat_expressions(&rest.arg),
+                    }
+                }
+            }
+            ast::Pat::Rest(rest) => self.visit_pat_expressions(&rest.arg),
+            ast::Pat::Assign(assign) => {
+                self.visit_pat_expressions(&assign.left);
+                assign.right.visit_with(self);
+            }
+            ast::Pat::Expr(e) => e.visit_with(self),
+            ast::Pat::Invalid(_) => {}
+        }
+    }
+}
+
+impl Visit for ReadIdentCollector {
+    fn visit_ident(&mut self, node: &ast::Ident) {
+        self.record_read(node.sym.as_ref());
+    }
+
+    fn visit_member_prop(&mut self, node: &ast::MemberProp) {
+        if let ast::MemberProp::Computed(c) = node {
+            c.expr.visit_with(self);
+        }
+    }
+
+    fn visit_prop(&mut self, node: &ast::Prop) {
+        match node {
+            ast::Prop::Shorthand(ident) => self.record_read(ident.sym.as_ref()),
+            ast::Prop::KeyValue(kv) => {
+                if let ast::PropName::Computed(c) = &kv.key {
+                    c.expr.visit_with(self);
+                }
+                kv.value.visit_with(self);
+            }
+            ast::Prop::Assign(assign) => {
+                self.record_read(assign.key.sym.as_ref());
+                assign.value.visit_with(self);
+            }
+            ast::Prop::Getter(g) => {
+                if let ast::PropName::Computed(c) = &g.key {
+                    c.expr.visit_with(self);
+                }
+                if let Some(body) = &g.body {
+                    body.visit_with(self);
+                }
+            }
+            ast::Prop::Setter(s) => {
+                if let ast::PropName::Computed(c) = &s.key {
+                    c.expr.visit_with(self);
+                }
+                let mut params = Vec::new();
+                collect_pat_idents(&s.param, &mut params);
+                self.shadowed.push(params.into_iter().collect());
+                if let Some(body) = &s.body {
+                    body.visit_with(self);
+                }
+                self.shadowed.pop();
+            }
+            ast::Prop::Method(m) => {
+                if let ast::PropName::Computed(c) = &m.key {
+                    c.expr.visit_with(self);
+                }
+                m.function.visit_with(self);
+            }
+        }
+    }
+
+    fn visit_var_declarator(&mut self, node: &ast::VarDeclarator) {
+        self.visit_pat_expressions(&node.name);
+        if let Some(init) = &node.init {
+            init.visit_with(self);
+        }
+    }
+
+    fn visit_assign_expr(&mut self, node: &ast::AssignExpr) {
+        if node.op == ast::AssignOp::Assign
+            && matches!(
+                node.left,
+                ast::AssignTarget::Simple(ast::SimpleAssignTarget::Ident(_))
+            )
+        {
+            node.right.visit_with(self);
+            return;
+        }
+        node.left.visit_with(self);
+        node.right.visit_with(self);
+    }
+
+    fn visit_function(&mut self, node: &ast::Function) {
+        let mut param_names = Vec::new();
+        for p in &node.params {
+            self.visit_pat_expressions(&p.pat);
+            collect_pat_idents(&p.pat, &mut param_names);
+        }
+        self.shadowed.push(param_names.into_iter().collect());
+        if let Some(body) = &node.body {
+            body.visit_with(self);
+        }
+        self.shadowed.pop();
+    }
+
+    fn visit_arrow_expr(&mut self, node: &ast::ArrowExpr) {
+        let mut param_names = Vec::new();
+        for p in &node.params {
+            self.visit_pat_expressions(p);
+            collect_pat_idents(p, &mut param_names);
+        }
+        self.shadowed.push(param_names.into_iter().collect());
+        node.body.visit_with(self);
+        self.shadowed.pop();
+    }
+
+    fn visit_fn_decl(&mut self, node: &ast::FnDecl) {
+        node.function.visit_with(self);
+    }
+
+    fn visit_catch_clause(&mut self, node: &ast::CatchClause) {
+        let mut bound = Vec::new();
+        if let Some(pat) = &node.param {
+            collect_pat_idents(pat, &mut bound);
+        }
+        self.shadowed.push(bound.into_iter().collect());
+        node.body.visit_with(self);
+        self.shadowed.pop();
+    }
+}
+
+fn collect_pat_idents(pat: &ast::Pat, out: &mut Vec<String>) {
+    match pat {
+        ast::Pat::Ident(ident) => out.push(ident.id.sym.to_string()),
+        ast::Pat::Array(arr) => {
+            for elem in arr.elems.iter().flatten() {
+                collect_pat_idents(elem, out);
+            }
+        }
+        ast::Pat::Object(obj) => {
+            for prop in &obj.props {
+                match prop {
+                    ast::ObjectPatProp::KeyValue(kv) => collect_pat_idents(&kv.value, out),
+                    ast::ObjectPatProp::Assign(assign) => out.push(assign.key.sym.to_string()),
+                    ast::ObjectPatProp::Rest(rest) => collect_pat_idents(&rest.arg, out),
+                }
+            }
+        }
+        ast::Pat::Rest(rest) => collect_pat_idents(&rest.arg, out),
+        ast::Pat::Assign(assign) => collect_pat_idents(&assign.left, out),
+        _ => {}
+    }
+}
+
+fn root_member_ident(mut expr: &ast::Expr) -> Option<String> {
+    loop {
+        match expr {
+            ast::Expr::Ident(ident) => return Some(ident.sym.to_string()),
+            ast::Expr::Member(member) => expr = &member.obj,
+            ast::Expr::Paren(paren) => expr = &paren.expr,
+            _ => return None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct MutatedIdentCollector {
+    names: BTreeSet<String>,
+}
+
+impl Visit for MutatedIdentCollector {
+    fn visit_assign_expr(&mut self, node: &ast::AssignExpr) {
+        match &node.left {
+            ast::AssignTarget::Simple(ast::SimpleAssignTarget::Ident(ident)) => {
+                self.names.insert(ident.id.sym.to_string());
+            }
+            ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(member)) => {
+                if let Some(root) = root_member_ident(&member.obj) {
+                    self.names.insert(root);
+                }
+            }
+            ast::AssignTarget::Pat(pat) => {
+                let mut bound = Vec::new();
+                match pat {
+                    ast::AssignTargetPat::Array(a) => {
+                        for elem in a.elems.iter().flatten() {
+                            collect_pat_idents(elem, &mut bound);
+                        }
+                    }
+                    ast::AssignTargetPat::Object(o) => {
+                        for prop in &o.props {
+                            match prop {
+                                ast::ObjectPatProp::KeyValue(kv) => collect_pat_idents(&kv.value, &mut bound),
+                                ast::ObjectPatProp::Assign(assign) => bound.push(assign.key.sym.to_string()),
+                                ast::ObjectPatProp::Rest(rest) => collect_pat_idents(&rest.arg, &mut bound),
+                            }
+                        }
+                    }
+                    ast::AssignTargetPat::Invalid(_) => {}
+                }
+                self.names.extend(bound);
+            }
+            _ => {}
+        }
+        node.visit_children_with(self);
+    }
+
+    fn visit_update_expr(&mut self, node: &ast::UpdateExpr) {
+        if let Some(root) = root_member_ident(&node.arg) {
+            self.names.insert(root);
+        }
+        node.visit_children_with(self);
+    }
+
+    fn visit_call_expr(&mut self, node: &ast::CallExpr) {
+        if let ast::Callee::Expr(callee) = &node.callee
+            && let ast::Expr::Member(member) = &**callee
+            && let ast::MemberProp::Ident(prop) = &member.prop
+            && matches!(
+                prop.sym.as_ref(),
+                "push" | "pop" | "shift" | "unshift" | "splice" | "sort" | "reverse" | "set" | "add" | "delete" | "clear"
+            )
+            && let Some(root) = root_member_ident(&member.obj)
+        {
+            self.names.insert(root);
+        }
+        node.visit_children_with(self);
+    }
 }
 
 fn canonical_inline_key(value: &Value) -> Option<String> {

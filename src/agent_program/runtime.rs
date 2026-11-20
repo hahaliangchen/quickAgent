@@ -435,9 +435,19 @@ impl Runtime {
             return;
         };
         let is_context = exported.get("messages").is_some_and(Value::is_array);
+        let is_resource_handle = exported.get("__ref").is_some()
+            || (exported.get("path").and_then(Value::as_str).is_some()
+                && exported.get("content").and_then(Value::as_str).is_some())
+            || (exported.get("exit_code").is_some()
+                && (exported.get("stdout").is_some() || exported.get("stderr").is_some()));
+        let max_bytes = if is_resource_handle {
+            4 * 1024 * 1024
+        } else {
+            MAX_SCOPE_VALUE_BYTES
+        };
         if !is_context {
             let serialized = exported.to_string();
-            if serialized.len() > MAX_SCOPE_VALUE_BYTES {
+            if serialized.len() > max_bytes {
                 let preview: String = serialized.chars().take(512).collect();
                 scope.insert(
                     name.to_owned(),
@@ -926,6 +936,20 @@ impl Runtime {
                         .map(|native| (method.clone(), VmValue::Reference(native)))
                 })
                 .collect::<Result<Vec<_>>>()?;
+            if !methods.is_empty() && !properties.iter().any(|(existing, _)| existing == "promises") {
+                let async_properties = methods
+                    .iter()
+                    .map(|(method, tool)| {
+                        self.heap
+                            .native(&format!("tool:async-tool:{tool}"))
+                            .map(|native| (method.clone(), VmValue::Reference(native)))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let promises_obj = self
+                    .heap
+                    .allocate(super::heap::HeapNode::Object(async_properties))?;
+                properties.push(("promises".to_owned(), VmValue::Reference(promises_obj)));
+            }
             if library == "host" {
                 for js_method in ["context", "tools"] {
                     if !properties.iter().any(|(existing, _)| existing == js_method) {
@@ -1011,6 +1035,8 @@ impl Runtime {
         let _ = self.heap.declare_segment_binding(environment, "$_", false)?;
         self.heap.define_binding(environment, "\0explicit_return", VmValue::Boolean(false))?;
         self.heap.define_binding(environment, "\0has_last_expr", VmValue::Boolean(false))?;
+        let sinks_arr = self.heap.allocate(super::heap::HeapNode::Array(Vec::new()))?;
+        self.heap.define_binding(environment, "\0expr_sinks", VmValue::Reference(sinks_arr))?;
 
         // Allocate closures only for functions newly declared in this segment so
         // existing closures keep referential identity (`fn === fn`).
@@ -1023,7 +1049,10 @@ impl Runtime {
             self.builtin_namespaces.remove(&id);
         }
         for name in function.vars.iter().chain(function.lexical.iter()) {
-            if !matches!(name.as_str(), "$_" | "\0explicit_return" | "\0has_last_expr") {
+            if !matches!(
+                name.as_str(),
+                "$_" | "\0explicit_return" | "\0has_last_expr" | "\0expr_sinks"
+            ) {
                 self.builtin_namespaces.remove(name);
             }
         }
@@ -1104,6 +1133,26 @@ impl Runtime {
         self.module_env
             .and_then(|env| self.heap.lookup_binding(env, "\0has_last_expr").ok())
             == Some(VmValue::Boolean(true))
+    }
+
+    /// Return values of all top-level bare query expressions evaluated in the
+    /// latest segment (e.g. `ppF.slice(280,305); shellF.slice(780,825);`),
+    /// omitting `undefined` results.
+    pub fn segment_expr_sinks(&self) -> Vec<Value> {
+        let Some(env) = self.module_env else {
+            return Vec::new();
+        };
+        let Ok(VmValue::Reference(id)) = self.heap.lookup_binding(env, "\0expr_sinks") else {
+            return Vec::new();
+        };
+        let Ok(super::heap::HeapNode::Array(items)) = self.heap.get(id) else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter(|v| !self.heap.json_absent(v))
+            .filter_map(|v| self.heap.to_json(v).ok())
+            .collect()
     }
 
     fn is_user_visible_binding(&self, environment: HeapId, name: &str, value: &VmValue) -> bool {
@@ -2604,7 +2653,22 @@ impl Runtime {
                     continue;
                 }
                 if let Some(pending) = self.async_actions.pop_front() {
-                    let read = |action: &Action| matches!(&action.kind, ActionKind::Tool { name, .. } if matches!(name.as_str(), "read_file" | "read_file_lines" | "read_file_chunk" | "search_text" | "list_dir"));
+                    let read = |action: &Action| matches!(
+                        &action.kind,
+                        ActionKind::Tool { name, .. }
+                            if matches!(
+                                name.as_str(),
+                                "read_file"
+                                    | "read_file_lines"
+                                    | "read_file_chunk"
+                                    | "search_text"
+                                    | "list_dir"
+                                    | "git_status"
+                                    | "git_diff"
+                                    | "git_log"
+                                    | "run_readonly_command"
+                            )
+                    );
                     if read(&pending.action) && self.async_actions.front().is_some_and(|item| read(&item.action)) {
                         let at = pending.action.at.clone();
                         let mut batch = vec![pending];

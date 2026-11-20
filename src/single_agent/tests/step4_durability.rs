@@ -4,7 +4,10 @@
 //! 3. `host.ask_user({ question })` graceful turn handoff (`NEEDS_USER`)
 //! 4. `host_folder` turn `.js` archival + `crate::rewind::rewind` round-trip verification
 
-use super::{TestWorkspace, assistant_messages, completion, extract_asset_id, init_task_row, run_js};
+use super::{
+    TestWorkspace, all_messages_text, assert_valid_tool_pairing, assistant_messages, completion,
+    extract_asset_id, init_task_row, last_tool_output, run_js,
+};
 use crate::agent_service::{self, AgentServiceState};
 use crate::single_agent::{host_folder, run_task};
 use axum::{Json, Router, routing::post};
@@ -46,11 +49,11 @@ async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
                 Json(match idx {
                     // Turn 1, step 1: read > 28KB file
                     0 => run_js("const big = io.read({ path: \"src/huge.rs\" });"),
-                    // Turn 1, step 2: verify `asset: asset-...` is recorded in permanent `// =>`, then finish Turn 1 (destroys VM!)
+                    // Turn 1, step 2: verify `asset: asset-...` is recorded in tool output, then finish Turn 1 (destroys VM!)
                     1 => {
-                        let user1 = body["messages"][1]["content"].as_str().unwrap();
-                        let aid = extract_asset_id(user1).unwrap_or_else(|| {
-                            panic!("expected `asset: asset-...` in Turn 1 permanent trace: {user1}")
+                        let tool1 = last_tool_output(&body);
+                        let aid = extract_asset_id(tool1).unwrap_or_else(|| {
+                            panic!("expected `asset: asset-...` in Turn 1 tool output: {tool1}")
                         });
                         assert!(aid.starts_with("asset-"), "unexpected asset id: {aid}");
                         *asset_ref.lock().unwrap() = Some(aid);
@@ -58,13 +61,15 @@ async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
                     }
                     // Turn 2, step 1 (brand new VM!): read back from durable asset store via `session.read_asset`!
                     2 => {
+                        assert_valid_tool_pairing(&body);
                         let msgs = body["messages"].as_array().unwrap();
-                        assert_eq!(msgs.len(), 4, "[system, user#1, assistant#1, user#2]");
-                        let frozen_user1 = msgs[1]["content"].as_str().unwrap();
+                        // [system, user#1, asst#1, tool#1, final_asst#1, user#2]
+                        assert_eq!(msgs.len(), 6, "expected full multi-turn Turn 1 + Turn 2 user: {msgs:?}");
+                        let all_text = all_messages_text(&body);
                         let aid = asset_ref.lock().unwrap().clone().unwrap();
                         assert!(
-                            frozen_user1.contains(&format!("asset: {aid}")),
-                            "frozen Turn 1 trace must preserve asset_id for cross-turn recall: {frozen_user1}"
+                            all_text.contains(&format!("asset: {aid}")),
+                            "Turn 1 history must preserve asset_id for cross-turn recall: {all_text}"
                         );
                         run_js(&format!(
                             "const page = session.read_asset({{ asset_id: {aid:?}, char_offset: 0, max_chars: 600 }});\n\
@@ -73,10 +78,10 @@ async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
                     }
                     // Turn 2, step 2: verify recovered flag is true and finish!
                     3 => {
-                        let user2 = body["messages"][3]["content"].as_str().unwrap();
+                        let tool2 = last_tool_output(&body);
                         assert!(
-                            user2.contains("recovered = true"),
-                            "session.read_asset must recover archived Turn 1 payload across turns: {user2}"
+                            tool2.contains("recovered = true"),
+                            "session.read_asset must recover archived Turn 1 payload across turns: {tool2}"
                         );
                         completion("跨轮通过 session.read_asset 成功取回归档内容。")
                     }
@@ -174,7 +179,7 @@ async fn step4_cross_session_code_reuse_require_preset_and_project_skill_modules
                         && sys.contains("require(\"audit-kit\")"),
                     "system prompt must advertise built-in preset & project skill libraries: {sys}"
                 );
-                let user = body["messages"][1]["content"].as_str().unwrap();
+                let user = last_tool_output(&body);
                 Json(match idx {
                     0 => run_js(
                         "const bf = require(\"batch-files\");\n\
@@ -260,18 +265,20 @@ async fn step4_host_ask_user_pauses_turn_gracefully_and_resumes_on_next_turn() {
                     ),
                     // Turn 2: user replied "staging", verify Turn 1 trace paused cleanly, finish Turn 2!
                     1 => {
+                        assert_valid_tool_pairing(&body);
                         let msgs = body["messages"].as_array().unwrap();
-                        assert_eq!(msgs.len(), 4);
+                        // [system, user#1, asst#1, tool#1(paused), final_asst#1(question), user#2]
+                        assert_eq!(msgs.len(), 6, "expected Turn 1 pause + Turn 2 user: {msgs:?}");
                         assert!(
-                            msgs[1]["content"]
+                            msgs[3]["content"]
                                 .as_str()
                                 .unwrap()
                                 .contains("[paused for user input via host.ask_user]"),
-                            "Turn 1 trace must record clean ask_user pause: {}",
-                            msgs[1]["content"]
+                            "Turn 1 tool response must record clean ask_user pause: {}",
+                            msgs[3]["content"]
                         );
                         assert_eq!(
-                            msgs[2]["content"].as_str().unwrap(),
+                            msgs[4]["content"].as_str().unwrap(),
                             "请确认要部署到 staging 还是 prod？"
                         );
                         completion("收到，已按你的确认选择 `staging` 目标。")
@@ -358,16 +365,18 @@ async fn step4_host_folder_turn_js_archive_and_rewind_roundtrip() {
                     3 => completion("Turn 2 wrote v2."),
                     // Turn 2 (after rewind to before turn 2): verify Turn 2 was dropped and file is back to v1!
                     4 => {
+                        assert_valid_tool_pairing(&body);
                         let msgs = body["messages"].as_array().unwrap();
-                        assert_eq!(msgs.len(), 4, "rewound state must have only Turn 1 + new Turn 2");
-                        assert_eq!(msgs[2]["content"].as_str().unwrap(), "Turn 1 wrote v1.");
+                        // [system, user#1, asst#1, tool#1, final_asst#1, user#2]
+                        assert_eq!(msgs.len(), 6, "rewound state must have only Turn 1 + new Turn 2: {msgs:?}");
+                        assert_eq!(msgs[4]["content"].as_str().unwrap(), "Turn 1 wrote v1.");
                         run_js("const cur = io.read({ path: \"state.txt\" }).content;")
                     }
                     5 => {
-                        let user2 = body["messages"][3]["content"].as_str().unwrap();
+                        let tool2 = last_tool_output(&body);
                         assert!(
-                            user2.contains("cur = \"v1\""),
-                            "rewound disk file must be back at v1: {user2}"
+                            tool2.contains("cur = \"v1\""),
+                            "rewound disk file must be back at v1: {tool2}"
                         );
                         completion("回退后重新执行 Turn 2 成功，确认文件已恢复为 v1。")
                     }

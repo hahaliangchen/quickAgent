@@ -3,11 +3,18 @@
 //! and First-Trap Truncation termination rule.
 
 use super::{
-    TestWorkspace, assert_single_run_js_tool, assistant_messages, completion, init_task_row,
-    run_js, run_js_with_note, spawn_mock_provider, split_stable_prefix, tool_call_count,
+    TestWorkspace, assert_prefix_immutable, assert_single_run_js_tool, assert_valid_tool_pairing,
+    assistant_messages, completion, init_task_row, last_tool_output, run_js, run_js_with_note,
+    spawn_mock_provider, tool_call_count,
 };
+use crate::agent_service::{self, AgentProviderRoute};
 use crate::single_agent::run_task;
-use serde_json::json;
+use axum::{Router, body::Body, http::header, response::Response, routing::post};
+use serde_json::{Value, json};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -56,32 +63,38 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
             )
         }
         1 => {
-            // 2. Verify <= 64KB file prints inline permanently with line numbers (NO EPHEMERAL_PEEK!).
-            let user_msg = body["messages"][1]["content"].as_str().unwrap();
+            // 2. Verify native multi-turn layout: [system, user, assistant(run_js), tool(output)]
+            assert_valid_tool_pairing(&body);
+            let msgs = body["messages"].as_array().unwrap();
+            assert_eq!(msgs.len(), 4, "[system, user, assistant#1, tool#1]: {msgs:?}");
+            assert_eq!(msgs[1]["role"], "user");
+            assert_eq!(msgs[2]["role"], "assistant");
+            assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "run_js");
+            assert_eq!(msgs[3]["role"], "tool");
+            let tool_out = last_tool_output(&body);
             assert!(
-                !user_msg.contains("EPHEMERAL_PEEK"),
-                "EPHEMERAL_PEEK must be removed: {user_msg}"
+                !tool_out.contains("EPHEMERAL_PEEK"),
+                "EPHEMERAL_PEEK must be removed: {tool_out}"
             );
             assert!(
-                user_msg.contains("authFile (File \"src/auth.rs\", Ref#1")
-                    && user_msg.contains("61: pub fn verify_token")
-                    && user_msg.contains("63:     decode_without_verify(token).is_ok()"),
-                "<= 64KB file must appear permanently inline with line numbers: {user_msg}"
+                tool_out.contains("authFile (File \"src/auth.rs\", Ref#1")
+                    && tool_out.contains("61: pub fn verify_token")
+                    && tool_out.contains("63:     decode_without_verify(token).is_ok()"),
+                "<= 64KB file must appear permanently inline with line numbers: {tool_out}"
             );
 
             // Model projects ONLY lines 61..64 via JS from live heap (0 disk re-reads!)
             run_js("const verifyFn = authFile.content.split(\"\\n\").slice(60, 64).join(\"\\n\");")
         }
         2 => {
-            // 3. Verify BOTH earlier file and new slice remain permanently visible (zero amnesia, pure Append-Only!)
-            let user_msg = body["messages"][1]["content"].as_str().unwrap();
+            // 3. Verify BOTH earlier tool output and new slice remain visible in multi-turn history!
+            assert_valid_tool_pairing(&body);
+            let msgs = body["messages"].as_array().unwrap();
+            assert_eq!(msgs.len(), 6, "[system, user, asst#1, tool#1, asst#2, tool#2]");
+            let tool2 = last_tool_output(&body);
             assert!(
-                !user_msg.contains("EPHEMERAL_PEEK"),
-                "EPHEMERAL_PEEK must not appear: {user_msg}"
-            );
-            assert!(
-                user_msg.contains("verifyFn:") && user_msg.contains("decode_without_verify(token).is_ok()"),
-                "pinned 4-line slice must live permanently in `// =>`: {user_msg}"
+                tool2.contains("verifyFn:") && tool2.contains("decode_without_verify(token).is_ok()"),
+                "pinned 4-line slice must appear in tool#2: {tool2}"
             );
 
             // Emit final Markdown reply directly (no `run_js` call, no `return <<<` needed!)
@@ -112,16 +125,12 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
     assert_eq!(reqs.len(), 3);
 
     // Verify 100% byte-exact KV-cache prefix growth across all 3 requests!
-    let sys0 = reqs[0]["messages"][0]["content"].as_str().unwrap();
-    for (i, req) in reqs.iter().enumerate() {
-        assert_eq!(req["messages"][0]["content"].as_str().unwrap(), sys0, "system prompt must be 100% static at req #{i}");
+    for req in reqs.iter() {
         assert_single_run_js_tool(req);
+        assert_valid_tool_pairing(req);
     }
-    let p0 = split_stable_prefix(reqs[0]["messages"][1]["content"].as_str().unwrap());
-    let p1 = split_stable_prefix(reqs[1]["messages"][1]["content"].as_str().unwrap());
-    let p2 = split_stable_prefix(reqs[2]["messages"][1]["content"].as_str().unwrap());
-    assert!(p1.starts_with(p0), "step 1 stable prefix must strictly extend step 0");
-    assert!(p2.starts_with(p1), "step 2 stable prefix must strictly extend step 1");
+    assert_prefix_immutable(&reqs[0], &reqs[1]);
+    assert_prefix_immutable(&reqs[1], &reqs[2]);
 
     // `read_file` called exactly ONCE (step 1 sliced from live JS heap memory!)
     assert_eq!(tool_call_count(ws.path(), "step1-analyze", "read_file"), 1);
@@ -147,28 +156,30 @@ async fn step1_anti_cheating_slice_lock_and_per_turn_fresh_vm() {
         0 => run_js("const f = io.read({ path: \"big.txt\" });"),
         // Turn 1, step 2: try to dump > 64KB slice -> must stay capped (> 64KB not inlined)
         1 => run_js("const cheatAll = f.content.slice(0, 68000);"),
-        // Turn 1, step 3: verify 64KB cap kept >64KB slice out of permanent inline, then finish via native JS `return`!
+        // Turn 1, step 3: verify 64KB cap kept >64KB slice out of tool output, then finish via native JS `return`!
         2 => {
-            let user_msg = body["messages"][1]["content"].as_str().unwrap();
-            let stable = split_stable_prefix(user_msg);
+            let tool_out = last_tool_output(&body);
             assert!(
-                stable.contains("> 64KB not inlined"),
-                "64KB cap must prevent >64KB slice from dumping verbatim into permanent trace: {stable}"
+                tool_out.contains("> 64KB not inlined"),
+                "64KB cap must prevent >64KB slice from dumping verbatim into tool output: {tool_out}"
             );
             run_js("return \"Turn 1 done cleanly.\";")
         }
         // Turn 2, step 1: try referencing Turn 1's `f` -> MUST fail compile (fresh VM!)
         3 => {
+            assert_valid_tool_pairing(&body);
             let msgs = body["messages"].as_array().unwrap();
-            assert_eq!(msgs.len(), 4, "[system, user#1, assistant#1, user#2]");
-            assert_eq!(msgs[2], json!({"role": "assistant", "content": "Turn 1 done cleanly."}));
-            assert!(!msgs[1]["content"].as_str().unwrap().contains("EPHEMERAL_PEEK"));
+            // [system, user#1, asst1, tool1, asst2, tool2, asst3, tool3, final_asst#1, user#2]
+            assert_eq!(msgs.len(), 10, "expected full multi-turn Turn 1 + Turn 2 user: {msgs:?}");
+            assert_eq!(msgs[8], json!({"role": "assistant", "content": "Turn 1 done cleanly."}));
+            assert_eq!(msgs[9], json!({"role": "user", "content": "Start fresh turn 2"}));
             run_js("const leaked = f.content;")
         }
-        // Turn 2, step 2: verify compile error reported in EPHEMERAL_PEEK, redeclare `const f` cleanly!
+        // Turn 2, step 2: verify compile error returned as matching tool message, redeclare `const f` cleanly!
         4 => {
-            let user2 = body["messages"][3]["content"].as_str().unwrap();
-            assert!(user2.contains("COMPILE_ERROR"), "Turn 2 must reject Turn 1 variable: {user2}");
+            assert_valid_tool_pairing(&body);
+            let tool_out = last_tool_output(&body);
+            assert!(tool_out.contains("COMPILE_ERROR"), "Turn 2 must reject Turn 1 variable: {tool_out}");
             run_js("const f = \"fresh-turn-2\";\nreturn `Rebound cleanly: ${f}`;")
         }
         other => panic!("unexpected round {other}"),
@@ -204,10 +215,10 @@ async fn step1_anti_cheating_slice_lock_and_per_turn_fresh_vm() {
 
     let reqs = captured.lock().unwrap();
     assert_eq!(reqs.len(), 5);
-    // Cross-turn KV cache: Turn 2's user#1 must be byte-identical to Turn 1's final stable prefix!
-    let t1_final_stable = split_stable_prefix(reqs[2]["messages"][1]["content"].as_str().unwrap());
-    let t2_user1 = reqs[3]["messages"][1]["content"].as_str().unwrap();
-    assert!(t2_user1.starts_with(t1_final_stable));
+    // Cross-step & cross-turn KV cache: every request strictly extends the exact prior messages!
+    for pair in reqs.windows(2) {
+        assert_prefix_immutable(&pair[0], &pair[1]);
+    }
 
     let replies = assistant_messages(ws.path(), "step1-lock");
     assert_eq!(replies, vec!["Turn 1 done cleanly.", "Rebound cleanly: fresh-turn-2"]);
@@ -229,14 +240,14 @@ async fn step1_termination_rule_external_tools_continue_pure_memory_projection_f
         // Round 1: pure in-memory JS slicing (`external_tool_calls == 0`) + explicit `return`
         // Host MUST execute slice into permanent `// =>` AND immediately finish the turn!
         1 => {
-            let user_msg = body["messages"][1]["content"].as_str().unwrap();
+            let tool_out = last_tool_output(&body);
             assert!(
-                user_msg.contains("unsafe_call()"),
-                "round 1 must see real file content from round 0: {user_msg}"
+                tool_out.contains("unsafe_call()"),
+                "round 1 must see real file content from round 0: {tool_out}"
             );
             assert!(
-                user_msg.contains("inspect the real output below before returning"),
-                "host note must explain discarded premature return: {user_msg}"
+                tool_out.contains("inspect the real output below before returning"),
+                "host note must explain discarded premature return: {tool_out}"
             );
             run_js(
                 "const pinned = f.content.trim();\nreturn \"Verified: `sample.rs` calls `unsafe_call()`.\";",
@@ -264,4 +275,239 @@ async fn step1_termination_rule_external_tools_continue_pure_memory_projection_f
     assert_eq!(tool_call_count(ws.path(), "step1-term", "read_file"), 1);
     let replies = assistant_messages(ws.path(), "step1-term");
     assert_eq!(replies, vec!["Verified: `sample.rs` calls `unsafe_call()`."]);
+}
+
+#[tokio::test]
+async fn step1_final_statement_only_display_rule() {
+    let ws = TestWorkspace::new("cac-v2-step1-final-only");
+    std::fs::write(ws.path().join("a.txt"), "ALPHA_SINGLE_STMT\n").unwrap();
+    std::fs::write(
+        ws.path().join("b.txt"),
+        "INTERMEDIATE_LINE_1_SHOULD_STAY_SILENT\nPICKED_LINE_2_FINAL\n",
+    )
+    .unwrap();
+    init_task_row(ws.path(), "step1-final");
+
+    let (state, captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
+        // Step 0: single statement -> displays `text`!
+        0 => run_js("const text = io.read({ path: \"a.txt\" });"),
+        // Step 1: multi-line statements -> intermediate `raw` stays silent in VM, ONLY final `picked` displays!
+        1 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("ALPHA_SINGLE_STMT"),
+                "single-statement step must display its variable: {tool_out}"
+            );
+            run_js(
+                "const raw = io.read({ path: \"b.txt\" });\n\
+                 const picked = raw.slice(2, 2);",
+            )
+        }
+        // Step 2: multi-source consumed by final expression -> ONLY `$_` displays (`n1`/`n2` silent)!
+        2 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("PICKED_LINE_2_FINAL") && !tool_out.contains("INTERMEDIATE_LINE_1_SHOULD_STAY_SILENT"),
+                "derived pipeline must show ONLY sink `picked` and suppress consumed `raw`: {tool_out}"
+            );
+            run_js(
+                "const n1 = \"SILENT_A\"; const n2 = \"SILENT_B\"; ({ finalVal: n1 + \"+\" + n2 })",
+            )
+        }
+        // Step 3: two independent unconsumed bindings -> BOTH display!
+        3 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("SILENT_A+SILENT_B")
+                    && !tool_out.contains("// => n1")
+                    && !tool_out.contains("// => n2"),
+                "consumed intermediates must stay silent when folded into final expr: {tool_out}"
+            );
+            run_js(
+                "const fromA = text.head(1);\n\
+                 const fromRaw = raw.head(1);",
+            )
+        }
+        // Step 4: multiple bare query expressions (e.g. `a.slice(...); b.slice(...)`) -> BOTH display!
+        4 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("fromA =")
+                    && tool_out.contains("ALPHA_SINGLE_STMT")
+                    && tool_out.contains("fromRaw =")
+                    && tool_out.contains("INTERMEDIATE_LINE_1_SHOULD_STAY_SILENT"),
+                "independent unconsumed bindings must BOTH display and silent `raw` must stay live: {tool_out}"
+            );
+            run_js("text.head(1); raw.slice(2, 2);")
+        }
+        // Step 5: `console.log(hits)` consumes `hits` -> ONLY console shows, no duplicate `// => hits`!
+        5 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("$_1 =")
+                    && tool_out.contains("ALPHA_SINGLE_STMT")
+                    && tool_out.contains("$_2 =")
+                    && tool_out.contains("PICKED_LINE_2_FINAL"),
+                "multiple bare query expressions must ALL display ($_1, $_2): {tool_out}"
+            );
+            run_js("const logged = raw.slice(1, 1); console.log(\"LOG:\" + logged);")
+        }
+        6 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("LOG:1: INTERMEDIATE_LINE_1_SHOULD_STAY_SILENT")
+                    && !tool_out.contains("// => logged"),
+                "variable consumed by console.log must NOT duplicate outside console: {tool_out}"
+            );
+            completion("Dataflow Sink 汇节点展示规则全部验证通过。")
+        }
+        other => panic!("unexpected round {other}"),
+    })
+    .await;
+
+    run_task(
+        state,
+        "step1-final".into(),
+        "fake".into(),
+        "Test dataflow sink display".into(),
+        10,
+        CancellationToken::new(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    let reqs = captured.lock().unwrap();
+    for pair in reqs.windows(2) {
+        assert_prefix_immutable(&pair[0], &pair[1]);
+    }
+    if std::env::var_os("PRINT_TEST_CONTEXT").is_some() {
+        eprintln!(
+            "=== CHAT COMPLETIONS MULTI-TURN CONTEXT (final step) ===\n{}",
+            serde_json::to_string_pretty(reqs.last().unwrap()).unwrap()
+        );
+    }
+
+    assert_eq!(
+        assistant_messages(ws.path(), "step1-final"),
+        vec!["Dataflow Sink 汇节点展示规则全部验证通过。"]
+    );
+}
+
+#[tokio::test]
+async fn step1_responses_api_replays_encrypted_reasoning_items() {
+    let ws = TestWorkspace::new("cac-v2-step1-responses");
+    std::fs::write(ws.path().join("hello.txt"), "RESPONSES_OK_LINE_1\n").unwrap();
+    init_task_row(ws.path(), "step1-resp");
+
+    let seq = Arc::new(AtomicUsize::new(0));
+    let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let cap_ref = captured.clone();
+
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |axum::Json(body): axum::Json<Value>| {
+            let idx = seq.fetch_add(1, Ordering::SeqCst);
+            cap_ref.lock().unwrap().push(body);
+            async move {
+                let sse = match idx {
+                    0 => concat!(
+                        "event: response.output_item.done\n",
+                        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_step1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Inspect hello.txt\"}],\"encrypted_content\":\"ENC_BLOB_STEP_1\"}}\n\n",
+                        "event: response.output_item.done\n",
+                        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_resp_1\",\"name\":\"run_js\",\"arguments\":\"{\\\"code\\\":\\\"const f = io.read({ path: \\\\\\\"hello.txt\\\\\\\" });\\\"}\"}}\n\n",
+                        "event: response.completed\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1000,\"output_tokens\":40,\"total_tokens\":1040}}}\n\n",
+                    ),
+                    1 => concat!(
+                        "event: response.output_item.done\n",
+                        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_step2\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Done\"}],\"encrypted_content\":\"ENC_BLOB_STEP_2\"}}\n\n",
+                        "event: response.output_text.delta\n",
+                        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Responses API 加密推理链回放验证成功。\"}\n\n",
+                        "event: response.completed\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":20,\"total_tokens\":1220}}}\n\n",
+                    ),
+                    other => panic!("unexpected responses round {other}"),
+                };
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from(sse))
+                    .unwrap()
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut state = agent_service::tests::test_state(ws.path(), addr);
+    state.provider_url = format!("http://{addr}/v1");
+    state.provider_routes.insert(
+        state.provider_name.clone(),
+        AgentProviderRoute {
+            prefix_system_messages: false,
+            responses: true,
+            messages: false,
+            messages_capabilities: Default::default(),
+            url: state.provider_url.clone(),
+            api_key: String::new(),
+            models: Default::default(),
+            max_output_tokens: Default::default(),
+            context_windows: Default::default(),
+        },
+    );
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    run_task(
+        state,
+        "step1-resp".into(),
+        "fake".into(),
+        "用 Responses API 读取 hello.txt".into(),
+        5,
+        CancellationToken::new(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    let reqs = captured.lock().unwrap();
+    assert_eq!(reqs.len(), 2);
+    let r1 = &reqs[1];
+    assert_eq!(r1["include"], json!(["reasoning.encrypted_content"]));
+    assert_eq!(r1["store"], json!(false));
+    let input = r1["input"].as_array().unwrap();
+    assert_eq!(input.len(), 4, "[user, reasoning(encrypted), function_call, function_call_output]: {input:?}");
+    assert_eq!(input[0]["role"], "user");
+    assert_eq!(input[1]["type"], "reasoning");
+    assert_eq!(input[1]["encrypted_content"], "ENC_BLOB_STEP_1");
+    assert_eq!(input[2]["type"], "function_call");
+    assert_eq!(input[2]["call_id"], "call_resp_1");
+    assert_eq!(input[2]["name"], "run_js");
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert_eq!(input[3]["call_id"], "call_resp_1");
+    assert!(
+        input[3]["output"].as_str().unwrap().contains("RESPONSES_OK_LINE_1"),
+        "function_call_output must contain file read output: {}",
+        input[3]
+    );
+    // Strict byte-identical prefix: input[0] of req1 == input[0] of req0!
+    assert_eq!(reqs[0]["input"][0], r1["input"][0]);
+    assert_eq!(reqs[0]["instructions"], r1["instructions"]);
+
+    if std::env::var_os("PRINT_TEST_CONTEXT").is_some() {
+        eprintln!(
+            "=== RESPONSES API MULTI-TURN CONTEXT (step 2 with encrypted reasoning) ===\n{}",
+            serde_json::to_string_pretty(r1).unwrap()
+        );
+    }
+
+    assert_eq!(
+        assistant_messages(ws.path(), "step1-resp"),
+        vec!["Responses API 加密推理链回放验证成功。"]
+    );
 }

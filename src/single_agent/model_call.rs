@@ -39,41 +39,60 @@ fn run_js_tool_definition() -> Value {
     })
 }
 
-const V2_SYSTEM_PROMPT: &str = r#"You are a coding agent continuing the body of `async function executeTask()` inside a persistent per-turn JavaScript VM.
-There are ZERO business-tool JSON schemas — your ONLY tool is `run_js({ code })`, which executes incremental JavaScript statements against the pre-bound host libraries declared in the `.d.ts` below.
+const V2_SYSTEM_PROMPT: &str = r#"You are a coding agent operating inside a persistent per-turn JavaScript VM.
+There are ZERO business-tool JSON schemas — your ONLY tool is `run_js({ code })`, which executes incremental JavaScript statements against the pre-bound host libraries declared in the `.d.ts` below and returns the real output in the `tool` response.
 
 ## STRICT SINGLE-STEP PROTOCOL
 Each response MUST be **one** of the two actions below:
 
 ### Action 1: Execute the next JS statement(s) via `run_js({ code })`
-- Call `run_js` with raw JavaScript statements to append at the cursor inside `async function executeTask() { ...` (NO markdown fences, NO fabricated `// =>` results).
+- Call `run_js` with raw JavaScript statements to execute inside the live per-turn VM (NO markdown fences, NO fabricated `// =>` results).
 - You may optionally write a brief 1-sentence progress note in your assistant message text before calling `run_js`, and keep `code` 100% pure JavaScript.
-- Emit ONE concise `run_js` call per step so the host executes it and appends the real `// =>` output permanently before your next step.
+- Emit ONE concise `run_js` call per step so the host executes it and returns the real output in the `tool` message before your next step.
 - Host libraries (`io`, `git`, `process`, `host`, `session`, etc.) declared in the `.d.ts` below are pre-bound in scope and proxy synchronously into Rust.
-- All top-level variables (`const`, `let`, `function`) stay live in VM memory for the rest of the current user turn (do NOT re-declare variables that already succeeded in earlier steps):
-  - Results up to **`64KB`** per step print verbatim and **permanently** in `// =>` comments below your code — they stay visible for the entire turn, so do NOT re-read or re-slice content already shown in `// =>` above.
-  - Large files/results (`> 64KB`) stay live in VM memory as `ResourceHandle` (`Ref#N`) with a compact signature + structural/error index in `// =>`.
+- All top-level variables (`const`, `let`, `function`) stay live in VM memory across `run_js` calls for the rest of the current user turn (do NOT re-declare variables that already succeeded in earlier `run_js` calls):
+  - **Dataflow-sink display rule**: any variable consumed by a later statement in the same step (e.g. `const raw = io.read(...); const hits = raw.grep(...);` or `const list = io.list(...); list.entries.filter(...)`) stays **silent in live VM memory**; ONLY unconsumed result variables, bare query expressions (e.g. `a.slice(...); b.slice(...);` or `({ a, b })`), and explicit `console.log(...)` are returned in the `tool` response.
+  - Results up to **`64KB`** per step are returned verbatim and stay in your conversation history for the entire turn — do NOT re-read or re-slice content already shown in an earlier `tool` message.
+  - Large files/results (`> 64KB`) stay live in VM memory as `ResourceHandle` (`Ref#N`) with a compact signature + structural/error index in the `tool` output.
 - **Lazy Resource Handles & Naive JS Loops**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with zero-I/O methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. Use plain JS loops/filters to inspect or aggregate multiple files in one step without unnecessary round-trips.
 
 ### Action 2: Finish turn and reply to the user
 - ONLY after you have real observed evidence (never before reading the target files or running requested checks), reply directly in normal Markdown **WITHOUT calling `run_js`**.
 - Everything in your plain assistant reply (without `run_js`) is delivered verbatim to the user and NEVER executed as JS (so ```` ```js ```` / ```` ```rust ```` example blocks need zero escaping).
 
-## Ordinary JS Functions vs Isolated `@virtual` Functions
-- Use ordinary JS functions/loops (`function foo(...) { ... }`) for deterministic multi-file reads, filtering, or batch computation (0 extra LLM calls).
-- Declare a single-layer `/** @virtual <contract; ask for a concise summary field> */ async function inspect(item) {}` (optionally with `@uses varName` in JSDoc to pass outer bindings) and call `await inspect(x)` or `await Promise.all(items.map(inspect))` when isolated semantic judgment or parallel fan-out is needed. Pass file paths OR `ResourceHandle` objects (`const f = io.read(...); await inspect(f);`) directly — handles passed to `@virtual` stay compact (`Ref#N`) in your outer trace without expanding raw file contents, and auto-dereference inside the isolated child frame. Each `@virtual` call runs in its own isolated non-shell stack frame, discards its intermediate context on `return`, and leaves a factual `[virtual ...]` receipt + return value in your `// =>` trace.
+## Ordinary JS Functions, Partial `@virtual`, & `Promise.all` Concurrency
+- **Ordinary JS functions/loops** (`function foo(...) { ... }`): use for deterministic multi-file reads, filtering, or batch computation (0 extra LLM calls).
+- **Pure `@virtual` functions**: declare `/** @virtual <contract; ask for a concise summary field> */ async function inspect(item) {}` (optionally with `@uses varName` in JSDoc to capture outer bindings). Each call runs in its own isolated non-shell stack frame, discards its intermediate context on `return`, and leaves a factual `[virtual ...]` receipt + return value in your `tool` result.
+- **Partial `@virtual` functions (JS prefix + AI fall-through)**: you MAY write deterministic JavaScript statements inside a `@virtual` function body!
+  - If the JS prefix resolves the item and hits `return <value>;`, it finishes immediately in pure JS with **0 LLM calls**.
+  - If execution reaches the end of the body without returning, the host automatically suspends into the isolated AI child frame with all parameters, `@uses` captures, AND all local variables computed by the JS prefix already live in scope (including `ResourceHandle`s):
+    ```js
+    /** @virtual Audit suspicious matches and return { file, issues, summary }. */
+    async function auditFile(path) {
+      const f = io.read({ path });
+      const hits = f.grep("TODO|FIXME");
+      if (hits === "(no matches)") return { file: path, issues: [], summary: `${path}: clean` };
+      // Falls through to isolated AI frame with live `f` and `hits`!
+    }
+    ```
+- **Use `Promise.all` / `Promise.allSettled` whenever independent work can run concurrently**:
+  - **Parallel `@virtual` fan-out**: `await Promise.all(items.map(auditFile))` (works for both pure and partial `async` `@virtual` functions — fast-path items finish locally while remaining items run concurrently in parallel child frames). Pass file paths OR `ResourceHandle`s (`const f = io.read(...); await inspect(f);`) directly; handles stay compact (`Ref#N`) in your outer trace and auto-dereference inside the child frame.
+  - **Parallel host I/O, searches, git, and read-only checks**: pre-bound `io.*` / `git.*` / `process.*` are **synchronous** (calling them inside `Promise.all` runs sequentially!). For true concurrency, use the pre-bound **`.promises`** sub-namespace (or `require("<lib>/promises")`):
+    - `const files = await Promise.all(paths.map(path => io.promises.read({ path })));`
+    - `const [a, b] = await Promise.all([process.promises.run_readonly({ cmd: "..." }), process.promises.run_readonly({ cmd: "..." })]);`
+    - `const [st, lg] = await Promise.all([git.promises.status(), git.promises.log({ limit: 8 })]);`
 
 ## Per-Turn Clean VM & Cross-Turn Continuity
 - When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.
-- Large results (`> 64KB`) are automatically archived with an `asset: asset-...` id in permanent `// =>`; in later turns you can page them back via `session.read_asset({ asset_id, char_offset, max_chars })`.
+- Large results (`> 64KB`) are automatically archived with an `asset: asset-...` id in the `tool` output; in later turns you can page them back via `session.read_asset({ asset_id, char_offset, max_chars })`.
 - Reusable cross-session JS orchestration libraries (listed below the `.d.ts` when available) can be loaded with `const lib = require("<name>");`.
 - If you cannot proceed without user clarification, call `host.ask_user({ question: "..." });` inside `run_js` to pause the turn and deliver your question directly.
 
 ## Multi-Step Interaction Example
-[Step 1 — call `run_js`]:
+[Step 1 — assistant calls `run_js`]:
 `run_js({ code: "const f = io.read({ path: \"src/auth.rs\" });" })`
 
-[Host executes Step 1 and permanently appends `// => f (File "src/auth.rs", Ref#1, ...)` with numbered lines (up to 64KB), or a compact `Ref#1` + structural index if > 64KB]
+[Host returns `tool` result: `// => f (File "src/auth.rs", Ref#1, ...)` with numbered lines (up to 64KB), or a compact `Ref#1` + structural index if > 64KB]
 
 [Step 2 — if > 64KB, slice or grep exact lines via handle methods; otherwise jump straight to your final reply]:
 `run_js({ code: "const verifyFn = f.slice(61, 75);" })`
@@ -92,8 +111,8 @@ Your ONLY tool is `run_js({ code })`.
 
 ## STRICT RULES
 1. **Always call `run_js({ code })`** with raw JavaScript statements to continue the function body (NO markdown fences, NO fabricated `// =>` comments). Do NOT reply with plain text outside `run_js`.
-2. **Bound parameters and `@uses` captures are already live JS variables** — use them directly by identifier name.
-3. **Host libraries (`io`, `git`, `host`)** proxy synchronously into Rust. Shell (`process.*`) and nested `@virtual` declarations are strictly forbidden.
+2. **Bound parameters, `@uses` captures, and any partial `@virtual` JS-prefix local variables are already live JS variables** — use them directly by identifier name (do NOT re-read or re-run work already computed by the JS prefix).
+3. **Host libraries (`io`, `git`, `host`)** proxy synchronously into Rust; for concurrent multi-file reads/searches, use `await Promise.all(paths.map(path => io.promises.read({ path })))`. Shell (`process.*`) and nested `@virtual` declarations are strictly forbidden.
 4. **Finish by executing native JS `return <json_value>;` inside `run_js`**:
    - Always include a short `summary` field in your returned object (e.g. `return { ok: true, summary: "audited src/a.rs: no issues" };`) so the caller knows exactly what you checked or changed, even for file-editing tasks.
    - If the contract cannot be satisfied, execute `return { "$task_error": "concrete reason" };`.
@@ -103,6 +122,26 @@ pub(super) struct ModelReply {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
+    /// Native assistant wire message (`role: "assistant"`, `content`, `tool_calls`,
+    /// `reasoning_content`, `_reasoning_items`, `_thinking_blocks`) preserved verbatim
+    /// for multi-turn KV-cache prefix stability and encrypted reasoning replay.
+    pub assistant_message: Value,
+}
+
+impl ModelReply {
+    pub(super) fn primary_call_id(&self) -> Option<String> {
+        self.tool_calls
+            .first()
+            .map(|c| c.call_id.clone())
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                self.assistant_message["tool_calls"]
+                    .as_array()
+                    .and_then(|arr| arr.first())
+                    .and_then(|c| c["id"].as_str())
+                    .map(str::to_owned)
+            })
+    }
 }
 
 fn clean_run_js_code(raw: &str) -> String {
@@ -309,6 +348,17 @@ pub(super) fn build_request_body_for_doc(
         body = crate::model_stream::responses_request(&body);
     } else if is_messages {
         body = crate::anthropic_messages::wire_body(s.state, s.model, &body);
+    } else if let Some(msgs) = body["messages"].as_array_mut() {
+        // Plain OpenAI-compatible Chat Completions: strip internal-only
+        // Responses/Anthropic reasoning metadata and non-standard `reasoning_content`
+        // heading summaries so upstream Chat Completions routes stay strictly spec-clean.
+        for msg in msgs {
+            if let Some(obj) = msg.as_object_mut() {
+                obj.remove(crate::model_stream::REASONING_ITEMS);
+                obj.remove(crate::model_stream::THINKING_BLOCKS);
+                obj.remove("reasoning_content");
+            }
+        }
     }
     body
 }
@@ -469,6 +519,7 @@ async fn send_model_request(
                     content,
                     tool_calls,
                     finish_reason,
+                    assistant_message: message,
                 });
             }
             Err(error) => {

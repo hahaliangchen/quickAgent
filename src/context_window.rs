@@ -50,8 +50,13 @@ pub fn estimate(value: &Value) -> usize {
         {
             4096
         }
+        // Encrypted Responses API reasoning blobs (`encrypted_content`) and
+        // Anthropic thinking `signature` blobs are opaque ciphertexts, not text
+        // prompt tokens — exclude them from the pre-request text estimate so
+        // ContextRing doesn't spike before `provider_usage` arrives.
         Value::Object(fields) => fields
             .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "encrypted_content" | "signature"))
             .map(|(key, value)| key.len().div_ceil(3) + estimate(value) + 4)
             .sum(),
         _ => 4,
@@ -83,5 +88,12 @@ mod tests {
             estimate(&json!({"type":"image_ref","artifact_id":"v"})),
             estimate(&json!({"type":"image_url","image_url":{"url":"data:image/png;base64,abc"}}))
         );
+    }
+
+    #[test]
+    fn encrypted_reasoning_and_thinking_signatures_do_not_inflate_estimate() {
+        let base = json!({"input":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"ok"}]}]});
+        let with_enc = json!({"input":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"ok"}],"encrypted_content":"A".repeat(60_000)}]});
+        assert_eq!(estimate(&base), estimate(&with_enc));
     }
 }

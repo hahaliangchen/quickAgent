@@ -3,7 +3,10 @@
 //! Pass-by-Handle zero outer expansion + `@virtual` Auto-Dereference, `EPHEMERAL_PEEK`
 //! cross-binding deduplication, and same-step inline alias folding.
 
-use super::{TestWorkspace, assistant_messages, completion, init_task_row, run_js, tool_call_count};
+use super::{
+    TestWorkspace, all_messages_text, assistant_messages, completion, init_task_row,
+    last_tool_output, run_js, tool_call_count,
+};
 use crate::agent_service::{self, AgentServiceState};
 use crate::single_agent::run_task;
 use axum::{Json, Router, routing::post};
@@ -64,7 +67,7 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
                         && sys.contains("grep(pattern"),
                     ".d.ts must advertise ResourceHandle methods: {sys}"
                 );
-                let user = body["messages"][1]["content"].as_str().unwrap();
+                let user = last_tool_output(&body);
                 Json(match idx {
                     0 => run_js("const big = io.read({ path: \"src/big_engine.rs\" });"),
                     1 => {
@@ -91,7 +94,8 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
                              const top2 = big.head(2);\n\
                              const bot1 = big.tail(1);\n\
                              let plainThrew = false;\n\
-                             try { ({ a: 1 }).slice(1, 2); } catch (e) { plainThrew = true; }",
+                             try { ({ a: 1 }).slice(1, 2); } catch (e) { plainThrew = true; }\n\
+                             ({ sym, hits, multi, top2, bot1, plainThrew })",
                         )
                     }
                     2 => {
@@ -104,7 +108,7 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
                                 && user.contains("261:     // SECRET_BUG_MARKER")
                                 && user.contains("skipped 257 lines")
                                 && user.contains("pub fn shutdown_engine()")
-                                && user.contains("plainThrew = true"),
+                                && user.contains("\"plainThrew\":true"),
                             "expected outline/grep/multi-slice/head/tail/TypeError check results: {user}"
                         );
                         completion("已通过惰性句柄按需分页定位第 260-263 行的 `critical_handler` 漏洞。")
@@ -177,7 +181,7 @@ async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_de
             let seen_children_ref = seen_children_ref.clone();
             async move {
                 let sys = body["messages"][0]["content"].as_str().unwrap();
-                let user = body["messages"][1]["content"].as_str().unwrap();
+                let user = all_messages_text(&body);
                 let is_virtual = sys.contains("isolated single-layer `@virtual`");
 
                 if !is_virtual {
@@ -197,33 +201,27 @@ async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_de
                              JSON.stringify(reports);",
                         ),
                         1 => {
-                            // 1. Pass-by-Handle: ZERO raw file expansion in outer prompt!
+                            // 1. Pass-by-Handle + final-statement-only rule: ZERO raw file expansion in outer prompt!
+                            //    (Child returned only line 2 `markerLine`; raw filler lines must NEVER appear!)
                             assert!(
-                                !user.contains("SECRET_RAW_A_ONLY_CHILD_SEES")
-                                    && !user.contains("SECRET_RAW_B_ONLY_CHILD_SEES"),
-                                "delegated handles MUST NOT expand raw file content in outer EPHEMERAL_PEEK: {user}"
+                                !user.contains("alpha filler comment 010")
+                                    && !user.contains("beta filler comment 010"),
+                                "delegated handles MUST NOT expand raw file content in outer trace: {user}"
                             );
+                            // 2. Intermediate bindings (`files`, `a`, `b`, `reportsAlias`) stay silent;
+                            //    only `[virtual ...]` receipts + final expression `$_` appear!
                             assert!(
-                                !user.contains("EPHEMERAL_PEEK"),
-                                "all delegated handles suppressed -> outer EPHEMERAL_PEEK should be empty: {user}"
-                            );
-                            // 2. Compact handle array signature + clean Ref# arg previews in [virtual ...] receipts!
-                            assert!(
-                                user.contains("files = [Array(2) of Handles: Ref#1(\"src/a.rs\"), Ref#2(\"src/b.rs\")]"),
-                                "expected compact handle array signature: {user}"
+                                !user.contains("// => files =")
+                                    && !user.contains("// => reportsAlias ="),
+                                "intermediate bindings must stay silent in multi-statement steps: {user}"
                             );
                             assert!(
                                 user.contains("[virtual reviewHandle(Ref#1(\"src/a.rs\"))")
-                                    && user.contains("[virtual reviewHandle(Ref#2(\"src/b.rs\"))"),
-                                "expected clean Ref# handle previews in virtual receipts: {user}"
+                                    && user.contains("[virtual reviewHandle(Ref#2(\"src/b.rs\"))")
+                                    && user.contains("// => $_ ="),
+                                "expected clean Ref# handle previews in virtual receipts + final $_: {user}"
                             );
-                            // 3. Same-step duplicate inline alias folding!
-                            assert!(
-                                user.contains("reportsAlias = (same as reports)")
-                                    && user.contains("$_ = (same as reports)"),
-                                "expected duplicate inline aliases to fold cleanly: {user}"
-                            );
-                            // 4. Demand Paging in outer scope on an already-delegated handle (zero extra disk I/O!)
+                            // 3. Demand Paging in outer scope on an already-delegated handle (zero extra disk I/O!)
                             run_js("const spot = a.grep(\"SECRET_RAW_A\", 0);")
                         }
                         2 => {
@@ -301,7 +299,7 @@ async fn step3_ephemeral_peek_deduplicates_aliases_in_same_step() {
             let seq = seq.clone();
             async move {
                 let idx = seq.fetch_add(1, Ordering::SeqCst);
-                let user = body["messages"][1]["content"].as_str().unwrap();
+                let user = last_tool_output(&body);
                 Json(match idx {
                     0 => run_js(
                         "const f = io.read({ path: \"dup.rs\" });\n\

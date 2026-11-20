@@ -339,6 +339,8 @@ pub(crate) async fn run_task_with_resource(
             eprintln!("[LIVE step={step} finish={:?} tc={tc:?} text_len={}] head={head:?}", reply.finish_reason, reply.content.len());
         }
         let submission = model_call::parse_main_submission(&reply);
+        let assistant_msg = Some(reply.assistant_message.clone());
+        let call_id = reply.primary_call_id();
 
         match submission {
             crate::model_stream::RunSubmission::Rejected { code, message } => {
@@ -358,7 +360,8 @@ pub(crate) async fn run_task_with_resource(
                     false,
                 )
                 .await?;
-                w.context_doc.set_rejection(code, &message);
+                w.context_doc
+                    .record_rejection(assistant_msg, call_id, code, &message);
                 save_window(&s, &w).await?;
             }
 
@@ -368,13 +371,35 @@ pub(crate) async fn run_task_with_resource(
             }
 
             crate::model_stream::RunSubmission::Run { source } => {
-                if execute_js_step(&s, &mut w, &libs, step, allow_shell, source, None).await? {
+                if execute_js_step(
+                    &s,
+                    &mut w,
+                    &libs,
+                    step,
+                    allow_shell,
+                    source,
+                    None,
+                    assistant_msg,
+                    call_id,
+                )
+                .await?
+                {
                     return Ok(());
                 }
             }
             crate::model_stream::RunSubmission::CodeAndReply { source, markdown } => {
-                if execute_js_step(&s, &mut w, &libs, step, allow_shell, source, Some(markdown))
-                    .await?
+                if execute_js_step(
+                    &s,
+                    &mut w,
+                    &libs,
+                    step,
+                    allow_shell,
+                    source,
+                    Some(markdown),
+                    assistant_msg,
+                    call_id,
+                )
+                .await?
                 {
                     return Ok(());
                 }
@@ -389,6 +414,7 @@ pub(crate) async fn run_task_with_resource(
 
 /// Execute one JS step (with optional trailing `return <<<` reply).
 /// Returns `Ok(true)` if the turn finished and delivered the final reply.
+#[allow(clippy::too_many_arguments)]
 async fn execute_js_step(
     s: &Session<'_>,
     w: &mut Window,
@@ -397,6 +423,8 @@ async fn execute_js_step(
     allow_shell: bool,
     source: String,
     pending_reply: Option<String>,
+    assistant_msg: Option<Value>,
+    call_id: Option<String>,
 ) -> Result<bool> {
     let Some(mut runtime) = w.program.take() else {
         bail!("turn VM missing");
@@ -424,7 +452,8 @@ async fn execute_js_step(
         )
         .await?;
         w.program = Some(runtime);
-        w.context_doc.set_rejection("COMPILE_ERROR", &msg);
+        w.context_doc
+            .record_rejection(assistant_msg, call_id, "COMPILE_ERROR", &msg);
         save_window(s, w).await?;
         return Ok(false);
     }
@@ -473,13 +502,15 @@ async fn execute_js_step(
                     &logs,
                     None,
                     &hints,
+                    assistant_msg,
+                    call_id,
                 );
                 finish_turn_with_reply(s, w, step, answer).await?;
                 return Ok(true);
             }
             if let Some(reply_md) = pending_reply {
                 if external_tool_calls == 0 {
-                    // Pure in-memory JS projection + final reply: pin `// =>` and finish!
+                    // Pure in-memory JS projection + final reply: record tool output and finish!
                     w.context_doc.record_completed_segment(
                         source,
                         &runtime,
@@ -487,6 +518,8 @@ async fn execute_js_step(
                         &logs,
                         None,
                         &hints,
+                        assistant_msg,
+                        call_id,
                     );
                     finish_turn_with_reply(s, w, step, reply_md).await?;
                     return Ok(true);
@@ -503,6 +536,8 @@ async fn execute_js_step(
                     &logs,
                     Some(note),
                     &hints,
+                    assistant_msg,
+                    call_id,
                 );
                 w.program = Some(runtime);
                 save_window(s, w).await?;
@@ -520,6 +555,8 @@ async fn execute_js_step(
                 &logs,
                 note,
                 &hints,
+                assistant_msg,
+                call_id,
             );
             w.program = Some(runtime);
             save_window(s, w).await?;
@@ -534,8 +571,15 @@ async fn execute_js_step(
                     .filter(|q| !q.is_empty())
                     .unwrap_or("需要你的确认后才能继续。")
                     .to_owned();
-                w.context_doc
-                    .record_paused_for_user(source, &runtime, &pre_fps, &logs, &hints);
+                w.context_doc.record_paused_for_user(
+                    source,
+                    &runtime,
+                    &pre_fps,
+                    &logs,
+                    &hints,
+                    assistant_msg,
+                    call_id,
+                );
                 append_event(
                     s,
                     "agent/needs_user",
@@ -563,8 +607,15 @@ async fn execute_js_step(
                 false,
             )
             .await?;
-            w.context_doc
-                .record_failed_segment(source, &runtime, &pre_fps, &logs, &err);
+            w.context_doc.record_failed_segment(
+                source,
+                &runtime,
+                &pre_fps,
+                &logs,
+                &err,
+                assistant_msg,
+                call_id,
+            );
             w.program = Some(runtime);
             save_window(s, w).await?;
             Ok(false)
