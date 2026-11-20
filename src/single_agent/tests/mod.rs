@@ -184,9 +184,14 @@ pub(super) fn last_tool_output(body: &Value) -> &str {
         .unwrap_or("")
 }
 
-/// Assert that `later["messages"]` strictly extends `earlier["messages"]` with 100%
-/// byte-identical earlier elements (proving native multi-turn KV-cache prefix stability).
+/// Assert that `later["messages"]` strictly extends `earlier["messages"]`:
+/// - Every message before the last element of `earlier` is 100% byte-identical;
+/// - The last message of `earlier` (which may carry the transient `LIVE_VM_SCRIPT` tail
+///   on an active turn's latest `tool` response) has its stable prefix 100% byte-identical
+///   in `later`, and `later`'s copy no longer carries the superseded transient tail.
 pub(super) fn assert_prefix_immutable(earlier: &Value, later: &Value) {
+    use crate::single_agent::context_doc::LIVE_VM_SCRIPT_MARKER;
+
     let a = earlier["messages"].as_array().unwrap();
     let b = later["messages"].as_array().unwrap();
     assert!(
@@ -195,7 +200,26 @@ pub(super) fn assert_prefix_immutable(earlier: &Value, later: &Value) {
         b.len(),
         a.len()
     );
+    let last_idx = a.len().saturating_sub(1);
+    let sep = format!("\n\n{LIVE_VM_SCRIPT_MARKER}");
     for (idx, (ma, mb)) in a.iter().zip(b.iter()).enumerate() {
+        if idx == last_idx
+            && ma["role"] == "tool"
+            && let (Some(ca), Some(cb)) = (ma["content"].as_str(), mb["content"].as_str())
+            && ca.contains(&sep)
+        {
+            let stable_a = ca.split(&sep).next().unwrap_or(ca);
+            assert!(
+                !cb.contains(LIVE_VM_SCRIPT_MARKER),
+                "superseded tool message[{idx}] must strip transient LIVE_VM_SCRIPT tail!"
+            );
+            assert_eq!(
+                stable_a, cb,
+                "stable prefix of tool message[{idx}] mutated across steps!"
+            );
+            assert_eq!(ma["tool_call_id"], mb["tool_call_id"]);
+            continue;
+        }
         assert_eq!(
             ma, mb,
             "message[{idx}] mutated across steps, breaking KV-cache prefix!"

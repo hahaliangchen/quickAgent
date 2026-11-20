@@ -108,7 +108,8 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
                                 && user.contains("261:     // SECRET_BUG_MARKER")
                                 && user.contains("skipped 257 lines")
                                 && user.contains("pub fn shutdown_engine()")
-                                && user.contains("\"plainThrew\":true"),
+                                && (user.contains("\"plainThrew\":true")
+                                    || user.contains("plainThrew = true")),
                             "expected outline/grep/multi-slice/head/tail/TypeError check results: {user}"
                         );
                         completion("已通过惰性句柄按需分页定位第 260-263 行的 `critical_handler` 漏洞。")

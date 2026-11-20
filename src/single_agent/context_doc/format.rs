@@ -29,6 +29,11 @@ const INLINE_DEDUP_MIN_CHARS: usize = 120;
 /// `.slice()` / `.grep()` / `.tail()` are available on medium & large logs.
 const COMMAND_HANDLE_MIN_CHARS: usize = 4_000;
 
+/// Strict hard cap on `console.log` output so accidental loops or bulk `console.log`
+/// calls can NEVER blow up context. Models should leave bare expressions or sink
+/// variables instead of calling `console.log`.
+const CONSOLE_LIMIT_CHARS: usize = 4_096;
+
 /// Context hints collected during one VM segment execution:
 /// - `virtual_receipts`: factual `[virtual ...]` / `[library ...]` summary lines.
 /// - `delegated_refs` / `delegated_content_hashes`: Resource Handles (and large text
@@ -251,19 +256,18 @@ pub(super) fn format_segment_feedback(
         let joined = console_logs.join("\n");
         let chars = joined.chars().count();
         let h = fnv1a64(&joined);
-        if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
+        if chars <= CONSOLE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
             tracker.seen_hashes.insert(h);
             receipts.push(format_comment_block("console", &joined));
         } else {
-            let line_count = joined.lines().count();
-            let mut block = format!(
-                "// => console = [{line_count} lines, {chars} chars | > 64KB]"
-            );
-            if tracker.claim_display(None, Some(h)) {
-                block.push('\n');
-                block.push_str(&format_large_source_index("console", &joined, None));
-            }
-            receipts.push(block);
+            let capped_budget = CONSOLE_LIMIT_CHARS.min(tracker.remaining_inline_budget);
+            let head: String = joined.chars().take(capped_budget).collect();
+            let _ = tracker.take_inline_budget(head.chars().count());
+            let mut body = head;
+            body.push_str(&format!(
+                "\n... [console truncated at 4KB ({chars} chars total) — do NOT use console.log for bulk output; return bare expressions or sink variables instead]"
+            ));
+            receipts.push(format_comment_block("console", &body));
         }
     }
 
@@ -902,6 +906,25 @@ pub(super) fn format_binding(
             return out;
         }
 
+        // 4b. Array of strings containing multiline/long text (e.g. `[a.slice(...), b.slice(...)]`):
+        // render each item cleanly unescaped and fill progressively up to the 64KB step budget
+        // instead of JSON-escaping `\n`/`\"` or collapsing the entire array to 978 bytes!
+        let all_strings = arr.iter().all(Value::is_string);
+        let has_multiline_or_long_str = all_strings
+            && arr.iter().any(|item| {
+                item.as_str()
+                    .is_some_and(|s| s.contains('\n') || s.chars().count() > 200)
+            });
+        if has_multiline_or_long_str {
+            let mut blocks = Vec::with_capacity(arr.len());
+            for (idx, item) in arr.iter().enumerate() {
+                let text = item.as_str().unwrap_or("");
+                let label = format!("{name}[{idx}]");
+                blocks.push(format_progressive_string(&label, text, tracker));
+            }
+            return blocks.join("\n");
+        }
+
         let serialized = serde_json::to_string(value).unwrap_or_default();
         let chars = serialized.chars().count();
         if tracker.container_already_covered(value) {
@@ -963,7 +986,34 @@ pub(super) fn format_binding(
         return lines.join("\n");
     }
 
-    // 6. Generic Object / Primitive
+    // 6. Object with multiline/long strings or nested File/Command handles
+    // (e.g. `({ lib: libF.slice(...), decl: decF.slice(...) })`):
+    // render key-by-key cleanly unescaped and fill progressively up to the 64KB step budget.
+    if let Some(map) = value.as_object()
+        && !map.is_empty()
+        && map.values().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s.contains('\n') || s.chars().count() > 200)
+                || v.as_object().is_some_and(|o| {
+                    is_file_handle_obj(o, tracker.is_virtual_param)
+                        || (o.contains_key("exit_code")
+                            && (o.contains_key("stdout") || o.contains_key("stderr")))
+                })
+        })
+    {
+        let mut blocks = Vec::with_capacity(map.len());
+        for (k, v) in map {
+            let field_name = format!("{name}.{k}");
+            if let Some(text) = v.as_str() {
+                blocks.push(format_progressive_string(&field_name, text, tracker));
+            } else {
+                blocks.push(format_binding(&field_name, v, tracker));
+            }
+        }
+        return blocks.join("\n");
+    }
+
+    // 7. Generic Object / Primitive
     let serialized = serde_json::to_string(value).unwrap_or_default();
     let chars = serialized.chars().count();
     let keys_summary = value
@@ -996,5 +1046,50 @@ pub(super) fn format_binding(
          // [{name} LARGE Object Index ({chars} chars) — keys: {keys_summary}]:\n\
          // Slice/filter `{name}` directly in JS (or pass `{name}` to a `@virtual` helper).\n\
          // head preview: {head}..."
+    )
+}
+
+/// Format a string entry inside an array/object cleanly without JSON escaping,
+/// filling progressively up to the remaining 64KB per-step budget instead of
+/// collapsing the entire parent container all-or-nothing.
+fn format_progressive_string(
+    label: &str,
+    text: &str,
+    tracker: &mut DisplayTracker<'_>,
+) -> String {
+    if text.is_empty() {
+        return format!("// => {label} = \"\" (Empty string)");
+    }
+    let chars = text.chars().count();
+    let lines = text.lines().count().max(1);
+    let h = fnv1a64(text);
+    if chars > 2_000 && !tracker.claim_display(None, Some(h)) {
+        return format!("// => {label} = [string | {lines} lines, {chars} chars | already shown]");
+    }
+    if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
+        if text.contains('\n') {
+            return format_comment_block(label, text);
+        }
+        return format!("// => {label} = {text:?}");
+    }
+    let avail = tracker.remaining_inline_budget;
+    if avail >= 1_024 {
+        let mut head: String = text.chars().take(avail).collect();
+        // Prefer cutting at a newline boundary so the last printed line stays complete.
+        if let Some(last_nl) = head.rfind('\n')
+            && last_nl >= avail / 2
+        {
+            head.truncate(last_nl);
+        }
+        let shown_chars = head.chars().count();
+        let _ = tracker.take_inline_budget(shown_chars);
+        let omitted = chars.saturating_sub(shown_chars);
+        let body = format!(
+            "{head}\n... [truncated: {omitted} more chars omitted — 64KB step budget reached; inspect remaining via `{label}` or source handle]"
+        );
+        return format_comment_block(label, &body);
+    }
+    format!(
+        "// => {label} = [string | {lines} lines, {chars} chars | omitted: 64KB step budget reached — inspect via `{label}` or source handle]"
     )
 }

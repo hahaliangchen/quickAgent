@@ -526,3 +526,157 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
     assert_eq!(usage_json["output_tokens"], json!(20));
     assert_eq!(usage_json["reasoning_tokens"], json!(12));
 }
+
+#[tokio::test]
+async fn step1_live_vm_script_snapshot_progressive_64kb_array_and_console_4kb_cap() {
+    use crate::single_agent::context_doc::{
+        LIVE_VM_SCRIPT_BUDGET_CHARS, LIVE_VM_SCRIPT_MARKER,
+    };
+
+    let ws = TestWorkspace::new("cac-v2-step1-live-script");
+    // Create 3 files (~30KB each -> combined 90KB > 64KB step budget)
+    let mk = |tag: &str| {
+        (1..=450)
+            .map(|i| format!("{tag}_line_{i:03}: payload_with_quotes_\"ok\"_padding_0123456789\n"))
+            .collect::<String>()
+    };
+    std::fs::write(ws.path().join("f1.txt"), mk("FILE1")).unwrap();
+    std::fs::write(ws.path().join("f2.txt"), mk("FILE2")).unwrap();
+    std::fs::write(ws.path().join("f3.txt"), mk("FILE3")).unwrap();
+    init_task_row(ws.path(), "step1-live-script");
+
+    let (state, captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
+        // Turn 1, Step 1: read all 3 files and return an ~88KB array of multiline slices.
+        0 => run_js(
+            "const a = io.read({ path: \"f1.txt\" });\n\
+             const b = io.read({ path: \"f2.txt\" });\n\
+             const c = io.read({ path: \"f3.txt\" });\n\
+             [a.slice(1, 450), b.slice(1, 450), c.slice(1, 450)];",
+        ),
+        // Turn 1, Step 2: verify progressive 64KB unescaped array + LIVE_VM_SCRIPT + Live handles!
+        1 => {
+            let tool_out = last_tool_output(&body);
+            // 1) Must NOT collapse all 88KB into a 978-byte LARGE Array INDEX!
+            assert!(
+                !tool_out.contains("LARGE Array("),
+                "multiline string array must fill progressively up to 64KB, not collapse all-or-nothing: {tool_out}"
+            );
+            // 2) Must print FILE1 and FILE2 cleanly unescaped (no JSON `\"ok\"` escaping!)
+            assert!(
+                tool_out.contains("FILE1_line_001: payload_with_quotes_\"ok\"")
+                    && tool_out.contains("FILE2_line_001: payload_with_quotes_\"ok\""),
+                "first ~64KB items must print verbatim and unescaped: {}",
+                &tool_out[..tool_out.len().min(600)]
+            );
+            // 3) Overflow item must be summarized cleanly with budget notice
+            assert!(
+                tool_out.contains("64KB step budget reached"),
+                "overflow tail must explain 64KB step budget cleanly"
+            );
+            // 4) Transient LIVE_VM_SCRIPT snapshot must be present with committed code + Live handles!
+            assert!(
+                tool_out.contains(LIVE_VM_SCRIPT_MARKER)
+                    && tool_out.contains("Live handles:")
+                    && tool_out.contains("Ref#1(\"f1.txt\"")
+                    && tool_out.contains("const a = io.read"),
+                "latest tool output must include transient LIVE_VM_SCRIPT + live handles"
+            );
+
+            // Now test console.log hard 4KB cap + compile-error exclusion in next step!
+            run_js("console.log(\"Z\".repeat(12000));")
+        }
+        // Turn 1, Step 3: verify console.log was capped at 4KB AND previous tool msg stripped LIVE_VM_SCRIPT!
+        2 => {
+            let msgs = body["messages"].as_array().unwrap();
+            // Step 1's tool output (msgs[3]) must NO LONGER carry LIVE_VM_SCRIPT!
+            assert!(
+                !msgs[3]["content"].as_str().unwrap().contains(LIVE_VM_SCRIPT_MARKER),
+                "superseded tool#1 must strip LIVE_VM_SCRIPT"
+            );
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("console truncated at 4KB (12000 chars total)")
+                    && tool_out.contains("do NOT use console.log for bulk output"),
+                "console.log must be strictly capped at 4KB: {tool_out}"
+            );
+            // Snapshot now includes BOTH Step 1 and Step 2 code!
+            assert!(
+                tool_out.contains(LIVE_VM_SCRIPT_MARKER)
+                    && tool_out.contains("const a = io.read")
+                    && tool_out.contains("console.log(\"Z\".repeat(12000))"),
+                "LIVE_VM_SCRIPT must accumulate committed steps"
+            );
+            // Trigger a syntax/compile error to prove rejected code is NOT added to LIVE_VM_SCRIPT
+            run_js("const badSyntax = (1 + ; // REJECTED_CODE_SHOULD_NOT_APPEAR")
+        }
+        // Turn 1, Step 4: verify rejected code was NOT added to LIVE_VM_SCRIPT, then finish Turn 1!
+        3 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("COMPILE_ERROR"),
+                "syntax error must trigger COMPILE_ERROR: {tool_out}"
+            );
+            let script_part = tool_out
+                .split(LIVE_VM_SCRIPT_MARKER)
+                .nth(1)
+                .expect("snapshot still present after rejection");
+            assert!(
+                !script_part.contains("REJECTED_CODE_SHOULD_NOT_APPEAR"),
+                "rejected code must NEVER enter LIVE_VM_SCRIPT: {script_part}"
+            );
+            assert!(
+                script_part.chars().count() <= LIVE_VM_SCRIPT_BUDGET_CHARS,
+                "LIVE_VM_SCRIPT must respect 20KB budget"
+            );
+            completion("Turn 1 complete.")
+        }
+        // Turn 2, Step 1: verify ALL non-system conversation messages are 100% free of Turn 1's LIVE_VM_SCRIPT!
+        4 => {
+            let msgs = body["messages"].as_array().unwrap();
+            for (i, m) in msgs.iter().enumerate().skip(1) {
+                if let Some(c) = m["content"].as_str() {
+                    assert!(
+                        !c.contains(LIVE_VM_SCRIPT_MARKER),
+                        "Turn 2 must NOT carry Turn 1 LIVE_VM_SCRIPT anywhere (found in msg[{i}])"
+                    );
+                }
+            }
+            completion("Turn 2 clean.")
+        }
+        other => panic!("unexpected round {other}"),
+    })
+    .await;
+
+    run_task(
+        state.clone(),
+        "step1-live-script".into(),
+        "fake".into(),
+        "Turn 1 task".into(),
+        10,
+        CancellationToken::new(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+
+    run_task(
+        state,
+        "step1-live-script".into(),
+        "fake".into(),
+        "Turn 2 task".into(),
+        10,
+        CancellationToken::new(),
+        2,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    let reqs = captured.lock().unwrap();
+    assert_eq!(reqs.len(), 5);
+    for pair in reqs.windows(2) {
+        assert_prefix_immutable(&pair[0], &pair[1]);
+    }
+}
