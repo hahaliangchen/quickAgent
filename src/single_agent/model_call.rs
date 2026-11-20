@@ -363,6 +363,23 @@ async fn send_model_request(
     .await
     .context("Cannot persist model input; request was not sent")?;
 
+    if actor == "agent" {
+        let estimated_input = crate::context_window::estimate(&body);
+        let _ = super::append_event(
+            s,
+            "context/usage",
+            json!({
+                "actor": actor,
+                "turn": s.turn,
+                "step": step,
+                "estimated_input_tokens": estimated_input,
+                "input_budget": s.input_budget,
+            }),
+            false,
+        )
+        .await;
+    }
+
     let mut attempt = 1u32;
     loop {
         let diagnostics = crate::model_transport::ModelRequestLog::new(
@@ -424,6 +441,28 @@ async fn send_model_request(
 
         match attempt_res {
             Ok((message, stats)) => {
+                if actor == "agent"
+                    && let Some(actual_prompt_tokens) = stats
+                        .pointer("/usage/prompt_tokens")
+                        .and_then(Value::as_u64)
+                        .or_else(|| stats.pointer("/usage/input_tokens").and_then(Value::as_u64))
+                    && actual_prompt_tokens > 0
+                {
+                    let _ = super::append_event(
+                        s,
+                        "context/usage",
+                        json!({
+                            "actor": actor,
+                            "turn": s.turn,
+                            "step": step,
+                            "estimated_input_tokens": actual_prompt_tokens,
+                            "input_budget": s.input_budget,
+                            "source": "provider_usage",
+                        }),
+                        false,
+                    )
+                    .await;
+                }
                 let content = message["content"].as_str().unwrap_or("").to_owned();
                 let tool_calls = crate::model_stream::tool_calls(&message);
                 let finish_reason = stats["finish_reason"].as_str().map(str::to_owned);
