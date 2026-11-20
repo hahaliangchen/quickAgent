@@ -405,11 +405,19 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
     let seq = Arc::new(AtomicUsize::new(0));
     let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
     let cap_ref = captured.clone();
+    let captured_session_ids = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let sid_ref = captured_session_ids.clone();
 
     let app = Router::new().route(
         "/v1/responses",
-        post(move |axum::Json(body): axum::Json<Value>| {
+        post(move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
             let idx = seq.fetch_add(1, Ordering::SeqCst);
+            sid_ref.lock().unwrap().push(
+                headers
+                    .get("session_id")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+            );
             cap_ref.lock().unwrap().push(body);
             async move {
                 let sse = match idx {
@@ -477,6 +485,12 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
 
     let reqs = captured.lock().unwrap();
     assert_eq!(reqs.len(), 2);
+    // Verify standard `session_id` HTTP header matches `prompt_cache_key` across all steps!
+    let sids = captured_session_ids.lock().unwrap();
+    assert_eq!(sids.len(), 2);
+    let expected_pck = reqs[0]["prompt_cache_key"].as_str().unwrap();
+    assert_eq!(sids[0].as_deref(), Some(expected_pck));
+    assert_eq!(sids[1].as_deref(), Some(expected_pck));
     let r1 = &reqs[1];
     assert_eq!(r1["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(r1["store"], json!(false));
@@ -528,12 +542,8 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
 }
 
 #[tokio::test]
-async fn step1_live_vm_script_snapshot_progressive_64kb_array_and_console_4kb_cap() {
-    use crate::single_agent::context_doc::{
-        LIVE_VM_SCRIPT_BUDGET_CHARS, LIVE_VM_SCRIPT_MARKER,
-    };
-
-    let ws = TestWorkspace::new("cac-v2-step1-live-script");
+async fn step1_append_only_live_handle_note_progressive_64kb_array_and_console_4kb_cap() {
+    let ws = TestWorkspace::new("cac-v2-step1-progressive");
     // Create 3 files (~30KB each -> combined 90KB > 64KB step budget)
     let mk = |tag: &str| {
         (1..=450)
@@ -543,17 +553,17 @@ async fn step1_live_vm_script_snapshot_progressive_64kb_array_and_console_4kb_ca
     std::fs::write(ws.path().join("f1.txt"), mk("FILE1")).unwrap();
     std::fs::write(ws.path().join("f2.txt"), mk("FILE2")).unwrap();
     std::fs::write(ws.path().join("f3.txt"), mk("FILE3")).unwrap();
-    init_task_row(ws.path(), "step1-live-script");
+    init_task_row(ws.path(), "step1-progressive");
 
     let (state, captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
-        // Turn 1, Step 1: read all 3 files and return an ~88KB array of multiline slices.
+        // Turn 1, Step 1: read all 3 files silently (consumed by slice array) and return ~88KB array.
         0 => run_js(
             "const a = io.read({ path: \"f1.txt\" });\n\
              const b = io.read({ path: \"f2.txt\" });\n\
              const c = io.read({ path: \"f3.txt\" });\n\
              [a.slice(1, 450), b.slice(1, 450), c.slice(1, 450)];",
         ),
-        // Turn 1, Step 2: verify progressive 64KB unescaped array + LIVE_VM_SCRIPT + Live handles!
+        // Turn 1, Step 2: verify progressive 64KB unescaped array + append-only live handles note!
         1 => {
             let tool_out = last_tool_output(&body);
             // 1) Must NOT collapse all 88KB into a 978-byte LARGE Array INDEX!
@@ -573,83 +583,41 @@ async fn step1_live_vm_script_snapshot_progressive_64kb_array_and_console_4kb_ca
                 tool_out.contains("64KB step budget reached"),
                 "overflow tail must explain 64KB step budget cleanly"
             );
-            // 4) Transient LIVE_VM_SCRIPT snapshot must be present with committed code + Live handles!
+            // 4) Silent new handles must be recorded in a compact append-only 1-line note!
             assert!(
-                tool_out.contains(LIVE_VM_SCRIPT_MARKER)
-                    && tool_out.contains("Live handles:")
-                    && tool_out.contains("Ref#1(\"f1.txt\"")
-                    && tool_out.contains("const a = io.read"),
-                "latest tool output must include transient LIVE_VM_SCRIPT + live handles"
+                tool_out.contains("// [live handles added:")
+                    && tool_out.contains("a=Ref#1(\"f1.txt\",450L)")
+                    && tool_out.contains("c=Ref#3(\"f3.txt\",450L)"),
+                "silent new handles must be recorded append-only: {}",
+                &tool_out[tool_out.len().saturating_sub(400)..]
             );
 
-            // Now test console.log hard 4KB cap + compile-error exclusion in next step!
+            // Now test console.log hard 4KB cap (no new handles -> no repeated handle note!)
             run_js("console.log(\"Z\".repeat(12000));")
         }
-        // Turn 1, Step 3: verify console.log was capped at 4KB AND previous tool msg stripped LIVE_VM_SCRIPT!
+        // Turn 1, Step 3: verify console.log capped at 4KB AND no duplicate live handles note!
         2 => {
-            let msgs = body["messages"].as_array().unwrap();
-            // Step 1's tool output (msgs[3]) must NO LONGER carry LIVE_VM_SCRIPT!
-            assert!(
-                !msgs[3]["content"].as_str().unwrap().contains(LIVE_VM_SCRIPT_MARKER),
-                "superseded tool#1 must strip LIVE_VM_SCRIPT"
-            );
             let tool_out = last_tool_output(&body);
             assert!(
                 tool_out.contains("console truncated at 4KB (12000 chars total)")
                     && tool_out.contains("do NOT use console.log for bulk output"),
                 "console.log must be strictly capped at 4KB: {tool_out}"
             );
-            // Snapshot now includes BOTH Step 1 and Step 2 code!
             assert!(
-                tool_out.contains(LIVE_VM_SCRIPT_MARKER)
-                    && tool_out.contains("const a = io.read")
-                    && tool_out.contains("console.log(\"Z\".repeat(12000))"),
-                "LIVE_VM_SCRIPT must accumulate committed steps"
-            );
-            // Trigger a syntax/compile error to prove rejected code is NOT added to LIVE_VM_SCRIPT
-            run_js("const badSyntax = (1 + ; // REJECTED_CODE_SHOULD_NOT_APPEAR")
-        }
-        // Turn 1, Step 4: verify rejected code was NOT added to LIVE_VM_SCRIPT, then finish Turn 1!
-        3 => {
-            let tool_out = last_tool_output(&body);
-            assert!(
-                tool_out.contains("COMPILE_ERROR"),
-                "syntax error must trigger COMPILE_ERROR: {tool_out}"
-            );
-            let script_part = tool_out
-                .split(LIVE_VM_SCRIPT_MARKER)
-                .nth(1)
-                .expect("snapshot still present after rejection");
-            assert!(
-                !script_part.contains("REJECTED_CODE_SHOULD_NOT_APPEAR"),
-                "rejected code must NEVER enter LIVE_VM_SCRIPT: {script_part}"
-            );
-            assert!(
-                script_part.chars().count() <= LIVE_VM_SCRIPT_BUDGET_CHARS,
-                "LIVE_VM_SCRIPT must respect 20KB budget"
+                !tool_out.contains("// [live handles added:"),
+                "must NOT repeat already-recorded handles on later steps: {tool_out}"
             );
             completion("Turn 1 complete.")
         }
-        // Turn 2, Step 1: verify ALL non-system conversation messages are 100% free of Turn 1's LIVE_VM_SCRIPT!
-        4 => {
-            let msgs = body["messages"].as_array().unwrap();
-            for (i, m) in msgs.iter().enumerate().skip(1) {
-                if let Some(c) = m["content"].as_str() {
-                    assert!(
-                        !c.contains(LIVE_VM_SCRIPT_MARKER),
-                        "Turn 2 must NOT carry Turn 1 LIVE_VM_SCRIPT anywhere (found in msg[{i}])"
-                    );
-                }
-            }
-            completion("Turn 2 clean.")
-        }
+        // Turn 2, Step 1: strict append-only across turns!
+        3 => completion("Turn 2 clean."),
         other => panic!("unexpected round {other}"),
     })
     .await;
 
     run_task(
         state.clone(),
-        "step1-live-script".into(),
+        "step1-progressive".into(),
         "fake".into(),
         "Turn 1 task".into(),
         10,
@@ -662,7 +630,7 @@ async fn step1_live_vm_script_snapshot_progressive_64kb_array_and_console_4kb_ca
 
     run_task(
         state,
-        "step1-live-script".into(),
+        "step1-progressive".into(),
         "fake".into(),
         "Turn 2 task".into(),
         10,
@@ -675,7 +643,8 @@ async fn step1_live_vm_script_snapshot_progressive_64kb_array_and_console_4kb_ca
     server.abort();
 
     let reqs = captured.lock().unwrap();
-    assert_eq!(reqs.len(), 5);
+    assert_eq!(reqs.len(), 4);
+    // Strict 100% byte-identical Append-Only KV-cache prefix across ALL steps and turns!
     for pair in reqs.windows(2) {
         assert_prefix_immutable(&pair[0], &pair[1]);
     }

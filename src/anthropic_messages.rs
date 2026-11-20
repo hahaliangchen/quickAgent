@@ -135,12 +135,15 @@ pub fn send(
 ) -> reqwest::RequestBuilder {
     let route = state.provider_routes.get(&state.provider_name);
     if route.is_some_and(|route| route.responses) {
+        let affinity = crate::model_transport::affinity(task, scope);
         return crate::model_transport::with_bearer(
             state.model_client.post(format!(
                 "{}/responses", state.provider_url.trim().trim_end_matches('/')
             )),
             &state.api_key,
-        ).json(body);
+        )
+        .header("session_id", affinity)
+        .json(body);
     }
     if !route.is_some_and(|route| route.messages) {
         return crate::model_transport::with_bearer(

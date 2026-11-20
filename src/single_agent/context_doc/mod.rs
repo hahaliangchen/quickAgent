@@ -36,16 +36,6 @@ pub const PEEK_FULL_LIMIT_CHARS: usize = INLINE_LIMIT_CHARS;
 /// Multi-turn history budget before dropping oldest completed turns in a batch.
 pub const HISTORY_BUDGET_CHARS: usize = 256_000;
 
-/// Marker prefix for the transient current-turn live VM script snapshot appended
-/// ONLY to the very latest `tool` message of an active turn.
-/// Cleared automatically from superseded steps and completely absent from completed
-/// turns / subsequent user turns.
-pub const LIVE_VM_SCRIPT_MARKER: &str = "// === LIVE VM SCRIPT (current turn, read-only) ===";
-
-/// Hard cap (20 KiB) for the transient live VM script snapshot so extreme turns
-/// never hurt KV-cache efficiency.
-pub const LIVE_VM_SCRIPT_BUDGET_CHARS: usize = 20_480;
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ContextDocument {
     pub turns: Vec<TurnDoc>,
@@ -61,8 +51,8 @@ pub struct TurnDoc {
     pub virtual_header: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<TraceSegment>,
-    /// Compact inventory of live `Ref#N` ResourceHandles currently bound in the active
-    /// turn's VM (e.g. `authFile=Ref#1("src/auth.rs",120L)`). Cleared when the turn finishes.
+    /// Live `Ref#N` handles already recorded in this turn so incremental append-only
+    /// `// [live handles added: ...]` notes list only newly created handles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub live_handles: Vec<String>,
     /// Transient note for a rejected/uncompiled submission (`executed: false`);
@@ -249,6 +239,7 @@ impl ContextDocument {
         }
         let live_handles = collect_live_handles(runtime);
         if let Some(turn) = self.active_turn_mut() {
+            append_new_handle_note(&mut receipts, &turn.live_handles, &live_handles);
             turn.segments.push(TraceSegment {
                 source,
                 inline_receipts: receipts,
@@ -275,7 +266,7 @@ impl ContextDocument {
         tool_call_id: Option<String>,
     ) {
         let empty_hints = SegmentContextHints::default();
-        let receipts = format_segment_feedback(
+        let mut receipts = format_segment_feedback(
             &source,
             runtime,
             pre_fingerprints,
@@ -294,6 +285,7 @@ impl ContextDocument {
         );
         let live_handles = collect_live_handles(runtime);
         if let Some(turn) = self.active_turn_mut() {
+            append_new_handle_note(&mut receipts, &turn.live_handles, &live_handles);
             turn.segments.push(TraceSegment {
                 source,
                 inline_receipts: receipts,
@@ -334,6 +326,7 @@ impl ContextDocument {
         }
         let live_handles = collect_live_handles(runtime);
         if let Some(turn) = self.active_turn_mut() {
+            append_new_handle_note(&mut receipts, &turn.live_handles, &live_handles);
             turn.segments.push(TraceSegment {
                 source,
                 inline_receipts: receipts,
@@ -382,22 +375,8 @@ impl ContextDocument {
             };
             out.push(json!({"role": "user", "content": opening_user}));
 
-            let live_snapshot = if active {
-                render_live_vm_snapshot(turn)
-            } else {
-                None
-            };
-            let last_seg_idx = turn.segments.len().saturating_sub(1);
-
             for (seg_idx, seg) in turn.segments.iter().enumerate() {
-                let mut tool_output = format_tool_output(seg);
-                if active
-                    && seg_idx == last_seg_idx
-                    && let Some(snapshot) = &live_snapshot
-                {
-                    tool_output.push_str("\n\n");
-                    tool_output.push_str(snapshot);
-                }
+                let tool_output = format_tool_output(seg);
                 let has_native_tool_calls = seg
                     .assistant_message
                     .as_ref()
@@ -540,84 +519,32 @@ fn collect_live_handles(runtime: &Runtime) -> Vec<String> {
     entries
 }
 
-/// Render the transient mutable code-view layer for the CURRENT active turn ONLY.
-/// Contains strictly committed JS code from executed (non-rejection) segments +
-/// compact live `Ref#N` handle inventory, capped at `LIVE_VM_SCRIPT_BUDGET_CHARS` (20 KiB).
-/// Never persisted into completed turns or carried across user turns.
-fn render_live_vm_snapshot(turn: &TurnDoc) -> Option<String> {
-    let executed: Vec<(usize, &TraceSegment)> = turn
-        .segments
+/// Append a compact, permanent 1-line note listing ONLY newly bound silent
+/// `Ref#N` handles created in this step (i.e. not already recorded in earlier steps
+/// and not already explicitly printed with their `Ref#` in `receipts`).
+/// Because this is written once into `inline_receipts`, the wire history stays
+/// 100% strictly byte-exact Append-Only (zero KV-cache invalidation).
+fn append_new_handle_note(
+    receipts: &mut Vec<String>,
+    previous_handles: &[String],
+    current_handles: &[String],
+) {
+    let added: Vec<&str> = current_handles
         .iter()
-        .enumerate()
-        .filter(|(_, s)| !s.is_rejection && !s.source.trim().is_empty())
+        .filter(|entry| !previous_handles.contains(entry))
+        .filter(|entry| {
+            // Skip if the handle's `Ref#N` was already explicitly printed in this step's receipts.
+            let ref_token = entry
+                .split_once('=')
+                .and_then(|(_, rest)| rest.split('(').next())
+                .unwrap_or("");
+            ref_token.is_empty() || !receipts.iter().any(|r| r.contains(ref_token))
+        })
+        .map(String::as_str)
         .collect();
-    if executed.is_empty() {
-        return None;
+    if !added.is_empty() {
+        receipts.push(format!("// [live handles added: {}]", added.join(", ")));
     }
-
-    let mut header = String::from(LIVE_VM_SCRIPT_MARKER);
-    header.push_str(
-        "\n// Already executed in this turn's live VM (do NOT redeclare or re-read; cleared next turn).",
-    );
-    if !turn.live_handles.is_empty() {
-        header.push_str("\n// Live handles: ");
-        header.push_str(&turn.live_handles.join(", "));
-    }
-
-    let mut chunks: Vec<String> = Vec::with_capacity(executed.len());
-    for (idx, (_, seg)) in executed.iter().enumerate() {
-        let mut block = String::new();
-        let is_runtime_err = seg.error_note.as_deref().is_some_and(|n| n.contains("[RUNTIME ERROR"));
-        if is_runtime_err {
-            block.push_str(&format!("// [step {} threw runtime error]\n", idx + 1));
-        }
-        block.push_str(seg.source.trim_end());
-        chunks.push(block);
-    }
-
-    let footer = "\n// === END LIVE VM SCRIPT ===";
-    let overhead = header.chars().count() + footer.chars().count() + 128;
-    let body_budget = LIVE_VM_SCRIPT_BUDGET_CHARS.saturating_sub(overhead);
-    let total_body_chars: usize = chunks.iter().map(|c| c.chars().count() + 1).sum();
-
-    let body = if total_body_chars <= body_budget {
-        chunks.join("\n")
-    } else {
-        // Keep the newest committed segments fitting within `body_budget`, folding older ones.
-        let mut kept_rev: Vec<&str> = Vec::new();
-        let mut used = 0usize;
-        for chunk in chunks.iter().rev() {
-            let cost = chunk.chars().count() + 1;
-            if used + cost > body_budget {
-                if kept_rev.is_empty() {
-                    // Single chunk larger than budget: keep tail within budget.
-                    let tail: String = chunk
-                        .chars()
-                        .rev()
-                        .take(body_budget.saturating_sub(32))
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-                    let note = format!(
-                        "// ... [earlier code folded to stay <= 20KB]\n...{tail}"
-                    );
-                    return Some(format!("{header}\n{note}{footer}"));
-                }
-                break;
-            }
-            kept_rev.push(chunk.as_str());
-            used += cost;
-        }
-        let omitted = chunks.len().saturating_sub(kept_rev.len());
-        kept_rev.reverse();
-        format!(
-            "// ... [earlier {omitted} committed step(s) folded to keep live script <= 20KB; their bindings & Live handles remain active]\n{}",
-            kept_rev.join("\n")
-        )
-    };
-
-    Some(format!("{header}\n{body}{footer}"))
 }
 
 fn format_tool_output(seg: &TraceSegment) -> String {
