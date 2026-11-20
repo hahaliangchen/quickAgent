@@ -1697,9 +1697,68 @@ impl Workspace {
     fn resolve_existing(&self, raw: &str) -> Result<PathBuf> {
         let candidate = self.resolve_for_write(raw)?;
         if !candidate.exists() {
-            return Err(ToolError::NotFound(raw.to_string()));
+            let hint = self.not_found_hint(raw, &candidate);
+            let msg = match hint {
+                Some(h) => format!("{raw} ({h})"),
+                None => raw.to_string(),
+            };
+            return Err(ToolError::NotFound(msg));
         }
         candidate.canonicalize().map_err(ToolError::from)
+    }
+
+    fn not_found_hint(&self, raw: &str, candidate: &Path) -> Option<String> {
+        // 1. Check directory-module equivalents: `foo/bar.rs` -> `foo/bar/mod.rs`,
+        //    `foo/bar.ts` -> `foo/bar/index.ts`, etc.
+        if let Some(ext) = candidate.extension().and_then(|e| e.to_str()) {
+            let stem_dir = candidate.with_extension("");
+            if stem_dir.is_dir() {
+                let candidates: &[&str] = match ext {
+                    "rs" => &["mod.rs"],
+                    "ts" | "tsx" | "js" | "jsx" => &["index.ts", "index.tsx", "index.js", "index.jsx"],
+                    "py" => &["__init__.py"],
+                    _ => &[],
+                };
+                for entry in candidates {
+                    let alt = stem_dir.join(entry);
+                    if alt.is_file() {
+                        let display = alt
+                            .strip_prefix(&self.root)
+                            .ok()
+                            .map(|p| p.to_string_lossy().replace('\\', "/"))
+                            .unwrap_or_else(|| alt.display().to_string());
+                        return Some(format!("found directory module: {display}"));
+                    }
+                }
+            }
+        }
+        // 2. Check close sibling names inside the existing parent directory.
+        let parent = candidate.parent()?;
+        let wanted = candidate.file_stem().and_then(|s| s.to_str()).unwrap_or(raw).to_ascii_lowercase();
+        if !parent.is_dir() || wanted.is_empty() {
+            return None;
+        }
+        let mut matches: Vec<String> = std::fs::read_dir(parent)
+            .ok()?
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with(&wanted) || lower.contains(&wanted) || wanted.contains(lower.trim_end_matches(".rs")) {
+                    let suffix = if e.path().is_dir() { "/" } else { "" };
+                    Some(format!("{name}{suffix}"))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        matches.sort();
+        matches.truncate(5);
+        if matches.is_empty() {
+            None
+        } else {
+            Some(format!("similar in parent dir: {}", matches.join(", ")))
+        }
     }
 
     fn resolve_existing_file(&self, raw: &str) -> Result<PathBuf> {

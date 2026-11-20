@@ -529,16 +529,30 @@ fn append_new_handle_note(
     previous_handles: &[String],
     current_handles: &[String],
 ) {
+    fn extract_ref(entry: &str) -> &str {
+        entry
+            .split_once('=')
+            .and_then(|(_, rest)| rest.split('(').next())
+            .unwrap_or("")
+    }
+    let prev_refs: std::collections::BTreeSet<&str> = previous_handles
+        .iter()
+        .map(|e| extract_ref(e))
+        .filter(|r| !r.is_empty())
+        .collect();
+    let mut seen_new_refs: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     let added: Vec<&str> = current_handles
         .iter()
-        .filter(|entry| !previous_handles.contains(entry))
         .filter(|entry| {
+            let ref_token = extract_ref(entry);
+            if ref_token.is_empty() {
+                return !previous_handles.contains(entry);
+            }
+            if prev_refs.contains(ref_token) || !seen_new_refs.insert(ref_token) {
+                return false;
+            }
             // Skip if the handle's `Ref#N` was already explicitly printed in this step's receipts.
-            let ref_token = entry
-                .split_once('=')
-                .and_then(|(_, rest)| rest.split('(').next())
-                .unwrap_or("");
-            ref_token.is_empty() || !receipts.iter().any(|r| r.contains(ref_token))
+            !receipts.iter().any(|r| r.contains(ref_token))
         })
         .map(String::as_str)
         .collect();

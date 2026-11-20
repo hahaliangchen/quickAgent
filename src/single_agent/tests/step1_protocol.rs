@@ -649,3 +649,84 @@ async fn step1_append_only_live_handle_note_progressive_64kb_array_and_console_4
         assert_prefix_immutable(&pair[0], &pair[1]);
     }
 }
+
+#[tokio::test]
+async fn step1_loop_guard_infinite_loop_notfound_hint_parse_caret_and_ref_dedup() {
+    let ws = TestWorkspace::new("cac-v2-step1-ergonomics");
+    std::fs::create_dir_all(ws.path().join("src/context_doc")).unwrap();
+    std::fs::write(
+        ws.path().join("src/context_doc/mod.rs"),
+        "pub fn hello() -> &'static str { \"ok\" }\n",
+    )
+    .unwrap();
+    init_task_row(ws.path(), "step1-ergo");
+
+    let (state, _captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
+        // Step 0: guess `src/context_doc.rs` -> should hint `src/context_doc/mod.rs`!
+        0 => run_js("const missing = io.read({ path: \"src/context_doc.rs\" });"),
+        // Step 1: verify directory module hint, then trigger a bracket syntax typo -> should show caret `^`!
+        1 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("found directory module: src/context_doc/mod.rs"),
+                "NotFound must suggest directory module mod.rs: {tool_out}"
+            );
+            run_js("({ a: 1 })})")
+        }
+        // Step 2: verify snippet + `^` caret, then run a heavy finite loop + Ref# alias check!
+        2 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("TS_PROGRAM 1:") && tool_out.contains("^"),
+                "parse error must include source snippet and caret `^`: {tool_out}"
+            );
+            run_js(
+                "const modFile = io.read({ path: \"src/context_doc/mod.rs\" });\n\
+                 let sum = 0;\n\
+                 for (let i = 0; i < 5000; i++) sum += i;\n\
+                 sum",
+            )
+        }
+        // Step 3: verify finite loop succeeded, bind an alias to `modFile` (same Ref#1) -> must NOT duplicate live handles note,
+        // and test React/Vue-style infinite-loop detection (`while(true){}` caught even inside try/catch)!
+        3 => {
+            let tool_out = last_tool_output(&body);
+            assert!(tool_out.contains("12497500"), "finite loop must complete cleanly: {tool_out}");
+            run_js("const aliasFile = modFile; try { while (true) {} } catch (e) { 'swallowed'; }")
+        }
+        // Step 4: verify INFINITE_LOOP_DETECTED fired swiftly AND aliasFile did NOT leak into `live handles added`!
+        4 => {
+            let tool_out = last_tool_output(&body);
+            assert!(
+                tool_out.contains("INFINITE_LOOP_DETECTED") && tool_out.contains("state_cycle"),
+                "stuck while(true){{}} must be caught by state-cycle detector: {tool_out}"
+            );
+            assert!(
+                !tool_out.contains("aliasFile=Ref#"),
+                "alias of existing Ref# must NOT leak into live handles added: {tool_out}"
+            );
+            completion("Ergonomics & infinite-loop guard verified.")
+        }
+        other => panic!("unexpected round {other}"),
+    })
+    .await;
+
+    run_task(
+        state,
+        "step1-ergo".into(),
+        "fake".into(),
+        "Verify ergonomics and infinite-loop guard".into(),
+        10,
+        CancellationToken::new(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    assert_eq!(
+        assistant_messages(ws.path(), "step1-ergo"),
+        vec!["Ergonomics & infinite-loop guard verified."]
+    );
+}

@@ -3010,13 +3010,44 @@ fn compile_inner(
             _ => kind,
         }
     };
+    let format_snippet = |line_no: usize, col_1based: usize| -> String {
+        let Some(line_text) = source.lines().nth(line_no.saturating_sub(1)) else {
+            return String::new();
+        };
+        let chars: Vec<char> = line_text.chars().collect();
+        if chars.is_empty() {
+            return String::new();
+        }
+        let col0 = col_1based.saturating_sub(1).min(chars.len());
+        let start = col0.saturating_sub(45);
+        let end = (col0 + 35).min(chars.len());
+        let prefix = if start > 0 { "..." } else { "" };
+        let suffix = if end < chars.len() { "..." } else { "" };
+        let window: String = chars[start..end].iter().collect();
+        let caret_offset = prefix.len() + (col0 - start);
+        format!("\n  {prefix}{window}{suffix}\n  {}^", " ".repeat(caret_offset))
+    };
     let module = parser.parse_module().map_err(|e| {
         let p = map.lookup_char_pos(e.span().lo);
-        anyhow::anyhow!("TS_PROGRAM {}:{}: {}", p.line, p.col.0 + 1, describe(format!("{:?}", e.kind())))
+        let col = p.col.0 + 1;
+        anyhow::anyhow!(
+            "TS_PROGRAM {}:{}: {}{}",
+            p.line,
+            col,
+            describe(format!("{:?}", e.kind())),
+            format_snippet(p.line, col)
+        )
     })?;
     if let Some(e) = parser.take_errors().first() {
         let p = map.lookup_char_pos(e.span().lo);
-        bail!("TS_PROGRAM {}:{}: {}", p.line, p.col.0 + 1, describe(format!("{:?}", e.kind())));
+        let col = p.col.0 + 1;
+        bail!(
+            "TS_PROGRAM {}:{}: {}{}",
+            p.line,
+            col,
+            describe(format!("{:?}", e.kind())),
+            format_snippet(p.line, col)
+        );
     }
     if !internal {
         struct Reserved(bool);

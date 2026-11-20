@@ -15,6 +15,10 @@ pub const CONSOLE_CAPTURE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 // native mutation fast paths. Leave >7x headroom, retaining bounded loops.
 pub const INSTRUCTION_LIMIT: usize = 2_000_000;
 pub const PROGRAM_TIME_LIMIT_MS: i64 = 30 * 60 * 1000;
+/// Default wall-clock safety cap (30s) per uninterrupted JS compute burst in
+/// unbounded REPL mode (catches diverging infinite loops like `while(true){i++}`
+/// while allowing legitimate heavy loops to run freely without arbitrary instruction caps).
+pub const DEFAULT_SEGMENT_WALL_LIMIT_MS: u64 = 30_000;
 fn instruction_limit() -> usize { INSTRUCTION_LIMIT }
 fn program_time_limit() -> i64 { PROGRAM_TIME_LIMIT_MS }
 /// A failure only the user can resolve (see single_agent/blockers.rs). Like a
@@ -27,7 +31,16 @@ fn stops_program(error: &Value) -> bool {
     is_resource_error(error) || is_user_blocker(error)
 }
 pub fn is_resource_error(error: &Value) -> bool {
-    matches!(error["code"].as_str(), Some("OUTPUT_OVER_CAPACITY" | "SHELL_OUTPUT_OVER_CAPACITY" | "INSTRUCTION_BUDGET_EXHAUSTED" | "PROGRAM_TIME_BUDGET_EXHAUSTED"))
+    matches!(
+        error["code"].as_str(),
+        Some(
+            "OUTPUT_OVER_CAPACITY"
+                | "SHELL_OUTPUT_OVER_CAPACITY"
+                | "INSTRUCTION_BUDGET_EXHAUSTED"
+                | "PROGRAM_TIME_BUDGET_EXHAUSTED"
+                | "INFINITE_LOOP_DETECTED"
+        )
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -206,8 +219,29 @@ pub struct Runtime {
     /// unless shadowed by user code).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     builtin_namespaces: BTreeMap<String, HeapId>,
+    /// When true (Context-as-Code v2 REPL), arbitrary instruction caps are lifted
+    /// so legitimate finite loops run freely; safety is enforced by React/Vue-style
+    /// state-cycle infinite-loop detection + a per-segment wall-clock watchdog.
+    #[serde(default)]
+    unbounded_instructions: bool,
+    /// Per-segment wall-clock watchdog (ms) when `unbounded_instructions` is enabled.
+    #[serde(default)]
+    segment_wall_limit_ms: u64,
+    #[serde(skip)]
+    segment_started_at: Option<std::time::Instant>,
+    /// Tracks backward-jump iteration counts and recent state fingerprints per
+    /// `(function, pc)` to detect stuck infinite loops in milliseconds.
+    #[serde(skip)]
+    loop_guard: BTreeMap<(String, usize), LoopGuardEntry>,
     #[serde(default)]
     next_segment: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LoopGuardEntry {
+    hits: u64,
+    last_fingerprint: Option<u64>,
+    unchanged_samples: u8,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ActionScope {
@@ -860,6 +894,10 @@ impl Runtime {
             time_limit_ms: PROGRAM_TIME_LIMIT_MS,
             active_segment_rollback: BTreeMap::new(),
             builtin_namespaces: BTreeMap::new(),
+            unbounded_instructions: false,
+            segment_wall_limit_ms: 0,
+            segment_started_at: None,
+            loop_guard: BTreeMap::new(),
             next_segment: 0,
         })
     }
@@ -901,6 +939,8 @@ impl Runtime {
         )?;
         let mut runtime = Self::new(program, "__repl_bootstrap", Vec::new())?;
         runtime.scoped_calls = true;
+        runtime.unbounded_instructions = true;
+        runtime.segment_wall_limit_ms = DEFAULT_SEGMENT_WALL_LIMIT_MS;
         runtime.install_static_libraries(&libraries)?;
         if let Some(environment) = runtime.module_env {
             for (name, json_val) in initial_bindings {
@@ -2277,8 +2317,149 @@ impl Runtime {
         self.module_env.and_then(|env|self.heap.lookup_binding(env,"__test262DoneCalled").ok())==Some(VmValue::Boolean(true))
     }
     fn refresh_instruction_segment(&mut self) {
-        self.fuel=self.segment_limit;
+        self.fuel = self.segment_limit;
         self.line_instructions.clear();
+        self.segment_started_at = Some(std::time::Instant::now());
+        self.loop_guard.clear();
+    }
+
+    #[cfg(test)]
+    pub fn set_segment_wall_limit_ms(&mut self, limit_ms: u64) {
+        self.segment_wall_limit_ms = limit_ms;
+    }
+
+    /// Lightweight deterministic state fingerprint of the active frame + enclosing
+    /// lexical environments + host queues, used by the React/Vue-style infinite loop
+    /// guard to detect loops executing thousands of iterations with zero state change.
+    fn loop_state_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+
+        fn hash_val(val: &VmValue, heap: &super::heap::Heap, depth: u8, h: &mut std::collections::hash_map::DefaultHasher) {
+            std::mem::discriminant(val).hash(h);
+            match val {
+                VmValue::Undefined | VmValue::Null => {}
+                VmValue::Boolean(b) => b.hash(h),
+                VmValue::Symbol(id) => id.hash(h),
+                VmValue::Number(n) => n.get().to_bits().hash(h),
+                VmValue::String(s) => {
+                    s.len().hash(h);
+                    let bytes = s.as_bytes();
+                    if bytes.len() <= 64 {
+                        bytes.hash(h);
+                    } else {
+                        bytes[..32].hash(h);
+                        bytes[bytes.len() - 32..].hash(h);
+                    }
+                }
+                VmValue::Utf16(u) => {
+                    u.len().hash(h);
+                    if let Some(first) = u.first() { first.hash(h); }
+                    if let Some(last) = u.last() { last.hash(h); }
+                }
+                VmValue::Promise(pid) => format!("{pid:?}").hash(h),
+                VmValue::Reference(id) => {
+                    id.hash(h);
+                    if depth == 0 {
+                        return;
+                    }
+                    if let Ok(node) = heap.get(*id) {
+                        std::mem::discriminant(node).hash(h);
+                        match node {
+                            HeapNode::Array(items) => {
+                                items.len().hash(h);
+                                if let Some(first) = items.first() {
+                                    hash_val(first, heap, depth - 1, h);
+                                }
+                                if let Some(last) = items.last() {
+                                    hash_val(last, heap, depth - 1, h);
+                                }
+                            }
+                            HeapNode::Object(props) => {
+                                props.len().hash(h);
+                                for (k, v) in props.iter().take(16) {
+                                    k.hash(h);
+                                    hash_val(v, heap, depth - 1, h);
+                                }
+                            }
+                            HeapNode::Iterator(it) => {
+                                it.cursor.hash(h);
+                                it.limit.hash(h);
+                            }
+                            HeapNode::Collection(col) => {
+                                format!("{col:?}").len().hash(h);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        self.frames.len().hash(&mut h);
+        self.log_bytes.hash(&mut h);
+        self.async_actions.len().hash(&mut h);
+        self.inflight_async.len().hash(&mut h);
+        if let Some(frame) = self.frames.last() {
+            if let Some(locals) = &frame.vm_locals {
+                locals.len().hash(&mut h);
+                for (k, v) in locals {
+                    k.hash(&mut h);
+                    hash_val(v, &self.heap, 1, &mut h);
+                }
+            }
+            let mut env_opt = frame.env;
+            let mut hops = 0u8;
+            while let Some(env_id) = env_opt {
+                if hops >= 4 {
+                    break;
+                }
+                hops += 1;
+                if let Ok(HeapNode::Environment { parent, bindings, .. }) = self.heap.get(env_id) {
+                    bindings.len().hash(&mut h);
+                    for (k, v) in bindings {
+                        if k.starts_with('\0') {
+                            continue;
+                        }
+                        k.hash(&mut h);
+                        hash_val(v, &self.heap, 1, &mut h);
+                    }
+                    env_opt = *parent;
+                } else {
+                    break;
+                }
+            }
+        }
+        h.finish()
+    }
+
+    fn infinite_loop_error(&self, reason: &str, detail: String) -> Value {
+        let mut hot: Vec<_> = self
+            .line_instructions
+            .iter()
+            .flat_map(|(function, lines)| {
+                lines.iter().map(move |(line, count)| {
+                    json!({"function": function, "line": line, "instructions": count})
+                })
+            })
+            .collect();
+        hot.sort_by(|a, b| b["instructions"].as_u64().cmp(&a["instructions"].as_u64()));
+        hot.truncate(8);
+        let location = self.work_site().map(|(_, at)| json!(at));
+        let elapsed_ms = self
+            .segment_started_at
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        json!({
+            "name": "InfiniteLoopError",
+            "code": "INFINITE_LOOP_DETECTED",
+            "reason": reason,
+            "message": detail,
+            "total_instructions": self.total_instructions,
+            "segment_elapsed_ms": elapsed_ms,
+            "location": location,
+            "hot_lines": hot
+        })
     }
     #[cfg(test)]
     pub(super) fn gc_collections(&self) -> usize { self.heap.gc_collections }
@@ -2728,9 +2909,12 @@ impl Runtime {
                 }
                 continue;
             }
-            if self.fuel == 0 {
+            if !self.unbounded_instructions && self.fuel == 0 {
                 self.fail_capacity(self.budget_error(false));
                 return State::Failed(self.error.clone().unwrap());
+            }
+            if self.unbounded_instructions && self.segment_started_at.is_none() {
+                self.segment_started_at = Some(std::time::Instant::now());
             }
             self.total_vm_steps = self.total_vm_steps.saturating_add(1);
             if self.total_vm_steps % 256 == 0 {
@@ -2738,27 +2922,87 @@ impl Runtime {
                     self.expire_time_budget();
                     return State::Failed(self.error.clone().unwrap());
                 }
+                if self.unbounded_instructions
+                    && self.segment_wall_limit_ms > 0
+                    && let Some(started) = self.segment_started_at
+                    && started.elapsed().as_millis() as u64 >= self.segment_wall_limit_ms
+                {
+                    let elapsed = started.elapsed().as_millis() as u64;
+                    let err = self.infinite_loop_error(
+                        "wall_timeout",
+                        format!(
+                            "Infinite loop or runaway computation detected: uninterrupted JS execution ran for {elapsed}ms (limit {}ms). Check hot_lines and use native handle.grep()/includes() or bound your loop.",
+                            self.segment_wall_limit_ms
+                        ),
+                    );
+                    self.fail_capacity(err);
+                    return State::Failed(self.error.clone().unwrap());
+                }
                 if self.heap.collection_due() && let Err(error) = self.collect_garbage() {
                     return self.collection_failed(error);
                 }
             }
-            let (instruction, charge) = {
+            let (instruction, charge, backedge_key) = {
                 let frame = self.frames.last_mut().unwrap();
-                let instruction = self.program.functions[&frame.function].code[frame.pc].clone();
+                let cur_pc = frame.pc;
+                let instruction = self.program.functions[&frame.function].code[cur_pc].clone();
+                let is_backedge = match &instruction.op {
+                    Op::Jump(target) | Op::Branch(_, target) => *target <= cur_pc,
+                    _ => false,
+                };
                 // Prelude implementation steps are not user instructions.
                 // One unit per entry and backward edge prices iterations and
                 // still bounds a built-in loop independently of wall time.
-                let charge = !frame.function.starts_with("$$") || frame.pc == 0 || match &instruction.op {
-                    Op::Jump(target) | Op::Branch(_, target) => *target <= frame.pc,
-                    _ => false,
+                let charge = !frame.function.starts_with("$$") || cur_pc == 0 || is_backedge;
+                let backedge_key = if self.unbounded_instructions
+                    && is_backedge
+                    && !frame.function.starts_with("$$")
+                {
+                    Some((frame.function.clone(), cur_pc))
+                } else {
+                    None
                 };
                 frame.pc += 1;
-                (instruction, charge)
+                (instruction, charge, backedge_key)
             };
+            if let Some(key) = backedge_key {
+                let hits = {
+                    let entry = self.loop_guard.entry(key.clone()).or_default();
+                    entry.hits = entry.hits.saturating_add(1);
+                    entry.hits
+                };
+                if hits >= 1_000 && hits % 1_000 == 0 {
+                    let fp = self.loop_state_fingerprint();
+                    let stuck = {
+                        let entry = self.loop_guard.entry(key).or_default();
+                        if entry.last_fingerprint == Some(fp) {
+                            entry.unchanged_samples = entry.unchanged_samples.saturating_add(1);
+                            entry.unchanged_samples >= 3
+                        } else {
+                            entry.last_fingerprint = Some(fp);
+                            entry.unchanged_samples = 0;
+                            false
+                        }
+                    };
+                    if stuck {
+                        let err = self.infinite_loop_error(
+                            "state_cycle",
+                            format!(
+                                "Infinite loop detected at line {}: loop executed {} iterations with identical local/heap state (no progress).",
+                                instruction.at.line, hits
+                            ),
+                        );
+                        self.fail_capacity(err);
+                        return State::Failed(self.error.clone().unwrap());
+                    }
+                }
+            }
             let at = instruction.at.clone();
             let work_site = self.work_site();
             if charge {
-                self.fuel -= 1;
+                if !self.unbounded_instructions {
+                    self.fuel -= 1;
+                }
                 self.total_instructions = self.total_instructions.saturating_add(1);
                 if let Some((function, location)) = &work_site {
                     *self.line_instructions.entry(function.clone()).or_default().entry(location.line).or_default() += 1;
