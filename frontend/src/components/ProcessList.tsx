@@ -88,7 +88,7 @@ export function liveActivity(items: readonly ChatItem[]): string {
 export function toolProgressLabel(reply: AssistantItem): string {
   return (reply.toolProgress ?? []).map(tool => {
     const action = tool.name === 'write_program' ? '正在编写程序'
-      : tool.name === 'run' ? '正在编写执行代码'
+      : (tool.name === 'run' || tool.name === 'run_js') ? '正在编写执行代码'
         : tool.name === 'write_file' ? '正在编写文件'
           : `正在生成工具调用${tool.name ? ` ${tool.name}` : ''}`
     return `${action} · 已生成 ${tool.argumentBytes.toLocaleString()} 字节`

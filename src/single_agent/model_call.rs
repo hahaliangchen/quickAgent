@@ -1,38 +1,64 @@
-//! Zero-Schema HTTP model caller for Context-as-Code v2.
+//! Single-shell `run_js` HTTP model caller for Context-as-Code v2.
 //!
 //! Sends:
-//! - Static `system` prompt (pure JS continuation + `return <<<` protocol +
-//!   `.d.ts` host library declarations from `declarations::static_library_header`).
+//! - Static `system` prompt (incremental JS execution via the single `run_js({ code })`
+//!   tool + `.d.ts` host library declarations from `declarations::static_library_header`).
 //! - Paired `(user #1, assistant #1, ..., user #N)` messages from `ContextDocument`.
-//! - ZERO JSON Schema `tools` / `tool_choice` / `parallel_tool_calls`.
+//! - ZERO business-tool JSON Schemas — ONLY the single fixed 1-parameter `run_js`
+//!   shell tool so reasoning models get a deterministic native `tool_calls` stop
+//!   signal and separate commentary text cleanly from executable JS.
 
 use super::{Session, Window};
 use crate::agent_program::{declarations, libraries::Libraries};
 use crate::agent_service;
+use crate::model_stream::{RunSubmission, ToolCall};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+pub(super) const RUN_JS_TOOL_NAME: &str = "run_js";
+
+fn run_js_tool_definition() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": RUN_JS_TOOL_NAME,
+            "description": "Execute the next JavaScript statement(s) inside the persistent per-turn `executeTask()` JS VM. All host libraries (`io`, `git`, `process`, `host`, `session`, etc.) declared in the `.d.ts` system prompt are pre-bound in scope.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "Raw JavaScript statements to append and execute in the live VM (no markdown code fences, no fabricated `// =>` comments)."
+                    }
+                },
+                "required": ["code"],
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
 const V2_SYSTEM_PROMPT: &str = r#"You are a coding agent continuing the body of `async function executeTask()` inside a persistent per-turn JavaScript VM.
-There are ZERO JSON tool schemas. Writing executable JavaScript is your ONLY way to call host capabilities.
+There are ZERO business-tool JSON schemas — your ONLY tool is `run_js({ code })`, which executes incremental JavaScript statements against the pre-bound host libraries declared in the `.d.ts` below.
 
 ## STRICT SINGLE-STEP PROTOCOL
-Each response MUST be **exactly ONE** of the two modes below — NEVER both in the same response:
+Each response MUST be **one** of the two actions below:
 
-### Mode 1: Execute the next JS statement(s)
-- Output ONLY raw JavaScript statements to append at the cursor inside `async function executeTask() { ...` (NO markdown fences, NO prose outside `//` JS comments, NO fabricated `// =>` results).
-- **IMPORTANT (no native tool channel)**: This session has NO built-in tool-call channel. Do NOT wait for a tool result inside the same response — simply emit the JS statements as your complete response and stop generating immediately; the outer Rust harness executes your JS and delivers the real `// =>` / `EPHEMERAL_PEEK` output in the next turn.
+### Action 1: Execute the next JS statement(s) via `run_js({ code })`
+- Call `run_js` with raw JavaScript statements to append at the cursor inside `async function executeTask() { ...` (NO markdown fences, NO fabricated `// =>` results).
+- You may optionally write a brief 1-sentence progress note in your assistant message text before calling `run_js`, and keep `code` 100% pure JavaScript.
+- Emit ONE concise `run_js` call per step so the host executes it and returns real `// =>` / `EPHEMERAL_PEEK` output before your next step.
 - Host libraries (`io`, `git`, `process`, `host`, `session`, etc.) declared in the `.d.ts` below are pre-bound in scope and proxy synchronously into Rust.
-- All top-level variables (`const`, `let`, `function`) stay live in VM memory for the rest of the current user turn:
+- All top-level variables (`const`, `let`, `function`) stay live in VM memory for the rest of the current user turn (do NOT re-declare variables that already succeeded in earlier steps):
   - Short results (`<= 2KB`) print verbatim in permanent `// =>` comments below your code.
   - Medium results (`2KB..=24KB`) leave a compact `[File(...) | ...]` / `[Object ...]` signature in `// =>` and expand in full (with line numbers) inside `EPHEMERAL_PEEK` at the bottom for ONE step only.
   - Large results (`> 24KB`) show a high-entropy index (symbols / error lines + tail / schema) in `EPHEMERAL_PEEK`.
-- **Lazy Resource Handles & Code-as-Projection**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with built-in zero-I/O paging methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. `EPHEMERAL_PEEK` disappears on the next step — pin only the lines you still need into a small variable (`<= 2KB`, e.g. `const bug = f.slice(61, 75);`), or jump straight to Mode 2 (`return <<<`) if you already have everything needed.
+- **Lazy Resource Handles & Code-as-Projection**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with built-in zero-I/O paging methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. `EPHEMERAL_PEEK` disappears on the next step — pin only the lines you still need into a small variable (`<= 2KB`, e.g. `const bug = f.slice(61, 75);`), or reply directly once you have everything needed.
 
-### Mode 2: Finish turn and reply to the user
-- ONLY after you have real observed evidence (never before reading the target files), start your response with `return <<<` on line 1, followed immediately by raw Markdown until EOF.
-- Everything after `return <<<` is delivered verbatim to the user and NEVER executed as JS (so ```` ```js ```` / ```` ```rust ```` example blocks need zero escaping).
-- NEVER write executable JS statements before or after `return <<<` in the same response!
+### Action 2: Finish turn and reply to the user
+- ONLY after you have real observed evidence (never before reading the target files or running requested checks), reply directly in normal Markdown **WITHOUT calling `run_js`**.
+- Everything in your plain assistant reply (without `run_js`) is delivered verbatim to the user and NEVER executed as JS (so ```` ```js ```` / ```` ```rust ```` example blocks need zero escaping).
 
 ## Ordinary JS Functions vs Isolated `@virtual` Functions
 - Use ordinary JS functions/loops (`function foo(...) { ... }`) for deterministic multi-file reads, filtering, or batch computation (0 extra LLM calls).
@@ -42,21 +68,18 @@ Each response MUST be **exactly ONE** of the two modes below — NEVER both in t
 - When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.
 - Large results (`> 24KB`) are automatically archived with an `asset: asset-...` id in permanent `// =>`; in later turns you can page them back via `session.read_asset({ asset_id, char_offset, max_chars })`.
 - Reusable cross-session JS orchestration libraries (listed below the `.d.ts` when available) can be loaded with `const lib = require("<name>");`.
-- If you cannot proceed without user clarification, call `host.ask_user({ question: "..." });` to pause the turn and deliver your question directly.
+- If you cannot proceed without user clarification, call `host.ask_user({ question: "..." });` inside `run_js` to pause the turn and deliver your question directly.
 
 ## Multi-Step Interaction Example
-[Model Response 1 — ONLY read the file, then STOP]:
-const f = io.read({ path: "src/auth.rs" });
+[Step 1 — call `run_js`]:
+`run_js({ code: "const f = io.read({ path: \"src/auth.rs\" });" })`
 
-[Host executes Step 1 and shows `// => f = [File("src/auth.rs") | Ref#1 | ...]` + `EPHEMERAL_PEEK` full file with line numbers]
+[Host executes Step 1 and appends `// => f = [File("src/auth.rs") | Ref#1 | ...]` + `EPHEMERAL_PEEK` full file with line numbers]
 
-[Model Response 2 — pin key lines via handle `.slice()` (optional) OR jump straight to `return <<<`]:
-const verifyFn = f.slice(61, 75);
+[Step 2 — call `run_js` to pin key lines via handle `.slice()` (optional) OR reply directly without `run_js`]:
+`run_js({ code: "const verifyFn = f.slice(61, 75);" })`
 
-[Host executes Step 2, pins the 15 lines in `// =>`, and wipes `EPHEMERAL_PEEK`]
-
-[Model Response 3 — final Markdown reply ONLY]:
-return <<<
+[Step 3 — final Markdown reply WITHOUT calling `run_js`]:
 Found the vulnerability in `src/auth.rs` lines 61–75...
 
 ```rust
@@ -66,25 +89,152 @@ Found the vulnerability in `src/auth.rs` lines 61–75...
 
 const VIRTUAL_LEAF_SYSTEM_PROMPT: &str = r#"You are executing inside an isolated single-layer `@virtual` JavaScript function frame.
 Complete ONLY this function's contract using its bound parameters, `@uses` captures, and allowed non-shell libraries in the `.d.ts` below.
-There are ZERO JSON tool schemas.
+Your ONLY tool is `run_js({ code })`.
 
 ## STRICT RULES
-1. **Emit ONLY raw JavaScript statements** to continue the function body (NO XML tags, NO Markdown prose outside `//` comments, NO `return <<<`).
+1. **Always call `run_js({ code })`** with raw JavaScript statements to continue the function body (NO markdown fences, NO fabricated `// =>` comments). Do NOT reply with plain text outside `run_js`.
 2. **Bound parameters and `@uses` captures are already live JS variables** — use them directly by identifier name.
 3. **Host libraries (`io`, `git`, `host`)** proxy synchronously into Rust. Shell (`process.*`) and nested `@virtual` declarations are strictly forbidden.
-4. **Finish by executing native JS `return <json_value>;`**:
+4. **Finish by executing native JS `return <json_value>;` inside `run_js`**:
    - Always include a short `summary` field in your returned object (e.g. `return { ok: true, summary: "audited src/a.rs: no issues" };`) so the caller knows exactly what you checked or changed, even for file-editing tasks.
    - If the contract cannot be satisfied, execute `return { "$task_error": "concrete reason" };`.
-5. **No native tool channel**: emit the JS statements for this step and stop generating immediately; the host executes them and returns real `// =>` / `EPHEMERAL_PEEK` output on the next step.
 "#;
 
 pub(super) struct ModelReply {
     pub content: String,
+    pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
 }
 
+fn clean_run_js_code(raw: &str) -> String {
+    let trimmed = raw.trim();
+    // Gracefully unwrap a single outer ```js ... ``` fence if a model placed fences inside `code`.
+    let unwrapped = if trimmed.starts_with("```") {
+        if let Some(first_nl) = trimmed.find('\n') {
+            let lang = trimmed[3..first_nl].trim().to_ascii_lowercase();
+            let body = &trimmed[first_nl + 1..];
+            if matches!(lang.as_str(), "" | "js" | "javascript" | "ts" | "typescript")
+                && let Some(stripped) = body.strip_suffix("```")
+                && !stripped.contains("\n```")
+            {
+                stripped
+                    .strip_suffix("\r\n")
+                    .or_else(|| stripped.strip_suffix('\n'))
+                    .unwrap_or(stripped)
+            } else {
+                trimmed
+            }
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    let mut s = unwrapped.trim().to_owned();
+    for stray in ["</parameter>", "</invoke>", "</tool_call>", "</function>"] {
+        if let Some(stripped) = s.strip_suffix(stray) {
+            s = stripped.trim_end().to_owned();
+        }
+    }
+    s
+}
+
+fn extract_tool_js(reply: &ModelReply) -> RunSubmission {
+    if reply.finish_reason.as_deref() == Some("length") {
+        return RunSubmission::Rejected {
+            code: "OUTPUT_TRUNCATED",
+            message: "The `run_js` tool call hit the output token limit. Resubmit a shorter JS step."
+                .into(),
+        };
+    }
+    let Some(call) = reply.tool_calls.first() else {
+        return RunSubmission::Rejected {
+            code: "EMPTY_TOOL_CALL",
+            message: "Expected a `run_js({ code })` tool call.".into(),
+        };
+    };
+    if call.name != RUN_JS_TOOL_NAME {
+        return RunSubmission::Rejected {
+            code: "UNKNOWN_TOOL",
+            message: format!(
+                "Unknown tool `{}`. The ONLY tool is `run_js({{ code }})` — invoke host libraries (`io.*`, `git.*`, `process.*`, `host.*`, `session.*`) as JS inside `run_js`.",
+                call.name
+            ),
+        };
+    }
+    let parsed: Value = match serde_json::from_str(&call.arguments) {
+        Ok(val) => val,
+        Err(err) => {
+            return RunSubmission::Rejected {
+                code: "INVALID_TOOL_ARGS",
+                message: format!(
+                    "`run_js` arguments were not valid JSON ({err}). Pass `{{\"code\": \"...\"}}`."
+                ),
+            };
+        }
+    };
+    let Some(raw_code) = parsed.get("code").and_then(Value::as_str) else {
+        return RunSubmission::Rejected {
+            code: "MISSING_CODE_FIELD",
+            message: "`run_js` requires a string `code` field: `{\"code\": \"...\"}`.".into(),
+        };
+    };
+    let source = clean_run_js_code(raw_code);
+    if source.is_empty() {
+        return RunSubmission::Rejected {
+            code: "EMPTY_CODE",
+            message: "`run_js` `code` was empty. Pass JavaScript statements to execute, or reply directly in Markdown without calling `run_js`.".into(),
+        };
+    }
+    RunSubmission::Run { source }
+}
+
+/// Parse a completed main-turn model response under the single-shell `run_js` protocol.
+/// - Tool call `run_js({ code })` -> `RunSubmission::Run { source }` (isolating any commentary in `reply.content`).
+/// - Plain assistant text without `run_js` -> `RunSubmission::Reply { markdown }` (also strips legacy `return <<<` header if present).
+pub(super) fn parse_main_submission(reply: &ModelReply) -> RunSubmission {
+    if !reply.tool_calls.is_empty() {
+        return extract_tool_js(reply);
+    }
+    if reply.finish_reason.as_deref() == Some("length") {
+        return RunSubmission::Rejected {
+            code: "REPLY_TRUNCATED",
+            message: "The final reply hit the output token limit. Please provide a concise final Markdown reply.".into(),
+        };
+    }
+    let trimmed = reply.content.trim();
+    if trimmed.is_empty() {
+        return RunSubmission::Rejected {
+            code: "EMPTY_RESPONSE",
+            message: "Empty response. Call `run_js({ code })` to execute JavaScript statements, or reply directly in Markdown to finish the turn.".into(),
+        };
+    }
+    // Graceful compatibility if a model still uses `return <<<` in plain text.
+    if trimmed.starts_with("return") {
+        if let RunSubmission::Reply { markdown } =
+            crate::model_stream::parse_run_submission(&reply.content, reply.finish_reason.as_deref())
+        {
+            return RunSubmission::Reply { markdown };
+        }
+    }
+    RunSubmission::Reply {
+        markdown: trimmed.to_owned(),
+    }
+}
+
+/// Parse a completed `@virtual` leaf model response under the single-shell `run_js` protocol.
+pub(super) fn parse_virtual_submission(reply: &ModelReply) -> RunSubmission {
+    if !reply.tool_calls.is_empty() {
+        return extract_tool_js(reply);
+    }
+    RunSubmission::Rejected {
+        code: "VIRTUAL_TOOL_REQUIRED",
+        message: "Inside a `@virtual` function, call `run_js({ code })` with JavaScript statements and finish with native JS `return { ..., summary: \"...\" };`. Do not reply with plain text outside `run_js`.".into(),
+    }
+}
+
 /// Build the provider wire body: static system prompt + `.d.ts` declarations +
-/// conversation turns, with ALL JSON tool-schema fields stripped.
+/// conversation turns + ONLY the single fixed `run_js({ code })` shell tool.
 pub(super) fn build_request_body(
     s: &Session<'_>,
     w: &Window,
@@ -122,6 +272,9 @@ pub(super) fn build_request_body_for_doc(
     let mut body = json!({
         "model": s.model,
         "messages": messages,
+        "tools": [run_js_tool_definition()],
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
         "stream": true,
     });
     let estimated_input = crate::context_window::estimate(&body);
@@ -140,8 +293,6 @@ pub(super) fn build_request_body_for_doc(
         body["reasoning_effort"] = json!(mapped);
     }
 
-    body = crate::model_stream::code_only_request(body);
-
     let is_responses = s
         .state
         .provider_routes
@@ -157,10 +308,8 @@ pub(super) fn build_request_body_for_doc(
     }
     if is_responses {
         body = crate::model_stream::responses_request(&body);
-        body = crate::model_stream::code_only_request(body);
     } else if is_messages {
         body = crate::anthropic_messages::wire_body(s.state, s.model, &body);
-        body = crate::model_stream::code_only_request(body);
     }
     body
 }
@@ -276,9 +425,11 @@ async fn send_model_request(
         match attempt_res {
             Ok((message, stats)) => {
                 let content = message["content"].as_str().unwrap_or("").to_owned();
+                let tool_calls = crate::model_stream::tool_calls(&message);
                 let finish_reason = stats["finish_reason"].as_str().map(str::to_owned);
                 return Ok(ModelReply {
                     content,
+                    tool_calls,
                     finish_reason,
                 });
             }

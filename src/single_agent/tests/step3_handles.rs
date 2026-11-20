@@ -3,7 +3,7 @@
 //! Pass-by-Handle zero outer expansion + `@virtual` Auto-Dereference, `EPHEMERAL_PEEK`
 //! cross-binding deduplication, and same-step inline alias folding.
 
-use super::{TestWorkspace, assistant_messages, completion, init_task_row, tool_call_count};
+use super::{TestWorkspace, assistant_messages, completion, init_task_row, run_js, tool_call_count};
 use crate::agent_service::{self, AgentServiceState};
 use crate::single_agent::run_task;
 use axum::{Json, Router, routing::post};
@@ -66,7 +66,7 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
                 );
                 let user = body["messages"][1]["content"].as_str().unwrap();
                 Json(match idx {
-                    0 => completion("const big = io.read({ path: \"src/big_engine.rs\" });"),
+                    0 => run_js("const big = io.read({ path: \"src/big_engine.rs\" });"),
                     1 => {
                         // Tier 3: compact Ref#1 handle in permanent trace + LARGE INDEX (not full 28KB!)
                         assert!(
@@ -84,7 +84,7 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
                             "Tier-3 large file must NOT dump middle filler lines into prompt: {user}"
                         );
                         // Use all 5 built-in zero-I/O handle methods + verify plain objects still reject `.slice()`!
-                        completion(
+                        run_js(
                             "const sym = big.outline();\n\
                              const hits = big.grep(/secret_bug_marker/i, 1);\n\
                              const multi = big.slice([[1, 2], [260, 263]]);\n\
@@ -107,7 +107,7 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
                                 && user.contains("plainThrew = true"),
                             "expected outline/grep/multi-slice/head/tail/TypeError check results: {user}"
                         );
-                        completion("return <<<\n已通过惰性句柄按需分页定位第 260-263 行的 `critical_handler` 漏洞。")
+                        completion("已通过惰性句柄按需分页定位第 260-263 行的 `critical_handler` 漏洞。")
                     }
                     other => panic!("unexpected round {other}"),
                 })
@@ -183,7 +183,7 @@ async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_de
                 if !is_virtual {
                     let idx = main_seq.fetch_add(1, Ordering::SeqCst);
                     return Json(match idx {
-                        0 => completion(
+                        0 => run_js(
                             "const files = [\n\
                                io.read({ path: \"src/a.rs\" }),\n\
                                io.read({ path: \"src/b.rs\" }),\n\
@@ -224,14 +224,14 @@ async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_de
                                 "expected duplicate inline aliases to fold cleanly: {user}"
                             );
                             // 4. Demand Paging in outer scope on an already-delegated handle (zero extra disk I/O!)
-                            completion("const spot = a.grep(\"SECRET_RAW_A\", 0);")
+                            run_js("const spot = a.grep(\"SECRET_RAW_A\", 0);")
                         }
                         2 => {
                             assert!(
                                 user.contains("2: // SECRET_RAW_A_ONLY_CHILD_SEES"),
                                 "demand-paged .grep() must materialize only the requested line on demand: {user}"
                             );
-                            completion("return <<<\nPass-by-Handle 零拷贝透传与按需分页全部验证通过。")
+                            completion("Pass-by-Handle 零拷贝透传与按需分页全部验证通过。")
                         }
                         other => panic!("unexpected main round {other}"),
                     });
@@ -247,7 +247,7 @@ async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_de
                 );
                 seen_children_ref.lock().unwrap().push(user.to_owned());
                 // Child uses handle's built-in `.grep()` directly on `h`!
-                Json(completion(
+                Json(run_js(
                     "const hit = h.grep(\"SECRET_RAW\", 0);\n\
                      return { path: h.path, markerLine: hit, summary: `audited ${h.path} cleanly with detailed findings and verified no critical security defects` };",
                 ))
@@ -303,7 +303,7 @@ async fn step3_ephemeral_peek_deduplicates_aliases_in_same_step() {
                 let idx = seq.fetch_add(1, Ordering::SeqCst);
                 let user = body["messages"][1]["content"].as_str().unwrap();
                 Json(match idx {
-                    0 => completion(
+                    0 => run_js(
                         "const f = io.read({ path: \"dup.rs\" });\n\
                          const arr = [f];\n\
                          const map = { primary: f.content };",
@@ -314,7 +314,7 @@ async fn step3_ephemeral_peek_deduplicates_aliases_in_same_step() {
                             count, 1,
                             "same file referenced by `f`, `arr`, and `map` MUST appear AT MOST ONCE in EPHEMERAL_PEEK (got {count}): {user}"
                         );
-                        completion("return <<<\nDeduplicated cleanly.")
+                        completion("Deduplicated cleanly.")
                     }
                     other => panic!("unexpected round {other}"),
                 })

@@ -1548,13 +1548,10 @@ pub(crate) async fn consume_model_stream_observed(
     let mut bytes = response.bytes_stream();
     let mut delta_text = String::new();
     let mut delta_reasoning = String::new();
-    let mut run_gate = crate::model_stream::RunStreamGate::default();
-    let mut run_code_chars = 0usize;
     let mut last_flush = Instant::now();
     let mut flushed = false;
     let mut tool_dirty = false;
     let mut last_tool_flush = Instant::now();
-    let mut truncated_code_burst = false;
 
     while !accumulator.received_done() {
         if let Some(log) = diagnostics {
@@ -1579,26 +1576,7 @@ pub(crate) async fn consume_model_stream_observed(
             // drops this future before a complete tool call is delivered.
             log.decoded(&accumulator.stats());
         }
-        for gate_event in run_gate.push(&delta.text) {
-            match gate_event {
-                crate::model_stream::RunStreamEvent::ReplyDelta(text) => delta_text.push_str(&text),
-                crate::model_stream::RunStreamEvent::RunProgress(code) => {
-                    run_code_chars = run_code_chars.saturating_add(code.chars().count());
-                    tool_dirty = true;
-                }
-            }
-        }
-        if run_gate.is_code() && accumulator.interrupted_code_burst().is_some() {
-            // Reasoning resumed mid-stream after a complete JS step was already emitted
-            // (e.g. a reasoning model expecting a native tool result). Stop reading early
-            // so we execute the clean first JS burst immediately instead of waiting for
-            // repeated `const` declarations that fail compilation.
-            if let Some(burst) = accumulator.interrupted_code_burst() {
-                run_code_chars = burst.chars().count();
-            }
-            truncated_code_burst = true;
-            break;
-        }
+        delta_text.push_str(&delta.text);
         delta_reasoning.push_str(&delta.reasoning);
         tool_dirty |= delta.tool_call;
         let tool_due = tool_dirty && (!flushed || last_tool_flush.elapsed() >= Duration::from_millis(500));
@@ -1611,11 +1589,7 @@ pub(crate) async fn consume_model_stream_observed(
                 log.phase("event_persistence");
             }
             let tool_progress = if tool_dirty {
-                if run_gate.is_code() {
-                    json!([{"name": "run", "argument_bytes": run_code_chars}])
-                } else {
-                    accumulator.tool_progress()
-                }
+                accumulator.tool_progress()
             } else {
                 Value::Null
             };
@@ -1634,19 +1608,12 @@ pub(crate) async fn consume_model_stream_observed(
             flushed = true;
         }
     }
-    if !truncated_code_burst {
-        for gate_event in run_gate.finish() {
-            if let crate::model_stream::RunStreamEvent::ReplyDelta(text) = gate_event {
-                delta_text.push_str(&text);
-            }
-        }
-    }
-    if !delta_text.is_empty() || !delta_reasoning.is_empty() || (truncated_code_burst && run_code_chars > 0) {
+    if !delta_text.is_empty() || !delta_reasoning.is_empty() || tool_dirty {
         if let Some(log) = diagnostics {
             log.phase("event_persistence");
         }
-        let tool_progress = if truncated_code_burst && run_code_chars > 0 {
-            json!([{"name": "run", "argument_bytes": run_code_chars}])
+        let tool_progress = if tool_dirty {
+            accumulator.tool_progress()
         } else {
             Value::Null
         };
@@ -1663,11 +1630,7 @@ pub(crate) async fn consume_model_stream_observed(
         log.phase("stream_decode");
         log.decoded(&accumulator.stats());
     }
-    let completed = if truncated_code_burst {
-        accumulator.finish_truncated_code_burst()?
-    } else {
-        accumulator.finish()?
-    };
+    let completed = accumulator.finish()?;
     let mut stats = completed.stats;
     stats["format"] = stats["response_format"].clone();
     stats["first_delta_after_headers_ms"] = stats["first_delta_ms"].clone();

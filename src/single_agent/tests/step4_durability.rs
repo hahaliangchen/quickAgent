@@ -4,7 +4,7 @@
 //! 3. `host.ask_user({ question })` graceful turn handoff (`NEEDS_USER`)
 //! 4. `host_folder` turn `.js` archival + `crate::rewind::rewind` round-trip verification
 
-use super::{TestWorkspace, assistant_messages, completion, extract_asset_id, init_task_row};
+use super::{TestWorkspace, assistant_messages, completion, extract_asset_id, init_task_row, run_js};
 use crate::agent_service::{self, AgentServiceState};
 use crate::single_agent::{host_folder, run_task};
 use axum::{Json, Router, routing::post};
@@ -45,7 +45,7 @@ async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
                 let idx = seq.fetch_add(1, Ordering::SeqCst);
                 Json(match idx {
                     // Turn 1, step 1: read > 28KB file
-                    0 => completion("const big = io.read({ path: \"src/huge.rs\" });"),
+                    0 => run_js("const big = io.read({ path: \"src/huge.rs\" });"),
                     // Turn 1, step 2: verify `asset: asset-...` is recorded in permanent `// =>`, then finish Turn 1 (destroys VM!)
                     1 => {
                         let user1 = body["messages"][1]["content"].as_str().unwrap();
@@ -54,7 +54,7 @@ async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
                         });
                         assert!(aid.starts_with("asset-"), "unexpected asset id: {aid}");
                         *asset_ref.lock().unwrap() = Some(aid);
-                        completion("return <<<\nTurn 1 已归档大文件。")
+                        completion("Turn 1 已归档大文件。")
                     }
                     // Turn 2, step 1 (brand new VM!): read back from durable asset store via `session.read_asset`!
                     2 => {
@@ -66,7 +66,7 @@ async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
                             frozen_user1.contains(&format!("asset: {aid}")),
                             "frozen Turn 1 trace must preserve asset_id for cross-turn recall: {frozen_user1}"
                         );
-                        completion(&format!(
+                        run_js(&format!(
                             "const page = session.read_asset({{ asset_id: {aid:?}, char_offset: 0, max_chars: 600 }});\n\
                              const recovered = page.content.includes(\"HUGE_ARCHIVE_HEADER_TOKEN_98765\");"
                         ))
@@ -78,7 +78,7 @@ async fn step4_large_result_asset_archival_and_cross_turn_read_asset() {
                             user2.contains("recovered = true"),
                             "session.read_asset must recover archived Turn 1 payload across turns: {user2}"
                         );
-                        completion("return <<<\n跨轮通过 session.read_asset 成功取回归档内容。")
+                        completion("跨轮通过 session.read_asset 成功取回归档内容。")
                     }
                     other => panic!("unexpected round {other}"),
                 })
@@ -176,7 +176,7 @@ async fn step4_cross_session_code_reuse_require_preset_and_project_skill_modules
                 );
                 let user = body["messages"][1]["content"].as_str().unwrap();
                 Json(match idx {
-                    0 => completion(
+                    0 => run_js(
                         "const bf = require(\"batch-files\");\n\
                          const ak = require(\"audit-kit/promises\");\n\
                          const many = bf.readMany([\"src/one.rs\", \"src/two.rs\"]);\n\
@@ -198,7 +198,7 @@ async fn step4_cross_session_code_reuse_require_preset_and_project_skill_modules
                                 && user.contains("\"hasAuditKit\":true"),
                             "both preset and project skill modules must execute cleanly: {user}"
                         );
-                        completion("return <<<\n跨会话复用库 `batch-files` 与项目技能模块 `audit-kit` 并发调用成功。")
+                        completion("跨会话复用库 `batch-files` 与项目技能模块 `audit-kit` 并发调用成功。")
                     }
                     other => panic!("unexpected round {other}"),
                 })
@@ -252,7 +252,7 @@ async fn step4_host_ask_user_pauses_turn_gracefully_and_resumes_on_next_turn() {
                 let idx = seq.fetch_add(1, Ordering::SeqCst);
                 Json(match idx {
                     // Turn 1: read deploy.json and ask user which target to deploy
-                    0 => completion(
+                    0 => run_js(
                         "const cfg = JSON.parse(io.read({ path: \"deploy.json\" }).content);\n\
                          if (cfg.targets.length > 1) {\n\
                            host.ask_user({ question: \"请确认要部署到 staging 还是 prod？\" });\n\
@@ -274,7 +274,7 @@ async fn step4_host_ask_user_pauses_turn_gracefully_and_resumes_on_next_turn() {
                             msgs[2]["content"].as_str().unwrap(),
                             "请确认要部署到 staging 还是 prod？"
                         );
-                        completion("return <<<\n收到，已按你的确认选择 `staging` 目标。")
+                        completion("收到，已按你的确认选择 `staging` 目标。")
                     }
                     other => panic!("unexpected round {other}"),
                 })
@@ -351,17 +351,17 @@ async fn step4_host_folder_turn_js_archive_and_rewind_roundtrip() {
                 let idx = seq.fetch_add(1, Ordering::SeqCst);
                 Json(match idx {
                     // Turn 1: write v1
-                    0 => completion("io.write({ path: \"state.txt\", content: \"v1\" });"),
-                    1 => completion("return <<<\nTurn 1 wrote v1."),
+                    0 => run_js("io.write({ path: \"state.txt\", content: \"v1\" });"),
+                    1 => completion("Turn 1 wrote v1."),
                     // Turn 2 (first attempt): write v2
-                    2 => completion("io.write({ path: \"state.txt\", content: \"v2\" });"),
-                    3 => completion("return <<<\nTurn 2 wrote v2."),
+                    2 => run_js("io.write({ path: \"state.txt\", content: \"v2\" });"),
+                    3 => completion("Turn 2 wrote v2."),
                     // Turn 2 (after rewind to before turn 2): verify Turn 2 was dropped and file is back to v1!
                     4 => {
                         let msgs = body["messages"].as_array().unwrap();
                         assert_eq!(msgs.len(), 4, "rewound state must have only Turn 1 + new Turn 2");
                         assert_eq!(msgs[2]["content"].as_str().unwrap(), "Turn 1 wrote v1.");
-                        completion("const cur = io.read({ path: \"state.txt\" }).content;")
+                        run_js("const cur = io.read({ path: \"state.txt\" }).content;")
                     }
                     5 => {
                         let user2 = body["messages"][3]["content"].as_str().unwrap();
@@ -369,7 +369,7 @@ async fn step4_host_folder_turn_js_archive_and_rewind_roundtrip() {
                             user2.contains("cur = \"v1\""),
                             "rewound disk file must be back at v1: {user2}"
                         );
-                        completion("return <<<\n回退后重新执行 Turn 2 成功，确认文件已恢复为 v1。")
+                        completion("回退后重新执行 Turn 2 成功，确认文件已恢复为 v1。")
                     }
                     other => panic!("unexpected round {other}"),
                 })

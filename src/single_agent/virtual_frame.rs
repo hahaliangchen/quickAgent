@@ -293,16 +293,13 @@ async fn run_virtual_loop(
         )
         .await?;
 
-        let submission = crate::model_stream::parse_run_submission(
-            &reply.content,
-            reply.finish_reason.as_deref(),
-        );
+        let submission = model_call::parse_virtual_submission(&reply);
 
         let source = match submission {
             crate::model_stream::RunSubmission::Reply { .. } => {
                 doc.set_rejection(
-                    "VIRTUAL_RETURN_REQUIRED",
-                    "Inside a `@virtual` function, do NOT use `return <<<`. Return a JSON value to your JS caller via native JS `return { ... };` (include a concise `summary` field).",
+                    "VIRTUAL_TOOL_REQUIRED",
+                    "Inside a `@virtual` function, call `run_js({ code })` and finish with native JS `return { ..., summary: \"...\" };`.",
                 );
                 continue;
             }

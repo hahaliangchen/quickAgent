@@ -159,9 +159,9 @@ impl ContextDocument {
     pub fn set_rejection(&mut self, code: &str, message: &str) {
         if let Some(turn) = self.active_turn_mut() {
             let hint = if turn.virtual_header.is_some() {
-                "Fix and resubmit JavaScript statements, or finish with native JS `return { ..., summary: \"...\" };`."
+                "Fix and call `run_js({ code })` with valid JavaScript statements, finishing with native JS `return { ..., summary: \"...\" };`."
             } else {
-                "Fix and resubmit JavaScript statements, or start with `return <<<` to give your final Markdown reply."
+                "Fix and call `run_js({ code })` with valid JavaScript statements, or reply directly in Markdown (without calling `run_js`) if you have all observed evidence."
             };
             turn.ephemeral_peek = Some(format!(
                 "// [REJECTED ({code}) — executed: false; nothing ran]\n// {message}\n// {hint}"

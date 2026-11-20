@@ -57,6 +57,39 @@ pub(super) fn completion(content: &str) -> Value {
     })
 }
 
+pub(super) fn run_js(code: &str) -> Value {
+    run_js_with_note("", code)
+}
+
+pub(super) fn run_js_with_note(note: &str, code: &str) -> Value {
+    json!({
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {
+                "role": "assistant",
+                "content": if note.is_empty() { Value::Null } else { json!(note) },
+                "tool_calls": [{
+                    "id": format!("call_{}", agent_service::uuid_like()),
+                    "type": "function",
+                    "function": {
+                        "name": "run_js",
+                        "arguments": json!({"code": code}).to_string(),
+                    }
+                }]
+            }
+        }]
+    })
+}
+
+pub(super) fn assert_single_run_js_tool(body: &Value) {
+    let tools = body["tools"]
+        .as_array()
+        .expect("request must carry the single run_js shell tool");
+    assert_eq!(tools.len(), 1, "must carry ONLY run_js, zero business tool schemas: {tools:?}");
+    assert_eq!(tools[0]["function"]["name"], "run_js");
+    assert_eq!(body["parallel_tool_calls"], json!(false));
+}
+
 pub(super) fn init_task_row(root: &Path, task_id: &str) {
     let conn = agent_service::open_db(root).unwrap();
     conn.execute(

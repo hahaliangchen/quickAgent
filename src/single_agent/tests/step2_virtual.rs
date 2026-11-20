@@ -1,7 +1,7 @@
 //! Step 2 unit tests: isolated, isomorphic `@virtual` stack frames,
 //! factual `[virtual ...]` receipts, Stack-Frame GC, and true `Promise.all` concurrency.
 
-use super::{TestWorkspace, assistant_messages, completion, init_task_row};
+use super::{TestWorkspace, assert_single_run_js_tool, assistant_messages, completion, init_task_row, run_js};
 use crate::agent_service::{self, AgentServiceState};
 use crate::single_agent::run_task;
 use axum::{Json, Router, routing::post};
@@ -36,14 +36,14 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
             let cap_ref = cap_ref.clone();
             async move {
                 cap_ref.lock().unwrap().push(body.clone());
-                assert!(body.get("tools").is_none(), "zero JSON schemas everywhere");
+                assert_single_run_js_tool(&body);
                 let sys = body["messages"][0]["content"].as_str().unwrap();
                 let is_virtual = sys.contains("isolated single-layer `@virtual`");
 
                 if !is_virtual {
                     let m_idx = main_seq.fetch_add(1, Ordering::SeqCst);
                     return Json(match m_idx {
-                        0 => completion(
+                        0 => run_js(
                             "const outerSecret = \"OUTER_HISTORY_MUST_NOT_LEAK\";\n\
                              const policy = \"NO_UNWRAP\";\n\
                              /** @virtual\n\
@@ -67,7 +67,7 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
                                     && user.contains("found unwrap() violating NO_UNWRAP"),
                                 "parent must see factual virtual receipt & summary: {user}"
                             );
-                            completion("return <<<\n审计完成：mod_a.rs 违反 NO_UNWRAP 规则。")
+                            completion("审计完成：mod_a.rs 违反 NO_UNWRAP 规则。")
                         }
                         other => panic!("unexpected main round {other}"),
                     });
@@ -98,26 +98,26 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
                 let l_idx = leaf_seq.fetch_add(1, Ordering::SeqCst);
                 Json(match l_idx {
                     // Attempt 0: verify shell call is blocked!
-                    0 => completion("process.run_readonly({ cmd: \"echo hacked\" });"),
+                    0 => run_js("process.run_readonly({ cmd: \"echo hacked\" });"),
                     // Attempt 1: verify nested @virtual is blocked with VIRTUAL_LAYER_LIMIT!
                     1 => {
                         assert!(user.contains("COMPILE_ERROR"), "shell must be rejected: {user}");
-                        completion("/** @virtual nested */\nasync function sub() {}")
+                        run_js("/** @virtual nested */\nasync function sub() {}")
                     }
-                    // Attempt 2: verify `return <<<` is rejected inside @virtual!
+                    // Attempt 2: verify plain text outside `run_js` is rejected inside @virtual!
                     2 => {
                         assert!(user.contains("VIRTUAL_LAYER_LIMIT"), "{user}");
-                        completion("return <<<\nNot allowed in virtual")
+                        completion("Not allowed in virtual")
                     }
                     // Attempt 3: legitimately read `target` via Rust proxy!
                     3 => {
-                        assert!(user.contains("VIRTUAL_RETURN_REQUIRED"), "{user}");
-                        completion("const src = io.read({ path: target }).content;")
+                        assert!(user.contains("VIRTUAL_TOOL_REQUIRED"), "{user}");
+                        run_js("const src = io.read({ path: target }).content;")
                     }
                     // Attempt 4: inspect read file and return structured JSON with summary!
                     4 => {
                         assert!(user.contains("SECRET_INNER_FILE_CONTENT_ONLY_CHILD_SEES"), "{user}");
-                        completion(
+                        run_js(
                             "const bad = src.includes(\"unwrap()\");\n\
                              return { ok: !bad, summary: `found unwrap() violating ${policy}` };",
                         )
@@ -190,7 +190,7 @@ async fn step2_virtual_promise_all_true_concurrency_file_edit_and_try_catch() {
                 if !is_virtual {
                     let idx = main_seq.fetch_add(1, Ordering::SeqCst);
                     return Json(match idx {
-                        0 => completion(
+                        0 => run_js(
                             "/** @virtual Edit file to uppercase and return { file, summary }. */\n\
                              async function patchFile(file) {}\n\
                              /** @virtual Always fail with $task_error to test try/catch. */\n\
@@ -210,14 +210,14 @@ async fn step2_virtual_promise_all_true_concurrency_file_edit_and_try_catch() {
                                 user.contains("DELIBERATE_LEAF_ERROR"),
                                 "parent try/catch must capture $task_error cleanly: {user}"
                             );
-                            completion("return <<<\n并发处理 3 个文件完成，并正确捕获了虚函数异常。")
+                            completion("并发处理 3 个文件完成，并正确捕获了虚函数异常。")
                         }
                         other => panic!("unexpected main round {other}"),
                     });
                 }
 
                 if user.contains("async function failingCheck()") {
-                    return Json(completion(
+                    return Json(run_js(
                         "return { \"$task_error\": \"DELIBERATE_LEAF_ERROR\" };",
                     ));
                 }
@@ -225,7 +225,7 @@ async fn step2_virtual_promise_all_true_concurrency_file_edit_and_try_catch() {
                 // Inside one of the 3 concurrent `patchFile` frames:
                 // Synchronize at the 3-way barrier to prove real concurrency!
                 barrier.wait().await;
-                Json(completion(
+                Json(run_js(
                     "const cur = io.read({ path: file }).content;\n\
                      io.write({ path: file, content: cur.toUpperCase() });\n\
                      return { file, summary: `uppercased ${file}` };",

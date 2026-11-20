@@ -3,8 +3,8 @@
 //! and First-Trap Truncation termination rule.
 
 use super::{
-    TestWorkspace, assistant_messages, completion, init_task_row, spawn_mock_provider,
-    split_stable_prefix, tool_call_count,
+    TestWorkspace, assert_single_run_js_tool, assistant_messages, completion, init_task_row,
+    run_js, run_js_with_note, spawn_mock_provider, split_stable_prefix, tool_call_count,
 };
 use crate::single_agent::run_task;
 use serde_json::json;
@@ -43,15 +43,17 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
 
     let (state, captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
         0 => {
-            // 1. Verify ZERO JSON tool schemas & presence of `.d.ts` declarations!
-            assert!(body.get("tools").is_none(), "must NOT send JSON tool schemas");
-            assert!(body.get("tool_choice").is_none());
+            // 1. Verify ONLY the single `run_js` shell tool (ZERO business tool schemas) & presence of `.d.ts` declarations!
+            assert_single_run_js_tool(&body);
             let sys = body["messages"][0]["content"].as_str().unwrap();
             assert!(sys.contains("declare namespace io"), "system prompt must contain .d.ts declarations: {sys}");
             assert!(sys.contains("function read("), "io.read .d.ts signature must be present");
 
-            // Emit pure raw JS (NO JSON, NO <run> tags) that proxies into Rust `read_file`!
-            completion("const authFile = io.read({ path: \"src/auth.rs\" });")
+            // Emit commentary text alongside `run_js`: commentary must stay cleanly isolated from JS code!
+            run_js_with_note(
+                "我会先读取 src/auth.rs 检查鉴权实现。",
+                "const authFile = io.read({ path: \"src/auth.rs\" });",
+            )
         }
         1 => {
             // 2. Verify permanent `// =>` has compact signature while `EPHEMERAL_PEEK` has full numbered file!
@@ -73,7 +75,7 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
             );
 
             // Model projects ONLY lines 61..64 via JS from live heap (0 disk re-reads!)
-            completion("const verifyFn = authFile.content.split(\"\\n\").slice(60, 64).join(\"\\n\");")
+            run_js("const verifyFn = authFile.content.split(\"\\n\").slice(60, 64).join(\"\\n\");")
         }
         2 => {
             // 3. Verify EPHEMERAL_PEEK vanished completely and ONLY the 4-line slice is pinned in `// =>`!
@@ -91,10 +93,10 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
                 "pinned 4-line slice must live permanently in `// =>`: {user_msg}"
             );
 
-            // Emit final Markdown reply containing a ```js example code block via `return <<<`
-            // (must NOT be executed as JS!)
+            // Emit final Markdown reply directly (no `run_js` call, no `return <<<` needed!)
+            // Example ```js block inside Markdown must NOT be executed as JS!
             completion(
-                "return <<<\n分析完成：`src/auth.rs` 第 61-64 行的 `verify_token` 使用了 `decode_without_verify`，跳过了签名和过期校验。\n\n示例修复思路（展示代码，不应执行）：\n```js\nio.write({ path: \"MUST_NOT_EXECUTE.txt\", content: \"boom\" });\n```",
+                "分析完成：`src/auth.rs` 第 61-64 行的 `verify_token` 使用了 `decode_without_verify`，跳过了签名和过期校验。\n\n示例修复思路（展示代码，不应执行）：\n```js\nio.write({ path: \"MUST_NOT_EXECUTE.txt\", content: \"boom\" });\n```",
             )
         }
         other => panic!("unexpected round {other}"),
@@ -122,7 +124,7 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
     let sys0 = reqs[0]["messages"][0]["content"].as_str().unwrap();
     for (i, req) in reqs.iter().enumerate() {
         assert_eq!(req["messages"][0]["content"].as_str().unwrap(), sys0, "system prompt must be 100% static at req #{i}");
-        assert!(req.get("tools").is_none(), "req #{i} must have zero tools");
+        assert_single_run_js_tool(req);
     }
     let p0 = split_stable_prefix(reqs[0]["messages"][1]["content"].as_str().unwrap());
     let p1 = split_stable_prefix(reqs[1]["messages"][1]["content"].as_str().unwrap());
@@ -151,9 +153,9 @@ async fn step1_anti_cheating_slice_lock_and_per_turn_fresh_vm() {
 
     let (state, captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
         // Turn 1, step 1: read big.txt
-        0 => completion("const f = io.read({ path: \"big.txt\" });"),
+        0 => run_js("const f = io.read({ path: \"big.txt\" });"),
         // Turn 1, step 2: try to cheat by slicing the entire > 2KB content
-        1 => completion("const cheatAll = f.content.slice(0, 3500);"),
+        1 => run_js("const cheatAll = f.content.slice(0, 3500);"),
         // Turn 1, step 3: verify anti-cheating lock kept >2KB out of permanent `// =>`, then finish via native JS `return`!
         2 => {
             let user_msg = body["messages"][1]["content"].as_str().unwrap();
@@ -162,7 +164,7 @@ async fn step1_anti_cheating_slice_lock_and_per_turn_fresh_vm() {
                 stable.contains("> 2KB not inlined"),
                 "anti-cheating lock must prevent >2KB slice from dumping into permanent trace: {stable}"
             );
-            completion("return \"Turn 1 done cleanly.\";")
+            run_js("return \"Turn 1 done cleanly.\";")
         }
         // Turn 2, step 1: try referencing Turn 1's `f` -> MUST fail compile (fresh VM!)
         3 => {
@@ -170,13 +172,13 @@ async fn step1_anti_cheating_slice_lock_and_per_turn_fresh_vm() {
             assert_eq!(msgs.len(), 4, "[system, user#1, assistant#1, user#2]");
             assert_eq!(msgs[2], json!({"role": "assistant", "content": "Turn 1 done cleanly."}));
             assert!(!msgs[1]["content"].as_str().unwrap().contains("EPHEMERAL_PEEK"));
-            completion("const leaked = f.content;")
+            run_js("const leaked = f.content;")
         }
         // Turn 2, step 2: verify compile error reported in EPHEMERAL_PEEK, redeclare `const f` cleanly!
         4 => {
             let user2 = body["messages"][3]["content"].as_str().unwrap();
             assert!(user2.contains("COMPILE_ERROR"), "Turn 2 must reject Turn 1 variable: {user2}");
-            completion("const f = \"fresh-turn-2\";\nreturn `Rebound cleanly: ${f}`;")
+            run_js("const f = \"fresh-turn-2\";\nreturn `Rebound cleanly: ${f}`;")
         }
         other => panic!("unexpected round {other}"),
     })
@@ -227,13 +229,13 @@ async fn step1_termination_rule_external_tools_continue_pure_memory_projection_f
     init_task_row(ws.path(), "step1-term");
 
     let (state, captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
-        // Round 0: external tool call (`io.read`) + premature `return <<<`
+        // Round 0: external tool call (`io.read`) + premature JS `return`
         // Because `external_tool_calls > 0`, host MUST execute `io.read`, discard
-        // the premature reply, and continue to Round 1!
-        0 => completion(
-            "const f = io.read({ path: \"sample.rs\" });return <<<\nPREMATURE_MUST_BE_DISCARDED\n>>>",
+        // the premature return, and continue to Round 1!
+        0 => run_js(
+            "const f = io.read({ path: \"sample.rs\" });\nreturn \"PREMATURE_MUST_BE_DISCARDED\";",
         ),
-        // Round 1: pure in-memory JS slicing (`external_tool_calls == 0`) + `return <<<`
+        // Round 1: pure in-memory JS slicing (`external_tool_calls == 0`) + explicit `return`
         // Host MUST execute slice into permanent `// =>` AND immediately finish the turn!
         1 => {
             let user_msg = body["messages"][1]["content"].as_str().unwrap();
@@ -242,11 +244,11 @@ async fn step1_termination_rule_external_tools_continue_pure_memory_projection_f
                 "round 1 must see real file content from round 0: {user_msg}"
             );
             assert!(
-                user_msg.contains("discarded the premature `return <<<`"),
-                "host note must explain discarded premature reply: {user_msg}"
+                user_msg.contains("inspect the real output below before returning"),
+                "host note must explain discarded premature return: {user_msg}"
             );
-            completion(
-                "const pinned = f.content.trim();\nreturn <<<\nVerified: `sample.rs` calls `unsafe_call()`.\n<<<",
+            run_js(
+                "const pinned = f.content.trim();\nreturn \"Verified: `sample.rs` calls `unsafe_call()`.\";",
             )
         }
         other => panic!("unexpected round {other}"),
