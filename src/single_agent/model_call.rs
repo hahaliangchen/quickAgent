@@ -60,27 +60,32 @@ Each response MUST be **one** of the two actions below:
 - ONLY after you have real observed evidence (never before reading the target files or running requested checks), reply directly in normal Markdown **WITHOUT calling `run_js`**.
 - Everything in your plain assistant reply (without `run_js`) is delivered verbatim to the user and NEVER executed as JS (so ```` ```js ```` / ```` ```rust ```` example blocks need zero escaping).
 
-## Ordinary JS Functions, Partial `@virtual`, & `Promise.all` Concurrency
-- **Ordinary JS functions/loops** (`function foo(...) { ... }`): use for deterministic multi-file reads, filtering, or batch computation (0 extra LLM calls).
-- **Pure `@virtual` functions**: declare `/** @virtual <contract; ask for a concise summary field> */ async function inspect(item) {}` (optionally with `@uses varName` in JSDoc to capture outer bindings). Each call runs in its own isolated non-shell stack frame, discards its intermediate context on `return`, and leaves a factual `[virtual ...]` receipt + return value in your `tool` result.
+## Parallel `@virtual` Fan-Out (Your Speed & Quality Superpower!)
+- **Default to parallel `@virtual` fan-out for multi-dimension / multi-module tasks**: whenever a task covers **2 or more independent subsystems, audit dimensions, or large file groups** that require deep reading & semantic judgment, **DO NOT read everything serially in the main VM** (serial reading bloats main context and slows down every step). Instead, declare one focused `async` `@virtual` (or partial `@virtual`) function per independent dimension/module and **run them ALL concurrently in ONE `await Promise.all([...])`** — you can even run main-frame `process.promises.run_readonly(...)` or `git.promises.*` checks in the **very same `Promise.all`**!
+  - Each `@virtual` child runs in its own isolated, low-context (~30k token) non-shell stack frame in parallel, returns structured findings (ask for exact `file:line` citations, concrete code evidence, and a concise `summary`), and discards its entire intermediate frame on `return` (Stack-Frame GC) — leaving your main context tiny so you can synthesize the final reply fast.
 - **Partial `@virtual` functions (JS prefix + AI fall-through)**: you MAY write deterministic JavaScript statements inside a `@virtual` function body!
   - If the JS prefix resolves the item and hits `return <value>;`, it finishes immediately in pure JS with **0 LLM calls**.
-  - If execution reaches the end of the body without returning, the host automatically suspends into the isolated AI child frame with all parameters, `@uses` captures, AND all local variables computed by the JS prefix already live in scope (including `ResourceHandle`s):
-    ```js
-    /** @virtual Audit suspicious matches and return { file, issues, summary }. */
-    async function auditFile(path) {
-      const f = io.read({ path });
-      const hits = f.grep("TODO|FIXME");
-      if (hits === "(no matches)") return { file: path, issues: [], summary: `${path}: clean` };
-      // Falls through to isolated AI frame with live `f` and `hits`!
-    }
-    ```
-- **Use `Promise.all` / `Promise.allSettled` whenever independent work can run concurrently**:
-  - **Parallel `@virtual` fan-out**: `await Promise.all(items.map(auditFile))` (works for both pure and partial `async` `@virtual` functions — fast-path items finish locally while remaining items run concurrently in parallel child frames). Pass file paths OR `ResourceHandle`s (`const f = io.read(...); await inspect(f);`) directly; handles stay compact (`Ref#N`) in your outer trace and auto-dereference inside the child frame.
-  - **Parallel host I/O, searches, git, and read-only checks**: pre-bound `io.*` / `git.*` / `process.*` are **synchronous** (calling them inside `Promise.all` runs sequentially!). For true concurrency, use the pre-bound **`.promises`** sub-namespace (or `require("<lib>/promises")`):
-    - `const files = await Promise.all(paths.map(path => io.promises.read({ path })));`
-    - `const [a, b] = await Promise.all([process.promises.run_readonly({ cmd: "..." }), process.promises.run_readonly({ cmd: "..." })]);`
-    - `const [st, lg] = await Promise.all([git.promises.status(), git.promises.log({ limit: 8 })]);`
+  - If execution reaches the end of the body without returning, the host automatically suspends into the isolated AI child frame with all parameters, `@uses` captures, AND all local variables computed by the JS prefix already live in scope (including `ResourceHandle`s).
+- **Combined parallel fan-out pattern**:
+  ```js
+  /** @virtual Audit host library routing across libraries.rs/tool_proxy.rs/host_tools.rs/mcp.rs; return { issues: Array<{severity, location, evidence, fix}>, checked, summary }. */
+  async function auditRouting() {
+    const files = await Promise.all(["src/a.rs", "src/b.rs"].map(path => io.promises.read({ path })));
+    // Falls through to isolated AI frame with pre-loaded `files`!
+  }
+  /** @virtual Audit .d.ts declarations vs Rust structs; return { issues: Array<{severity, location, evidence, fix}>, checked, summary }. */
+  async function auditContracts() {}
+  const [routing, contracts, shellCheck] = await Promise.all([
+    auditRouting(),
+    auditContracts(),
+    process.promises.run_readonly({ cmd: "..." }),
+  ]);
+  ```
+- **Ordinary JS functions/loops** (`function foo(...) { ... }`): use for purely deterministic filtering, counting, or batch transformations (0 extra LLM calls).
+- **Parallel host I/O, searches, git, and read-only checks**: pre-bound `io.*` / `git.*` / `process.*` are **synchronous** (calling them inside `Promise.all` runs sequentially!). For true concurrency, use the pre-bound **`.promises`** sub-namespace (or `require("<lib>/promises")`):
+  - `const files = await Promise.all(paths.map(path => io.promises.read({ path })));`
+  - `const [a, b] = await Promise.all([process.promises.run_readonly({ cmd: "..." }), process.promises.run_readonly({ cmd: "..." })]);`
+  - `const [st, lg] = await Promise.all([git.promises.status(), git.promises.log({ limit: 8 })]);`
 
 ## Per-Turn Clean VM & Cross-Turn Continuity
 - When a turn finishes, its VM is completely destroyed. Each new user turn starts with a fresh empty VM.
@@ -113,8 +118,9 @@ Your ONLY tool is `run_js({ code })`.
 1. **Always call `run_js({ code })`** with raw JavaScript statements to continue the function body (NO markdown fences, NO fabricated `// =>` comments). Do NOT reply with plain text outside `run_js`.
 2. **Bound parameters, `@uses` captures, and any partial `@virtual` JS-prefix local variables are already live JS variables** — use them directly by identifier name (do NOT re-read or re-run work already computed by the JS prefix).
 3. **Host libraries (`io`, `git`, `host`)** proxy synchronously into Rust; for concurrent multi-file reads/searches, use `await Promise.all(paths.map(path => io.promises.read({ path })))`. Shell (`process.*`) and nested `@virtual` declarations are strictly forbidden.
-4. **Finish by executing native JS `return <json_value>;` inside `run_js`**:
-   - Always include a short `summary` field in your returned object (e.g. `return { ok: true, summary: "audited src/a.rs: no issues" };`) so the caller knows exactly what you checked or changed, even for file-editing tasks.
+4. **Be thorough and return complete structured evidence via native JS `return <json_value>;` inside `run_js`**:
+   - Always include exact `file:line` citations, concrete code/symbol evidence (so the caller does not need to re-read files), and a short `summary` field in your returned object (e.g. `return { ok: true, issues: [...], summary: "audited src/a.rs: no issues" };`).
+   - Verify before claiming something is missing (search across relevant files rather than guessing).
    - If the contract cannot be satisfied, execute `return { "$task_error": "concrete reason" };`.
 "#;
 
@@ -483,20 +489,18 @@ async fn send_model_request(
                 stats["finish_reason"] != "content_filter",
                 "model response was filtered; no code was executed"
             );
-            diagnostics.phase("completed");
+            diagnostics.completed(&stats["usage"]);
             Ok::<(Value, Value), anyhow::Error>((message, stats))
         }
         .await;
 
         match attempt_res {
             Ok((message, stats)) => {
-                if actor == "agent"
-                    && let Some(actual_prompt_tokens) = stats
-                        .pointer("/usage/prompt_tokens")
-                        .and_then(Value::as_u64)
-                        .or_else(|| stats.pointer("/usage/input_tokens").and_then(Value::as_u64))
-                    && actual_prompt_tokens > 0
-                {
+                let (actual_input, cached_tokens, output_tokens, reasoning_tokens) =
+                    crate::model_transport::extract_usage_counts(&stats["usage"]);
+                if actor == "agent" && actual_input > 0 {
+                    let cache_hit_pct =
+                        ((cached_tokens as f64 / actual_input as f64) * 1000.0).round() / 10.0;
                     let _ = super::append_event(
                         s,
                         "context/usage",
@@ -504,7 +508,11 @@ async fn send_model_request(
                             "actor": actor,
                             "turn": s.turn,
                             "step": step,
-                            "estimated_input_tokens": actual_prompt_tokens,
+                            "estimated_input_tokens": actual_input,
+                            "cached_tokens": cached_tokens,
+                            "cache_hit_pct": cache_hit_pct,
+                            "output_tokens": output_tokens,
+                            "reasoning_tokens": reasoning_tokens,
                             "input_budget": s.input_budget,
                             "source": "provider_usage",
                         }),

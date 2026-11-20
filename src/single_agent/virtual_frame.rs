@@ -23,7 +23,7 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-const VIRTUAL_MAX_ROUNDS: usize = 16;
+const VIRTUAL_MAX_ROUNDS: usize = 20;
 
 #[derive(Clone, Debug)]
 pub(super) struct VirtualCallSpec {

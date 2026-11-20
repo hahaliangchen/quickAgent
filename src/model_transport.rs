@@ -26,6 +26,41 @@ impl Default for TimeoutPolicy {
     }
 }
 
+/// Extract `(input_tokens, cached_tokens, output_tokens, reasoning_tokens)`
+/// across OpenAI Responses API, OpenAI Chat Completions, and Anthropic Messages.
+pub fn extract_usage_counts(usage: &Value) -> (u64, u64, u64, u64) {
+    let input = usage
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("prompt_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let cached = usage
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("completion_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let reasoning = usage
+        .pointer("/output_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .pointer("/completion_tokens_details/reasoning_tokens")
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+    (input, cached, output, reasoning)
+}
+
 /// Streaming requests have no wall-clock deadline. The progress watchdog owns
 /// waiting limits; unrelated HTTP calls retain their existing client policy.
 pub fn client() -> anyhow::Result<reqwest::Client> {
@@ -264,6 +299,28 @@ impl ModelRequestLog {
 
     pub fn phase(&self, phase: &'static str) {
         self.progress.lock().unwrap().phase = phase;
+    }
+
+    /// Record final request completion with provider token & KV-cache usage stats.
+    pub fn completed(&self, usage: &Value) {
+        self.phase("completed");
+        let (input, cached, output, reasoning) = extract_usage_counts(usage);
+        let cache_hit_pct = if input > 0 {
+            ((cached as f64 / input as f64) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        };
+        self.event(
+            "completed",
+            json!({
+                "total_ms": self.elapsed(),
+                "input_tokens": input,
+                "cached_tokens": cached,
+                "cache_hit_pct": cache_hit_pct,
+                "output_tokens": output,
+                "reasoning_tokens": reasoning,
+            }),
+        );
     }
 
     fn deadline(&self, policy: TimeoutPolicy) -> (Instant, &'static str, Duration) {

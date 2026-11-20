@@ -427,7 +427,7 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
                         "event: response.output_text.delta\n",
                         "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Responses API 加密推理链回放验证成功。\"}\n\n",
                         "event: response.completed\n",
-                        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":20,\"total_tokens\":1220}}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1200,\"input_tokens_details\":{\"cached_tokens\":1140},\"output_tokens\":20,\"output_tokens_details\":{\"reasoning_tokens\":12},\"total_tokens\":1220}}}\n\n",
                     ),
                     other => panic!("unexpected responses round {other}"),
                 };
@@ -510,4 +510,19 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
         assistant_messages(ws.path(), "step1-resp"),
         vec!["Responses API 加密推理链回放验证成功。"]
     );
+    // Verify exact provider KV-cache & reasoning token telemetry was persisted in context/usage!
+    let conn = agent_service::open_db(ws.path()).unwrap();
+    let usage_row: String = conn
+        .query_row(
+            "SELECT data FROM agent_task_events WHERE task_id='step1-resp' AND kind='context/usage' AND json_extract(data,'$.source')='provider_usage' ORDER BY seq DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let usage_json: Value = serde_json::from_str(&usage_row).unwrap();
+    assert_eq!(usage_json["estimated_input_tokens"], json!(1200));
+    assert_eq!(usage_json["cached_tokens"], json!(1140));
+    assert_eq!(usage_json["cache_hit_pct"], json!(95.0));
+    assert_eq!(usage_json["output_tokens"], json!(20));
+    assert_eq!(usage_json["reasoning_tokens"], json!(12));
 }
