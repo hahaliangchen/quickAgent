@@ -4,8 +4,30 @@ import test from 'node:test'
 import ts from 'typescript'
 const source = await readFile(new URL('../src/sidebarModel.ts', import.meta.url),'utf8')
 const {outputText} = ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2024}})
-const {isChat,taskTitle,visibleTasks,projectGroups} = await import('data:text/javascript;base64,'+Buffer.from(outputText).toString('base64'))
+const {compactRelativeTime,isChat,taskTitle,visibleTasks,projectGroups} = await import('data:text/javascript;base64,'+Buffer.from(outputText).toString('base64'))
 const task = (id, extra={}) => ({task_id:id,prompt:id,status:'completed',updated_at:1,parent_task_id:null,...extra})
+
+test('compactRelativeTime formats relative and calendar boundaries', () => {
+  const realNow = Date.now
+  const now = new Date(2025, 2, 15, 12, 0, 0, 0).getTime()
+  Date.now = () => now
+  try {
+    assert.equal(compactRelativeTime(now - 30 * 1000), '刚刚')
+    assert.equal(compactRelativeTime(now - 5 * 60 * 1000), '5m')
+    assert.equal(compactRelativeTime(now - 2 * 60 * 60 * 1000), '2h')
+    assert.equal(compactRelativeTime(now - 24 * 60 * 60 * 1000), '昨天')
+    assert.equal(compactRelativeTime(now - 3 * 24 * 60 * 60 * 1000), '3d')
+    assert.equal(compactRelativeTime(new Date(2025, 1, 28, 12).getTime()), '2/28')
+    assert.equal(compactRelativeTime(new Date(2024, 0, 1, 12).getTime()), '2024/1/1')
+    assert.equal(compactRelativeTime((now + 60 * 60 * 1000) / 1000), '刚刚')
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test('compactRelativeTime rejects invalid timestamps', () => {
+  for (const value of [undefined, 0, -1, NaN, Infinity, -Infinity]) assert.equal(compactRelativeTime(value), '')
+})
 test('chat and code histories are disjoint, blank drafts stay out, titles are searchable', () => {
   const tasks=[task('code',{title:'Renamed'}),task('plugin',{plugin_id:'ppt-master'}),task('chat',{kind:'chat'}),task('blank',{prompt:'',status:'draft'}),task('archived',{archived:true})]
   const shown=visibleTasks(tasks,'',false)

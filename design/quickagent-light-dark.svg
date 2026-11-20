@@ -1,0 +1,171 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1400" viewBox="0 0 2400 1400" role="img" aria-labelledby="title desc">
+  <title id="title">QuickAgent 浅色与深色主题设计图</title>
+  <desc id="desc">以当前 QuickAgent 页面结构为基础的浅色与深色并列设计稿，包含左侧导航、会话侧栏、中央新代码任务输入区和色板。</desc>
+  <defs>
+    <filter id="shadowLight" x="-20%" y="-30%" width="140%" height="180%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#b9c2c9" flood-opacity="0.25"/>
+    </filter>
+    <filter id="shadowDark" x="-20%" y="-30%" width="140%" height="180%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+    <linearGradient id="lightCanvas" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f7faf9"/>
+    </linearGradient>
+    <linearGradient id="darkCanvas" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#18191d"/>
+      <stop offset="1" stop-color="#121715"/>
+    </linearGradient>
+    <style>
+      .font{font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;}
+      .label{font-size:22px;font-weight:600;letter-spacing:.02em;}
+      .tiny{font-size:15px;letter-spacing:.01em;}
+      .body{font-size:18px;}
+      .title{font-size:30px;font-weight:700;letter-spacing:-.03em;}
+      .sub{font-size:16px;}
+    </style>
+    <g id="mark">
+      <path d="M34 30C33.5 17 41.5 9 54.5 9.5C55 22.5 47 30.5 34 30Z" fill="#1D9E75"/>
+      <path d="M30 34C30.5 47 22.5 55 9.5 54.5C9 41.5 17 33.5 30 34Z" fill="#1D9E75"/>
+      <path d="M29 29C19.5 29 12.5 22.5 12 12C22.5 12.5 29 19.5 29 29Z" fill="#127C5C"/>
+      <path d="M35 35C44.5 35 51.5 41.5 52 52C41.5 51.5 35 44.5 35 35Z" fill="#127C5C"/>
+    </g>
+    <g id="searchIcon" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
+      <circle cx="10" cy="10" r="6"/><path d="M14.5 14.5 20 20"/>
+    </g>
+    <g id="gridIcon" fill="none" stroke="currentColor" stroke-width="2.5">
+      <rect x="2" y="2" width="6" height="6" rx="1"/><rect x="12" y="2" width="6" height="6" rx="1"/><rect x="2" y="12" width="6" height="6" rx="1"/><rect x="12" y="12" width="6" height="6" rx="1"/>
+    </g>
+    <g id="branchIcon" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+      <circle cx="5" cy="4" r="2.5"/><circle cx="15" cy="10" r="2.5"/><circle cx="5" cy="17" r="2.5"/><path d="M7.5 5.5 12.5 8.5M7.5 15.5 12.5 11.5"/>
+    </g>
+    <g id="settingsIcon" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+      <circle cx="10" cy="10" r="3.2"/><path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M3.9 3.9l1.4 1.4M14.7 14.7l1.4 1.4M16.1 3.9l-1.4 1.4M5.3 14.7l-1.4 1.4"/>
+    </g>
+    <g id="moonIcon" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M16.5 12.5A7.2 7.2 0 0 1 7.5 3.5a7.5 7.5 0 1 0 9 9Z"/></g>
+    <g id="sunIcon" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10" cy="10" r="3.3"/><path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M3.9 3.9l1.4 1.4M14.7 14.7l1.4 1.4M16.1 3.9l-1.4 1.4M5.3 14.7l-1.4 1.4"/></g>
+  </defs>
+
+  <rect width="2400" height="1400" fill="#edf1f0"/>
+  <text x="80" y="72" class="font title" fill="#111827">QuickAgent 主题设计图</text>
+  <text x="80" y="108" class="font sub" fill="#667085">沿用当前页面布局，补齐浅色与深色的层级、状态和对比关系</text>
+  <rect x="80" y="132" width="90" height="6" rx="3" fill="#1d9e75"/>
+
+  <!-- LIGHT BOARD -->
+  <g transform="translate(80 170)">
+    <rect width="1080" height="1100" rx="28" fill="#ffffff" stroke="#dfe5e2" stroke-width="2"/>
+    <text x="38" y="54" class="font label" fill="#111827">浅色 Light</text>
+    <text x="38" y="82" class="font tiny" fill="#667085">清爽、安静，突出任务输入区</text>
+    <rect x="38" y="106" width="1004" height="928" rx="18" fill="url(#lightCanvas)" stroke="#e8ecea"/>
+    <!-- rail -->
+    <rect x="38" y="106" width="54" height="928" rx="18 0 0 18" fill="#f2f4f3"/>
+    <rect x="49" y="122" width="32" height="32" rx="9" fill="#e2f4ec"/>
+    <g transform="translate(53 126) scale(.42)" color="#147b5d"><use href="#mark"/></g>
+    <g transform="translate(55 183) scale(.9)" color="#667085"><use href="#gridIcon"/></g>
+    <g transform="translate(55 236) scale(.9)" color="#667085"><use href="#branchIcon"/></g>
+    <g transform="translate(55 962) scale(.8)" color="#667085"><use href="#settingsIcon"/></g>
+    <g transform="translate(55 999) scale(.8)" color="#667085"><use href="#moonIcon"/></g>
+    <!-- sidebar -->
+    <rect x="92" y="106" width="250" height="928" fill="#f7f8fa"/>
+    <g transform="translate(112 124) scale(.52)"><use href="#mark"/></g>
+    <text x="144" y="145" class="font body" font-weight="700" fill="#111827">QuickAgent</text>
+    <g transform="translate(281 127) scale(.8)" color="#667085"><use href="#searchIcon"/></g>
+    <rect x="110" y="176" width="214" height="44" rx="12" fill="#edf0f2"/>
+    <path d="M128 191h12v12h-12z" fill="none" stroke="#374151" stroke-width="2"/>
+    <path d="M128 193l6-5 6 5" fill="none" stroke="#374151" stroke-width="2"/>
+    <text x="151" y="204" class="font body" fill="#111827">新代码会话</text>
+    <rect x="110" y="232" width="95" height="30" rx="9" fill="#e3f4ec"/>
+    <text x="126" y="252" class="font tiny" fill="#147b5d">● 聊天</text>
+    <rect x="210" y="232" width="95" height="30" rx="9" fill="#ffffff" stroke="#e1e6e3"/>
+    <text x="230" y="252" class="font tiny" fill="#5b6673">⌘ 代码</text>
+    <text x="112" y="310" class="font body" font-weight="700" fill="#111827">项目</text>
+    <text x="297" y="310" class="font body" fill="#667085">＋</text>
+    <text x="112" y="350" class="font tiny" fill="#7b8490">添加项目，开始代码会话</text>
+    <!-- main -->
+    <rect x="342" y="106" width="700" height="928" fill="#ffffff"/>
+    <g transform="translate(683 366) scale(.55)" opacity=".98"><use href="#mark"/></g>
+    <text x="692" y="437" text-anchor="middle" class="font title" fill="#111827">准备好开始新的代码任务了吗</text>
+    <rect x="450" y="470" width="484" height="42" rx="9" fill="#f1f3f5"/>
+    <text x="468" y="496" class="font tiny" fill="#667085">Internal Server Error</text>
+    <text x="468" y="546" class="font body" fill="#374151">▱ 选择项目⌄</text>
+    <rect x="450" y="564" width="484" height="118" rx="18" fill="#ffffff" stroke="#dfe5e2" filter="url(#shadowLight)"/>
+    <text x="470" y="598" class="font tiny" fill="#9aa2ab">随心输入</text>
+    <text x="470" y="655" class="font body" fill="#6b7280">♧</text>
+    <text x="504" y="655" class="font body" fill="#6b7280">＋</text>
+    <text x="535" y="655" class="font tiny" fill="#147b5d">◉ 执行前询问</text>
+    <text x="840" y="655" class="font tiny" fill="#6b7280">选择模型⌄</text>
+    <circle cx="903" cy="647" r="18" fill="#e3f4ec"/>
+    <text x="903" y="654" text-anchor="middle" class="font body" fill="#147b5d">↑</text>
+    <g transform="translate(482 714)">
+      <rect width="126" height="36" rx="18" fill="#fafbfb" stroke="#eef1ef"/>
+      <text x="16" y="23" class="font tiny" fill="#a0a7ae">☷ 审查最近改动</text>
+      <rect x="138" width="126" height="36" rx="18" fill="#fafbfb" stroke="#eef1ef"/>
+      <text x="153" y="23" class="font tiny" fill="#a0a7ae">▱ 梳理项目架构</text>
+      <rect x="276" width="138" height="36" rx="18" fill="#fafbfb" stroke="#eef1ef"/>
+      <text x="293" y="23" class="font tiny" fill="#a0a7ae">›_ 运行并修复测试</text>
+    </g>
+    <!-- palette -->
+    <text x="42" y="1070" class="font tiny" fill="#667085">Color tokens</text>
+    <g transform="translate(142 1058)"><rect width="22" height="22" rx="6" fill="#ffffff" stroke="#d0d5dd"/><rect x="32" width="22" height="22" rx="6" fill="#f7f8fa"/><rect x="64" width="22" height="22" rx="6" fill="#f3f4f6"/><rect x="96" width="22" height="22" rx="6" fill="#1d9e75"/><rect x="128" width="22" height="22" rx="6" fill="#e3f4ec"/></g>
+    <text x="42" y="1098" class="font tiny" fill="#667085">#FFFFFF · #F7F8FA · #F3F4F6 · #1D9E75 · #E3F4EC</text>
+  </g>
+
+  <!-- DARK BOARD -->
+  <g transform="translate(1240 170)">
+    <rect width="1080" height="1100" rx="28" fill="#161819" stroke="#2c3531" stroke-width="2"/>
+    <text x="38" y="54" class="font label" fill="#f4f4f5">深色 Dark</text>
+    <text x="38" y="82" class="font tiny" fill="#9ca3af">降低背景亮度，保留翠绿色状态识别</text>
+    <rect x="38" y="106" width="1004" height="928" rx="18" fill="url(#darkCanvas)" stroke="#2c3531"/>
+    <!-- rail -->
+    <rect x="38" y="106" width="54" height="928" rx="18 0 0 18" fill="#111214"/>
+    <rect x="49" y="122" width="32" height="32" rx="9" fill="#163329"/>
+    <g transform="translate(53 126) scale(.42)" color="#34d399"><use href="#mark"/></g>
+    <g transform="translate(55 183) scale(.9)" color="#9ca3af"><use href="#gridIcon"/></g>
+    <g transform="translate(55 236) scale(.9)" color="#9ca3af"><use href="#branchIcon"/></g>
+    <g transform="translate(55 962) scale(.8)" color="#9ca3af"><use href="#settingsIcon"/></g>
+    <g transform="translate(55 999) scale(.8)" color="#34d399"><use href="#sunIcon"/></g>
+    <!-- sidebar -->
+    <rect x="92" y="106" width="250" height="928" fill="#15171a"/>
+    <g transform="translate(112 124) scale(.52)"><use href="#mark"/></g>
+    <text x="144" y="145" class="font body" font-weight="700" fill="#f4f4f5">QuickAgent</text>
+    <g transform="translate(281 127) scale(.8)" color="#9ca3af"><use href="#searchIcon"/></g>
+    <rect x="110" y="176" width="214" height="44" rx="12" fill="#22252b"/>
+    <path d="M128 191h12v12h-12z" fill="none" stroke="#e4e4e7" stroke-width="2"/>
+    <path d="M128 193l6-5 6 5" fill="none" stroke="#e4e4e7" stroke-width="2"/>
+    <text x="151" y="204" class="font body" fill="#f4f4f5">新代码会话</text>
+    <rect x="110" y="232" width="95" height="30" rx="9" fill="#163329"/>
+    <text x="126" y="252" class="font tiny" fill="#5dcaa5">● 聊天</text>
+    <rect x="210" y="232" width="95" height="30" rx="9" fill="#1e2025" stroke="#363a44"/>
+    <text x="230" y="252" class="font tiny" fill="#9ca3af">⌘ 代码</text>
+    <text x="112" y="310" class="font body" font-weight="700" fill="#f4f4f5">项目</text>
+    <text x="297" y="310" class="font body" fill="#9ca3af">＋</text>
+    <text x="112" y="350" class="font tiny" fill="#818892">添加项目，开始代码会话</text>
+    <!-- main -->
+    <rect x="342" y="106" width="700" height="928" fill="#18191d"/>
+    <g transform="translate(683 366) scale(.55)" opacity=".98"><use href="#mark"/></g>
+    <text x="692" y="437" text-anchor="middle" class="font title" fill="#f4f4f5">准备好开始新的代码任务了吗</text>
+    <rect x="450" y="470" width="484" height="42" rx="9" fill="#242522"/>
+    <text x="468" y="496" class="font tiny" fill="#9ca3af">Internal Server Error</text>
+    <text x="468" y="546" class="font body" fill="#e4e4e7">▱ 选择项目⌄</text>
+    <rect x="450" y="564" width="484" height="118" rx="18" fill="#1e2025" stroke="#363a44" filter="url(#shadowDark)"/>
+    <text x="470" y="598" class="font tiny" fill="#727983">随心输入</text>
+    <text x="470" y="655" class="font body" fill="#9ca3af">♧</text>
+    <text x="504" y="655" class="font body" fill="#9ca3af">＋</text>
+    <text x="535" y="655" class="font tiny" fill="#5dcaa5">◉ 执行前询问</text>
+    <text x="840" y="655" class="font tiny" fill="#9ca3af">选择模型⌄</text>
+    <circle cx="903" cy="647" r="18" fill="#1d9e75"/>
+    <text x="903" y="654" text-anchor="middle" class="font body" fill="#071b14">↑</text>
+    <g transform="translate(482 714)">
+      <rect width="126" height="36" rx="18" fill="#1d2021" stroke="#282e2c"/>
+      <text x="16" y="23" class="font tiny" fill="#727983">☷ 审查最近改动</text>
+      <rect x="138" width="126" height="36" rx="18" fill="#1d2021" stroke="#282e2c"/>
+      <text x="153" y="23" class="font tiny" fill="#727983">▱ 梳理项目架构</text>
+      <rect x="276" width="138" height="36" rx="18" fill="#1d2021" stroke="#282e2c"/>
+      <text x="293" y="23" class="font tiny" fill="#727983">›_ 运行并修复测试</text>
+    </g>
+    <!-- palette -->
+    <text x="42" y="1070" class="font tiny" fill="#9ca3af">Color tokens</text>
+    <g transform="translate(142 1058)"><rect width="22" height="22" rx="6" fill="#18191d" stroke="#363a44"/><rect x="32" width="22" height="22" rx="6" fill="#15171a"/><rect x="64" width="22" height="22" rx="6" fill="#111214"/><rect x="96" width="22" height="22" rx="6" fill="#1d9e75"/><rect x="128" width="22" height="22" rx="6" fill="#163329"/></g>
+    <text x="42" y="1098" class="font tiny" fill="#9ca3af">#18191D · #15171A · #111214 · #1D9E75 · #163329</text>
+  </g>
+</svg>

@@ -3,7 +3,7 @@ import { api } from '../api.ts'
 import clsx from 'clsx'
 import { Button, Menu, Modal, IconArchiveOutlineMedium, IconFolderCloseRegular, IconFolderOpenRegular, IconPlusOutlineMedium, IconUnarchiveOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Project, Task, TaskStatus } from '../api.ts'
-import { isChat, projectGroups, taskTitle, visibleTasks } from '../sidebarModel.ts'
+import { compactRelativeTime, isChat, projectGroups, taskTitle, visibleTasks } from '../sidebarModel.ts'
 export { taskTitle, workspaceName } from '../sidebarModel.ts'
 import css from './CodexSidebar.module.css'
 import { ProjectNotesDialog } from './ProjectNotesDialog.tsx'
@@ -20,21 +20,6 @@ export function dotState(status: TaskStatus): 'done' | 'warning' | 'ongoing' | '
   }
 }
 
-function compactRelativeTime(ts?: number): string {
-  if (!ts) return ''
-  const ms = ts < 1e12 ? ts * 1000 : ts
-  const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000))
-  if (diffSec < 60) return '刚刚'
-  const mins = Math.floor(diffSec / 60)
-  if (mins < 60) return `${mins}m`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h`
-  const days = Math.floor(hours / 24)
-  if (days === 1) return '昨天'
-  if (days < 7) return `${days}d`
-  const d = new Date(ms)
-  return `${d.getMonth() + 1}/${d.getDate()}`
-}
 
 function sessionSubStatus(task: Task): string {
   if (task.awaiting_approval) return '待确认'

@@ -1,5 +1,33 @@
 import type { Task, Project } from './api.ts'
 
+/**
+ * Format a task timestamp for the compact sidebar display.
+ * Timestamps from the API may be in seconds or milliseconds.
+ */
+export function compactRelativeTime(ts?: number): string {
+  if (typeof ts !== 'number' || !Number.isFinite(ts) || ts <= 0) return ''
+
+  const ms = ts < 1e12 ? ts * 1000 : ts
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+
+  const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000))
+  if (diffSec < 60) return '刚刚'
+
+  const mins = Math.floor(diffSec / 60)
+  if (mins < 60) return `${mins}m`
+
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h`
+
+  const days = Math.floor(hours / 24)
+  if (days === 1) return '昨天'
+  if (days < 7) return `${days}d`
+
+  const date = new Date(ms)
+  if (Number.isNaN(date.getTime())) return ''
+  if (days >= 365) return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`
+  return `${date.getMonth() + 1}/${date.getDate()}`
+}
 export function workspaceName(path: string): string {
   return path.replace(/^\\\\\?\\/, '').split(/[\\/]/).filter(Boolean).at(-1) ?? path
 }
