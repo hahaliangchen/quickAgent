@@ -75,6 +75,14 @@ function TurnEnd({ reason, durationMs }: { reason: TurnEndReason; durationMs?: n
       </div>
     )
   }
+  if (reason.kind === 'interrupted') {
+    return (
+      <div className={css.turnNote}>
+        本轮已中断
+        {durationText && <span className={css.turnDurationSpan}> · 耗时 {durationText}</span>}
+      </div>
+    )
+  }
   return (
     <div className={messageCss.turnErrorRow} role="status">
       <StateDot state="error" className={messageCss.turnErrorDot} />

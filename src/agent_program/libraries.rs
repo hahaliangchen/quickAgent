@@ -113,8 +113,6 @@ pub fn builtin() -> Libraries {
             ("diff", "git_diff"),
             ("log", "git_log"),
         ])),
-        // Published only while a program the user's message paused can be resumed.
-        ("previous".into(), named(&[("resume", "resume_previous_program")])),
         ("process".into(), BTreeMap::from([
             ("exec_command".into(), "exec_command".into()),
             ("write_stdin".into(), "write_stdin".into()),
@@ -155,12 +153,7 @@ pub fn builtin() -> Libraries {
         // script has them, as a function has only its arguments.
         ("session".into(), same(&[
             "read_session_history",
-            "list_project_flows",
-            "read_project_flow",
             "read_asset",
-            "list_context_assets",
-            "refresh_asset",
-            "propose_project_note",
         ])),
         // Model-facing control-plane methods are regular host-library calls
         // in the context-as-code ABI. They still resolve to the existing

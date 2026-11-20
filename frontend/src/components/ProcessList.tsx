@@ -265,6 +265,7 @@ const PROGRAM_EVENTS: Record<ProgramItem['event'], {
   result_invalid: { label: '返回值不符合约定', tone: 'warn', chipTone: 'edit', icon: <IconWarningTriangleOutlineMedium /> },
   module_loaded: { label: '使用已写好的模块', tone: 'muted', chipTone: 'context', icon: <IconCodeOutlineRegular /> },
   module_fix: { label: '模块出错，交给 AI 修复', tone: 'warn', chipTone: 'edit', icon: <IconWarningTriangleOutlineMedium /> },
+  visual_completed: { label: '视觉检查完成', tone: 'muted', chipTone: 'context', icon: <IconSparkleRegular /> },
 }
 
 function ProgramEvent({ item }: { item: ProgramItem }) {

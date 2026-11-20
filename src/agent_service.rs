@@ -631,7 +631,7 @@ fn cleanup_terminal_task_data(
     let sql = format!(
         "DELETE FROM agent_task_events WHERE task_id IN ({task_selector}) AND (
             kind IN ('scheduler/state','worker/work_state',
-                     'worker/source_working_set','assistant/delta','execution/tick',
+                     'worker/source_working_set','execution/tick',
                      'organizer/request_metrics')
             OR kind LIKE 'execution/%'
         )"

@@ -128,6 +128,7 @@ export function DraftChat({ chatId, draftLabel, draftFolder, source, hidden, exp
         }
         if (item.reason.kind === 'error') rows.push(<div key={item.key} className={styles.chatError}>本轮出错：{item.reason.message}</div>)
         else if (item.reason.kind === 'aborted') rows.push(<div key={item.key} className={styles.chatNotice}>本轮已停止</div>)
+        else if (item.reason.kind === 'interrupted') rows.push(<div key={item.key} className={styles.chatNotice}>本轮已中断</div>)
         break
       }
       default:

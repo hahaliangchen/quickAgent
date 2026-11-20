@@ -50,6 +50,23 @@ pub(super) async fn proxy_rust_tool(
             Ok(val) => (val, false),
             Err(err) => (json!({"error": format!("{err:#}")}), true),
         },
+        "read_attachment" => match crate::attachments::read(s.state, s.task, &args).await {
+            Ok(val) => (val, false),
+            Err(err) => (json!({"error": format!("{err:#}")}), true),
+        },
+        "analyze_images" => {
+            let context = host_tools::visual_context(s, node)?;
+            match crate::visual_jobs::submit(s.state, &context, &args, call_id, s.model, s.cancel) {
+                Ok(val) => (val, false),
+                Err(err) => (json!({"error": format!("{err:#}")}), true),
+            }
+        }
+        "image_analysis_results" => match crate::visual_jobs::results(
+            s.state.workspace.root(), s.task, &args, s.cancel,
+        ).await {
+            Ok(val) => (val, false),
+            Err(err) => (json!({"error": format!("{err:#}")}), true),
+        },
         "read_session_history" => match crate::session_history::read(
             s.state.workspace.root(),
             s.task,

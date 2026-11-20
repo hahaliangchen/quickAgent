@@ -11,6 +11,7 @@ export interface ToolResult {
 export type TurnEndReason =
   | { readonly kind: 'completed'; readonly goalAchieved?: boolean | undefined; readonly unresolved?: readonly string[] | undefined }
   | { readonly kind: 'aborted' }
+  | { readonly kind: 'interrupted' }
   | { readonly kind: 'error'; readonly message: string; readonly code: string | undefined }
 
 export type ChatItem =
@@ -88,7 +89,7 @@ export interface ProgramItem {
   readonly kind: 'program'
   readonly key: string
   readonly frame?: string | undefined
-  readonly event: 'started' | 'invalid' | 'failed' | 'question' | 'paused' | 'result_invalid' | 'module_loaded' | 'module_fix'
+  readonly event: 'started' | 'invalid' | 'failed' | 'question' | 'paused' | 'result_invalid' | 'module_loaded' | 'module_fix' | 'visual_completed'
   readonly text: string
   readonly source?: string | undefined
   readonly line?: number | undefined
@@ -253,6 +254,7 @@ function reasonOf(value: unknown): TurnEndReason {
   if (reason.kind === 'error') {
     return { kind: 'error', message: stringOf(reason.error?.message) ?? '', code: stringOf(reason.error?.code) }
   }
+  if (reason.kind === 'interrupted') return { kind: 'interrupted' }
   return { kind: 'aborted' }
 }
 
@@ -641,6 +643,19 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
         items.push({ kind: 'program', key, frame, event: question ? 'question' : 'failed', text: stringOf(error.message) ?? stringOf(event.data.error) ?? '', line: numberOf(recordOf(error.location).line), time: event.time })
         break
       }
+      case 'agent/needs_user':
+        items.push({ kind: 'program', key, frame, event: 'question', text: stringOf(event.data.question) ?? '', time: event.time })
+        break
+      case 'visual/job_completed':
+        items.push({
+          kind: 'program',
+          key,
+          frame,
+          event: 'visual_completed',
+          text: `${stringOf(event.data.status) ?? 'completed'}${stringOf(event.data.error) ? `：${stringOf(event.data.error)}` : ''}`,
+          time: event.time,
+        })
+        break
       case 'program/paused':
         items.push({ kind: 'program', key, frame, event: 'paused', text: stringOf(event.data.stopped_at) ?? '', time: event.time })
         break
@@ -689,7 +704,7 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
     items.push({
       kind: 'turn-end',
       key: `synthetic:turn-end:${task.task_id}`,
-      reason: task.status === 'completed' ? { kind: 'completed' } : { kind: 'aborted' },
+      reason: task.status === 'completed' ? { kind: 'completed' } : task.status === 'interrupted' ? { kind: 'interrupted' } : { kind: 'aborted' },
       durationMs,
       time: task.updated_at,
     })
