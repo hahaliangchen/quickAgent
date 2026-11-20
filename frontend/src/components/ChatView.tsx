@@ -527,7 +527,11 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
 
             {task && <ApprovalCards className={chatCss.flowItem} taskId={task.task_id} events={events} />}
 
-            {thinking && nodes.length === 0 && (
+            {running && (() => {
+              const lastNode = nodes.at(-1)
+              const hasOpenAssistantTurn = lastNode?.kind === 'assistant-turn' && !lastNode.turn.closed
+              return !hasOpenAssistantTurn && (thinking || nodes.length === 0 || lastNode?.kind === 'user')
+            })() && (
               <div className={chatCss.flowItem}>
                 <TextShimmer active className={css.thinking}>
                   {durationInfo.currentTurnDurationMs !== undefined

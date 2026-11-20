@@ -315,6 +315,18 @@ pub(crate) async fn run_task_with_resource(
             bail!("cancelled");
         }
 
+        append_event(
+            &s,
+            "step/start",
+            json!({
+                "actor": "agent",
+                "turn": s.turn,
+                "step": step,
+            }),
+            false,
+        )
+        .await?;
+
         let reply = model_call::call_model(&s, &w, &libs, step).await?;
         #[cfg(test)]
         if std::env::var_os("LIVE_DEBUG_STEPS").is_some() {
@@ -416,6 +428,19 @@ async fn execute_js_step(
     }
 
     let node = format!("step_{}_{}", s.turn, step);
+    append_event(
+        s,
+        "program/start",
+        json!({
+            "actor": "agent",
+            "turn": s.turn,
+            "step": step,
+            "source": source,
+            "lines": source.lines().count(),
+        }),
+        false,
+    )
+    .await?;
     if w.next_ref_id == 0 {
         w.next_ref_id = 1;
     }
@@ -524,6 +549,18 @@ async fn execute_js_step(
                 finish_turn_with_reply(s, w, step, question).await?;
                 return Ok(true);
             }
+            append_event(
+                s,
+                "program/error",
+                json!({
+                    "actor": "agent",
+                    "turn": s.turn,
+                    "step": step,
+                    "error": err,
+                }),
+                false,
+            )
+            .await?;
             w.context_doc
                 .record_failed_segment(source, &runtime, &pre_fps, &logs, &err);
             w.program = Some(runtime);

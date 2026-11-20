@@ -70,6 +70,11 @@ export function liveActivity(items: readonly ChatItem[]): string {
       const label = toolLabel(item.name, item.arguments)
       return [label.title, label.summary].filter(Boolean).join(' · ')
     }
+    if (item.kind === 'program') {
+      if (item.event === 'started') return '正在执行代码'
+      if (item.event === 'invalid') return '代码未通过编译，正在修正'
+      if (item.event === 'failed') return '代码执行出错，正在排查'
+    }
     if (item.kind === 'assistant') {
       if (item.streaming && item.toolProgress?.length) return toolProgressLabel(item)
       if (item.program !== undefined) return '编写程序'
@@ -82,7 +87,10 @@ export function liveActivity(items: readonly ChatItem[]): string {
 
 export function toolProgressLabel(reply: AssistantItem): string {
   return (reply.toolProgress ?? []).map(tool => {
-    const action = tool.name === 'write_program' ? '正在编写程序' : tool.name === 'write_file' ? '正在编写文件' : `正在生成工具调用${tool.name ? ` ${tool.name}` : ''}`
+    const action = tool.name === 'write_program' ? '正在编写程序'
+      : tool.name === 'run' ? '正在编写执行代码'
+        : tool.name === 'write_file' ? '正在编写文件'
+          : `正在生成工具调用${tool.name ? ` ${tool.name}` : ''}`
     return `${action} · 已生成 ${tool.argumentBytes.toLocaleString()} 字节`
   }).join('；')
 }
@@ -260,8 +268,51 @@ const PROGRAM_EVENTS: Record<ProgramItem['event'], {
 }
 
 function ProgramEvent({ item }: { item: ProgramItem }) {
+  const { expanded, toggle } = useDisclosure()
   const meta = PROGRAM_EVENTS[item.event]
   const where = item.line === undefined ? '' : `第 ${item.line} 行`
+  const source = item.source?.trim() ?? ''
+  if (source !== '' && (item.event === 'started' || item.event === 'invalid')) {
+    const lineCount = source.split(/\r?\n/).length
+    const title = item.event === 'started' ? '执行代码' : meta.label
+    const detail = [where, item.text].filter(Boolean).join('：')
+    const summary = item.event === 'started'
+      ? [`${lineCount} 行`, detail].filter(Boolean).join(' · ')
+      : [detail || `${lineCount} 行`].join('')
+    const fenced = `\`\`\`js\n${source}\n\`\`\``
+    return (
+      <div className={toolCss.root} data-tone={meta.chipTone} data-state={item.event === 'invalid' ? 'error' : 'ok'}>
+        <DisclosureRow
+          rowClassName={toolCss.row}
+          leadingClassName={toolCss.leading}
+          titleClassName={toolCss.title}
+          chevronClassName={toolCss.chevron}
+          icon={item.event === 'started' ? <IconCodeOutlineRegular size={14} /> : meta.icon}
+          title={title}
+          open={expanded}
+          expandable
+          expandOnRowClick
+          keepContentWhenOpen
+          onToggle={toggle}
+          collapsedContent={summary !== '' && (
+            <>
+              <Separator />
+              <span className={`${toolCss.summary} ${item.event === 'invalid' ? toolCss.errorSummary : ''}`} title={detail || undefined}>
+                {summary}
+              </span>
+            </>
+          )}
+        >
+          {expanded && (
+            <div className={css.inside}>
+              <ExecutionPlanView plan={item.plan} />
+              <AssistantMessage text={fenced} reasoning="" streaming={false} showActions={false} />
+            </div>
+          )}
+        </DisclosureRow>
+      </div>
+    )
+  }
   return (
     <div
       className={`${toolCss.root} ${css.event}`}

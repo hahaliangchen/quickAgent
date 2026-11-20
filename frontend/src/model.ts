@@ -90,6 +90,7 @@ export interface ProgramItem {
   readonly frame?: string | undefined
   readonly event: 'started' | 'invalid' | 'failed' | 'question' | 'paused' | 'result_invalid' | 'module_loaded' | 'module_fix'
   readonly text: string
+  readonly source?: string | undefined
   readonly line?: number | undefined
   readonly plan?: ExecutionPlan | undefined
   readonly time: number
@@ -446,6 +447,20 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
     items[index] = { ...reply, program }
     return true
   }
+  /** Close any open streaming assistant items in a frame when a step transitions without an assistant/message. */
+  const finalizeStreaming = (frame: string | undefined, keepSlot?: string) => {
+    const prefix = `${frame ?? ''}:`
+    for (const [slot, index] of [...streaming.entries()]) {
+      if (slot === keepSlot) continue
+      if (frame !== undefined && !slot.startsWith(prefix) && !slot.startsWith(':')) continue
+      if (frame === undefined && !slot.startsWith(':')) continue
+      const open = items[index]
+      if (open?.kind === 'assistant' && open.streaming) {
+        items[index] = { ...open, streaming: false }
+      }
+      streaming.delete(slot)
+    }
+  }
 
   for (const event of events) {
     const key = `${event.type}:${event.seq}`
@@ -459,9 +474,14 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
         break
       }
       case 'turn/start': {
+        finalizeStreaming(frame)
         turnStartTime = event.time
         const turn = numberOf(event.data.turn) ?? 1
         if (turn > 1) items.push({ kind: 'turn', key, turn })
+        break
+      }
+      case 'step/start': {
+        finalizeStreaming(frame)
         break
       }
       case 'user/interjection':
@@ -490,6 +510,7 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
           return { name: stringOf(tool.name) ?? '', argumentBytes: numberOf(tool.argument_bytes) ?? 0 }
         }) : undefined
         const slot = `${frame ?? ''}:${turn}:${step}`
+        finalizeStreaming(frame, slot)
         const index = streaming.get(slot)
         const open = index === undefined ? undefined : items[index]
         if (index !== undefined && open?.kind === 'assistant') {
@@ -593,20 +614,24 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
         consumeWriteProgram(frame)
         break
       case 'program/start': {
+        finalizeStreaming(frame)
         // The host compiled the program the AI handed over and started it.
         const plan = executionPlan(event.data.plan)
+        const source = stringOf(event.data.source)
         if (consumeWriteProgram(frame) || !markProgram(frame, { status: 'started', plan })) {
-          items.push({ kind: 'program', key, frame, event: 'started', text: event.data.fixed === true ? '修复后重新运行' : stringOf(event.data.function) ?? '', plan, time: event.time })
+          items.push({ kind: 'program', key, frame, event: 'started', text: event.data.fixed === true ? '修复后重新运行' : stringOf(event.data.function) ?? '', source, plan, time: event.time })
         }
         break
       }
       case 'program/source_invalid': {
+        finalizeStreaming(frame)
         const diagnostic = recordOf(event.data.diagnostic)
         const first = recordOf(Array.isArray(diagnostic.diagnostics) ? diagnostic.diagnostics[0] : undefined)
         const error = stringOf(first.message) ?? stringOf(diagnostic.error) ?? ''
         const line = numberOf(first.line)
+        const source = stringOf(event.data.source)
         if (consumeWriteProgram(frame) || !markProgram(frame, { status: 'invalid', error, line })) {
-          items.push({ kind: 'program', key, frame, event: 'invalid', text: error, line, time: event.time })
+          items.push({ kind: 'program', key, frame, event: 'invalid', text: error, source, line, time: event.time })
         }
         break
       }
@@ -629,6 +654,13 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
         items.push({ kind: 'program', key, frame, event: 'module_fix', text: stringOf(recordOf(event.data.error).message) ?? '', time: event.time })
         break
       case 'turn/end': {
+        for (const [slot, index] of [...streaming.entries()]) {
+          const open = items[index]
+          if (open?.kind === 'assistant' && open.streaming) {
+            items[index] = { ...open, streaming: false }
+          }
+          streaming.delete(slot)
+        }
         const durationMs = turnStartTime !== undefined ? Math.max(0, event.time - turnStartTime) : undefined
         const reason = reasonOf(event.data.reason)
         items.push({
@@ -805,12 +837,12 @@ export function getTaskDurationInfo(
   }
 }
 
-/** Whether the log is waiting on the model: a step opened with no reply yet. */
+/** Whether the log is waiting on the model: a turn/step opened with no reply yet. */
 export function awaitingModel(events: readonly AgentEvent[]): boolean {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const type = events[index]?.type
-    if (type === 'step/start') return true
-    if (type === 'assistant/delta' || type === 'assistant/message' || type === 'tool/call' || type === 'tool/result' || type === 'turn/end') return false
+    if (type === 'step/start' || type === 'turn/start' || type === 'user/message') return true
+    if (type === 'assistant/delta' || type === 'assistant/message' || type === 'tool/call' || type === 'tool/result' || type === 'program/start' || type === 'program/source_invalid' || type === 'turn/end') return false
   }
   return false
 }

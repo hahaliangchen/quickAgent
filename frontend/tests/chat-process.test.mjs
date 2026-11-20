@@ -4,7 +4,7 @@ import test from 'node:test'
 import ts from 'typescript'
 const source = await readFile(new URL('../src/model.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
-const { chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+const { awaitingModel, chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
 
 let seq = 0
 const event = (type, data) => ({ seq: ++seq, time: 1000 + seq, type, data: { turn: 1, ...data } })
@@ -297,4 +297,28 @@ test('a running call names what it waits on: a command with its elapsed time, co
   assert.equal(runningCallState(call([started]), 20_000), '运行中', 'module code between steps')
   assert.equal(runningCallState(call([started], false), 20_000), 'AI 处理中', 'a virtual helper thinks between tools')
   assert.equal(runningCallState(call([]), 0), '运行中')
+})
+
+test('v2 single_agent steps finalize streaming deltas on program/start and await model immediately after user/message', () => {
+  seq = 0
+  const initial = [
+    event('turn/start', { runtime: 'single_agent' }),
+    event('user/message', { message: { role: 'user', content: [{ type: 'text', text: 'check sidebar' }] } }),
+  ]
+  assert.equal(awaitingModel(initial), true, 'immediately shows thinking state after user/message')
+
+  const afterStep1 = [
+    ...initial,
+    event('step/start', { actor: 'agent', step: 1 }),
+    event('assistant/delta', { step: 1, text: '', reasoning: '**Reading files**', tool_progress: [{ name: 'run', argument_bytes: 120 }] }),
+    event('program/start', { actor: 'agent', step: 1, source: 'const f = io.read({ path: "a.ts" });' }),
+    event('step/start', { actor: 'agent', step: 2 }),
+  ]
+  assert.equal(awaitingModel(afterStep1), true, 'awaits model again on step 2 start')
+  const items = chatItems(afterStep1)
+  const step1Assistant = items.find(item => item.kind === 'assistant')
+  assert.equal(step1Assistant.streaming, false, 'step 1 delta stops spinning once program/start arrives')
+  const step1Program = items.find(item => item.kind === 'program')
+  assert.equal(step1Program.event, 'started')
+  assert.equal(step1Program.source, 'const f = io.read({ path: "a.ts" });')
 })

@@ -132,6 +132,194 @@ fn strip_single_js_fence(text: &str) -> Option<String> {
     Some(inner.to_owned())
 }
 
+/// Returns `true` when `text` already contains at least one syntactically
+/// balanced executable JS statement/block (ending in `;` or `}`) and is NOT a
+/// `return <<<` Markdown reply. Used to stop reasoning models cleanly when they
+/// finish a JS step and resume reasoning inside the same HTTP stream expecting
+/// a native tool output (otherwise they repeat `const ...` declarations and
+/// fail compilation with `is already declared in this scope`).
+pub fn is_complete_js_burst(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || find_reply_heredoc(trimmed).is_some() {
+        return false;
+    }
+    let owned_inner;
+    let source = if trimmed.starts_with("```") {
+        let Some(inner) = strip_single_js_fence(trimmed) else {
+            return false;
+        };
+        owned_inner = inner;
+        owned_inner.as_str()
+    } else {
+        trimmed
+    };
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum LexMode {
+        Code,
+        SingleQuote,
+        DoubleQuote,
+        Template,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    let mut mode = LexMode::Code;
+    let mut paren = 0i32;
+    let mut bracket = 0i32;
+    let mut brace = 0i32;
+    // Stack of brace depths at which `${` opened inside a template literal.
+    let mut template_expr_braces: Vec<i32> = Vec::new();
+    let mut last_code_byte: Option<u8> = None;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        match mode {
+            LexMode::Code => {
+                if b == b'/' && i + 1 < bytes.len() {
+                    if bytes[i + 1] == b'/' {
+                        mode = LexMode::LineComment;
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i + 1] == b'*' {
+                        mode = LexMode::BlockComment;
+                        i += 2;
+                        continue;
+                    }
+                }
+                match b {
+                    b'\'' => {
+                        mode = LexMode::SingleQuote;
+                        last_code_byte = Some(b);
+                    }
+                    b'"' => {
+                        mode = LexMode::DoubleQuote;
+                        last_code_byte = Some(b);
+                    }
+                    b'`' => {
+                        mode = LexMode::Template;
+                        last_code_byte = Some(b);
+                    }
+                    b'(' => {
+                        paren += 1;
+                        last_code_byte = Some(b);
+                    }
+                    b')' => {
+                        paren -= 1;
+                        if paren < 0 {
+                            return false;
+                        }
+                        last_code_byte = Some(b);
+                    }
+                    b'[' => {
+                        bracket += 1;
+                        last_code_byte = Some(b);
+                    }
+                    b']' => {
+                        bracket -= 1;
+                        if bracket < 0 {
+                            return false;
+                        }
+                        last_code_byte = Some(b);
+                    }
+                    b'{' => {
+                        brace += 1;
+                        last_code_byte = Some(b);
+                    }
+                    b'}' => {
+                        if template_expr_braces.last().copied() == Some(brace) {
+                            template_expr_braces.pop();
+                            brace -= 1;
+                            mode = LexMode::Template;
+                        } else {
+                            brace -= 1;
+                            if brace < 0 {
+                                return false;
+                            }
+                            last_code_byte = Some(b);
+                        }
+                    }
+                    b if b.is_ascii_whitespace() => {}
+                    _ => {
+                        last_code_byte = Some(b);
+                    }
+                }
+                i += 1;
+            }
+            LexMode::SingleQuote => {
+                if b == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if b == b'\'' {
+                    mode = LexMode::Code;
+                    last_code_byte = Some(b);
+                } else if b == b'\n' {
+                    return false;
+                }
+                i += 1;
+            }
+            LexMode::DoubleQuote => {
+                if b == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    mode = LexMode::Code;
+                    last_code_byte = Some(b);
+                } else if b == b'\n' {
+                    return false;
+                }
+                i += 1;
+            }
+            LexMode::Template => {
+                if b == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if b == b'`' {
+                    mode = LexMode::Code;
+                    last_code_byte = Some(b);
+                    i += 1;
+                    continue;
+                }
+                if b == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                    brace += 1;
+                    template_expr_braces.push(brace);
+                    mode = LexMode::Code;
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+            LexMode::LineComment => {
+                if b == b'\n' {
+                    mode = LexMode::Code;
+                }
+                i += 1;
+            }
+            LexMode::BlockComment => {
+                if b == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                    mode = LexMode::Code;
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    matches!(mode, LexMode::Code | LexMode::LineComment)
+        && paren == 0
+        && bracket == 0
+        && brace == 0
+        && template_expr_braces.is_empty()
+        && matches!(last_code_byte, Some(b';' | b'}'))
+}
+
 /// Parse one completed model response under the pure-JS + `return <<<` protocol.
 pub fn parse_run_submission(text: &str, finish_reason: Option<&str>) -> RunSubmission {
     let heredoc = find_reply_heredoc(text);
@@ -608,6 +796,9 @@ pub struct ChatStream {
     data: Option<String>,
     event_name: String,
     text: String,
+    /// First complete JS code burst captured if a reasoning model resumes
+    /// thinking mid-stream after already emitting executable JS statements.
+    first_code_burst: Option<String>,
     reasoning: String,
     reasoning_chars: usize,
     tools: BTreeMap<usize, PartialTool>,
@@ -647,6 +838,7 @@ impl ChatStream {
             data: None,
             event_name: String::new(),
             text: String::new(),
+            first_code_burst: None,
             reasoning: String::new(),
             reasoning_chars: 0,
             tools: BTreeMap::new(),
@@ -675,6 +867,24 @@ impl ChatStream {
 
     pub fn received_done(&self) -> bool {
         self.received_done
+    }
+
+    /// If a reasoning model resumed reasoning after emitting a syntactically
+    /// complete JS burst, returns that clean first burst so the caller can
+    /// stop reading the HTTP stream early and execute it without duplicate
+    /// variable-declaration compile errors.
+    pub fn interrupted_code_burst(&self) -> Option<&str> {
+        self.first_code_burst.as_deref()
+    }
+
+    fn note_reasoning_piece(&mut self, piece: &str) {
+        if self.first_code_burst.is_none()
+            && !piece.trim().is_empty()
+            && !self.text.trim().is_empty()
+            && is_complete_js_burst(&self.text)
+        {
+            self.first_code_burst = Some(self.text.clone());
+        }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> anyhow::Result<Delta> {
@@ -852,6 +1062,7 @@ impl ChatStream {
             .or_else(|| choice_delta.get("reasoning").and_then(Value::as_str))
             .filter(|piece| !piece.is_empty());
         if let Some(piece) = reasoning {
+            self.note_reasoning_piece(piece);
             self.reasoning_chars += piece.chars().count();
             if self.limits.retain_reasoning {
                 self.reasoning.push_str(piece);
@@ -927,6 +1138,7 @@ impl ChatStream {
                 model_delta = true;
             },
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => if let Some(piece) = piece {
+                self.note_reasoning_piece(piece);
                 self.reasoning_chars += piece.chars().count();
                 if self.limits.retain_reasoning {
                     self.reasoning.push_str(piece);
@@ -1100,6 +1312,7 @@ impl ChatStream {
                     }
                     Some("thinking_delta") => {
                         if let Some(text) = piece["thinking"].as_str().filter(|text| !text.is_empty()) {
+                            self.note_reasoning_piece(text);
                             self.reasoning_chars += text.chars().count();
                             if self.limits.retain_reasoning {
                                 self.reasoning.push_str(text);
@@ -1259,6 +1472,30 @@ impl ChatStream {
             "keepalives":self.keepalives,"first_chunk_ms":self.first_chunk_ms,"first_delta_ms":self.first_delta_ms,
             "first_tool_delta_ms":self.first_tool_delta_ms,"text_chars":self.text.chars().count(),
             "reasoning_chars":self.reasoning_chars,"tool_calls":self.tools.len(),"tool_argument_bytes":self.tool_argument_bytes()})
+    }
+
+    /// Finish early using the captured clean first JS code burst after a
+    /// reasoning model resumed thinking mid-stream expecting a host output.
+    pub fn finish_truncated_code_burst(mut self) -> anyhow::Result<Completed> {
+        let Some(burst) = self.first_code_burst.take() else {
+            return self.finish();
+        };
+        let complete_ms = self.elapsed_ms();
+        self.text = burst;
+        self.item_text.clear();
+        self.pending.clear();
+        self.data = None;
+        self.finish_reason = json!("stop");
+        self.received_done = true;
+        let message = self.message();
+        let mut stats = self.stats();
+        stats["response_complete_ms"] = json!(complete_ms);
+        stats["truncated_on_reasoning_resume"] = json!(true);
+        Ok(Completed {
+            message,
+            stats,
+            terminated: true,
+        })
     }
 
     pub fn finish(mut self) -> anyhow::Result<Completed> {
@@ -1675,6 +1912,66 @@ mod tests {
         );
         assert!(!reply.is_code());
         assert!(reply.finish().is_empty());
+    }
+
+    #[test]
+    fn complete_js_burst_detects_balanced_code_and_skips_incomplete_or_replies() {
+        assert!(is_complete_js_burst(
+            "const f = io.read({ path: \"src/app.ts\" });"
+        ));
+        assert!(is_complete_js_burst(
+            "const a = 1;\nfunction foo(x) {\n  return `val=${x}`;\n}"
+        ));
+        assert!(is_complete_js_burst(
+            "```js\nconst f = io.read({ path: \"a.ts\" });\n```"
+        ));
+        assert!(!is_complete_js_burst(""));
+        assert!(!is_complete_js_burst("// just a comment"));
+        assert!(!is_complete_js_burst("const x = { a: 1"));
+        assert!(!is_complete_js_burst("const s = \"unclosed;"));
+        assert!(!is_complete_js_burst("const t = `unclosed ${x};"));
+        assert!(!is_complete_js_burst("const f = io.read({ path: \"a\" })"));
+        assert!(!is_complete_js_burst("return <<<\nDone;"));
+        assert!(!is_complete_js_burst("const x = 1;\nreturn <<<\nDone;"));
+    }
+
+    #[test]
+    fn chat_stream_captures_first_js_burst_when_reasoning_resumes_mid_stream() {
+        let mut stream = ChatStream::new(Limits::WORKER, Instant::now());
+        // Reproduces gpt-6.1-terra interleaving reasoning -> JS -> reasoning -> duplicate JS.
+        let burst1 = "const sidebarFile = io.read({path:\"frontend/src/components/Sidebar.tsx\"});\nconst statusNow = git.status({include_untracked:true});";
+        let sse = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: {}\n\n",
+            json!({"choices":[{"delta":{"reasoning_content":"**Inspecting target files**"}}]}),
+            json!({"choices":[{"delta":{"content": burst1}}]}),
+            json!({"choices":[{"delta":{"reasoning_content":"**Waiting for host output**"}}]}),
+            json!({"choices":[{"delta":{"content": burst1}}]}),
+        );
+        stream.push(sse.as_bytes()).unwrap();
+        assert_eq!(stream.interrupted_code_burst(), Some(burst1));
+        let completed = stream.finish_truncated_code_burst().unwrap();
+        assert!(completed.terminated);
+        assert_eq!(completed.message["content"].as_str(), Some(burst1));
+        assert_eq!(completed.stats["truncated_on_reasoning_resume"], json!(true));
+        assert_eq!(completed.stats["finish_reason"], json!("stop"));
+    }
+
+    #[test]
+    fn chat_stream_does_not_truncate_return_heredoc_reply_when_reasoning_resumes() {
+        let mut stream = ChatStream::new(Limits::WORKER, Instant::now());
+        let sse = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"delta":{"content":"return <<<\nFirst paragraph;"}}]}),
+            json!({"choices":[{"delta":{"reasoning_content":"**Wrapping up**"}}]}),
+            json!({"choices":[{"delta":{"content":"\nSecond paragraph."}}]}),
+        );
+        stream.push(sse.as_bytes()).unwrap();
+        assert_eq!(stream.interrupted_code_burst(), None);
+        let completed = stream.finish().unwrap();
+        assert_eq!(
+            completed.message["content"].as_str(),
+            Some("return <<<\nFirst paragraph;\nSecond paragraph.")
+        );
     }
 }
 

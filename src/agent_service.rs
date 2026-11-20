@@ -1554,6 +1554,7 @@ pub(crate) async fn consume_model_stream_observed(
     let mut flushed = false;
     let mut tool_dirty = false;
     let mut last_tool_flush = Instant::now();
+    let mut truncated_code_burst = false;
 
     while !accumulator.received_done() {
         if let Some(log) = diagnostics {
@@ -1586,6 +1587,17 @@ pub(crate) async fn consume_model_stream_observed(
                     tool_dirty = true;
                 }
             }
+        }
+        if run_gate.is_code() && accumulator.interrupted_code_burst().is_some() {
+            // Reasoning resumed mid-stream after a complete JS step was already emitted
+            // (e.g. a reasoning model expecting a native tool result). Stop reading early
+            // so we execute the clean first JS burst immediately instead of waiting for
+            // repeated `const` declarations that fail compilation.
+            if let Some(burst) = accumulator.interrupted_code_burst() {
+                run_code_chars = burst.chars().count();
+            }
+            truncated_code_burst = true;
+            break;
         }
         delta_reasoning.push_str(&delta.reasoning);
         tool_dirty |= delta.tool_call;
@@ -1622,20 +1634,28 @@ pub(crate) async fn consume_model_stream_observed(
             flushed = true;
         }
     }
-    for gate_event in run_gate.finish() {
-        if let crate::model_stream::RunStreamEvent::ReplyDelta(text) = gate_event {
-            delta_text.push_str(&text);
+    if !truncated_code_burst {
+        for gate_event in run_gate.finish() {
+            if let crate::model_stream::RunStreamEvent::ReplyDelta(text) = gate_event {
+                delta_text.push_str(&text);
+            }
         }
     }
-    if !delta_text.is_empty() || !delta_reasoning.is_empty() {
+    if !delta_text.is_empty() || !delta_reasoning.is_empty() || (truncated_code_burst && run_code_chars > 0) {
         if let Some(log) = diagnostics {
             log.phase("event_persistence");
         }
+        let tool_progress = if truncated_code_burst && run_code_chars > 0 {
+            json!([{"name": "run", "argument_bytes": run_code_chars}])
+        } else {
+            Value::Null
+        };
         emit(
             root,
             task_id,
             "assistant/delta",
-            json!({"turn":turn,"step":step,"task_node_id":frame,"text":delta_text,"reasoning":delta_reasoning}),
+            json!({"turn":turn,"step":step,"task_node_id":frame,"text":delta_text,"reasoning":delta_reasoning,
+                "tool_progress": tool_progress}),
         )
         .await?;
     }
@@ -1643,7 +1663,11 @@ pub(crate) async fn consume_model_stream_observed(
         log.phase("stream_decode");
         log.decoded(&accumulator.stats());
     }
-    let completed = accumulator.finish()?;
+    let completed = if truncated_code_burst {
+        accumulator.finish_truncated_code_burst()?
+    } else {
+        accumulator.finish()?
+    };
     let mut stats = completed.stats;
     stats["format"] = stats["response_format"].clone();
     stats["first_delta_after_headers_ms"] = stats["first_delta_ms"].clone();
