@@ -151,6 +151,10 @@ pub(crate) fn library_compile_scope(
     let mut libs = agent_program::libraries::builtin();
     if !allow_shell {
         libs.remove("process");
+    } else if !crate::shell_process::read_only_available()
+        && let Some(process_lib) = libs.get_mut("process")
+    {
+        process_lib.remove("run_readonly");
     }
     if s.plugin.is_some() {
         for methods in libs.values_mut() {
@@ -330,13 +334,11 @@ pub(crate) async fn run_task_with_resource(
         let reply = model_call::call_model(&s, &w, &libs, step).await?;
         #[cfg(test)]
         if std::env::var_os("LIVE_DEBUG_STEPS").is_some() {
-            let head: String = reply.content.chars().take(260).collect();
-            eprintln!("[LIVE step={step} finish={:?} len={}] head={head:?}", reply.finish_reason, reply.content.len());
+            let head: String = reply.content.chars().take(160).collect();
+            let tc = reply.tool_calls.first().map(|c| format!("{}({})", c.name, c.arguments.len()));
+            eprintln!("[LIVE step={step} finish={:?} tc={tc:?} text_len={}] head={head:?}", reply.finish_reason, reply.content.len());
         }
-        let submission = crate::model_stream::parse_run_submission(
-            &reply.content,
-            reply.finish_reason.as_deref(),
-        );
+        let submission = model_call::parse_main_submission(&reply);
 
         match submission {
             crate::model_stream::RunSubmission::Rejected { code, message } => {

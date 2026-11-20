@@ -375,6 +375,9 @@ pub(super) async fn business_tool_inner(
     } else {
         (tool_workspace, args, false)
     };
+    if name == crate::shell_process::READ_ONLY {
+        return crate::shell_process::run_read_only(&tool_workspace, &args, s.cancel).await;
+    }
     let sandbox_boundary = crate::shell_process::boundary(s.state.permission_mode, s.ban_execution);
     if crate::shell_process::is_tool(name) {
         return Box::pin(execute_sandboxed_shell_tool(
