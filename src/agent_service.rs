@@ -32,7 +32,7 @@ pub(crate) fn model_request_slots() -> Arc<tokio::sync::Semaphore> {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 0 && value <= tokio::sync::Semaphore::MAX_PERMITS)
-        .unwrap_or(6);
+        .unwrap_or(3);
     Arc::new(tokio::sync::Semaphore::new(limit))
 }
 // Acceptance may include history, code and image reads before its return.
