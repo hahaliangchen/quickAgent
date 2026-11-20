@@ -16,9 +16,12 @@ pub(super) async fn proxy_rust_tool(
     step: usize,
     call_id: &str,
     tool_name: &str,
-    args: Value,
+    mut args: Value,
     allow_shell: bool,
 ) -> Result<(Value, bool)> {
+    if tool_name == "edit_file" {
+        normalize_edit_file_args(&mut args);
+    }
     append_event(
         s,
         "tool/call",
@@ -218,4 +221,61 @@ fn handle_find_library_methods(
         }
     }
     (json!({"methods": matched}), false)
+}
+
+/// Accept ergonomic single-edit shorthand `{ path, old_text, new_text }` in
+/// addition to `{ path, edits: [{ old_text, new_text }] }` for `io.edit`.
+fn normalize_edit_file_args(args: &mut Value) {
+    let Some(obj) = args.as_object_mut() else {
+        return;
+    };
+    let needs_edits = match obj.get("edits") {
+        None | Some(Value::Null) => true,
+        Some(_) => false,
+    };
+    if !needs_edits {
+        return;
+    }
+    if obj.get("old_text").is_some_and(Value::is_string)
+        && obj.get("new_text").is_some_and(Value::is_string)
+    {
+        let old_text = obj.remove("old_text").unwrap();
+        let new_text = obj.remove("new_text").unwrap();
+        obj.remove("replace_all");
+        obj.insert(
+            "edits".into(),
+            json!([{"old_text": old_text, "new_text": new_text}]),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_edit_file_args;
+    use serde_json::json;
+
+    #[test]
+    fn edit_file_shorthand_normalizes_to_edits_array() {
+        let mut args = json!({
+            "path": "src/a.ts",
+            "old_text": "foo",
+            "new_text": "bar",
+        });
+        normalize_edit_file_args(&mut args);
+        assert_eq!(
+            args,
+            json!({
+                "path": "src/a.ts",
+                "edits": [{"old_text": "foo", "new_text": "bar"}],
+            })
+        );
+
+        let mut already = json!({
+            "path": "src/a.ts",
+            "edits": [{"old_text": "a", "new_text": "b"}],
+        });
+        let expected = already.clone();
+        normalize_edit_file_args(&mut already);
+        assert_eq!(already, expected);
+    }
 }
