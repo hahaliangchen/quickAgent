@@ -26,6 +26,28 @@ use std::pin::Pin;
 const MAX_LIBRARY_CALL_DEPTH: usize = 4;
 const MAX_LIBRARY_ACTIONS: usize = 256;
 
+#[cfg(test)]
+mod tests {
+    use super::resolve_host_require;
+    use crate::agent_program::libraries;
+    use serde_json::json;
+
+    #[test]
+    fn required_host_contract_matches_direct_host_surface() {
+        let libs = libraries::builtin();
+        let value = resolve_host_require(&libs);
+        assert_eq!(value["library_methods"], json!(["context", "tools", "delegate"]));
+        assert_eq!(value["methods"]["contracts"], "read_tool_contracts");
+    }
+
+    #[test]
+    fn required_host_surface_omits_delegate_without_parent_session() {
+        let mut libs = libraries::builtin();
+        libs.remove("session");
+        assert_eq!(resolve_host_require(&libs)["library_methods"], json!(["context", "tools"]));
+    }
+}
+
 /// Resolve `require("<library>")` (or `require("<library>/promises")`) into the
 /// method descriptor expected by `Runtime::link`.
 pub(super) fn resolve_require(
@@ -34,7 +56,9 @@ pub(super) fn resolve_require(
     library: &str,
 ) -> (Value, bool) {
     let base = library.strip_suffix("/promises").unwrap_or(library);
-
+    if base == "host" {
+        return (resolve_host_require(libs), false);
+    }
     if let Some(native_methods) = libs.get(base) {
         let mut payload = json!({ "methods": native_methods });
         if let Some(js_methods) = crate::flow_libraries::public_method_names(s, base)
@@ -44,35 +68,25 @@ pub(super) fn resolve_require(
         }
         return (payload, false);
     }
-
     if let Some(js_methods) = crate::flow_libraries::public_method_names(s, base)
         && !js_methods.is_empty()
     {
-        return (
-            json!({
-                "methods": {},
-                "library_methods": js_methods,
-            }),
-            false,
-        );
+        return (json!({"methods": {}, "library_methods": js_methods}), false);
     }
-
     let mut available: Vec<String> = libs.keys().cloned().collect();
     for (name, _) in crate::flow_libraries::list_libraries(s) {
-        if !available.contains(&name) {
-            available.push(name);
-        }
+        if !available.contains(&name) { available.push(name); }
     }
     available.sort();
-
-    (
-        json!({
-            "code": "UNKNOWN_LIBRARY",
-            "message": format!("Cannot find library '{library}'"),
-            "available_libraries": available,
-        }),
-        true,
-    )
+    (json!({"code":"UNKNOWN_LIBRARY","message":format!("Cannot find library '{library}'"),"available_libraries":available}), true)
+}
+fn resolve_host_require(libs: &Libraries) -> Value {
+    let methods = libs.get("host").cloned().unwrap_or_default();
+    let mut library_methods = vec!["context", "tools"];
+    if crate::agent_program::libraries::allows_delegation(libs) {
+        library_methods.push("delegate");
+    }
+    json!({"methods": methods, "library_methods": library_methods})
 }
 
 /// Execute one `ActionKind::LibraryCall { library, method, args }` in an isolated
@@ -133,6 +147,14 @@ fn execute_host_builtin(
                 None,
             )
         }
+        "delegate" => (
+            json!({
+                "code": "NESTED_DELEGATE_FORBIDDEN",
+                "message": "host.delegate is only available in the parent frame; orchestration library calls cannot delegate",
+            }),
+            true,
+            None,
+        ),
         other => (
             json!({
                 "code": "UNKNOWN_HOST_METHOD",

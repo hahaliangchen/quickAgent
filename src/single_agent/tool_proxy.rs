@@ -92,12 +92,7 @@ pub(super) async fn proxy_rust_tool(
         },
         "list_skills" => handle_list_skills(s),
         "read_skill" => handle_read_skill(s, &args),
-        "read_tool_contracts" => (
-            json!({
-                "declarations": agent_program::declarations::static_library_header(libs)
-            }),
-            false,
-        ),
+        "read_tool_contracts" => handle_read_tool_contracts(libs, &args),
         "read_program_guide" => (
             json!({
                 "guide": agent_program::CAPABILITIES,
@@ -224,6 +219,33 @@ fn handle_read_skill(s: &Session<'_>, args: &Value) -> (Value, bool) {
     }
 }
 
+fn handle_read_tool_contracts(
+    libs: &agent_program::libraries::Libraries,
+    args: &Value,
+) -> (Value, bool) {
+    let mut selection = args.clone();
+    if let Some(library) = selection.get("library").and_then(Value::as_str).map(str::to_owned) {
+        let mut libraries = selection.get("libraries").and_then(Value::as_array).cloned().unwrap_or_default();
+        libraries.push(Value::String(library));
+        selection["libraries"] = Value::Array(libraries);
+        selection.as_object_mut().unwrap().remove("library");
+    }
+    let has_selection = selection.get("libraries").and_then(Value::as_array).is_some_and(|v| !v.is_empty())
+        || selection.get("methods").and_then(Value::as_array).is_some_and(|v| !v.is_empty());
+    let selected = if has_selection {
+        match agent_program::declarations::selected(libs, &selection) {
+            Ok(value) => value,
+            Err(error) => return (json!({"code":"INVALID_CONTRACT_SELECTION","message":format!("{error:#}")}), true),
+        }
+    } else {
+        libs.clone()
+    };
+    if selection.get("overview").and_then(Value::as_bool).unwrap_or(false) {
+        return (json!({"overview": agent_program::declarations::overview(&selected, &[])}), false);
+    }
+    (json!({"declarations": agent_program::declarations::static_library_header(&selected)}), false)
+}
+
 fn handle_find_library_methods(
     s: &Session<'_>,
     libs: &agent_program::libraries::Libraries,
@@ -289,8 +311,30 @@ fn normalize_edit_file_args(args: &mut Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_edit_file_args;
+    use super::{handle_read_tool_contracts, normalize_edit_file_args};
+    use crate::agent_program::libraries;
     use serde_json::json;
+
+    #[test]
+    fn read_tool_contracts_filters_libraries_methods_and_legacy_library() {
+        let libs = libraries::builtin();
+        let (io_only, failed) = handle_read_tool_contracts(&libs, &json!({"libraries":["io"]}));
+        assert!(!failed);
+        assert!(io_only["declarations"].as_str().unwrap().contains("declare namespace io"));
+        assert!(!io_only["declarations"].as_str().unwrap().contains("declare namespace git"));
+        let (one, failed) = handle_read_tool_contracts(&libs, &json!({"library":"git","overview":false}));
+        assert!(!failed);
+        let text = one["declarations"].as_str().unwrap();
+        assert!(text.contains("function status"));
+        let (method_only, failed) = handle_read_tool_contracts(&libs, &json!({"methods":["git.status"]}));
+        assert!(!failed);
+        let method_text = method_only["declarations"].as_str().unwrap();
+        assert!(method_text.contains("function status"));
+        assert!(!method_text.contains("function diff"));
+        let (overview, failed) = handle_read_tool_contracts(&libs, &json!({"libraries":["io"],"overview":true}));
+        assert!(!failed);
+        assert!(overview["overview"].as_str().unwrap().contains("io"));
+    }
 
     #[test]
     fn edit_file_shorthand_normalizes_to_edits_array() {

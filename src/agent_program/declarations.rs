@@ -295,6 +295,18 @@ pub fn static_library_header(libraries: &Libraries) -> String {
     );
     out.push_str(&directory(libraries));
     out.push('\n');
+    if libraries.contains_key("browser") {
+        out.push_str(
+            "interface BrowserConnection {\n\
+               browser_session_id: string;\n\
+               page_id: string;\n\
+               websocket_url?: string;\n\
+               display_mode?: 'visible_window' | 'headless';\n\
+               page_epoch?: number;\n\
+               capture_seq?: number;\n\
+             }\n\n",
+        );
+    }
     if libraries.contains_key("io") || libraries.contains_key("process") {
         out.push_str(
             "interface ResourceHandle {\n\
@@ -333,15 +345,15 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "git_log" => "args?: { rev?: string; limit?: number; paths?: string[] }): { commits: unknown[]; truncated: boolean }",
                 "run_readonly_command" => "args: { cmd: string; workdir?: string; timeout_ms?: number }): { exit_code: number | null; stdout: string; stderr: string }",
                 "exec_command" => "args: { cmd: string; workdir?: string; yield_time_ms?: number; max_output_tokens?: number; stdin?: boolean }): { exit_code: number | null; running: boolean; session_id?: string; stdout: string; stderr: string }",
-                "write_stdin" => "args: { session_id: string; chars?: string; yield_time_ms?: number; max_output_tokens?: number }): { exit_code: number | null; running: boolean; session_id?: string; stdout: string; stderr: string }",
+                "write_stdin" => "args: { session_id: string; chars?: string; yield_time_ms?: number; max_output_tokens?: number; stream?: 'stdout' | 'stderr'; char_offset?: number }): { exit_code: number | null; running: boolean; session_id?: string; stdout: string; stderr: string; output?: string; next_char_offset?: number | null; total_chars?: number }",
                 "kill_session" => "args: { session_id: string }): { exit_code: number | null; running: boolean; session_id?: string }",
-                "read_tool_contracts" => "args: { library?: string; methods?: string[]; overview?: boolean }): { declarations?: string; overview?: string }",
+                "read_tool_contracts" => "args?: { libraries?: string[]; library?: string; methods?: string[]; overview?: boolean }): { declarations?: string; overview?: string }",
                 "find_library_methods" => "args: { query: string }): { methods: Array<{ library: string; method: string; tool?: string; orchestration?: boolean; description?: string }> }",
                 "read_program_guide" => "args?: { section?: string }): { guide: string; builtin_contracts: string }",
                 "list_skills" => "args?: {}): Array<{ name: string; description: string }>",
                 "read_skill" => "args: { name: string }): { name: string; content: string }",
                 "ask_user" => "args: { question: string }): { code: string; question: string; message: string }",
-                "read_session_history" => "args: { programs?: boolean; directory?: string; program?: string; turn?: number; event_seq?: number; start_line?: number; end_line?: number; output?: boolean }): unknown",
+                "read_session_history" => "args?: { scope?: 'conversation' | 'project'; view?: 'records' | 'index'; task_id?: string; match_offset?: number; query?: string; role?: string; node_id?: string; turn?: number; include_descendants?: boolean; request_id?: number; before_seq?: number; after_seq?: number; event_seq?: number; snapshot_seq?: number; snapshot_id?: number; new_snapshot?: boolean; audit_history_reads?: boolean; limit?: number; char_offset?: number; max_chars?: number; include_event?: boolean; include_context?: boolean; programs?: boolean; directory?: string; program?: string; start_line?: number; end_line?: number; output?: boolean }): unknown",
                 "read_asset" => "args: { asset_id?: string; seq?: number; char_offset?: number; max_chars?: number }): unknown",
                 "snapshot" => "args: { asset_id: string }): unknown",
                 "http_probe" => "args: { url: string; timeout_ms?: number; reason?: string }): { reachable: boolean; http_status: number | null; check_passed: boolean; elapsed_ms: number; reused?: boolean }",
@@ -350,15 +362,15 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "run_project_script" => "args: { project_path?: string; script: string; args?: string[]; background?: boolean; timeout_seconds?: number; ready_url?: string; ready_port?: number; wait_seconds?: number; max_chars?: number }): unknown",
                 "get_project_process" => "args?: { process_id?: string; project_path?: string; script?: string; after_seq?: number; max_chars?: number; ready_url?: string; ready_port?: number; wait_seconds?: number; force_refresh?: boolean; observation_purpose?: string }): unknown",
                 "stop_project_process" => "args: { process_id: string; max_chars?: number }): unknown",
-                "browser_open" => "args: { url: string; visible?: boolean }): unknown",
-                "browser_read" => "args?: { expect_text?: string }): unknown",
-                "browser_wait" => "args?: { selector?: string; text?: string; state?: 'visible' | 'exists' | 'hidden'; font_status?: 'loading' | 'loaded'; timeout_ms?: number }): unknown",
-                "browser_diagnostics" => "args?: { url_contains?: string; category?: 'all' | 'fetch' | 'xhr' | 'font' | 'resource' }): unknown",
-                "browser_click" => "args?: { text?: string; selector?: string; times?: number }): unknown",
-                "browser_press_key" => "args: { key: string }): unknown",
-                "browser_upload" => "args: { path: string; selector?: string }): unknown",
-                "browser_screenshot" => "args?: { full_page?: boolean }): unknown",
-                "browser_close" => "args?: {}): unknown",
+                "browser_open" => "args: { url: string; visible?: boolean; browser_connection?: BrowserConnection }): unknown",
+                "browser_read" => "args?: { expect_text?: string; browser_connection?: BrowserConnection }): unknown",
+                "browser_wait" => "args?: { selector?: string; text?: string; state?: 'visible' | 'exists' | 'hidden'; font_status?: 'loading' | 'loaded'; timeout_ms?: number; browser_connection?: BrowserConnection }): unknown",
+                "browser_diagnostics" => "args?: { url_contains?: string; category?: 'all' | 'fetch' | 'xhr' | 'font' | 'resource'; browser_connection?: BrowserConnection }): unknown",
+                "browser_click" => "args?: { text?: string; selector?: string; times?: number; browser_connection?: BrowserConnection }): unknown",
+                "browser_press_key" => "args: { key: string; browser_connection?: BrowserConnection }): unknown",
+                "browser_upload" => "args: { path: string; selector?: string; browser_connection?: BrowserConnection }): unknown",
+                "browser_screenshot" => "args?: { full_page?: boolean; browser_connection?: BrowserConnection }): unknown",
+                "browser_close" => "args?: { browser_connection?: BrowserConnection }): unknown",
                 "view_image" => "args: { artifact_id: string; original?: boolean; checked_goal?: string }): unknown",
                 "read_attachment" => "args: { attachment_id: string; char_offset?: number; max_chars?: number; page_index?: number; slide?: number; picture?: string }): unknown",
                 "analyze_images" => "args: { artifact_ids: string[]; question: string; background?: boolean }): unknown",
@@ -375,7 +387,7 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 _ => "args?: Record<string, unknown>): unknown",
             };
             if target == "run_readonly_command" {
-                out.push_str("  /** Run one-off builds, tests, or CLI diagnostics only — prefer `io.list`/`io.read`/`io.search` and `git.*` for file and git work. */\n");
+                out.push_str("  /** Run strictly read-only CLI diagnostics in a read-only sandbox — prefer `io.list`/`io.read`/`io.search` and `git.*` for file/git work, and use `process.exec_command` for builds/tests that write artifacts or spawn nested sandboxes. */\n");
             }
             out.push_str(&format!("  function {method}({sig};\n"));
         }
@@ -893,6 +905,17 @@ mod tests {
         assert!(header.contains("function contracts"));
         assert!(header.contains("function delegate(task: string): Promise<unknown>"));
         assert!(header.contains("context?: Record<string, unknown>"));
+        assert!(header.contains("libraries?: string[]"));
+        assert!(header.contains("library?: string"));
+        assert!(header.contains("scope?: 'conversation' | 'project'"));
+        assert!(header.contains("snapshot_seq?: number"));
+        assert!(header.contains("stream?: 'stdout' | 'stderr'"));
+        let browser = static_library_header(&std::collections::BTreeMap::from([(
+            "browser".to_owned(),
+            std::collections::BTreeMap::from([("open".to_owned(), "browser_open".to_owned())]),
+        )]));
+        assert!(browser.contains("interface BrowserConnection"));
+        assert!(browser.contains("browser_connection?: BrowserConnection"));
         assert!(!header.contains("read_file"));
         assert!(!header.contains("parameters"));
     }
