@@ -125,6 +125,18 @@ mod streaming_asset_tests {
         assert!(restored.get("content").is_none());
         Ok(())
     }
+
+    #[test]
+    fn snapshot_restores_frozen_file_after_workspace_changes() -> Result<()> {
+        let f = Fixture::new()?;
+        let value = json!({"path":"example.txt","content":"alpha\nbeta\ngamma\n","complete":true,"bytes":17,"total_lines":3});
+        let reference = register(&f.root, "asset-task", f.seq, "read_file", &json!({"path":"example.txt"}), &value)?;
+        let restored = snapshot(&f.root, "asset-task", &json!({"asset_id":reference["asset_id"]}))?;
+        assert_eq!(restored["content"], "alpha\nbeta\ngamma\n");
+        assert!(restored["__ref"].as_str().is_some_and(|id| id.starts_with("Ref#asset-")));
+        assert_eq!(restored["content"].as_str().unwrap().lines().nth(1), Some("beta"));
+        Ok(())
+    }
 }
 
 pub fn rewind(tx: &rusqlite::Transaction, task: &str, start: i64) -> Result<()> {
@@ -679,6 +691,33 @@ pub fn read(root: &Path, task: &str, args: &Value, through: Option<i64>) -> Resu
         "ASSET_CONTENT_CHANGED: saved snapshot does not match its hash; use original history_reference"
     );
     saved_delivery(&reference, &String::from_utf8(bytes)?, args)
+}
+
+/// Restore an immutable snapshot by asset id without consulting its source path.
+pub fn snapshot(root: &Path, task: &str, args: &Value) -> Result<Value> {
+    let asset_id = args["asset_id"].as_str().context("asset_id is required")?;
+    let restored = read(root, task, args, None)?;
+    let value = restored.get("original_result").cloned().unwrap_or(restored);
+    if let Value::String(content) = value {
+        return Ok(json!({
+            "__ref": format!("Ref#{asset_id}"),
+            "asset_id": asset_id,
+            "content": content,
+            "complete": true,
+            "version": "saved_snapshot",
+        }));
+    }
+    if let Some(object) = value.as_object()
+        && (object.get("path").and_then(Value::as_str).is_some()
+            && object.get("content").and_then(Value::as_str).is_some()
+            || object.get("exit_code").is_some())
+    {
+        let mut handle = object.clone();
+        handle.insert("__ref".into(), json!(format!("Ref#{asset_id}")));
+        handle.insert("asset_id".into(), json!(asset_id));
+        return Ok(Value::Object(handle));
+    }
+    Ok(value)
 }
 
 fn read_shell_snapshot(reference: &Value, path: &Path, args: &Value) -> Result<Value> {

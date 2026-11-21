@@ -154,6 +154,7 @@ pub fn builtin() -> Libraries {
         ("session".into(), same(&[
             "read_session_history",
             "read_asset",
+            "snapshot",
         ])),
         // Model-facing control-plane methods are regular host-library calls
         // in the context-as-code ABI. They still resolve to the existing

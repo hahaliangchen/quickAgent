@@ -343,6 +343,7 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "ask_user" => "args: { question: string }): { code: string; question: string; message: string }",
                 "read_session_history" => "args: { programs?: boolean; directory?: string; program?: string; turn?: number; event_seq?: number; start_line?: number; end_line?: number; output?: boolean }): unknown",
                 "read_asset" => "args: { asset_id?: string; seq?: number; char_offset?: number; max_chars?: number }): unknown",
+                "snapshot" => "args: { asset_id: string }): unknown",
                 "http_probe" => "args: { url: string; timeout_ms?: number; reason?: string }): { reachable: boolean; http_status: number | null; check_passed: boolean; elapsed_ms: number; reused?: boolean }",
                 "run_program" => "args: { program: 'cargo' | 'git' | 'node' | 'python'; args: string[]; project_path?: string; timeout_seconds?: number; max_output_bytes?: number }): unknown",
                 "install_dependencies" => "args?: { project_path?: string; mode?: 'auto' | 'install' | 'ci'; background?: boolean; timeout_seconds?: number; max_chars?: number }): unknown",

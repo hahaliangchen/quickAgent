@@ -422,7 +422,8 @@
             {"id":"llm-pi-ai","config":{"providers":{
                 "deepseek":{"baseURL":"https://api.deepseek.com/v1","api":"openai-completions","models":[
                     {"id":"deepseek-flash","contextWindow":1048576,"maxTokens":393216,
-                     "reasoningEfforts":{"low":"low","high":"high","max":"max","false":null,"minimal":"minimal"}}
+                     "reasoningEfforts":{"low":"low","high":"high","max":"max","false":null,"minimal":"minimal"},
+                     "cost":{"longContextThreshold":272000}}
                 ]},
                 "subapi":{"baseURL":"http://relay.example/v1","api":"openai-completions","models":[
                     {"id":"gpt-6.1-sol","contextWindow":1050000,"maxTokens":128000,
@@ -442,6 +443,9 @@
         )
         .unwrap();
         let loaded = load_config(&path).unwrap();
+        let mut state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        apply_agent_config(&mut state, &loaded);
+        assert_eq!(crate::model_settings::long_context_threshold(&state, "deepseek-flash"), Some(272_000));
         // An entry that names its levels is selectable without repeating them;
         // `false` and `minimal` fold onto levels the host can save.
         assert_eq!(

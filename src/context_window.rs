@@ -32,6 +32,47 @@ impl TokenCalibration {
 /// Maximum field of view, not a target request size. Providers do not share a
 /// tokenizer; use a conservative text estimate and reserve room for output.
 pub const MAX_TOKENS: usize = 256_000;
+
+/// Known two-times pricing/context cliffs. Unknown routes use the budget-only
+/// economic line in the caller.
+pub fn pricing_cliff(model: &str, _input_budget: usize) -> Option<usize> {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("gpt-5.6")
+        || lower.contains("gpt-6")
+        || lower.contains("gpt-6.1")
+        || lower.contains("gpt-6.2")
+        || lower.contains("terra")
+        || lower.contains("272k")
+    {
+        Some(272_000)
+    } else if lower.contains("claude") || lower.contains("anthropic") {
+        Some(200_000)
+    } else {
+        None
+    }
+}
+
+pub fn configured_pricing_cliff(model: &str, configured: Option<usize>) -> Option<usize> {
+    configured.or_else(|| pricing_cliff(model, 0))
+}
+
+pub fn soft_limit(model: &str, input_budget: usize) -> usize {
+    let budget_line = ((input_budget as f64) * 0.75) as usize;
+    pricing_cliff(model, input_budget)
+        .map(|cliff| (((cliff as f64) * 0.85) as usize).min(budget_line))
+        .unwrap_or(budget_line)
+}
+
+pub fn hard_guard(input_budget: usize) -> usize {
+    ((input_budget as f64) * 0.80) as usize
+}
+
+pub fn hard_limit(model: &str, input_budget: usize, configured: Option<usize>) -> usize {
+    let budget_line = hard_guard(input_budget);
+    configured_pricing_cliff(model, configured)
+        .map(|cliff| (((cliff as f64) * 0.85) as usize).min(budget_line))
+        .unwrap_or(budget_line)
+}
 pub fn estimate(value: &Value) -> usize {
     match value {
         Value::String(text) => {
@@ -95,5 +136,17 @@ mod tests {
         let base = json!({"input":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"ok"}]}]});
         let with_enc = json!({"input":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"ok"}],"encrypted_content":"A".repeat(60_000)}]});
         assert_eq!(estimate(&base), estimate(&with_enc));
+    }
+
+    #[test]
+    fn pricing_lines_use_known_cliffs_and_budget_fallback() {
+        assert_eq!(pricing_cliff("gpt-6.1-terra", 300_000), Some(272_000));
+        assert_eq!(pricing_cliff("gpt-6.2", 300_000), Some(272_000));
+        assert_eq!(soft_limit("gpt-6.1-terra", 300_000), 225_000);
+        assert_eq!(soft_limit("local-model", 100_000), 75_000);
+        assert_eq!(hard_guard(100_000), 80_000);
+        assert_eq!(hard_limit("gpt-6.2", 300_000, None), 231_200);
+        assert_eq!(hard_limit("local-model", 100_000, Some(90_000)), 76_500);
+        assert_eq!(hard_limit("local-model", 100_000, Some(120_000)), 80_000);
     }
 }

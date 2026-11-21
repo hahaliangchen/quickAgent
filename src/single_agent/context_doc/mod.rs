@@ -33,12 +33,48 @@ pub const INLINE_LIMIT_CHARS: usize = 65_536;
 /// Alias for `INLINE_LIMIT_CHARS` used by `tool_proxy` for automatic durable asset archiving.
 pub const PEEK_FULL_LIMIT_CHARS: usize = INLINE_LIMIT_CHARS;
 
-/// Multi-turn history budget before dropping oldest completed turns in a batch.
-pub const HISTORY_BUDGET_CHARS: usize = 256_000;
+/// Clamp one tool receipt to a quarter of the remaining input budget. Keeping
+/// this calculation in the document module makes all receipt producers use the
+/// same safe bound.
+pub fn inline_limit_for_budget(remaining_budget_chars: usize) -> usize {
+    INLINE_LIMIT_CHARS.min(remaining_budget_chars.saturating_div(4).max(1))
+}
+
+/// A completed turn's immutable native `run_js` fold.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FoldedTurn {
+    pub code: String,
+    pub manifest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_message: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+/// An immutable prefix fold of the active turn. The live VM is deliberately
+/// outside this value and remains owned by `Window.program`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FoldedPrefix {
+    pub cutoff: usize,
+    pub code: String,
+    pub manifest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_message: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ContextDocument {
     pub turns: Vec<TurnDoc>,
+    #[serde(skip)]
+    pub inline_budget_chars: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_start_turn: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,6 +95,17 @@ pub struct TurnDoc {
     /// cleared as soon as the next valid segment executes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_rejection: Option<String>,
+    /// Permanently replaces all completed segments once a turn is folded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folded: Option<FoldedTurn>,
+    /// Permanently replaces `segments[..cutoff]` while the active VM stays live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folded_prefix: Option<FoldedPrefix>,
+    /// Snapshots captured when the VM ended, waiting for the next economic fold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_manifest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_code_asset_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_reply: Option<String>,
 }
@@ -88,12 +135,26 @@ pub struct TraceSegment {
 }
 
 impl ContextDocument {
+    pub fn set_inline_budget_chars(&mut self, remaining_budget_chars: usize) {
+        self.inline_budget_chars = inline_limit_for_budget(remaining_budget_chars);
+    }
+
+    fn inline_budget_chars(&self) -> usize {
+        if self.inline_budget_chars == 0 {
+            INLINE_LIMIT_CHARS
+        } else {
+            self.inline_budget_chars
+        }
+    }
+
     pub fn active_turn(&self) -> Option<&TurnDoc> {
         self.turns.last().filter(|t| t.assistant_reply.is_none())
     }
 
     pub fn active_turn_mut(&mut self) -> Option<&mut TurnDoc> {
-        self.turns.last_mut().filter(|t| t.assistant_reply.is_none())
+        self.turns
+            .last_mut()
+            .filter(|t| t.assistant_reply.is_none())
     }
 
     /// Start a brand-new user turn. If a previous turn was interrupted without
@@ -112,6 +173,10 @@ impl ContextDocument {
             segments: Vec::new(),
             live_handles: Vec::new(),
             pending_rejection: None,
+            folded: None,
+            folded_prefix: None,
+            snapshot_manifest: None,
+            snapshot_code_asset_id: None,
             assistant_reply: None,
         });
     }
@@ -177,6 +242,10 @@ impl ContextDocument {
             segments: Vec::new(),
             live_handles: Vec::new(),
             pending_rejection: None,
+            folded: None,
+            folded_prefix: None,
+            snapshot_manifest: None,
+            snapshot_code_asset_id: None,
             assistant_reply: None,
         });
     }
@@ -231,6 +300,7 @@ impl ContextDocument {
             console_logs,
             hints,
             extra_note.is_some(),
+            self.inline_budget_chars(),
         );
         if !hints.virtual_receipts.is_empty() {
             let mut combined = hints.virtual_receipts.clone();
@@ -273,6 +343,7 @@ impl ContextDocument {
             console_logs,
             &empty_hints,
             false,
+            self.inline_budget_chars(),
         );
         let err_summary = error["message"]
             .as_str()
@@ -318,6 +389,7 @@ impl ContextDocument {
             console_logs,
             hints,
             false,
+            self.inline_budget_chars(),
         );
         if !hints.virtual_receipts.is_empty() {
             let mut combined = hints.virtual_receipts.clone();
@@ -349,6 +421,136 @@ impl ContextDocument {
         }
     }
 
+    /// Fold a completed turn exactly once. The original segments remain in the
+    /// persisted document for audit/rewind, while rendering switches to the
+    /// immutable native protocol representation.
+    pub fn fold_turn(
+        &mut self,
+        turn_number: usize,
+        manifest: impl Into<String>,
+        code_asset_id: Option<String>,
+    ) -> bool {
+        let Some(turn) = self.turns.iter_mut().find(|turn| turn.turn == turn_number) else {
+            return false;
+        };
+        if turn.folded.is_some() || turn.assistant_reply.is_none() {
+            return false;
+        }
+        let steps = turn
+            .segments
+            .iter()
+            .filter(|segment| !segment.is_rejection && !segment.source.trim().is_empty())
+            .count();
+        if steps == 0 {
+            return false;
+        }
+        let mut code = format!(
+            "// [Turn {turn_number} folded from {steps} steps; Turn {turn_number} VM ended]\n"
+        );
+        for segment in &turn.segments {
+            if !segment.is_rejection && !segment.source.trim().is_empty() {
+                code.push_str(&segment.source);
+                code.push_str("\n");
+            }
+        }
+        if code.chars().count() > 16 * 1024 {
+            if let Some(asset_id) = code_asset_id.as_deref() {
+                let prefix: String = code.chars().take(12 * 1024).collect();
+                code = format!("{prefix}\n// [full folded code snapshot: {asset_id}]\n");
+            }
+        }
+        let (assistant_message, tool_call_id) = fold_message(turn, turn_number);
+        turn.folded = Some(FoldedTurn {
+            code,
+            manifest: manifest.into(),
+            code_asset_id,
+            assistant_message,
+            tool_call_id,
+        });
+        true
+    }
+
+    /// Fold an old prefix of the active turn while retaining the live runtime.
+    /// Later calls may extend the immutable prefix to a larger cutoff.
+    pub fn fold_active_prefix(
+        &mut self,
+        turn_number: usize,
+        cutoff: usize,
+        manifest: impl Into<String>,
+        code_asset_id: Option<String>,
+    ) -> bool {
+        let Some(turn) = self.turns.iter_mut().find(|turn| turn.turn == turn_number) else {
+            return false;
+        };
+        if turn.assistant_reply.is_some() || cutoff == 0 || cutoff > turn.segments.len() {
+            return false;
+        }
+        if let Some(existing) = &turn.folded_prefix {
+            if cutoff <= existing.cutoff {
+                return false;
+            }
+        }
+        if !turn.segments[..cutoff]
+            .iter()
+            .any(|segment| !segment.is_rejection && !segment.source.trim().is_empty())
+        {
+            return false;
+        }
+        let existing_cutoff = turn.folded_prefix.as_ref().map_or(0, |fold| fold.cutoff);
+        let total_steps = turn.segments[..cutoff]
+            .iter()
+            .filter(|segment| !segment.is_rejection && !segment.source.trim().is_empty())
+            .count();
+        let mut code = turn
+            .folded_prefix
+            .as_ref()
+            .map(|fold| fold.code.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "// [Turn {turn_number} folded from {total_steps} steps; live VM retained]\n"
+                )
+            });
+        let segment_start = if turn.folded_prefix.is_some() {
+            existing_cutoff
+        } else {
+            0
+        };
+        for segment in &turn.segments[segment_start..cutoff] {
+            if !segment.is_rejection && !segment.source.trim().is_empty() {
+                if !code.ends_with('\n') {
+                    code.push('\n');
+                }
+                code.push_str(&segment.source);
+                code.push_str("\n");
+            }
+        }
+        if code.chars().count() > 16 * 1024 {
+            if let Some(asset_id) = code_asset_id.as_deref() {
+                let prefix: String = code.chars().take(12 * 1024).collect();
+                code = format!("{prefix}\n// [full folded code snapshot: {asset_id}]\n");
+            }
+        }
+        let assistant_message = turn
+            .folded_prefix
+            .as_ref()
+            .and_then(|fold| fold.assistant_message.clone())
+            .or_else(|| fold_message(turn, turn_number).0);
+        let tool_call_id = turn
+            .folded_prefix
+            .as_ref()
+            .and_then(|fold| fold.tool_call_id.clone())
+            .or_else(|| fold_message(turn, turn_number).1);
+        turn.folded_prefix = Some(FoldedPrefix {
+            cutoff,
+            code,
+            manifest: manifest.into(),
+            code_asset_id,
+            assistant_message,
+            tool_call_id,
+        });
+        true
+    }
+
     /// Render the clean executed JS trace of `turn` (for durable `.js` archiving in `host_folder`).
     pub fn render_turn_js(&self, turn: usize) -> Option<String> {
         let doc = self.turns.iter().find(|t| t.turn == turn)?;
@@ -365,9 +567,11 @@ impl ContextDocument {
     /// Every earlier message remains 100% byte-identical as new steps append, preserving
     /// KV-cache prefix hits and native encrypted reasoning replay across providers.
     pub fn render_conversation_messages(&self) -> Vec<Value> {
-        let start = self.history_start();
         let mut out = Vec::new();
-        for turn in self.turns.iter().skip(start) {
+        for turn in &self.turns {
+            if self.active_start_turn.is_some_and(|start| turn.turn < start) {
+                continue;
+            }
             let active = turn.assistant_reply.is_none();
             let opening_user = match &turn.virtual_header {
                 Some(vh) => vh.clone(),
@@ -375,7 +579,25 @@ impl ContextDocument {
             };
             out.push(json!({"role": "user", "content": opening_user}));
 
+            let mut rendered_fold = false;
+            if let Some(folded) = &turn.folded {
+                out.push(folded_assistant_message(folded, turn.turn));
+                out.push(json!({"role":"tool","tool_call_id":folded.tool_call_id.as_deref().unwrap_or("call_folded"),"content":folded.manifest}));
+                rendered_fold = true;
+            } else if let Some(prefix) = &turn.folded_prefix {
+                out.push(folded_assistant_message(prefix, turn.turn));
+                out.push(json!({"role":"tool","tool_call_id":prefix.tool_call_id.as_deref().unwrap_or("call_folded_prefix"),"content":prefix.manifest}));
+            }
+
             for (seg_idx, seg) in turn.segments.iter().enumerate() {
+                if rendered_fold
+                    || turn
+                        .folded_prefix
+                        .as_ref()
+                        .is_some_and(|prefix| seg_idx < prefix.cutoff)
+                {
+                    continue;
+                }
                 let tool_output = format_tool_output(seg);
                 let has_native_tool_calls = seg
                     .assistant_message
@@ -457,38 +679,75 @@ impl ContextDocument {
         }
         out
     }
+}
 
-    fn history_start(&self) -> usize {
-        let mut start = 0;
-        let mut used = 0usize;
-        let completed = self
-            .turns
-            .len()
-            .saturating_sub(usize::from(self.active_turn().is_some()));
-        for idx in 0..completed {
-            let t = &self.turns[idx];
-            let size = t.user_text.chars().count()
-                + t.segments
-                    .iter()
-                    .map(|s| {
-                        s.source.chars().count()
-                            + s.inline_receipts
-                                .iter()
-                                .map(|r| r.chars().count())
-                                .sum::<usize>()
-                    })
-                    .sum::<usize>()
-                + t.assistant_reply
-                    .as_ref()
-                    .map_or(0, |r| r.chars().count());
-            if idx > start && used + size > HISTORY_BUDGET_CHARS {
-                start = idx;
-                used = 0;
-            }
-            used += size;
+fn fold_message(turn: &TurnDoc, turn_number: usize) -> (Option<Value>, Option<String>) {
+    let original = turn
+        .segments
+        .iter()
+        .find(|segment| !segment.is_rejection && segment.assistant_message.is_some())
+        .and_then(|segment| segment.assistant_message.clone());
+    let call_id = turn
+        .segments
+        .iter()
+        .find(|segment| !segment.is_rejection)
+        .and_then(|segment| segment.tool_call_id.clone())
+        .unwrap_or_else(|| format!("call_folded_t{turn_number}"));
+    (original, Some(call_id))
+}
+
+fn folded_assistant_message(fold: &impl FoldMessage, turn: usize) -> Value {
+    let call_id = fold
+        .tool_call_id()
+        .filter(|id| !id.is_empty())
+        .unwrap_or("call_folded");
+    let mut message = fold
+        .assistant_message()
+        .cloned()
+        .unwrap_or_else(|| json!({"role":"assistant","content":Value::Null}));
+    if let Some(obj) = message.as_object_mut() {
+        obj.remove("_reasoning_items");
+        obj.remove("reasoning_content");
+        if !fold.keep_thinking_blocks() {
+            obj.remove(crate::model_stream::THINKING_BLOCKS);
         }
-        start
+        obj.insert("role".into(), json!("assistant"));
+        obj.insert("content".into(), Value::Null);
+        obj.insert("tool_calls".into(), json!([{"id":call_id,"type":"function","function":{"name":"run_js","arguments":json!({"code":fold.code()}).to_string()}}]));
     }
+    let _ = turn;
+    message
+}
+
+trait FoldMessage {
+    fn code(&self) -> &str;
+    fn assistant_message(&self) -> Option<&Value>;
+    fn tool_call_id(&self) -> Option<&str>;
+    fn keep_thinking_blocks(&self) -> bool;
+}
+impl FoldMessage for FoldedTurn {
+    fn code(&self) -> &str {
+        &self.code
+    }
+    fn assistant_message(&self) -> Option<&Value> {
+        self.assistant_message.as_ref()
+    }
+    fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+    fn keep_thinking_blocks(&self) -> bool { false }
+}
+impl FoldMessage for FoldedPrefix {
+    fn code(&self) -> &str {
+        &self.code
+    }
+    fn assistant_message(&self) -> Option<&Value> {
+        self.assistant_message.as_ref()
+    }
+    fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+    fn keep_thinking_blocks(&self) -> bool { true }
 }
 
 fn collect_live_handles(runtime: &Runtime) -> Vec<String> {
@@ -507,7 +766,10 @@ fn collect_live_handles(runtime: &Runtime) -> Vec<String> {
             obj.get("path").and_then(Value::as_str),
             obj.get("content").and_then(Value::as_str),
         ) {
-            let lines = content.lines().count().max(usize::from(!content.is_empty()));
+            let lines = content
+                .lines()
+                .count()
+                .max(usize::from(!content.is_empty()));
             entries.push(format!("{name}={ref_id}({path:?},{lines}L)"));
         } else if obj.contains_key("exit_code") {
             let stdout = obj.get("stdout").and_then(Value::as_str).unwrap_or("");
@@ -614,4 +876,141 @@ fn render_archive_js(turn: &TurnDoc) -> String {
         }
     }
     out.trim_end_matches('\n').to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assistant(id: &str, thinking: bool) -> Value {
+        let mut value = json!({"role":"assistant","content":Value::Null,"reasoning_content":"stale","_reasoning_items":[{"type":"reasoning","id":"r"}],"tool_calls":[{"id":id,"type":"function","function":{"name":"run_js","arguments":"{}"}}]});
+        if thinking {
+            value[crate::model_stream::THINKING_BLOCKS] =
+                json!([{"thinking":"keep","signature":"sig"}]);
+        }
+        value
+    }
+
+    #[test]
+    fn completed_fold_has_strict_native_wire_shape_and_keeps_prefix_bytes() {
+        let mut doc = ContextDocument::default();
+        doc.begin_turn(1, "inspect file");
+        if let Some(turn) = doc.active_turn_mut() {
+            turn.segments.push(TraceSegment {
+                source: "const a = 1;".into(),
+                inline_receipts: vec!["// => a = 1".into()],
+                error_note: None,
+                assistant_message: Some(assistant("call-1", true)),
+                tool_call_id: Some("call-1".into()),
+                is_rejection: false,
+            });
+            turn.segments.push(TraceSegment {
+                source: "const b = a + 1;".into(),
+                inline_receipts: vec!["// => b = 2".into()],
+                error_note: None,
+                assistant_message: Some(assistant("call-2", false)),
+                tool_call_id: Some("call-2".into()),
+                is_rejection: false,
+            });
+        }
+        doc.finish_turn("done");
+        assert!(doc.fold_turn(1, "{\"frozen\":true}", None));
+        let first = doc.render_conversation_messages();
+        assert_eq!(
+            first
+                .iter()
+                .map(|m| m["role"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["user", "assistant", "tool", "assistant"]
+        );
+        assert_eq!(first[1]["tool_calls"][0]["function"]["name"], "run_js");
+        assert!(
+            first[1]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap()
+                .contains("const a = 1;")
+        );
+        assert!(!first[0]["content"].as_str().unwrap().contains("const a"));
+        assert!(first[1].get(crate::model_stream::THINKING_BLOCKS).is_none());
+        assert!(first[1].get("_reasoning_items").is_none());
+        assert!(first[1].get("reasoning_content").is_none());
+        let prefix = first[..3].to_vec();
+        doc.begin_turn(2, "next");
+        let second = doc.render_conversation_messages();
+        assert_eq!(&second[..3], &prefix[..]);
+    }
+
+    #[test]
+    fn active_prefix_fold_keeps_recent_steps_and_thinking_metadata() {
+        let mut doc = ContextDocument::default();
+        doc.begin_turn(1, "work");
+        for i in 0..6 {
+            doc.active_turn_mut().unwrap().segments.push(TraceSegment {
+                source: format!("let s{i} = {i};"),
+                inline_receipts: vec![],
+                error_note: None,
+                assistant_message: Some(assistant(&format!("c{i}"), i == 0)),
+                tool_call_id: Some(format!("c{i}")),
+                is_rejection: false,
+            });
+        }
+        assert!(doc.fold_active_prefix(1, 2, "{\"live_vm\":true}", None));
+        let wire = doc.render_conversation_messages();
+        assert!(
+            wire.iter()
+                .any(|message| message["role"] == "tool"
+                    && message["content"] == "{\"live_vm\":true}")
+        );
+        assert!(wire.iter().any(|message| {
+            message["role"] == "assistant"
+                && message["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .is_some_and(|code| code.contains("let s0 = 0;"))
+        }));
+        assert!(wire.iter().any(|message| message["role"] == "assistant"
+            && message["tool_calls"].is_array()
+            && message["tool_calls"][0]["id"] == "c5"));
+        assert!(doc.fold_active_prefix(1, 4, "rewritten", None));
+        let second = doc.render_conversation_messages();
+        assert!(second.iter().any(|message| {
+            message["role"] == "assistant"
+                && message["tool_calls"][0]["function"]["arguments"]
+                    .as_str()
+                    .is_some_and(|code| code.contains("let s3 = 3;"))
+        }));
+        assert_eq!(
+            second[1][crate::model_stream::THINKING_BLOCKS][0]["thinking"],
+            "keep"
+        );
+        assert!(second[1].get("_reasoning_items").is_none());
+        assert!(second[1].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn inline_budget_is_clamped_to_a_quarter_of_remaining_chars() {
+        assert_eq!(inline_limit_for_budget(200_000), 50_000);
+        assert_eq!(inline_limit_for_budget(400_000), INLINE_LIMIT_CHARS);
+        assert_eq!(inline_limit_for_budget(3), 1);
+    }
+
+    #[test]
+    fn active_start_turn_filters_archived_older_turns_from_rendering() {
+        let mut doc = ContextDocument::default();
+        doc.begin_turn(1, "old");
+        doc.active_turn_mut().unwrap().segments.push(TraceSegment {
+            source: "let old = 1;".into(),
+            inline_receipts: vec![],
+            error_note: None,
+            assistant_message: Some(assistant("old", false)),
+            tool_call_id: Some("old".into()),
+            is_rejection: false,
+        });
+        doc.finish_turn("old reply");
+        doc.begin_turn(2, "recent");
+        doc.finish_turn("recent reply");
+        doc.active_start_turn = Some(2);
+        let wire = doc.render_conversation_messages();
+        assert!(!wire.iter().any(|message| message["content"] == "old"));
+        assert!(wire.iter().any(|message| message["content"] == "recent"));
+    }
 }

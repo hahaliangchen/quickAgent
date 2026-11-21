@@ -206,6 +206,26 @@ pub(crate) fn apply_agent_config(
                             })
                         })
                         .collect(),
+                    long_context_thresholds: provider
+                        .model_metadata
+                        .iter()
+                        .filter_map(|(id, metadata)| {
+                            let threshold = metadata
+                                .pointer("/cost/longContextThreshold")
+                                .and_then(Value::as_u64)
+                                .and_then(|n| usize::try_from(n).ok())?;
+                            (threshold > 0).then(|| {
+                                (
+                                    provider
+                                        .model_map
+                                        .get(id)
+                                        .cloned()
+                                        .unwrap_or_else(|| id.clone()),
+                                    threshold,
+                                )
+                            })
+                        })
+                        .collect(),
                 },
             )
         })

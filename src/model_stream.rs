@@ -609,7 +609,18 @@ pub fn responses_request(chat: &Value) -> Value {
         body["parallel_tool_calls"] = chat.get("parallel_tool_calls").cloned().unwrap_or(json!(false));
     }
     if let Some(text) = instructions {
-        body["instructions"] = json!(text);
+        if chat["model"]
+            .as_str()
+            .is_some_and(|model| model.to_ascii_lowercase().starts_with("gpt-6.2"))
+        {
+            input.insert(
+                0,
+                json!({"type":"message","role":"developer","content":[{"type":"input_text","text":text}]}),
+            );
+            body["input"] = Value::Array(input);
+        } else {
+            body["instructions"] = json!(text);
+        }
     }
     if !tools.is_empty() {
         body["tools"] = json!(tools);

@@ -121,7 +121,29 @@ pub fn wire_body(state: &AgentServiceState, model: &str, chat: &Value) -> Value 
     else {
         return chat.clone();
     };
-    body(chat, route.messages_capabilities(model))
+    with_cache_breakpoints(body(chat, route.messages_capabilities(model)))
+}
+
+fn with_cache_breakpoints(mut body: Value) -> Value {
+    if let Some(system) = body.get("system").and_then(Value::as_str).map(str::to_owned) {
+        body["system"] = json!([{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}]);
+    }
+    if let Some(tools) = body["tools"].as_array_mut() {
+        if let Some(last) = tools.last_mut() {
+            last["cache_control"] = json!({"type":"ephemeral"});
+        }
+    }
+    if let Some(messages) = body["messages"].as_array_mut() {
+        let non_system = messages.iter().filter(|message| message["role"] != "system").count();
+        if non_system > 1
+            && let Some(last) = messages.iter_mut().rev().find(|message| message["role"] != "system")
+            && let Some(content) = last["content"].as_array_mut()
+            && let Some(block) = content.last_mut()
+        {
+            block["cache_control"] = json!({"type":"ephemeral"});
+        }
+    }
+    body
 }
 
 /// A request for a body already in the route's wire form. Responses and Chat
@@ -700,6 +722,20 @@ mod tests {
         assert!(wire.get("output_config").is_none());
     }
 
+    #[test]
+    fn cache_breakpoints_mark_system_tools_and_last_history_block() {
+        let mut chat = chat(&["read_file"], &[], &[]);
+        chat["messages"] = json!([
+            {"role":"system","content":"stable"},
+            {"role":"user","content":"read"},
+            {"role":"assistant","content":"done"}
+        ]);
+        let wire = with_cache_breakpoints(body(&chat, Capabilities::default()));
+        assert_eq!(wire["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(wire["tools"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(wire["messages"].as_array().unwrap().last().unwrap()["content"].as_array().unwrap().last().unwrap()["cache_control"]["type"], "ephemeral");
+    }
+
     /// The conversion under test, named so the fixtures above stay readable.
     fn body_(chat: &Value, capabilities: Capabilities) -> Value {
         body(chat, capabilities)
@@ -834,6 +870,7 @@ mod tests {
             models: [("deepseek-flash".to_owned(), "deepseek-flash".to_owned())].into_iter().collect(),
             max_output_tokens: Default::default(),
             context_windows: Default::default(),
+                long_context_thresholds: Default::default(),
         });
         let body = json!({"model":"deepseek-flash","stream":true,"messages":[]});
         let header = |state: &crate::agent_service::AgentServiceState| {
@@ -878,6 +915,7 @@ mod tests {
             models: [("deepseek-flash".into(), "deepseek-flash".into())].into_iter().collect(),
             max_output_tokens: Default::default(),
             context_windows: Default::default(),
+                long_context_thresholds: Default::default(),
         });
         assert_eq!(wire_body(&completions, "deepseek-flash", &chat), chat);
         let _ = std::fs::remove_dir_all(root);
@@ -970,6 +1008,7 @@ mod tests {
             models: [("deepseek-flash".to_owned(), "deepseek-flash".to_owned())].into_iter().collect(),
             max_output_tokens: Default::default(),
             context_windows: Default::default(),
+                long_context_thresholds: Default::default(),
         });
         let conn = crate::agent_service::open_db(root.path()).unwrap();
         conn.execute(

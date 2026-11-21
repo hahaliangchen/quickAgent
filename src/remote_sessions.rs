@@ -722,15 +722,15 @@ mod tests {
                             return Json(json!({"choices":[{"message":{"role":"assistant","content":VISION},"finish_reason":"stop"}]}));
                         }
                         if body["messages"].to_string().contains("WAIT_PLAN_TEST") {
-                            let src = "<run>\nconst lib = require(\"review_lab\");\ntry { await lib.render({slides:[99]}); } catch (e) { console.log('should not continue'); }\n</run>";
-                            return Json(json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":src}}]}));
+                            let source = "const lib = require(\"review_lab\");\ntry { await lib.render({slides:[99]}); } catch (e) { console.log('should not continue'); }";
+                            return Json(json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"call_wait_plan","type":"function","function":{"name":"run_js","arguments":serde_json::to_string(&json!({"code":source})).unwrap()}}]}}]}));
                         }
                         let n = rounds.fetch_add(1, Ordering::SeqCst);
-                        let content = match n {
-                            0 => "<run>\nconst rl = require(\"review_lab\");\nconst rendered = await rl.render({slides:[1,2]});\nconst ids = rendered.images.map(i => i.artifact_id);\nconst rev = await vision.analyze_images({artifact_ids: ids, question: \"I just changed the subtitle.\"});\nawait rl.record({analysis_ids: [rev.analysis_id]});\n</run>",
-                            _ => "Page 1 reviewed.",
+                        let source = match n {
+                            0 => "const rl = require(\"review_lab\");\nconst rendered = await rl.render({slides:[1,2]});\nconst ids = rendered.images.map(i => i.artifact_id);\nconst rev = await vision.analyze_images({artifact_ids: ids, question: \"I just changed the subtitle.\"});\nawait rl.record({analysis_ids: [rev.analysis_id]});",
+                            _ => "return { summary: \"Page 1 reviewed.\" };",
                         };
-                        Json(json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":content}}]}))
+                        Json(json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":format!("call_review_{n}"),"type":"function","function":{"name":"run_js","arguments":serde_json::to_string(&json!({"code":source})).unwrap()}}]}}]}))
                     }
                 }
             }));

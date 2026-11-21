@@ -69,6 +69,11 @@ fn declared_context_window(state: &AgentServiceState, model: &str) -> Option<usi
     declared(&route.context_windows, &route.models, model).copied()
 }
 
+pub fn long_context_threshold(state: &AgentServiceState, model: &str) -> Option<usize> {
+    let route = state.provider_routes.get(&state.provider_name)?;
+    declared(&route.long_context_thresholds, &route.models, model).copied()
+}
+
 fn declared_max_output(state: &AgentServiceState, model: &str) -> Option<usize> {
     let route = state.provider_routes.get(&state.provider_name)?;
     declared(&route.max_output_tokens, &route.models, model).copied()
@@ -239,6 +244,7 @@ mod tests {
                     .collect(),
                 max_output_tokens: [("mapped-model".into(), 64_000)].into_iter().collect(),
                 context_windows: Default::default(),
+                long_context_thresholds: Default::default(),
             },
         );
         let routed = ModelSettings {
@@ -350,6 +356,7 @@ mod tests {
                     .collect(),
                 max_output_tokens: [("deepseek-flash".into(), 393_216)].into_iter().collect(),
                 context_windows: [("deepseek-flash".into(), 1_048_576)].into_iter().collect(),
+                long_context_thresholds: Default::default(),
             },
         );
         // The declared 1M window is what a request may use, not the fallback.

@@ -50,13 +50,26 @@ pub(super) async fn proxy_rust_tool(
             Ok(val) => (val, false),
             Err(err) => (json!({"error": format!("{err:#}")}), true),
         },
+        "snapshot" => match crate::context_assets::snapshot(
+            s.state.workspace.root(),
+            s.task,
+            &args,
+        ) {
+            Ok(val) => (val, false),
+            Err(err) => (json!({"error": format!("{err:#}")}), true),
+        },
         "read_attachment" => match crate::attachments::read(s.state, s.task, &args).await {
             Ok(val) => (val, false),
             Err(err) => (json!({"error": format!("{err:#}")}), true),
         },
         "analyze_images" => {
             let context = host_tools::visual_context(s, node)?;
-            match crate::visual_jobs::submit(s.state, &context, &args, call_id, s.model, s.cancel) {
+            let result = if args["background"] == true {
+                crate::visual_jobs::submit(s.state, &context, &args, call_id, s.model, s.cancel)
+            } else {
+                crate::image_analysis::execute(s.state, &context, &args, call_id, s.model, s.cancel).await
+            };
+            match result {
                 Ok(val) => (val, false),
                 Err(err) => (json!({"error": format!("{err:#}")}), true),
             }
@@ -104,6 +117,14 @@ pub(super) async fn proxy_rust_tool(
         )
         .await
         {
+            Ok(value) if value["host_denied"] == true => (
+                json!({
+                    "code": agent_program::runtime::NEEDS_USER,
+                    "question": value["question"],
+                    "message": value["message"],
+                }),
+                true,
+            ),
             Ok(val) => (val, false),
             Err(err) => (json!({"error": format!("{err:#}")}), true),
         },

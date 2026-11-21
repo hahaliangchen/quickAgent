@@ -120,6 +120,8 @@ pub struct AgentProviderRoute {
     pub max_output_tokens: HashMap<String, usize>,
     /// Total input/output limits declared by the model catalog (`contextWindow`).
     pub context_windows: HashMap<String, usize>,
+    /// Configured economic line before a model enters its long-context price tier.
+    pub long_context_thresholds: HashMap<String, usize>,
 }
 
 impl AgentProviderRoute {

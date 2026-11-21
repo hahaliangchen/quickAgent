@@ -122,6 +122,14 @@
     }
 
     #[test]
+    fn gpt_6_2_moves_instructions_into_the_developer_input_prefix() {
+        let chat = json!({"model":"gpt-6.2-preview","messages":[{"role":"system","content":"stable policy"},{"role":"user","content":"hello"}]});
+        let body = responses_request(&chat);
+        assert!(body.get("instructions").is_none());
+        assert_eq!(body["input"][0], json!({"type":"message","role":"developer","content":[{"type":"input_text","text":"stable policy"}]}));
+    }
+
+    #[test]
     fn prefix_system_projection_preserves_tool_pairs_and_instruction_order() {
         let messages=serde_json::json!([
             {"role":"system","content":"policy"},{"role":"user","content":"request"},

@@ -482,3 +482,189 @@ async fn step4_host_folder_turn_js_archive_and_rewind_roundtrip() {
         ]
     );
 }
+
+#[tokio::test]
+async fn step4_multiturn_folding_snapshot_handle_refresh_baselines_and_level2_truncation() {
+    let ws = TestWorkspace::new("cac-v2-step4-fold");
+    std::fs::write(
+        ws.path().join("target.rs"),
+        "fn v1_alpha() {}\nfn v1_beta() {}\nfn v1_gamma() {}\n",
+    )
+    .unwrap();
+    init_task_row(ws.path(), "step4-fold");
+
+    let seq = Arc::new(AtomicUsize::new(0));
+    let pinned_system = Arc::new(std::sync::Mutex::new(String::new()));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let seq = seq.clone();
+            let pinned_system = pinned_system.clone();
+            async move {
+                let idx = seq.fetch_add(1, Ordering::SeqCst);
+                let sys = body["messages"][0]["content"].as_str().unwrap().to_owned();
+                {
+                    let mut guard = pinned_system.lock().unwrap();
+                    if guard.is_empty() {
+                        *guard = sys.clone();
+                    } else {
+                        assert_eq!(*guard, sys, "pinned_system_prompt must remain byte-identical across turns");
+                    }
+                }
+                Json(match idx {
+                    // Turn 1: read target.rs (v1)
+                    0 => run_js("const f1 = io.read({ path: \"target.rs\" }); f1.slice(1, 2);"),
+                    1 => completion("Turn 1 read v1."),
+                    // Turn 2: hard_limit triggers Level-1 fold of Turn 1!
+                    2 => {
+                        assert_valid_tool_pairing(&body);
+                        let msgs = body["messages"].as_array().unwrap();
+                        // [system, user#1, folded_asst#1, folded_tool#1, final_asst#1, user#2]
+                        assert_eq!(msgs.len(), 6, "Turn 1 should be folded into 1 native pair: {msgs:?}");
+                        assert!(!msgs[1]["content"].as_str().unwrap().contains("io.read"), "user#1 must not contain folded code");
+                        assert_eq!(msgs[2]["role"], "assistant");
+                        assert!(msgs[2].get("_reasoning_items").is_none());
+                        assert!(msgs[2].get("reasoning_content").is_none());
+                        let folded_code = msgs[2]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+                        assert!(folded_code.contains("io.read") && folded_code.contains("Turn 1 folded"));
+                        assert_eq!(msgs[3]["role"], "tool");
+                        let manifest: Value = serde_json::from_str(msgs[3]["content"].as_str().unwrap()).unwrap();
+                        let file_asset = manifest["binding_assets"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|e| e["name"] == "f1" && e["kind"] == "file")
+                            .expect("f1 file binding must have its own snapshot asset_id");
+                        let aid = file_asset["asset_id"].as_str().unwrap();
+                        assert!(
+                            msgs[5]["content"].as_str().unwrap().contains("Files changed between turns: target.rs"),
+                            "Turn 2 user message must announce between-turn external edit: {}",
+                            msgs[5]["content"]
+                        );
+                        run_js(&format!(
+                            "const oldSnap = session.snapshot({{ asset_id: {aid:?} }});\n\
+                             const oldSlice = oldSnap.slice(1, 2);\n\
+                             const fresh = io.read({{ path: \"target.rs\" }});\n\
+                             const newSlice = fresh.slice(1, 2);\n\
+                             io.edit({{ path: \"target.rs\", edits: [{{ old_text: \"fn v2_beta() {{}}\", new_text: \"fn v3_beta() {{}}\" }}] }});\n\
+                             ({{ oldSlice, newSlice }});"
+                        ))
+                    }
+                    3 => {
+                        let tool2 = last_tool_output(&body);
+                        assert!(
+                            tool2.contains("v1_alpha") && tool2.contains("v1_beta"),
+                            "session.snapshot().slice() must return frozen Turn 1 bytes after disk edit: {tool2}"
+                        );
+                        assert!(
+                            tool2.contains("v2_alpha") && tool2.contains("v2_beta"),
+                            "io.read().slice() must return updated disk bytes: {tool2}"
+                        );
+                        completion("Turn 2 verified frozen snapshot + edited v3.")
+                    }
+                    // Turn 3: hard_limit triggers Level-2 aggressive truncation (drops Turn 1, keeps Turn 2 + Turn 3!)
+                    4 => {
+                        assert_valid_tool_pairing(&body);
+                        let msgs = body["messages"].as_array().unwrap();
+                        let all_text = all_messages_text(&body);
+                        assert!(
+                            !all_text.contains("Inspect v1 target"),
+                            "Level-2 truncation must drop Turn 1 from active hot context: {msgs:?}"
+                        );
+                        assert!(
+                            all_text.contains("Compare snapshot and edit") && all_text.contains("Turn 3 check"),
+                            "Level-2 truncation must retain latest completed Turn 2 + active Turn 3: {msgs:?}"
+                        );
+                        completion("Turn 3 confirmed Level-2 truncation.")
+                    }
+                    other => panic!("unexpected round {other}"),
+                })
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut state: AgentServiceState =
+        agent_service::tests::test_state(ws.path(), listener.local_addr().unwrap());
+    state.provider_name = "test".into();
+    state.provider_routes.insert(
+        "test".into(),
+        agent_service::AgentProviderRoute {
+            prefix_system_messages: false,
+            responses: false,
+            messages: false,
+            messages_capabilities: Default::default(),
+            url: state.provider_url.clone(),
+            api_key: String::new(),
+            models: [("fake".into(), "fake".into())].into_iter().collect(),
+            max_output_tokens: Default::default(),
+            context_windows: [("fake".into(), 200_000)].into_iter().collect(),
+            long_context_thresholds: [("fake".into(), 100)].into_iter().collect(),
+        },
+    );
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    run_task(
+        state.clone(),
+        "step4-fold".into(),
+        "fake".into(),
+        "Inspect v1 target".into(),
+        5,
+        CancellationToken::new(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+
+    // User externally modifies target.rs between Turn 1 and Turn 2!
+    std::fs::write(
+        ws.path().join("target.rs"),
+        "fn v2_alpha() {}\nfn v2_beta() {}\nfn v2_gamma() {}\n",
+    )
+    .unwrap();
+
+    run_task(
+        state.clone(),
+        "step4-fold".into(),
+        "fake".into(),
+        "Compare snapshot and edit".into(),
+        5,
+        CancellationToken::new(),
+        2,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        std::fs::read_to_string(ws.path().join("target.rs"))
+            .unwrap()
+            .contains("fn v3_beta() {}"),
+        "Turn 2 io.edit after external edit must succeed via refresh_baselines"
+    );
+
+    run_task(
+        state,
+        "step4-fold".into(),
+        "fake".into(),
+        "Turn 3 check".into(),
+        5,
+        CancellationToken::new(),
+        3,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    assert_eq!(
+        assistant_messages(ws.path(), "step4-fold"),
+        vec![
+            "Turn 1 read v1.",
+            "Turn 2 verified frozen snapshot + edited v3.",
+            "Turn 3 confirmed Level-2 truncation.",
+        ]
+    );
+}

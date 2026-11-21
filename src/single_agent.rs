@@ -31,11 +31,11 @@ mod managed_files;
 mod model_call;
 pub(crate) mod modules;
 mod task_frames;
+#[cfg(test)]
+mod tests;
 mod tool_proxy;
 mod virtual_frame;
 mod vm_driver;
-#[cfg(test)]
-mod tests;
 
 #[cfg(test)]
 use host_tools::{business_tool, business_tool_inner};
@@ -60,6 +60,10 @@ pub(crate) struct Window {
     pub(crate) task_node_id: Option<String>,
     #[serde(default = "default_next_ref_id")]
     pub(crate) next_ref_id: usize,
+    #[serde(default)]
+    pub(crate) token_calibration: crate::context_window::TokenCalibration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pinned_system_prompt: Option<String>,
 }
 
 /// Per-invocation host session context shared by the agent driver, host tool
@@ -125,13 +129,8 @@ async fn append_event(s: &Session<'_>, kind: &str, mut data: Value, surface: boo
     let kind = kind.to_owned();
     db(s.state.workspace.root(), move |conn| {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let seq = agent_service::append_event_tx(
-            &tx,
-            &task,
-            &kind,
-            &data,
-            surface.then_some("append"),
-        )?;
+        let seq =
+            agent_service::append_event_tx(&tx, &task, &kind, &data, surface.then_some("append"))?;
         tx.commit()?;
         Ok(seq)
     })
@@ -161,6 +160,27 @@ pub(crate) fn library_compile_scope(
             methods.retain(|_, tool| host_tools::page_allows(s, tool));
         }
         libs.retain(|_, methods| !methods.is_empty());
+    }
+    if let Some(catalog) = s.state.tool_catalog.as_ref() {
+        let mut packages = catalog.packages.catalog();
+        if let Some(owner) = s.plugin.as_deref() {
+            if let Some(entries) = packages.as_array_mut() {
+                entries.retain(|package| package["id"] == owner);
+            }
+        }
+        let active = packages
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|package| package["enabled"] == true)
+            .filter_map(|package| package["id"].as_str().map(str::to_owned))
+            .collect::<std::collections::BTreeSet<_>>();
+        let plugin_definitions = catalog.packages.tools(&active);
+        for (name, methods) in agent_program::libraries::catalog(&plugin_definitions, &packages) {
+            if !libs.contains_key(&name) {
+                libs.insert(name, methods);
+            }
+        }
     }
     libs
 }
@@ -267,6 +287,23 @@ pub(crate) async fn run_task_with_resource(
         .and_then(|raw| serde_json::from_str(raw).ok())
         .unwrap_or_default();
 
+    // Between turns the user owns workspace changes. Advance managed-file
+    // baselines before the new user message so the next edit sees the current
+    // world and the immutable history remains untouched.
+    let moved_baselines = managed_files::refresh_baselines(state.workspace.root(), &task)?;
+    let prompt = if moved_baselines.is_empty() {
+        prompt
+    } else {
+        format!(
+            "{prompt}\n\n[Files changed between turns: {}]",
+            moved_baselines.join(", ")
+        )
+    };
+    let libs = library_compile_scope(&s, &w);
+    if w.pinned_system_prompt.is_none() {
+        w.pinned_system_prompt = Some(model_call::pinned_system_prompt(&s, &libs));
+    }
+
     // Emit durable turn/start and user/message events for frontend timeline.
     append_event(
         &s,
@@ -296,7 +333,6 @@ pub(crate) async fn run_task_with_resource(
     .await?;
 
     // Every new user turn ALWAYS starts with a brand-new empty JS VM!
-    let libs = library_compile_scope(&s, &w);
     w.program = Some(Runtime::new_repl(libs.clone())?);
     w.next_ref_id = 1;
     w.context_doc.begin_turn(turn, &prompt);
@@ -306,6 +342,15 @@ pub(crate) async fn run_task_with_resource(
 
     for step in 1..=max_rounds {
         if cancel.is_cancelled() {
+            let manifest =
+                snapshot_turn_state(&s, &w).unwrap_or_else(|_| "{\"frozen\":true}".into());
+            w.context_doc
+                .finish_turn("[Turn aborted before final reply.]");
+            let code_asset_id = fold_code_asset(&s, &w);
+            if let Some(turn_doc) = w.context_doc.turns.iter_mut().find(|turn| turn.turn == s.turn) {
+                turn_doc.snapshot_manifest = Some(manifest);
+                turn_doc.snapshot_code_asset_id = code_asset_id;
+            }
             w.program = None;
             save_window(&s, &w).await?;
             let _ = append_event(
@@ -331,16 +376,37 @@ pub(crate) async fn run_task_with_resource(
         )
         .await?;
 
-        let reply = model_call::call_model(&s, &w, &libs, step).await?;
+        let estimated_request = maybe_fold_before_request(&s, &mut w, &libs).await?;
+
+        let reply = match model_call::call_model(&s, &mut w, &libs, step).await {
+            Ok(reply) => reply,
+            Err(error) if is_context_length_error(&error) => {
+                force_fold_active_prefix(&s, &mut w).await?;
+                model_call::call_model(&s, &mut w, &libs, step).await?
+            }
+            Err(error) => return Err(error),
+        };
         #[cfg(test)]
         if std::env::var_os("LIVE_DEBUG_STEPS").is_some() {
             let head: String = reply.content.chars().take(160).collect();
-            let tc = reply.tool_calls.first().map(|c| format!("{}({})", c.name, c.arguments.len()));
-            eprintln!("[LIVE step={step} finish={:?} tc={tc:?} text_len={}] head={head:?}", reply.finish_reason, reply.content.len());
+            let tc = reply
+                .tool_calls
+                .first()
+                .map(|c| format!("{}({})", c.name, c.arguments.len()));
+            eprintln!(
+                "[LIVE step={step} finish={:?} tc={tc:?} text_len={}] head={head:?}",
+                reply.finish_reason,
+                reply.content.len()
+            );
         }
         let submission = model_call::parse_main_submission(&reply);
         let assistant_msg = Some(reply.assistant_message.clone());
         let call_id = reply.primary_call_id();
+        let remaining_budget_chars = s
+            .input_budget
+            .saturating_sub(estimated_request)
+            .saturating_mul(4);
+        w.context_doc.set_inline_budget_chars(remaining_budget_chars);
 
         match submission {
             crate::model_stream::RunSubmission::Rejected { code, message } => {
@@ -410,6 +476,194 @@ pub(crate) async fn run_task_with_resource(
     // Reached max_rounds (mainly test cap); persist current state cleanly.
     save_window(&s, &w).await?;
     Ok(())
+}
+
+async fn maybe_fold_before_request(
+    s: &Session<'_>,
+    w: &mut Window,
+    libs: &agent_program::libraries::Libraries,
+) -> Result<usize> {
+    let body = model_call::build_request_body(s, w, libs);
+    let route = format!("{}/{}", s.state.provider_name, s.model);
+    let mut estimated = w.token_calibration.estimate(&body, &route);
+    let hard = crate::context_window::hard_limit(
+        s.model,
+        s.input_budget,
+        crate::model_settings::long_context_threshold(s.state, s.model),
+    );
+    let mut changed = false;
+    if estimated >= hard {
+        let completed: Vec<usize> = w
+            .context_doc
+            .turns
+            .iter()
+            .filter(|turn| {
+                turn.turn != s.turn && turn.assistant_reply.is_some() && turn.folded.is_none()
+            })
+            .map(|turn| turn.turn)
+            .collect();
+        for turn in completed {
+            let (manifest, code_asset_id) = w.context_doc.turns.iter().find(|doc| doc.turn == turn)
+                .map(|doc| (doc.snapshot_manifest.clone().unwrap_or_else(|| json!({"kind":"frozen_turn_snapshots","turn":turn,"frozen":true,"read":"session.snapshot({ asset_id })"}).to_string()), doc.snapshot_code_asset_id.clone()))
+                .unwrap_or_else(|| (json!({"kind":"frozen_turn_snapshots","turn":turn,"frozen":true,"read":"session.snapshot({ asset_id })"}).to_string(), None));
+            changed |= w.context_doc.fold_turn(turn, manifest, code_asset_id);
+        }
+    }
+    if changed {
+        let refreshed = model_call::build_request_body(s, w, libs);
+        estimated = w.token_calibration.estimate(&refreshed, &route);
+    }
+    if estimated >= hard {
+        let completed: Vec<usize> = w
+            .context_doc
+            .turns
+            .iter()
+            .filter(|turn| turn.turn < s.turn && turn.assistant_reply.is_some())
+            .map(|turn| turn.turn)
+            .collect();
+        if completed.len() > 1 {
+            let keep_from = *completed.last().unwrap();
+            if w.context_doc.active_start_turn != Some(keep_from) {
+                w.context_doc.active_start_turn = Some(keep_from);
+                if let Some(retained) = w.context_doc.turns.iter_mut().find(|turn| turn.turn == keep_from)
+                    && let Some(folded) = retained.folded.as_mut()
+                {
+                    let mut manifest: Value = serde_json::from_str(&folded.manifest).unwrap_or_else(|_| json!({}));
+                    manifest["archived_before_turn"] = json!(keep_from);
+                    manifest["archived_access"] = json!("session.read_history({ turn: ... })");
+                    folded.manifest = manifest.to_string();
+                }
+                changed = true;
+                let refreshed = model_call::build_request_body(s, w, libs);
+                estimated = w.token_calibration.estimate(&refreshed, &route);
+            }
+        }
+    }
+    while estimated >= hard {
+        let Some(turn) = w.context_doc.active_turn() else { break };
+        let cutoff = active_prefix_cutoff(turn, 5);
+        let existing_cutoff = turn.folded_prefix.as_ref().map_or(0, |fold| fold.cutoff);
+        if cutoff == 0 || cutoff <= existing_cutoff {
+            break;
+        }
+        let manifest = snapshot_turn_state(s, w).unwrap_or_else(|_| {
+            json!({"kind":"frozen_prefix_snapshots","turn":s.turn,"frozen":true,"live_vm":true,"read":"session.snapshot({ asset_id })"}).to_string()
+        });
+        let code_asset_id = fold_prefix_code_asset(s, w, cutoff);
+        if !w
+            .context_doc
+            .fold_active_prefix(s.turn, cutoff, manifest, code_asset_id)
+        {
+            break;
+        }
+        changed = true;
+        let refreshed = model_call::build_request_body(s, w, libs);
+        estimated = w.token_calibration.estimate(&refreshed, &route);
+        if estimated < hard.saturating_mul(3) / 4 {
+            break;
+        }
+    }
+    if changed {
+        save_window(s, w).await?;
+    }
+    Ok(estimated)
+}
+
+fn is_context_length_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("context_length_exceeded")
+        || text.contains("context length")
+        || text.contains("maximum context")
+}
+
+fn active_prefix_cutoff(turn: &context_doc::TurnDoc, keep: usize) -> usize {
+    let mut remaining = keep;
+    for (index, segment) in turn.segments.iter().enumerate().rev() {
+        if !segment.is_rejection && !segment.source.trim().is_empty() {
+            remaining = remaining.saturating_sub(1);
+            if remaining == 0 {
+                return index;
+            }
+        }
+    }
+    0
+}
+
+fn fold_prefix_code_asset(s: &Session<'_>, w: &Window, cutoff: usize) -> Option<String> {
+    let turn = w
+        .context_doc
+        .turns
+        .iter()
+        .find(|turn| turn.turn == s.turn)?;
+    let code: String = turn.segments[..cutoff]
+        .iter()
+        .filter(|segment| !segment.is_rejection && !segment.source.trim().is_empty())
+        .map(|segment| format!("{}\n", segment.source))
+        .collect();
+    (code.chars().count() > 16 * 1024).then(|| {
+        crate::context_assets::register_pending(
+            s.state.workspace.root(),
+            s.task,
+            "turn_folded_prefix_code",
+            &json!({"turn":s.turn,"cutoff":cutoff}),
+            &json!({"turn":s.turn,"cutoff":cutoff,"code":code}),
+        )
+        .ok()
+        .and_then(|reference| reference["asset_id"].as_str().map(str::to_owned))
+    })?
+}
+
+async fn force_fold_active_prefix(s: &Session<'_>, w: &mut Window) -> Result<()> {
+    let completed: Vec<usize> = w
+        .context_doc
+        .turns
+        .iter()
+        .filter(|turn| turn.turn < s.turn && turn.assistant_reply.is_some())
+        .map(|turn| turn.turn)
+        .collect();
+    for turn in &completed {
+        let (manifest, code_asset_id) = w
+            .context_doc
+            .turns
+            .iter()
+            .find(|doc| doc.turn == *turn)
+            .map(|doc| {
+                (
+                    doc.snapshot_manifest.clone().unwrap_or_else(|| {
+                        json!({"kind":"frozen_turn_snapshots","turn":turn,"frozen":true,"read":"session.snapshot({ asset_id })"}).to_string()
+                    }),
+                    doc.snapshot_code_asset_id.clone(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    json!({"kind":"frozen_turn_snapshots","turn":turn,"frozen":true,"read":"session.snapshot({ asset_id })"}).to_string(),
+                    None,
+                )
+            });
+        let _ = w.context_doc.fold_turn(*turn, manifest, code_asset_id);
+    }
+    if completed.len() > 1 {
+        w.context_doc.active_start_turn = completed.last().copied();
+    }
+    if let Some(turn) = w.context_doc.active_turn() {
+        let existing_cutoff = turn.folded_prefix.as_ref().map_or(0, |fold| fold.cutoff);
+        let cutoff = [5usize, 2, 1]
+            .into_iter()
+            .map(|keep| active_prefix_cutoff(turn, keep))
+            .find(|&candidate| candidate > existing_cutoff)
+            .unwrap_or(0);
+        if cutoff > 0 {
+            let manifest = snapshot_turn_state(s, w).unwrap_or_else(|_| {
+                json!({"kind":"forced_context_guard","turn":s.turn,"frozen":true,"live_vm":true,"read":"session.snapshot({ asset_id })"}).to_string()
+            });
+            let code_asset_id = fold_prefix_code_asset(s, w, cutoff);
+            let _ = w
+                .context_doc
+                .fold_active_prefix(s.turn, cutoff, manifest, code_asset_id);
+        }
+    }
+    save_window(s, w).await
 }
 
 /// Execute one JS step (with optional trailing `return <<<` reply).
@@ -634,6 +888,9 @@ async fn finish_turn_with_reply(
     step: usize,
     markdown: String,
 ) -> Result<()> {
+    let manifest = snapshot_turn_state(s, w).unwrap_or_else(|_| {
+        "// Frozen turn snapshots unavailable; no live VM state was re-read.\n".to_owned()
+    });
     // Archive clean turn JS trace into `host_folder` (best-effort) when JS ran.
     if let Some(turn_js) = w.context_doc.render_turn_js(s.turn) {
         let _ = host_folder::write_program(
@@ -645,6 +902,11 @@ async fn finish_turn_with_reply(
     }
     // Strip EPHEMERAL_PEEK, pair `(user #N, assistant #N)`, and unconditionally destroy VM!
     w.context_doc.finish_turn(&markdown);
+    let code_asset_id = fold_code_asset(s, w);
+    if let Some(turn_doc) = w.context_doc.turns.iter_mut().find(|turn| turn.turn == s.turn) {
+        turn_doc.snapshot_manifest = Some(manifest);
+        turn_doc.snapshot_code_asset_id = code_asset_id;
+    }
     w.program = None;
     append_event(
         s,
@@ -674,4 +936,171 @@ async fn finish_turn_with_reply(
     .await?;
     let _ = agent_service::finish(s.state, s.task, "completed").await;
     Ok(())
+}
+
+fn fold_code_asset(s: &Session<'_>, w: &Window) -> Option<String> {
+    let turn = w
+        .context_doc
+        .turns
+        .iter()
+        .find(|turn| turn.turn == s.turn)?;
+    let code: String = turn
+        .segments
+        .iter()
+        .filter(|segment| !segment.is_rejection && !segment.source.trim().is_empty())
+        .map(|segment| format!("{}\n", segment.source))
+        .collect();
+    (code.chars().count() > 16 * 1024).then(|| {
+        crate::context_assets::register_pending(
+            s.state.workspace.root(),
+            s.task,
+            "turn_folded_code",
+            &json!({"turn":s.turn}),
+            &json!({"turn":s.turn,"code":code}),
+        )
+        .ok()
+        .and_then(|reference| reference["asset_id"].as_str().map(str::to_owned))
+    })?
+}
+
+/// Freeze the runtime bindings and all receipts before the VM is destroyed.
+/// The assets are content-addressed by `context_assets` and are subsequently
+/// read only through `session.snapshot`, never through their source paths.
+fn snapshot_turn_state(s: &Session<'_>, w: &Window) -> Result<String> {
+    let turn = w.context_doc.turns.iter().find(|turn| turn.turn == s.turn);
+    let mut asset_refs = std::collections::BTreeSet::new();
+    let mut notes = Vec::new();
+    let live_vm_handles = turn
+        .map(|turn| turn.live_handles.clone())
+        .unwrap_or_default();
+    if let Some(turn) = turn {
+        for segment in &turn.segments {
+            for receipt in &segment.inline_receipts {
+                for token in receipt.split_whitespace() {
+                    let id =
+                        token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-');
+                    if id.starts_with("asset-") {
+                        asset_refs.insert(format!("asset: {id}"));
+                    }
+                }
+            }
+            if let Some(error) = &segment.error_note {
+                let mut note: String = error.chars().take(600).collect();
+                if error.chars().count() > 600 {
+                    note.push_str("…");
+                }
+                notes.push(note);
+            }
+        }
+    }
+    let bindings = w
+        .program
+        .as_ref()
+        .map(|runtime| {
+            let mut values = serde_json::Map::new();
+            for (name, value) in runtime.named_bindings() {
+                if !name.starts_with('\0') && name != "$_" {
+                    values.insert(name, value);
+                }
+            }
+            Value::Object(values)
+        })
+        .unwrap_or_else(|| json!({}));
+    let mut binding_assets = Vec::new();
+    let mut small_bindings = serde_json::Map::new();
+    if let Some(object) = bindings.as_object() {
+        for (name, value) in object {
+            let serialized = serde_json::to_vec(value)?;
+            let object = value.as_object();
+            let is_file = object.is_some_and(|o| {
+                o.get("path").and_then(Value::as_str).is_some()
+                    && o.get("content").and_then(Value::as_str).is_some()
+            });
+            let is_command = object.is_some_and(|o| o.get("exit_code").is_some());
+            let is_large = serialized.len() > 4 * 1024;
+            if (is_file || is_command || is_large) && binding_assets.len() < 32 {
+                let kind = if is_file { "file" } else if is_command { "command" } else { "json" };
+                let asset = crate::context_assets::register_pending(
+                    s.state.workspace.root(),
+                    s.task,
+                    &format!("turn_binding_{kind}"),
+                    &json!({"turn":s.turn,"name":name}),
+                    value,
+                )?;
+                let mut entry = json!({
+                    "name": name,
+                    "asset_id": asset["asset_id"],
+                    "kind": kind,
+                    "bytes": serialized.len(),
+                    "lines": value.get("content").and_then(Value::as_str).or_else(|| value.get("stdout").and_then(Value::as_str)).map(|text| text.lines().count()),
+                });
+                if let Some(path) = object.and_then(|o| o.get("path")).and_then(Value::as_str) {
+                    entry["path"] = json!(path);
+                }
+                if let Some(exit_code) = object.and_then(|o| o.get("exit_code")) {
+                    entry["exit_code"] = exit_code.clone();
+                }
+                binding_assets.push(entry);
+            } else {
+                small_bindings.insert(name.clone(), value.clone());
+            }
+        }
+    }
+    let small_bindings_ref = crate::context_assets::register_pending(
+        s.state.workspace.root(),
+        s.task,
+        "turn_bindings",
+        &json!({"turn":s.turn}),
+        &Value::Object(small_bindings),
+    )?;
+    let outputs = json!({
+        "turn": s.turn,
+        "step_outputs": w.context_doc.turns.iter().find(|turn| turn.turn == s.turn)
+            .map(|turn| turn.segments.iter().map(|segment| json!({
+                "inline_receipts": segment.inline_receipts.clone(),
+                "error": segment.error_note.clone(),
+            })).collect::<Vec<_>>()).unwrap_or_default(),
+    });
+    notes.truncate(4);
+    for note in &mut notes {
+        if note.chars().count() > 240 {
+            *note = note.chars().take(240).collect::<String>() + "…";
+        }
+    }
+    let asset_refs = asset_refs.into_iter().take(32).collect::<Vec<_>>();
+    let live_vm_handles = live_vm_handles.into_iter().take(32).collect::<Vec<_>>();
+    let outputs_ref = crate::context_assets::register_pending(
+        s.state.workspace.root(),
+        s.task,
+        "step_outputs",
+        &json!({"turn":s.turn}),
+        &outputs,
+    )?;
+    Ok(json!({
+        "kind":"frozen_turn_snapshots",
+        "turn":s.turn,
+        "turn_bindings":{"asset_id":small_bindings_ref["asset_id"],"read":"session.snapshot({ asset_id: ... })"},
+        "binding_assets":binding_assets,
+        "step_outputs":{"asset_id":outputs_ref["asset_id"],"read":"session.snapshot({ asset_id: ... })"},
+        "asset_refs":asset_refs,
+        "live_vm_handles":live_vm_handles,
+        "notes":notes,
+        "frozen":true,
+    }).to_string())
+}
+
+#[cfg(test)]
+mod context_guard_tests {
+    use super::*;
+
+    #[test]
+    fn context_length_errors_trigger_the_single_retry_path() {
+        assert!(is_context_length_error(&anyhow::anyhow!(
+            "400 context_length_exceeded"
+        )));
+        assert!(is_context_length_error(&anyhow::anyhow!(
+            "maximum context window reached"
+        )));
+        assert!(!is_context_length_error(&anyhow::anyhow!("network timeout")));
+    }
 }

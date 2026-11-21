@@ -130,13 +130,16 @@ pub(super) struct DisplayTracker<'a> {
 }
 
 impl<'a> DisplayTracker<'a> {
-    pub(super) fn from_hints(hints: &'a SegmentContextHints) -> Self {
+    pub(super) fn from_hints(
+        hints: &'a SegmentContextHints,
+        inline_budget_chars: usize,
+    ) -> Self {
         Self {
             delegated_refs: Some(&hints.delegated_refs),
             delegated_hashes: Some(&hints.delegated_content_hashes),
             seen_refs: BTreeSet::new(),
             seen_hashes: BTreeSet::new(),
-            remaining_inline_budget: INLINE_LIMIT_CHARS,
+            remaining_inline_budget: inline_budget_chars.min(INLINE_LIMIT_CHARS),
             is_virtual_param: false,
         }
     }
@@ -248,9 +251,10 @@ pub(super) fn format_segment_feedback(
     console_logs: &[String],
     hints: &SegmentContextHints,
     ignore_trailing_return: bool,
+    inline_budget_chars: usize,
 ) -> Vec<String> {
     let mut receipts = Vec::new();
-    let mut tracker = DisplayTracker::from_hints(hints);
+    let mut tracker = DisplayTracker::from_hints(hints, inline_budget_chars);
 
     if !console_logs.is_empty() {
         let joined = console_logs.join("\n");

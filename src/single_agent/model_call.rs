@@ -84,6 +84,7 @@ Each response MUST be **one** of the two actions below:
   - **Dataflow-sink display rule (do NOT use `console.log(...)`)**: any variable consumed by a later statement in the same step (e.g. `const raw = io.read(...); const hits = raw.grep(...);` or `const list = io.list(...); list.entries.filter(...)`) stays **silent in live VM memory**; ONLY unconsumed result variables (e.g. flat multi-line `const a = f1.slice(...);\nconst b = f2.slice(...);`) and bare query expressions (e.g. `a.slice(...); b.slice(...);` or `[a.slice(...), b.slice(...)]`) are returned automatically in clean unescaped blocks. Avoid `console.log(...)` (it is strictly capped at 4KB).
   - Results up to **`64KB`** per step are returned verbatim and stay in your conversation history for the entire turn — do NOT re-read or re-slice content already shown in an earlier `tool` message. If a batched array/object exceeds `64KB`, the first `64KB` is still printed verbatim and only overflow tail items are summarized.
   - Large files/results (`> 64KB`) stay live in VM memory as `ResourceHandle` (`Ref#N`) with a compact signature + structural/error index in the `tool` output (and any silent new file/command handles loaded in a step are noted in a 1-line `// [live handles added: ...]` footer so you can reuse them without re-reading).
+  - Frozen turn snapshots are immutable host assets. Use `session.snapshot({ asset_id })` to restore the exact saved file, command output, or JSON value even after the workspace changes. `session.read_asset(...)` remains available for paged asset delivery.
 - **Lazy Resource Handles & Programmatic JS**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with zero-I/O methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. Use JS loops, regexes, sets, and maps to diff, verify, or extract across multiple files in a single step.
 
 ### Action 2: Finish turn and reply to the user
@@ -318,7 +319,25 @@ pub(super) fn build_request_body(
     w: &Window,
     libs: &Libraries,
 ) -> Value {
-    build_request_body_for_doc(s, &w.context_doc, V2_SYSTEM_PROMPT, libs)
+    let base = w.pinned_system_prompt.as_deref().unwrap_or(V2_SYSTEM_PROMPT);
+    build_request_body_for_doc(s, &w.context_doc, base, libs)
+}
+
+pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String {
+    let mut text = String::from(V2_SYSTEM_PROMPT);
+    text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
+    text.push_str(&declarations::static_library_header(libs));
+    if !s.scope.starts_with("virtual:") {
+        let orch = crate::flow_libraries::list_libraries(s);
+        if !orch.is_empty() {
+            text.push_str("\n// Reusable JS orchestration libraries via `require(\"<name>\")`:\n");
+            for (name, desc) in orch {
+                let methods = crate::flow_libraries::public_method_names(s, &name).unwrap_or_default();
+                text.push_str(&format!("// - require({name:?}) -> {{ {} }}: {desc}\n", methods.join(", ")));
+            }
+        }
+    }
+    text
 }
 
 pub(super) fn build_request_body_for_doc(
@@ -328,9 +347,12 @@ pub(super) fn build_request_body_for_doc(
     libs: &Libraries,
 ) -> Value {
     let mut system_text = String::from(base_prompt);
-    system_text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
-    system_text.push_str(&declarations::static_library_header(libs));
-    if !s.scope.starts_with("virtual:") {
+    let has_pinned_sdk = base_prompt.contains("/* === RUNTIME HOST SDK (.d.ts) === */");
+    if !has_pinned_sdk {
+        system_text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
+        system_text.push_str(&declarations::static_library_header(libs));
+    }
+    if !has_pinned_sdk && !s.scope.starts_with("virtual:") {
         let orch = crate::flow_libraries::list_libraries(s);
         if !orch.is_empty() {
             system_text.push_str("\n// Reusable JS orchestration libraries via `require(\"<name>\")`:\n");
@@ -405,13 +427,13 @@ pub(super) fn build_request_body_for_doc(
 
 pub(super) async fn call_model(
     s: &Session<'_>,
-    w: &Window,
+    w: &mut Window,
     libs: &Libraries,
     step: usize,
 ) -> Result<ModelReply> {
     let body = build_request_body(s, w, libs);
     let node = format!("step_{}_{}", s.turn, step);
-    send_model_request(s, w.task_node_id.as_deref(), body, &node, step, "agent").await
+    send_model_request(s, w.task_node_id.as_deref(), body, &node, step, "agent", Some(&mut w.token_calibration)).await
 }
 
 pub(super) async fn call_virtual_model(
@@ -424,7 +446,7 @@ pub(super) async fn call_virtual_model(
 ) -> Result<ModelReply> {
     let body = build_request_body_for_doc(s, doc, VIRTUAL_LEAF_SYSTEM_PROMPT, leaf_libs);
     let node = format!("virtual_{action_id}_{parent_step}_{sub_step}");
-    send_model_request(s, s.task_node_id.as_deref(), body, &node, sub_step, "virtual").await
+    send_model_request(s, s.task_node_id.as_deref(), body, &node, sub_step, "virtual", None).await
 }
 
 async fn send_model_request(
@@ -434,6 +456,7 @@ async fn send_model_request(
     node: &str,
     step: usize,
     actor: &str,
+    mut calibration: Option<&mut crate::context_window::TokenCalibration>,
 ) -> Result<ModelReply> {
     let trace = crate::request_context::record(
         s.state.workspace.root(),
@@ -532,6 +555,13 @@ async fn send_model_request(
             Ok((message, stats)) => {
                 let (actual_input, cached_tokens, output_tokens, reasoning_tokens) =
                     crate::model_transport::extract_usage_counts(&stats["usage"]);
+                if actual_input > 0 {
+                    let estimated = crate::context_window::estimate(&body);
+                    let route = format!("{}/{}", s.state.provider_name, s.model);
+                    if let Some(calibration) = calibration.as_deref_mut() {
+                        calibration.observe(&route, estimated, actual_input as usize);
+                    }
+                }
                 if actor == "agent" && actual_input > 0 {
                     let cache_hit_pct =
                         ((cached_tokens as f64 / actual_input as f64) * 1000.0).round() / 10.0;

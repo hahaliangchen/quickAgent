@@ -27,6 +27,7 @@ pub(super) fn page_allows(s: &Session<'_>, name: &str) -> bool {
             | "unload_skill"
             | "read_session_history"
             | "read_asset"
+            | "snapshot"
             | "list_context_assets"
             | "find_library_methods"
             | "ask_user"

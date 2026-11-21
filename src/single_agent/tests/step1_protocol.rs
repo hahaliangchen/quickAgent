@@ -536,6 +536,7 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
             models: Default::default(),
             max_output_tokens: Default::default(),
             context_windows: Default::default(),
+                long_context_thresholds: Default::default(),
         },
     );
     let server = tokio::spawn(async move {
