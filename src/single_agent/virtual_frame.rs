@@ -3,8 +3,8 @@
 //! Core properties:
 //! - **Strict Stack-Frame Isolation**: Child frame sees ONLY its own function
 //!   signature, `@virtual` contract, bound parameters, `@uses` captures, and
-//!   allowed non-shell libraries (`io`, `git`, `host`, ...). It NEVER inherits
-//!   outer conversation history, `MAIN_PROMPT`, `process.*`, or `session.*`.
+//!   the parent's regular host libraries and execution boundary. It NEVER
+//!   inherits outer conversation history, `MAIN_PROMPT`, or `session.*`.
 //! - **Isomorphic Engine**: Inside the isolated frame, the model writes raw JS
 //!   with the exact same `.d.ts` + Rust proxy + `// =>` + `EPHEMERAL_PEEK` loop
 //!   as the outer driver, finishing with native JS `return <json_value>;`.
@@ -22,8 +22,6 @@ use crate::agent_program::{Runtime, State, libraries::Libraries, runtime::Action
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
-
-const VIRTUAL_MAX_ROUNDS: usize = 20;
 
 #[derive(Clone, Debug)]
 pub(super) struct VirtualCallSpec {
@@ -70,10 +68,11 @@ impl VirtualCallReceipt {
     }
 }
 
-/// Build the strictly non-shell, non-session library catalog for a `@virtual` leaf.
+/// Build the child library catalog. The child keeps the parent's regular tools,
+/// including process and plugin libraries, while session state and delegation
+/// are reserved for the parent frame.
 pub(super) fn leaf_libraries(parent_libs: &Libraries) -> Libraries {
     let mut libs = parent_libs.clone();
-    libs.remove("process");
     libs.remove("session");
     libs.remove("previous");
     libs
@@ -257,7 +256,7 @@ async fn run_virtual_loop(
         model: &child_model,
         turn: parent_session.turn,
         cancel: parent_session.cancel,
-        ban_execution: true, // hard shell ban inside @virtual!
+        ban_execution: parent_session.ban_execution,
         scope: format!("virtual:{}:{}", spec.fn_name, spec.action_id),
         parent: Some(parent_session.scope.clone()),
         input_budget: crate::model_settings::input_budget(state_ref, &child_model),
@@ -286,14 +285,12 @@ async fn run_virtual_loop(
 
     let mut files_read = BTreeSet::new();
     let mut files_written = BTreeSet::new();
-    let mut steps_used = 0usize;
     let mut next_ref_id = 1usize;
 
-    for sub_step in 1..=VIRTUAL_MAX_ROUNDS {
+    for sub_step in 1usize.. {
         if child_session.cancel.is_cancelled() {
             bail!("cancelled");
         }
-        steps_used = sub_step;
 
         let reply = model_call::call_virtual_model(
             &child_session,
@@ -364,7 +361,7 @@ async fn run_virtual_loop(
                         let receipt = VirtualCallReceipt {
                             fn_name: spec.fn_name,
                             args_preview,
-                            steps: steps_used,
+                            steps: sub_step,
                             files_read: files_read.into_iter().collect(),
                             files_written: files_written.into_iter().collect(),
                             returned_preview: compact_value_preview(task_err, 220),
@@ -375,7 +372,7 @@ async fn run_virtual_loop(
                     let receipt = VirtualCallReceipt {
                         fn_name: spec.fn_name,
                         args_preview,
-                        steps: steps_used,
+                        steps: sub_step,
                         files_read: files_read.into_iter().collect(),
                         files_written: files_written.into_iter().collect(),
                         returned_preview: compact_value_preview(&val, 260),
@@ -418,21 +415,7 @@ async fn run_virtual_loop(
             }
         }
     }
-
-    let timeout_err = json!({
-        "code": "VIRTUAL_MAX_ROUNDS",
-        "message": format!("@virtual function `{}` did not return within {VIRTUAL_MAX_ROUNDS} steps", spec.fn_name),
-    });
-    let receipt = VirtualCallReceipt {
-        fn_name: spec.fn_name,
-        args_preview,
-        steps: steps_used,
-        files_read: files_read.into_iter().collect(),
-        files_written: files_written.into_iter().collect(),
-        returned_preview: "exceeded max steps without returning".into(),
-        failed: true,
-    };
-    Ok((timeout_err, true, receipt))
+    unreachable!("unbounded worker loop exits only via return or cancellation")
 }
 
 async fn drive_leaf_vm(
@@ -455,15 +438,7 @@ async fn drive_leaf_vm(
                 ActionKind::Tool { name, args } => {
                     external_calls += 1;
                     record_file_touch(&name, &args, files_read, files_written);
-                    let (mut result, is_error) = if is_shell_tool(&name) {
-                        (
-                            json!({
-                                "code": "VIRTUAL_SHELL_FORBIDDEN",
-                                "error": format!("Shell tool `{name}` is strictly forbidden inside `@virtual` frames.")
-                            }),
-                            true,
-                        )
-                    } else if name == "ask_user" {
+                    let (mut result, is_error) = if name == "ask_user" {
                         (
                             json!({
                                 "code": "VIRTUAL_ASK_USER_FORBIDDEN",
@@ -480,7 +455,7 @@ async fn drive_leaf_vm(
                             &action.id,
                             &name,
                             args,
-                            false, // NEVER allow shell inside @virtual!
+                            !s.ban_execution,
                         )
                         .await?
                     };
@@ -498,24 +473,17 @@ async fn drive_leaf_vm(
                     let futs = operations.into_iter().enumerate().map(|(idx, (name, args))| {
                         let call_id = format!("{base_id}-p{idx}");
                         async move {
-                            if is_shell_tool(&name) {
-                                Ok::<(Value, bool), anyhow::Error>((
-                                    json!({"code": "VIRTUAL_SHELL_FORBIDDEN", "error": "shell forbidden in @virtual"}),
-                                    true,
-                                ))
-                            } else {
-                                super::tool_proxy::proxy_rust_tool(
-                                    s,
-                                    leaf_libs,
-                                    node,
-                                    step,
-                                    &call_id,
-                                    &name,
-                                    args,
-                                    false,
-                                )
-                                .await
-                            }
+                            super::tool_proxy::proxy_rust_tool(
+                                s,
+                                leaf_libs,
+                                node,
+                                step,
+                                &call_id,
+                                &name,
+                                args,
+                                !s.ban_execution,
+                            )
+                            .await
                         }
                     });
                     let results = futures::future::try_join_all(futs).await?;
@@ -542,6 +510,17 @@ async fn drive_leaf_vm(
                         )?;
                     }
                 }
+                ActionKind::LibraryCall { library, method, .. }
+                    if library == "host" && method == "delegate" =>
+                {
+                    runtime.resume(
+                        json!({
+                            "code": "NESTED_DELEGATE_FORBIDDEN",
+                            "error": "host.delegate is only available in the parent frame; nested delegation is forbidden inside a virtual worker."
+                        }),
+                        true,
+                    )?;
+                }
                 ActionKind::Call { name, .. } | ActionKind::Task { name, .. } => {
                     runtime.resume(
                         json!({
@@ -564,10 +543,6 @@ async fn drive_leaf_vm(
             terminal => return Ok((terminal, external_calls)),
         }
     }
-}
-
-fn is_shell_tool(name: &str) -> bool {
-    crate::shell_process::is_tool(name) || crate::project_process::is_execution(name)
 }
 
 fn record_file_touch(

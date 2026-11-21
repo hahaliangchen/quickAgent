@@ -9,7 +9,7 @@ use super::{
 };
 use crate::agent_service::{self, AgentProviderRoute};
 use crate::single_agent::run_task;
-use axum::{Router, body::Body, http::header, response::Response, routing::post};
+use axum::{Json, Router, body::Body, http::header, response::Response, routing::post};
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
@@ -394,6 +394,79 @@ async fn step1_final_statement_only_display_rule() {
         assistant_messages(ws.path(), "step1-final"),
         vec!["Dataflow Sink 汇节点展示规则全部验证通过。"]
     );
+}
+
+#[tokio::test]
+async fn step1_stream_transport_retry_resets_partial_delta_before_success() {
+    let ws = TestWorkspace::new("cac-v2-step1-stream-retry");
+    std::fs::write(ws.path().join("README.md"), "retry fixture\n").unwrap();
+    init_task_row(ws.path(), "step1-stream-retry");
+
+    let seq = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(_body): Json<Value>| {
+            let idx = seq.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if idx == 0 {
+                    let chunks = vec![
+                        Ok::<_, std::convert::Infallible>(
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"半截旧文本\"}}]}\n\n"
+                                .as_bytes()
+                                .to_vec(),
+                        ),
+                        Ok::<_, std::convert::Infallible>(
+                            "data: {\"error\":{\"message\":\"upstream_http2_stream_error\"}}\n\n"
+                                .as_bytes()
+                                .to_vec(),
+                        ),
+                    ];
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from_stream(futures::stream::iter(chunks)))
+                        .unwrap()
+                } else {
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(serde_json::to_vec(&completion(
+                            "流式重试成功，最终结果只出现一次。",
+                        )).unwrap()))
+                        .unwrap()
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let state = agent_service::tests::test_state(ws.path(), listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    run_task(
+        state,
+        "step1-stream-retry".into(),
+        "fake".into(),
+        "验证流式请求可恢复".into(),
+        3,
+        CancellationToken::new(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    assert_eq!(
+        assistant_messages(ws.path(), "step1-stream-retry"),
+        vec!["流式重试成功，最终结果只出现一次。"]
+    );
+    let conn = agent_service::open_db(ws.path()).unwrap();
+    let reset_count: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_task_events WHERE task_id=?1 AND kind='assistant/delta' AND json_extract(data,'$.reset')=1",
+            ["step1-stream-retry"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reset_count, 1, "a partial stream retry must reset its open slot");
 }
 
 #[tokio::test]

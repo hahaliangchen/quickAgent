@@ -29,6 +29,22 @@ test('tool argument progress grows without exposing arguments and closes when th
   assert.equal(done[0].streaming, false)
 })
 
+test('stream reset replaces partial assistant output before the retry continues', () => {
+  seq = 0
+  const events = [
+    event('assistant/delta', { step: 2, task_node_id: 'main', text: '半截旧文本' }),
+    event('assistant/delta', { step: 2, task_node_id: 'main', reasoning: '旧推理' }),
+    event('assistant/delta', { step: 2, task_node_id: 'main', reset: true, text: '完整重试结果', reasoning: '新推理' }),
+    event('assistant/delta', { step: 2, task_node_id: 'main', text: '继续。' }),
+  ]
+  const items = chatItems(events)
+  assert.equal(items.length, 1)
+  assert.equal(items[0].text, '完整重试结果继续。')
+  assert.equal(items[0].reasoning, '新推理')
+  assert.equal(items[0].text.includes('半截旧文本'), false)
+  assert.equal(items[0].streaming, true)
+})
+
 test('completed turns can report tool failures without claiming they were not recovered', () => {
   seq = 0
   const items = chatItems([call('main', 'c1', 'browser', {}), result('main', 'c1', 'unavailable', true),

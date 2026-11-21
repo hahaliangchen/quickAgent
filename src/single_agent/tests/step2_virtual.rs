@@ -3,7 +3,7 @@
 
 use super::{
     TestWorkspace, all_messages_text, assert_single_run_js_tool, assert_valid_tool_pairing,
-    assistant_messages, completion, init_task_row, last_tool_output, run_js,
+    assistant_messages, completion, init_task_row, last_tool_output, run_js, tool_call_count,
 };
 use crate::agent_service::{self, AgentServiceState};
 use crate::single_agent::run_task;
@@ -83,8 +83,8 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
                 let user = all_messages_text(&body);
                 // 1. Strict isolation assertions:
                 assert!(
-                    !sys.contains("declare namespace process"),
-                    "@virtual .d.ts must NOT expose process/shell: {sys}"
+                    sys.contains("declare namespace process"),
+                    "@virtual .d.ts must expose the inherited process capability: {sys}"
                 );
                 assert!(
                     !sys.contains("executeTask"),
@@ -103,21 +103,23 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
 
                 let l_idx = leaf_seq.fetch_add(1, Ordering::SeqCst);
                 Json(match l_idx {
-                    // Attempt 0: verify shell call is blocked!
-                    0 => run_js("process.run_readonly({ cmd: \"echo hacked\" });"),
-                    // Attempt 1: verify nested @virtual is blocked with VIRTUAL_LAYER_LIMIT!
+                    // Attempt 0: parent permission allows a synchronous read-only process call.
+                    0 => run_js("process.run_readonly({ cmd: \"printf virtual-readonly\" });"),
+                    // Attempt 1: async process calls remain available inside Promise.all.
                     1 => {
-                        assert!(last_tool_output(&body).contains("COMPILE_ERROR"), "shell must be rejected: {user}");
+                        let output = last_tool_output(&body);
+                        assert!(output.contains("virtual-readonly"), "synchronous process output must reach the worker: {output}");
+                        assert!(!output.contains("VIRTUAL_SHELL_FORBIDDEN"), "shell must follow the inherited permission boundary: {output}");
+                        run_js("const [result] = await Promise.all([process.promises.run_readonly({ cmd: \"printf virtual-async\" })]); result;")
+                    }
+                    // Attempt 2: verify nested @virtual is still blocked with VIRTUAL_LAYER_LIMIT!
+                    2 => {
+                        assert!(last_tool_output(&body).contains("virtual-async"), "async process output must reach the worker: {user}");
                         run_js("/** @virtual nested */\nasync function sub() {}")
                     }
-                    // Attempt 2: verify plain text outside `run_js` is rejected inside @virtual!
-                    2 => {
-                        assert!(last_tool_output(&body).contains("VIRTUAL_LAYER_LIMIT"), "{user}");
-                        completion("Not allowed in virtual")
-                    }
-                    // Attempt 3: legitimately read `target` via Rust proxy!
+                    // Attempt 3: nested @virtual is rejected, then ordinary file work continues.
                     3 => {
-                        assert!(user.contains("VIRTUAL_TOOL_REQUIRED"), "{user}");
+                        assert!(last_tool_output(&body).contains("VIRTUAL_LAYER_LIMIT"), "{user}");
                         run_js("const src = io.read({ path: target }).content;")
                     }
                     // Attempt 4: inspect read file and return structured JSON with summary!
@@ -168,6 +170,74 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
         )
         .unwrap();
     assert_eq!(node_done, 1);
+}
+
+#[tokio::test]
+async fn step2_virtual_worker_inherits_ban_execution_for_process_tools() {
+    let ws = TestWorkspace::new("cac-v2-step2-virtual-ban-execution");
+    init_task_row(ws.path(), "step2-virtual-ban-execution");
+    let main_seq = Arc::new(AtomicUsize::new(0));
+    let leaf_seq = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let main_seq = main_seq.clone();
+            let leaf_seq = leaf_seq.clone();
+            async move {
+                assert_single_run_js_tool(&body);
+                let sys = body["messages"][0]["content"].as_str().unwrap();
+                let is_virtual = sys.contains("isolated single-layer `@virtual`");
+                if is_virtual {
+                    let leaf_round = leaf_seq.fetch_add(1, Ordering::SeqCst);
+                    assert!(!sys.contains("declare namespace process"), "parent ban_execution must remove process from the child surface: {sys}");
+                    if leaf_round == 0 {
+                        return Json(run_js("process.run_readonly({ cmd: \"printf denied\" });"));
+                    }
+                    let user = all_messages_text(&body);
+                    assert!(
+                        user.contains("COMPILE_ERROR")
+                            || user.contains("ReferenceError")
+                            || user.contains("RUNTIME ERROR"),
+                        "the denied process call must be rejected inside the child: {user}"
+                    );
+                    return Json(run_js("return { denied: true, summary: \"execution boundary inherited\" };"));
+                }
+                let index = main_seq.fetch_add(1, Ordering::SeqCst);
+                Json(match index {
+                    0 => run_js("const result = await host.delegate({ task: \"Run a read-only process probe\" }); return { result };"),
+                    1 => {
+                        let output = last_tool_output(&body);
+                        assert!(output.contains("execution boundary inherited"), "child must inherit execution denial and finish: {output}");
+                        completion("子 worker 继承了父级执行权限边界。")
+                    }
+                    other => panic!("unexpected main round {other}"),
+                })
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let state = agent_service::tests::test_state(ws.path(), listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_task(
+            state,
+            "step2-virtual-ban-execution".into(),
+            "fake".into(),
+            "Delegate a process probe while execution is denied".into(),
+            4,
+            CancellationToken::new(),
+            1,
+            true,
+        ),
+    )
+    .await
+    .expect("ban_execution inheritance test timed out")
+    .unwrap();
+    server.abort();
 }
 
 #[tokio::test]
@@ -476,4 +546,263 @@ async fn step2_promise_all_parallel_reads_via_io_promises() {
         assistant_messages(ws.path(), "step2-iop"),
         vec!["并发读取 3 个文件成功。"]
     );
+}
+
+#[tokio::test]
+async fn step2_host_delegate_parallel_partial_pass_by_handle_and_no_nesting() {
+    let ws = TestWorkspace::new("cac-v2-step2-delegate");
+    std::fs::write(
+        ws.path().join("audit.rs"),
+        "// DELEGATE_MARKER\npub fn audit() { value.unwrap(); }\n",
+    )
+    .unwrap();
+    init_task_row(ws.path(), "step2-delegate");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let main_seq = Arc::new(AtomicUsize::new(0));
+    let leaf_calls = Arc::new(AtomicUsize::new(0));
+    let leaf_calls_ref = leaf_calls.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let barrier = barrier.clone();
+            let main_seq = main_seq.clone();
+            let leaf_calls = leaf_calls_ref.clone();
+            async move {
+                assert_single_run_js_tool(&body);
+                let sys = body["messages"][0]["content"].as_str().unwrap();
+                let user = all_messages_text(&body);
+                let is_virtual = sys.contains("isolated single-layer `@virtual`");
+                if is_virtual {
+                    leaf_calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(!sys.contains("function delegate"), "leaf declarations must omit host.delegate: {sys}");
+                    assert!(user.contains("delegate-a") || user.contains("delegate-b"), "delegate task must reach the child: {user}");
+                    assert!(user.contains("audit.rs"), "ResourceHandle context must reach the child: {user}");
+                    barrier.wait().await;
+                    return Json(if user.contains("delegate-a") {
+                        run_js(
+                            "const line = file.slice(1, 1);\nreturn { name, marker: line, tools, summary: `${name}: checked ${file.path}` };",
+                        )
+                    } else {
+                        run_js("return { name: \"delegate-b\", summary: \"delegate-b checked audit.rs\" };")
+                    });
+                }
+                let index = main_seq.fetch_add(1, Ordering::SeqCst);
+                Json(match index {
+                    0 => run_js(
+                        "const file = io.read({ path: \"audit.rs\" });\n\
+                         async function inspect(name) {\n\
+                           if (name === \"fast\") return { mode: \"js-fast\", summary: \"deterministic precheck\" };\n\
+                           if (name === \"delegate-a\") return await host.delegate({ name, task: \"Inspect audit.rs and return structured evidence.\", context: { name, file, tools: \"target-files\" } });\n\
+                           return await host.delegate({ name, task: \"Inspect audit.rs independently as delegate-b and return structured evidence.\", context: { name, file, tools: \"target-files\" } });\n\
+                         }\n\
+                         const [fast, a, b, check] = await Promise.all([\n\
+                           inspect(\"fast\"),\n\
+                           inspect(\"delegate-a\"),\n\
+                           inspect(\"delegate-b\"),\n\
+                           process.promises.run_readonly({ cmd: \"printf delegate-check\" })\n\
+                         ]);\n\
+                         return { fast, a, b, check };",
+                    ),
+                    1 => {
+                        let output = last_tool_output(&body);
+                        assert!(output.contains("delegate-a") && output.contains("delegate-b"), "both delegate receipts must return: {output}");
+                        assert!(output.contains("target-files"), "ordinary context key `tools` must be bound in the child: {output}");
+                        assert!(output.contains("delegate-check"), "mixed process promise must return: {output}");
+                        completion("host.delegate 并发、部分实现快路径和句柄传递通过。")
+                    }
+                    other => panic!("unexpected main round {other}"),
+                })
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let state = agent_service::tests::test_state(ws.path(), listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        run_task(
+            state,
+            "step2-delegate".into(),
+            "fake".into(),
+            "Audit audit.rs with two concurrent host.delegate workers and a read-only check".into(),
+            6,
+            CancellationToken::new(),
+            1,
+            false,
+        ),
+    )
+    .await
+    .expect("host.delegate barrier timed out")
+    .unwrap();
+    server.abort();
+
+    assert_eq!(leaf_calls.load(Ordering::SeqCst), 2, "two delegate frames must be in flight");
+    assert_eq!(tool_call_count(ws.path(), "step2-delegate", "read_file"), 1, "children must reuse the parent handle");
+    assert_eq!(
+        assistant_messages(ws.path(), "step2-delegate"),
+        vec!["host.delegate 并发、部分实现快路径和句柄传递通过。"]
+    );
+}
+
+#[tokio::test]
+async fn step2_host_delegate_context_collision_keys_are_preserved_without_overwriting_hosts() {
+    let ws = TestWorkspace::new("cac-v2-step2-delegate-context-collisions");
+    std::fs::write(ws.path().join("audit.rs"), "fn audit_marker() {}\n").unwrap();
+    init_task_row(ws.path(), "step2-delegate-context-collisions");
+    let main_seq = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let main_seq = main_seq.clone();
+            async move {
+                assert_single_run_js_tool(&body);
+                let sys = body["messages"][0]["content"].as_str().unwrap();
+                let is_virtual = sys.contains("isolated single-layer `@virtual`");
+                if is_virtual {
+                    assert!(all_messages_text(&body).contains("audit.rs"), "delegate context must reach child: {body}");
+                    return Json(run_js(
+                        "const direct = lib.slice(1, 1);\n\
+                         const viaContext = context.lib.slice(1, 1);\n\
+                         const read = io.read({ path: \"audit.rs\" });\n\
+                         return {\n\
+                           host: context.host,\n\
+                           io: context.io,\n\
+                           returned: context[\"return\"],\n\
+                           tools,\n\
+                           contextTools: context.tools,\n\
+                           direct,\n\
+                           viaContext,\n\
+                           read: read.content,\n\
+                           ioStillHostLibrary: typeof io.read === \"function\",\n\
+                           summary: \"collision context preserved\"\n\
+                         };",
+                    ));
+                }
+                let index = main_seq.fetch_add(1, Ordering::SeqCst);
+                Json(match index {
+                    0 => run_js(
+                        "const file = io.read({ path: \"audit.rs\" });\n\
+                         const delegated = await host.delegate({\n\
+                           name: \"collision-check\",\n\
+                           task: \"Read the supplied handle and verify every context field.\",\n\
+                           context: { host: \"host-value\", io: \"io-value\", return: \"return-value\", tools: \"tools-value\", lib: file }\n\
+                         });\n\
+                         const emptyTask = await host.delegate({ task: \"   \" }).catch(error => ({ code: error.code, message: error.message }));\n\
+                         const malformed = await host.delegate({ name: \"missing-task\" }).catch(error => ({ code: error.code, message: error.message }));\n\
+                         return { delegated, emptyTask, malformed };",
+                    ),
+                    1 => {
+                        let output = last_tool_output(&body);
+                        assert!(output.contains("host-value") && output.contains("io-value") && output.contains("return-value"), "collision keys must remain readable through context: {output}");
+                        assert!(output.contains("tools-value") && output.contains("audit_marker"), "safe and handle context values must survive: {output}");
+                        assert!(output.contains("ioStillHostLibrary") && output.contains("true"), "context.io must not overwrite io: {output}");
+                        assert!(output.contains("INVALID_DELEGATE"), "empty task and missing task must remain invalid: {output}");
+                        completion("host.delegate context 冲突键已安全归并，宿主库和句柄均可读取。")
+                    }
+                    other => panic!("unexpected main round {other}"),
+                })
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let state = agent_service::tests::test_state(ws.path(), listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_task(
+            state,
+            "step2-delegate-context-collisions".into(),
+            "fake".into(),
+            "Preserve colliding host.delegate context keys".into(),
+            4,
+            CancellationToken::new(),
+            1,
+            false,
+        ),
+    )
+    .await
+    .expect("delegate context collision test timed out")
+    .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn step2_host_delegate_has_no_artificial_20_step_cap() {
+    let ws = TestWorkspace::new("cac-v2-step2-delegate-unbounded");
+    init_task_row(ws.path(), "step2-delegate-unbounded");
+    let main_seq = Arc::new(AtomicUsize::new(0));
+    let leaf_steps = Arc::new(AtomicUsize::new(0));
+    let leaf_steps_ref = leaf_steps.clone();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let main_seq = main_seq.clone();
+            let leaf_steps = leaf_steps_ref.clone();
+            async move {
+                assert_single_run_js_tool(&body);
+                let sys = body["messages"][0]["content"].as_str().unwrap();
+                let is_virtual = sys.contains("isolated single-layer `@virtual`");
+                if is_virtual {
+                    let step = leaf_steps.fetch_add(1, Ordering::SeqCst) + 1;
+                    let user = all_messages_text(&body);
+                    assert!(user.contains("target-files"), "worker context must remain available: {user}");
+                    assert!(
+                        !user.contains("VIRTUAL WORKER BUDGET"),
+                        "unbounded worker must not inject step-limit countdowns: {user}"
+                    );
+                    let code = if step < 22 {
+                        "const observation = tools; observation;"
+                    } else {
+                        "return { ok: true, tools, steps: 22, summary: `finished after ${tools}` };"
+                    };
+                    return Json(run_js(code));
+                }
+                let index = main_seq.fetch_add(1, Ordering::SeqCst);
+                Json(match index {
+                    0 => run_js(
+                        "const result = await host.delegate({ name: \"deep_check\", task: \"Inspect the supplied target list and return structured evidence.\", context: { tools: \"target-files\" } });\nreturn { result };",
+                    ),
+                    1 => {
+                        let output = last_tool_output(&body);
+                        assert!(output.contains("target-files"), "final worker result must survive past 20 steps: {output}");
+                        assert!(!output.contains("VIRTUAL_MAX_ROUNDS"), "worker must not fail at 20 steps: {output}");
+                        completion("子 worker 不受 20 步硬上限限制，正常交付最终结果。")
+                    }
+                    other => panic!("unexpected main round {other}"),
+                })
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let state = agent_service::tests::test_state(ws.path(), listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        run_task(
+            state,
+            "step2-delegate-unbounded".into(),
+            "fake".into(),
+            "Delegate a multi-step check without an artificial 20-step ceiling".into(),
+            4,
+            CancellationToken::new(),
+            1,
+            false,
+        ),
+    )
+    .await
+    .expect("delegate unbounded test timed out")
+    .unwrap();
+    server.abort();
+    assert_eq!(leaf_steps.load(Ordering::SeqCst), 22, "worker should run past 20 steps and finish cleanly");
 }

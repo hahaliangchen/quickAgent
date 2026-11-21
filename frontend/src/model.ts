@@ -512,6 +512,20 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
           return { name: stringOf(tool.name) ?? '', argumentBytes: numberOf(tool.argument_bytes) ?? 0 }
         }) : undefined
         const slot = `${frame ?? ''}:${turn}:${step}`
+        const reset = event.data.reset === true
+        const existingIndex = streaming.get(slot)
+        const existing = existingIndex === undefined ? undefined : items[existingIndex]
+        if (reset && existingIndex !== undefined && existing?.kind === 'assistant') {
+          items[existingIndex] = {
+            ...existing,
+            text: piece,
+            reasoning: reasoningPiece,
+            toolProgress: toolProgress ?? [],
+            time: event.time,
+            streaming: true,
+          }
+          break
+        }
         finalizeStreaming(frame, slot)
         const index = streaming.get(slot)
         const open = index === undefined ? undefined : items[index]

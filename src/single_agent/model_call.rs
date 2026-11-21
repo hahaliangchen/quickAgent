@@ -18,6 +18,29 @@ use std::time::Duration;
 
 pub(super) const RUN_JS_TOOL_NAME: &str = "run_js";
 
+fn retryable_stream_transport_error(error: &anyhow::Error) -> bool {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::visual_probe::HttpModelFailure>()
+            .is_some_and(|failure| (400..500).contains(&failure.status))
+    }) {
+        return false;
+    }
+    let text = format!("{error:#}").to_ascii_lowercase();
+    !text.contains("cancelled")
+        && [
+            "upstream_http2_stream_error",
+            "http/2 stream",
+            "stream reset",
+            "unexpected eof",
+            "connection reset",
+            "broken pipe",
+            "connection closed before message completed",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
 fn run_js_tool_definition() -> Value {
     json!({
         "type": "function",
@@ -50,6 +73,7 @@ Each response MUST be **one** of the two actions below:
 - You may optionally write a brief 1-sentence progress note in your assistant message text before calling `run_js`, and keep `code` 100% pure JavaScript.
 - Emit ONE `run_js` call per step so the host executes it and returns the real output in the `tool` message before your next step.
 - **Batch into readable multi-line JS scripts once you know your targets**: JS runs in milliseconds while each model round-trip takes seconds. During initial exploration, a short probe is fine; once you understand the file layout, symbols, or checks needed, prefer writing a cohesive **multi-line** script (one statement per line with real `\n`, flat `const` sink bindings rather than cramming deeply nested `({ a: {...}, b: {...} })` onto one minified line, which easily causes bracket typos).
+- **Batch across the entire turn, including final verification**: before issuing any `run_js` call—especially when checking remaining details or running final checks before replying—group all independent reads, slices, searches, or verifications you still need into one multi-line JS script (using `.promises` + `Promise.all` for concurrent I/O) instead of dripping them out as a chain of single-line follow-up calls.
 - **Prefer native search/grep & confirmed paths**:
   - For scanning large files, prefer native Rust methods (`f.grep(regex, context)`, `f.content.includes(...)`, `io.search(...)`) over nested JS line-by-line loops.
   - When batch-reading multiple files, prefer paths confirmed by `io.list`/`io.search` (or wrap uncertain paths in `Promise.allSettled(...)`) so one missing file does not abort the rest of the batch.
@@ -67,29 +91,30 @@ Each response MUST be **one** of the two actions below:
 - Keep information dense. Group repeated findings such as several routing gaps or several type drifts in a compact Markdown table with columns such as `问题 | 位置 | 差异/后果 | 建议`. Quote only the critical 2–5 lines of code when a snippet is needed, and do not reproduce large structs or repeat evidence already stated.
 - Concision must remove filler, stock transitions, and duplicated templates only. Preserve every verified conclusion, exact `file:line` coordinate, key evidence comparison, and measured command or test result.
 
-## Optional Parallel `@virtual` Functions & Concurrent I/O
+## Parallel Delegation (`host.delegate`) & Concurrent I/O
 - **Parallel host I/O, searches, git, and read-only checks**: pre-bound `io.*` / `git.*` / `process.*` are **synchronous** (calling them inside `Promise.all` runs sequentially!). For true concurrency, use the pre-bound **`.promises`** sub-namespace (or `require("<lib>/promises")`):
   - `const files = await Promise.all(paths.map(path => io.promises.read({ path })));`
   - `const [a, b] = await Promise.all([process.promises.run_readonly({ cmd: "..." }), process.promises.run_readonly({ cmd: "..." })]);`
   - `const [st, lg] = await Promise.all([git.promises.status(), git.promises.log({ limit: 8 })]);`
 - **Ordinary JS functions/loops** (`function foo(...) { ... }`): prefer plain JS for deterministic filtering, cross-checking, counting, or batch transformations (0 extra LLM calls).
-- **Parallel `@virtual` fan-out (state-driven)**: once you have a clear understanding of the code structure, the involved modules, and the key files, and the remaining work naturally separates into multiple independent sub-tasks that each require deep reading and semantic judgment (for example, a multi-dimension audit, research across several subsystems, or comparisons across modules), prefer focused `async` `@virtual` functions and dispatch them together with one `await Promise.all([...])`. When useful, put main-frame `process.promises.run_readonly(...)` or `git.promises.*` calls in that same `Promise.all`. Do not keep reading every independent area serially in the main frame after this condition is met.
-  - Give each child the confirmed target file paths or an explicit check scope. A Partial `@virtual` may first read the confirmed paths into `ResourceHandle`s and then fall through to the isolated AI frame, so children do not blindly rediscover the workspace.
-  - Require each child to return a structured object with exact `file:line` citations, the key code or type differences, and a `verifiedClean` list of items checked without finding a problem. The parent should be able to trust and merge these results without re-reading the same files.
-  - Each `@virtual` child runs in its own isolated non-shell stack frame in parallel and discards its intermediate frame on `return` (Stack-Frame GC).
-  - **Partial `@virtual` (JS prefix + AI fall-through)**: you may put deterministic JS statements inside a `@virtual` body; hitting `return <value>;` finishes in pure JS (0 LLM calls), while reaching the end of the body hands all parameters, `@uses` captures, and JS-computed locals (including `ResourceHandle`s) to the isolated AI child frame.
+- **Delegation (`host.delegate`) — AI-decided, single lightweight tasks only**: decide for yourself whether delegating improves efficiency. Delegation is recommended (either concurrently via `Promise.allSettled([...])` / `Promise.all([...])` when independent sub-tasks benefit from parallelism, or as a single focused call) whenever offloading a clean sub-problem saves time or keeps the main frame concise; when target files heavily overlap or batched main-frame JS is faster, handle it directly in the main frame. Keep deterministic filtering, regex extraction, counting, and cross-file correlation in plain parent JS (0 extra LLM calls).
+  - **STRICT RULE — single lightweight task only; NEVER delegate complex or heavyweight tasks**: each `host.delegate` call MUST be a **single, narrow, self-contained task** (e.g., comparing one specific pair of declarations and structs, inspecting one bounded file or symbol, or running one targeted verification). **Do NOT delegate broad, complex, multi-module, or open-ended investigations** to a worker: heavyweight workers lose efficiency through duplicated reads, long wandering traces, and high parent re-verification cost.
+  - **Delegate context names**: fields in `context` may be used directly by their safe variable name or through `context.<key>` / `context["<key>"]`. If a field collides with a JavaScript keyword or an injected host library such as `host` or `io`, read it through `context` so the field cannot replace the host binding. Safe fields remain available as direct parameters, while the complete context object remains available for uniform access.
+  - A delegated worker is a teammate with the parent's regular `io.*`, `git.*`, `process.*`, plugin, and permission/sandbox capabilities, running in an independent frame discarded on return (Stack-Frame GC). Only nested `@virtual` and nested `host.delegate` are forbidden.
+  - Pass pre-loaded `ResourceHandle`s, relevant slices, or confirmed paths in `context` so workers start immediately without re-reading the same files. Workers may still follow direct `include!(...)` splits or references strictly needed for their single task.
+  - Ask each worker for **compact, directly checkable output** (exact `file:line` coordinates, concrete diffs/facts, `verifiedClean`, and a short `summary`) rather than long prose essays. When you want to double-check key candidate findings returned by delegates, batch all spot-checks into **one multi-line JS script** (e.g., multiple `.slice(...)` calls together) instead of checking one file per step.
+  - **Partial delegation**: wrap deterministic JS pre-reading/filtering in an ordinary `async` function—return directly on the fast path (0 LLM calls), and otherwise `return await host.delegate({ name, task, context: { file, hits } })`. Existing `@virtual` declarations also remain supported.
   - Example:
     ```js
-    /** @virtual Audit module A; return { issues: Array<{severity, location, evidence, fix}>, verifiedClean, summary }. */
-    async function auditModuleA() {
-      const files = await Promise.all(["src/a.rs", "src/b.rs"].map(path => io.promises.read({ path })));
-      // Falls through to isolated AI frame with pre-loaded `files`
+    async function audit(path) {
+      const file = await io.promises.read({ path });
+      const hits = file.grep("TODO");
+      if (hits === "(no matches)") return { path, verifiedClean: [path], summary: "no TODO" };
+      return await host.delegate({ name: "audit", task: "Return issues with exact file:line evidence.", context: { file, hits } });
     }
-    /** @virtual Audit module B; return { issues: Array<{severity, location, evidence, fix}>, verifiedClean, summary }. */
-    async function auditModuleB() {}
     const [modA, modB, check] = await Promise.all([
-      auditModuleA(),
-      auditModuleB(),
+      audit("src/a.rs"),
+      audit("src/b.rs"),
       process.promises.run_readonly({ cmd: "..." }),
     ]);
     ```
@@ -118,16 +143,16 @@ Found the vulnerability in `src/auth.rs` lines 61–75...
 "#;
 
 const VIRTUAL_LEAF_SYSTEM_PROMPT: &str = r#"You are executing inside an isolated single-layer `@virtual` JavaScript function frame.
-Complete ONLY this function's contract using its bound parameters, `@uses` captures, and allowed non-shell libraries in the `.d.ts` below.
+Complete ONLY this function's contract using its bound parameters, `@uses` captures, and all host libraries declared in the `.d.ts` below. The parent permission and sandbox boundary still apply.
 Your ONLY tool is `run_js({ code })`.
 
 ## STRICT RULES
 1. **Always call `run_js({ code })`** with raw JavaScript statements to continue the function body (NO markdown fences, NO fabricated `// =>` comments). Do NOT reply with plain text outside `run_js`.
 2. **Bound parameters, `@uses` captures, and any partial `@virtual` JS-prefix local variables are already live JS variables** — use them directly by identifier name (do NOT re-read or re-run work already computed by the JS prefix).
-3. **Host libraries (`io`, `git`, `host`)** proxy synchronously into Rust; for concurrent multi-file reads/searches, use `await Promise.all(paths.map(path => io.promises.read({ path })))`. Once you know the target files or checks, batch multiple reads/slices/cross-checks into a single multi-line JS script per step instead of tiny one-line probes. Shell (`process.*`) and nested `@virtual` declarations are strictly forbidden.
-4. **Be thorough and return complete structured evidence via native JS `return <json_value>;` inside `run_js`**:
-   - Always include exact `file:line` citations, concrete code/symbol evidence (so the caller does not need to re-read files), and a short `summary` field. You may also include `verifiedClean` for items checked and found to be correct, so the caller can trust the result without a second read (e.g. `return { ok: true, issues: [...], verifiedClean: ["src/a.rs: routing table"], summary: "audited src/a.rs" };`).
-   - Verify before claiming something is missing (search across relevant files rather than guessing).
+3. **Host libraries (`io`, `git`, `host`, `process`, plugins, and their `.promises` interfaces)** proxy into Rust with the same permission and sandbox boundary as the parent. You may independently follow related files and execute the read-only commands or tests needed for this contract. Use `.promises` for true concurrency. When searching across files, prefer passing a confirmed directory path such as `path: "src"` to `io.search` instead of guessing a single module filename. Nested `@virtual` declarations and nested `host.delegate` are strictly forbidden.
+4. **Stay tightly focused and return compact, directly checkable JSON via native JS `return <json_value>;` inside `run_js`**:
+   - **Intermediate exploration is not the final return**: after inspecting with `.slice()`, `.grep()`, `.outline()`, `.head()`, `.tail()`, `io.read()`, or `io.search()`, do not write a top-level `return`. Use a trailing expression such as `({ a, b });` or `[a, b];` to show observations for the next worker step. A top-level `return <final_json>;` terminates this worker immediately and passes the value unchanged to its caller, so use it only after your assigned check is complete.
+   - Stay strictly within your single assigned task: return concise, high-signal findings with exact `file:line` coordinates, concrete diffs/symbols, and a short `summary` (plus `verifiedClean` if relevant). Never expand into a broader multi-module investigation or perform redundant repo-wide double-checking—the caller handles cross-module synthesis and any batched JS verification.
    - If the contract cannot be satisfied, execute `return { "$task_error": "concrete reason" };`.
 "#;
 
@@ -538,8 +563,30 @@ async fn send_model_request(
                 });
             }
             Err(error) => {
-                if attempt >= 3 || s.cancel.is_cancelled() || diagnostics.output_started() {
+                let retry_after_output =
+                    diagnostics.output_started() && retryable_stream_transport_error(&error);
+                if attempt >= 3
+                    || s.cancel.is_cancelled()
+                    || (diagnostics.output_started() && !retry_after_output)
+                {
                     return Err(error);
+                }
+                if retry_after_output {
+                    super::append_event(
+                        s,
+                        "assistant/delta",
+                        json!({
+                            "turn": s.turn,
+                            "step": step,
+                            "task_node_id": frame,
+                            "text": "",
+                            "reasoning": "",
+                            "tool_progress": [],
+                            "reset": true,
+                        }),
+                        false,
+                    )
+                    .await?;
                 }
                 let delay = diagnostics
                     .retry_after()

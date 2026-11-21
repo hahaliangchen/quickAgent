@@ -168,6 +168,12 @@ pub fn builtin() -> Libraries {
         ])),
     ])
 }
+
+/// `host.delegate` is available only in a parent frame. Virtual leaf frames
+/// remove `session`, which keeps delegation out of their static host surface.
+pub fn allows_delegation(libraries: &Libraries) -> bool {
+    libraries.contains_key("session")
+}
 /// Only tools present in this frame's catalog are published. Colliding plugin
 /// namespaces are omitted rather than silently routing to the wrong owner.
 pub fn catalog(definitions: &[Value], packages: &Value) -> Libraries {

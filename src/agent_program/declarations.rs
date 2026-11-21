@@ -376,8 +376,11 @@ pub fn static_library_header(libraries: &Libraries) -> String {
             out.push_str(&format!("  function {method}({sig};\n"));
         }
         if library == "host" {
-            out.push_str("  function context(): { messages: unknown[]; tools: string[] };\n");
-            out.push_str("  function tools(): { tools: string[]; libraries: Record<string, unknown> };\n");
+            out.push_str("  function context(): { task: string; turn: number; scope: string; tools: string[] };\n");
+            out.push_str("  function tools(): { libraries: string[]; orchestration_libraries: Array<{ name: string; description: string; methods: string[] }> };\n");
+            if super::libraries::allows_delegation(libraries) {
+                out.push_str("  /** Run an isolated non-shell AI worker frame in parallel via `Promise.all`; `context` keys become live variables inside the worker (including `ResourceHandle`s). */\n  function delegate(task: string): Promise<unknown>;\n  function delegate(args: { name?: string; task: string; context?: Record<string, unknown> }): Promise<unknown>;\n");
+            }
         }
         if matches!(library.as_str(), "io" | "git" | "process") {
             out.push_str(&format!(
@@ -884,6 +887,8 @@ mod tests {
         let header = static_library_header(&libs);
         assert!(header.contains("declare namespace host"));
         assert!(header.contains("function contracts"));
+        assert!(header.contains("function delegate(task: string): Promise<unknown>"));
+        assert!(header.contains("context?: Record<string, unknown>"));
         assert!(!header.contains("read_file"));
         assert!(!header.contains("parameters"));
     }

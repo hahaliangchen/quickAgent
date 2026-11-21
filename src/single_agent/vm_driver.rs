@@ -106,6 +106,50 @@ pub(super) async fn drive_vm_segment(
                             args,
                         } => {
                             external_tool_calls += 1;
+                            if library == "host" && method == "delegate" {
+                                let spec = match build_delegate_spec(&action.id, args, libs) {
+                                    Ok(spec) => spec,
+                                    Err(error) => {
+                                        runtime.resume_action(
+                                            &action.id,
+                                            json!({"code": "INVALID_DELEGATE", "message": format!("{error:#}")}),
+                                            true,
+                                        )?;
+                                        continue;
+                                    }
+                                };
+                                for (_, value) in &spec.params {
+                                    context_doc::collect_delegated_markers(
+                                        value,
+                                        &mut hints.delegated_refs,
+                                        &mut hints.delegated_content_hashes,
+                                    );
+                                }
+                                if !is_async_inflight {
+                                    let (value, is_error, receipt) =
+                                        virtual_frame::execute_virtual_call(s, libs, spec, step)
+                                            .await?;
+                                    hints.virtual_receipts.push(receipt.format_line());
+                                    runtime.resume_action(&action.id, value, is_error)?;
+                                    continue;
+                                }
+                                guard_spawn(&mut spawned_ids, &mut inflight_jobs, &action.id)?;
+                                let action_id = action.id.clone();
+                                let owned = OwnedSession::from_parent(s, libs);
+                                inflight_jobs.spawn(async move {
+                                    let parent_s = owned.as_session();
+                                    let (value, is_error, receipt) =
+                                        virtual_frame::execute_virtual_call(
+                                            &parent_s,
+                                            &owned.libs,
+                                            spec,
+                                            step,
+                                        )
+                                        .await?;
+                                    Ok((action_id, value, is_error, Some(receipt.format_line())))
+                                });
+                                continue;
+                            }
                             if library == "host" || !is_async_inflight {
                                 let (val, is_err, receipt) = flow_runtime::execute_library_call(
                                     s,
@@ -385,6 +429,140 @@ pub(super) fn build_virtual_spec(
         captures: captured,
         partial_locals: Vec::new(),
     }
+}
+
+fn build_delegate_spec(
+    action_id: &str,
+    mut args: Vec<Value>,
+    parent_libs: &agent_program::libraries::Libraries,
+) -> Result<virtual_frame::VirtualCallSpec> {
+    let input = if args.len() == 1 {
+        args.remove(0)
+    } else {
+        bail!("host.delegate expects one object or task string argument")
+    };
+    let (name, task, context) = match input {
+        Value::String(task) => (None, task, Value::Null),
+        Value::Object(mut object) => {
+            let name = object.remove("name").and_then(|value| value.as_str().map(str::to_owned));
+            let task = object
+                .remove("task")
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .ok_or_else(|| anyhow::anyhow!("host.delegate requires a string `task`"))?;
+            (name, task, object.remove("context").unwrap_or(Value::Null))
+        }
+        _ => bail!("host.delegate requires an object or non-empty task string"),
+    };
+    let task = task.trim().to_owned();
+    if task.is_empty() {
+        bail!("host.delegate requires a non-empty string `task`");
+    }
+    let fn_name = name
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            let candidate = crate::agent_program::libraries::namespace(value.trim());
+            if crate::agent_program::libraries::identifier(&candidate)
+                && !crate::agent_program::libraries::reserved(&candidate)
+            {
+                candidate
+            } else {
+                "delegate".to_owned()
+            }
+        })
+        .unwrap_or_else(|| "delegate".to_owned());
+    let params = match context {
+        Value::Object(object) => {
+            let context_value = Value::Object(object.clone());
+            let mut params = object
+                .into_iter()
+                .filter_map(|(key, value)| {
+                    delegate_context_key_is_safe(&key, parent_libs).then_some((key, value))
+                })
+                .collect::<Vec<_>>();
+            // Keep the complete original object available through `context`, including
+            // keys that cannot become parameters because they collide with VM bindings.
+            params.push(("context".to_owned(), context_value));
+            params
+        }
+        Value::Null => Vec::new(),
+        value => vec![("context".to_owned(), value)],
+    };
+    let param_names = params.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>();
+    Ok(virtual_frame::VirtualCallSpec {
+        action_id: action_id.to_owned(),
+        fn_name: fn_name.clone(),
+        signature: format!("async function {fn_name}({})", param_names.join(", ")),
+        contract: task,
+        params,
+        captures: BTreeMap::new(),
+        partial_locals: Vec::new(),
+    })
+}
+
+fn delegate_context_key_is_safe(
+    key: &str,
+    parent_libs: &agent_program::libraries::Libraries,
+) -> bool {
+    if !crate::agent_program::libraries::identifier(key)
+        || key.starts_with("$temp")
+        || is_js_keyword(key)
+    {
+        return false;
+    }
+    let leaf_libs = virtual_frame::leaf_libraries(parent_libs);
+    key != "host" && key != "context" && !leaf_libs.contains_key(key)
+}
+
+fn is_js_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "await"
+            | "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "debugger"
+            | "default"
+            | "delete"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extends"
+            | "finally"
+            | "for"
+            | "function"
+            | "if"
+            | "implements"
+            | "import"
+            | "in"
+            | "instanceof"
+            | "interface"
+            | "let"
+            | "new"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
+            | "return"
+            | "static"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "try"
+            | "true"
+            | "typeof"
+            | "var"
+            | "false"
+            | "void"
+            | "while"
+            | "with"
+            | "null"
+            | "yield"
+    )
 }
 
 /// Build a `VirtualCallSpec` for a partial `@virtual` function whose JS prefix
