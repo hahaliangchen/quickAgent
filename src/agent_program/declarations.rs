@@ -290,6 +290,7 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
 pub fn static_library_header(libraries: &Libraries) -> String {
     let mut out = String::from(
         "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n\
+         // PATHS: every io.* / git.* path is relative to the workspace root unless you pass an absolute one — write \"src/...\", \"frontend/...\" directly; calling io.workspace_info() first just to build absolute paths wastes a step.\n\
          // IMPORTANT: Pre-bound `io.*`, `git.*`, `process.*` methods are SYNCHRONOUS.\n\
          // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`, `process.promises.run_readonly`) or `require(\"<lib>/promises\")`.\n\
          // MANDATORY exact-text edit rule: for io.edit/io.replace/io.write, use String.raw tagged templates for snippets containing backslashes that have NO backticks (`) or `${` (put real line breaks directly because `\\n` stays literal).\n\
@@ -341,6 +342,9 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "write_file" => "args: { path: string; content: string; create_parent_dirs?: boolean; expected_code_hash?: string }): { path: string; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown }",
                 "edit_file" => "args: { path: string; edits: Array<{ old_text: string; new_text: string }>; replace_all?: boolean; expected_code_hash?: string } | { path: string; old_text: string; new_text: string; replace_all?: boolean; expected_code_hash?: string }): { path: string; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown; preview?: string }",
                 "replace_range" => "args: { path: string; start_line: number; end_line: number; replacement: string; expected_old_text?: string; expected_code_hash?: string }): { path: string; start_line: number; end_line: number; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown; preview?: string }",
+                "delete_path" => "args: { path: string; recursive?: boolean }): { path: string; deleted: boolean; kind: 'file' | 'directory' }",
+                "rename_path" => "args: { path: string; to: string; overwrite?: boolean; create_parent_dirs?: boolean }): { path: string; to: string; overwritten: boolean; index_refresh: unknown }",
+                "create_dir" => "args?: { path: string; recursive?: boolean }): { path: string; created: boolean }",
                 "workspace_info" => "args?: { workspace_root?: string }): { workspace_root: string; platform: string; allowed_scope: string; default_ignored_dirs: string[] }",
                 "git_status" => "args?: { paths?: string[]; include_untracked?: boolean; max_entries?: number }): { head: string | null; branch: string | null; clean: boolean; staged: string[]; modified: string[]; untracked: string[]; total_entries: number; truncated: boolean }",
                 "git_diff" => "args?: { rev_range?: string; staged?: boolean; paths?: string[]; stat_only?: boolean; unified?: number; max_lines?: number; max_chars?: number }): { diff: string; files: string[]; truncated: boolean; stat_only: boolean }",
@@ -377,6 +381,7 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "read_attachment" => "args: { attachment_id: string; char_offset?: number; max_chars?: number; page_index?: number; slide?: number; picture?: string }): unknown",
                 "analyze_images" => "args: { artifact_ids: string[]; question: string; background?: boolean }): unknown",
                 "image_analysis_results" => "args?: { wait_ms?: number }): unknown",
+                "register_image" => "args: { path: string }): { artifact_id: string; visual_artifact: Record<string, unknown>; path: string; width: number; height: number; source_width: number; source_height: number; normalization: Record<string, unknown> }",
                 "generate_image" => "args: { prompt: string; model?: string; reference_paths?: string[]; reference_artifact_ids?: string[]; size?: string; quality?: 'low' | 'medium' | 'high' | 'auto'; background?: 'opaque' | 'transparent' | 'auto'; output_path?: string }): { artifact_id: string; visual_artifact: Record<string, unknown>; model: string; mode: 'generate' | 'edit'; size: string; width: number; height: number; bytes: number; output_path?: string; revised_prompt?: string }",
                 "record_work_memory" => "args: { summary: string; files_changed?: string[]; implementation?: string; tests?: string; risks?: string; source_task_id?: string; kind?: string; applies_to?: string; source_refs?: string[] }): { memory_path: string; recorded: unknown }",
                 "list_work_memory" => "args?: { limit?: number }): { memory_path: string; memories: unknown[] }",
@@ -574,25 +579,6 @@ pub fn overview(libraries: &Libraries, definitions: &[Value]) -> String {
     result
 }
 
-/// Third-party libraries by name and purpose. A program loads one where it
-/// needs it; its methods are read with read_tool_contracts.
-pub fn third_party_index(libraries: &BTreeMap<String, String>) -> String {
-    if libraries.is_empty() {
-        return String::new();
-    }
-    let mut result = String::from(
-        "\n// Third-party libraries, loaded where the code needs one: const lib = require(\"<name>\"), or require(\"<name>/promises\") for async methods. Use read_tool_contracts with the library name and overview:true to browse its methods.\n",
-    );
-    for (library, description) in libraries {
-        let summary = description.split(['.', '。', '\n']).next().unwrap_or("");
-        let summary = text(&summary.chars().take(140).collect::<String>());
-        if !summary.is_empty() {
-            result.push_str(&format!("/** {summary} */\n"));
-        }
-        result.push_str(&format!("declare module \"{library}\";\n"));
-    }
-    result
-}
 
 pub fn selected(libraries: &Libraries, args: &Value) -> anyhow::Result<Libraries> {
     use anyhow::{Context, ensure};
@@ -639,15 +625,6 @@ pub fn selected(libraries: &Libraries, args: &Value) -> anyhow::Result<Libraries
     Ok(result)
 }
 
-pub fn contract_tool() -> Value {
-    json!({"type":"function","function":{"name":"read_tool_contracts",
-        "description":"Browse a library's method names and uses with {libraries:[\"io\"],overview:true}. For exact signatures, pass only qualified methods, for example {methods:[\"io.read_lines\"]}. Documentation lookup does not execute tools or expand permissions.",
-        "parameters":{"type":"object","properties":{
-            "libraries":{"type":"array","items":{"type":"string"},"description":"Select all methods of each named library. Use overview:true for a short library page."},
-            "methods":{"type":"array","items":{"type":"string"},"description":"Select individual qualified names such as io.read_lines. Omit libraries to limit the result to these methods."},
-            "overview":{"type":"boolean","description":"Return a short method list and usage notes instead of full declarations. Default false."}
-        },"additionalProperties":false}}})
-}
 
 /// Retired transport name, still recognized in saved histories.
 pub const CALL: &str = "invoke_library";
@@ -917,6 +894,11 @@ mod tests {
         assert!(header.contains("String.raw"));
         assert!(header.contains("query: string | RegExp"));
         assert!(header.contains("function generate_image"));
+        assert!(header.contains("function register_image"));
+        assert!(header.contains("function delete(args: { path: string; recursive?: boolean })"));
+        assert!(header.contains("function rename(args: { path: string; to: string;"));
+        assert!(header.contains("function mkdir(args?: { path: string; recursive?: boolean })"));
+        assert!(header.contains("every io.* / git.* path is relative to the workspace root"));
         assert!(header.contains("reference_artifact_ids?: string[]"));
         let browser = static_library_header(&std::collections::BTreeMap::from([(
             "browser".to_owned(),

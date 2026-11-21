@@ -170,11 +170,6 @@ pub(crate) fn apply_agent_config(
             (
                 name.clone(),
                 crate::agent_service::AgentProviderRoute {
-                    prefix_system_messages: provider
-                        .extra
-                        .get("prefixSystemMessages")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
                     responses: provider.api_type == "openai-responses",
                     messages: provider.api_type == "anthropic-messages",
                     messages_capabilities: provider

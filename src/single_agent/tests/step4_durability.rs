@@ -592,7 +592,6 @@ async fn step4_multiturn_folding_snapshot_handle_refresh_baselines_and_level2_tr
     state.provider_routes.insert(
         "test".into(),
         agent_service::AgentProviderRoute {
-            prefix_system_messages: false,
             responses: false,
             messages: false,
             messages_capabilities: Default::default(),

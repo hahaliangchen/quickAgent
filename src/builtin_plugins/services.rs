@@ -197,6 +197,9 @@ pub(crate) const FILE_TOOLS: &[&str] = &[
     "write_file",
     "replace_range",
     "edit_file",
+    "delete_path",
+    "rename_path",
+    "create_dir",
 ];
 const MEMORY_TOOLS: &[&str] = &[
     "record_work_memory",

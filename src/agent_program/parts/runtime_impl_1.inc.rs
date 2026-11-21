@@ -823,13 +823,6 @@ impl Runtime {
             .and_then(|env| self.heap.lookup_binding(env, "\0explicit_return").ok())
             == Some(VmValue::Boolean(true))
     }
-
-    pub fn segment_evaluated_expr(&self) -> bool {
-        self.module_env
-            .and_then(|env| self.heap.lookup_binding(env, "\0has_last_expr").ok())
-            == Some(VmValue::Boolean(true))
-    }
-
     /// Return values of all top-level bare query expressions evaluated in the
     /// latest segment (e.g. `ppF.slice(280,305); shellF.slice(780,825);`),
     /// omitting `undefined` results.
@@ -885,48 +878,6 @@ impl Runtime {
         out
     }
 
-    /// Partition live user bindings into `last_step_bindings` (3-tier inspection)
-    /// and `older_locals` (compact signature) relative to a pre-segment snapshot.
-    pub fn partition_overlay_bindings(
-        &self,
-        pre_fingerprints: &BTreeMap<String, String>,
-        max_inline_chars: usize,
-    ) -> (BTreeMap<String, super::js_value::BindingInspection>, BTreeMap<String, String>) {
-        const STEP_BUDGET_CHARS: usize = 48_000;
-        let mut last_step = BTreeMap::new();
-        let mut older = BTreeMap::new();
-        let mut used_step_chars = 0usize;
-        let Some(environment) = self.module_env else { return (last_step, older) };
-        let show_last_expr = self.segment_evaluated_expr() || self.segment_returned_explicitly();
-
-        for (name, value) in self.heap.initialized_bindings(environment).unwrap_or_default() {
-            if !self.is_user_visible_binding(environment, &name, &value) {
-                continue;
-            }
-            if name == "$_" {
-                if show_last_expr && value != VmValue::Undefined {
-                    let cap = max_inline_chars.min(STEP_BUDGET_CHARS.saturating_sub(used_step_chars).max(2_000));
-                    let inspected = super::js_value::inspect_binding(&self.heap, &value, cap);
-                    used_step_chars = used_step_chars.saturating_add(inspected.preview.chars().count());
-                    last_step.insert(name, inspected);
-                }
-                continue;
-            }
-            let current_fp = match &value {
-                VmValue::Reference(id) => format!("ref:{id:?}:{}", super::js_value::inspect_older_binding(&self.heap, &value)),
-                _ => super::js_value::inspect_older_binding(&self.heap, &value),
-            };
-            if pre_fingerprints.get(&name) != Some(&current_fp) {
-                let cap = max_inline_chars.min(STEP_BUDGET_CHARS.saturating_sub(used_step_chars).max(2_000));
-                let inspected = super::js_value::inspect_binding(&self.heap, &value, cap);
-                used_step_chars = used_step_chars.saturating_add(inspected.preview.chars().count());
-                last_step.insert(name, inspected);
-            } else {
-                older.insert(name, format!("{} [live in JS binding]", super::js_value::inspect_older_binding(&self.heap, &value)));
-            }
-        }
-        (last_step, older)
-    }
 
     pub fn logs_len(&self) -> usize {
         self.logs.len()
@@ -936,13 +887,6 @@ impl Runtime {
         self.logs.get(start..).map(|s| s.to_vec()).unwrap_or_default()
     }
 
-    pub fn stack_snapshot(&self) -> Vec<String> {
-        self.frames
-            .iter()
-            .filter(|frame| !frame.function.starts_with("$$"))
-            .map(|frame| format!("{}@pc{}", frame.function, frame.pc))
-            .collect()
-    }
 
 
 }

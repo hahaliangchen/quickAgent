@@ -359,7 +359,6 @@ mod tests {
         main.provider_routes.insert(
             "alternate".into(),
             crate::agent_service::AgentProviderRoute {
-                prefix_system_messages: false,
                 responses: false,
                 messages: false,
                 messages_capabilities: Default::default(),
@@ -472,7 +471,6 @@ mod tests {
         state.provider_routes.insert(
             "deepseek".into(),
             crate::agent_service::AgentProviderRoute {
-                prefix_system_messages: false,
                 responses: false,
                 messages: false,
                 messages_capabilities: Default::default(),

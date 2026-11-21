@@ -12,6 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 const SHELL_MODULE_ONLY_MESSAGE: &str = "SHELL_MODULE_ONLY: Shell execution is disabled in this session or restricted plugin context (allow_shell=false).";
 
+/// Which host capabilities a plugin-owned session may reach. `register_image`
+/// is deliberately missing: it reads local files, and a plugin page owns none
+/// outside its own workspace.
 pub(super) fn page_allows(s: &Session<'_>, name: &str) -> bool {
     let Some(owner) = &s.plugin else {
         return true;
@@ -622,6 +625,15 @@ pub(super) async fn business_tool_inner(
                 parallel_owner.as_deref(),
                 s.turn,
             )?;
+        }
+        // A deleted or moved path keeps no baseline: the next write must compare
+        // against what is on disk then, not against bytes that are gone.
+        if result.is_ok()
+            && matches!(name, "delete_path" | "rename_path")
+        {
+            for raw in [args["path"].as_str(), args["to"].as_str()].into_iter().flatten() {
+                managed_files::forget(s.state.workspace.root(), s.task, tool_workspace.root(), raw)?;
+            }
         }
         if let Some(prepared) = managed {
             return match result {

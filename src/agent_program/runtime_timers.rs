@@ -45,11 +45,6 @@ impl Runtime {
         self.timers.values().map(|timer| timer.due_at_ms).min()
     }
 
-    pub fn timer_wait(&self) -> Option<std::time::Duration> {
-        self.next_timer_at().map(|due| {
-            std::time::Duration::from_millis(due.saturating_sub(self.timer_now()).max(0) as u64)
-        })
-    }
 
     /// Cancellation is terminal, unlike a user interjection's resumable pause.
     pub fn cancel(&mut self) {

@@ -27,9 +27,10 @@ use crate::rust_index::{
     SearchRustSymbolsRequest,
 };
 use crate::tools::{
-    EditFileRequest, GitDiffRequest, GitLogRequest, GitStatusRequest, ListDirRequest,
-    ReadFileChunkRequest, ReadFileLinesRequest, ReadFileRequest, ReplaceRangeRequest,
-    SearchTextRequest, Workspace, WorkspaceInfoRequest, WriteFileRequest,
+    CreateDirRequest, DeletePathRequest, EditFileRequest, GitDiffRequest, GitLogRequest,
+    GitStatusRequest, ListDirRequest, ReadFileChunkRequest, ReadFileLinesRequest, ReadFileRequest,
+    RenamePathRequest, ReplaceRangeRequest, SearchTextRequest, Workspace, WorkspaceInfoRequest,
+    WriteFileRequest,
 };
 use crate::ts_index::{
     IndexTsWorkspaceRequest, ListTsSymbolsRequest, ReadTsSymbolRequest, SearchTsSymbolsRequest,
@@ -1031,6 +1032,33 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
             })
             .await??
         }
+        "delete_path" => {
+            let workspace = Workspace::new(workspace.root())?;
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+                Ok(serde_json::to_value(workspace.delete_path(
+                    serde_json::from_value::<DeletePathRequest>(arguments)?,
+                )?)?)
+            })
+            .await??
+        }
+        "rename_path" => {
+            let workspace = Workspace::new(workspace.root())?;
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+                Ok(serde_json::to_value(workspace.rename_path(
+                    serde_json::from_value::<RenamePathRequest>(arguments)?,
+                )?)?)
+            })
+            .await??
+        }
+        "create_dir" => {
+            let workspace = Workspace::new(workspace.root())?;
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+                Ok(serde_json::to_value(workspace.create_dir(
+                    serde_json::from_value::<CreateDirRequest>(arguments)?,
+                )?)?)
+            })
+            .await??
+        }
         "record_work_memory" => {
             serde_json::to_value(workspace.record_work_memory(serde_json::from_value::<
                 RecordWorkMemoryRequest,
@@ -1289,6 +1317,56 @@ pub fn tool_definitions() -> Value {
                     "content": { "type": "string" },
                     "create_parent_dirs": { "type": "boolean", "default": true },
                     "expected_code_hash": {"type":"string","description":"Required when path already exists. Use the code_hash returned by a current source read."}
+                }
+            }
+        },
+        {
+            "name": "delete_path",
+            "description": "Delete a file inside the selected workspace, or a directory tree when recursive is true. Refuses the workspace root and anything under .git. Use it instead of a shell rm so the change log, undo and index stay coherent.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "workspace_root": {
+                        "type": "string",
+                        "description": "Optional absolute project directory to use for this call. Defaults to the server startup directory."
+                    },
+                    "path": { "type": "string", "description": "Workspace-relative path, or an absolute path inside the workspace." },
+                    "recursive": { "type": "boolean", "default": false, "description": "Required to remove a directory and everything inside it." }
+                }
+            }
+        },
+        {
+            "name": "rename_path",
+            "description": "Move or rename one path inside the selected workspace. An existing destination must be allowed with overwrite: true. Refuses the workspace root and anything under .git. Use it instead of a shell mv.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path", "to"],
+                "properties": {
+                    "workspace_root": {
+                        "type": "string",
+                        "description": "Optional absolute project directory to use for this call. Defaults to the server startup directory."
+                    },
+                    "path": { "type": "string", "description": "Current path." },
+                    "to": { "type": "string", "description": "New path." },
+                    "overwrite": { "type": "boolean", "default": false, "description": "Replace an existing destination file." },
+                    "create_parent_dirs": { "type": "boolean", "default": true }
+                }
+            }
+        },
+        {
+            "name": "create_dir",
+            "description": "Create a directory inside the selected workspace; recursive (the default) creates the whole chain. Reports created=false when it already existed.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "workspace_root": {
+                        "type": "string",
+                        "description": "Optional absolute project directory to use for this call. Defaults to the server startup directory."
+                    },
+                    "path": { "type": "string" },
+                    "recursive": { "type": "boolean", "default": true }
                 }
             }
         },

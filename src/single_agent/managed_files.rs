@@ -258,7 +258,32 @@ pub(super) fn change_summary(before: Option<&[u8]>, after: Option<&[u8]>) -> Val
         "before":cut(&removed.concat()),"after":cut(&added.concat())})
 }
 
-/// Only save a read snapshot if it matches the actual version delivered by the tool.
+/// A removed or moved path (or directory tree) has no baseline left to compare
+/// against. Dropping both exact and child rows keeps the next write from being
+/// misread as an external change.
+pub(super) fn forget(root: &Path, task: &str, workspace: &Path, raw: &str) -> Result<()> {
+    let (work, relative, _) = key(workspace, raw)?;
+    let prefix = format!("{relative}/");
+    let conn = connection(root)?;
+    for table in [
+        "agent_file_baselines",
+        "agent_file_writer_versions",
+        "agent_file_writer_metadata",
+    ] {
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE task_id=?1 AND workspace=?2 \
+                 AND (path=?3 OR (length(path) > length(?3) AND substr(path, 1, length(?3) + 1) = ?4))"
+            ),
+            params![task, work, relative, prefix],
+        )?;
+    }
+    Ok(())
+}
+
+/// Record a file a read or a shell command produced, so a later write compares
+/// against what the task itself last saw. Only a snapshot that matches the
+/// actual version delivered by the tool is saved.
 pub(super) fn observe(root: &Path, task: &str, workspace: &Path, args: &Value, result: &Value) -> Result<Option<Value>> {
     let Some(raw) = args["path"].as_str() else { return Ok(None); };
     let Some(hash) = result["code_hash"].as_str() else { return Ok(None); };

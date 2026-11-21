@@ -662,6 +662,144 @@ impl Workspace {
         })
     }
 
+    /// Remove one file, or a whole directory tree when `recursive` is set.
+    ///
+    /// Refuses the workspace root and the repository metadata directory: a
+    /// delete that lands there cannot be recovered by re-reading source.
+    pub fn delete_path(&self, request: DeletePathRequest) -> Result<DeletePathResponse> {
+        let workspace = self.with_root(request.workspace_root.as_deref())?;
+        let path = crate::file_edit::workspace_path(&workspace.root, &request.path)?;
+        if path == workspace.root {
+            return Err(ToolError::InvalidParameter(
+                "refusing to delete the workspace root".into(),
+            ));
+        }
+        if in_repository_metadata(&workspace.root, &path) {
+            return Err(ToolError::InvalidParameter(
+                "refusing to delete inside .git".into(),
+            ));
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ToolError::NotFound(request.path));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let lock = crate::file_edit::file_lock(&path);
+        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+        let kind = if metadata.is_dir() {
+            if !request.recursive {
+                return Err(ToolError::InvalidParameter(format!(
+                    "path is a directory: pass recursive: true to remove it: {}",
+                    request.path
+                )));
+            }
+            fs::remove_dir_all(&path)?;
+            "directory"
+        } else {
+            fs::remove_file(&path)?;
+            "file"
+        };
+        Ok(DeletePathResponse {
+            path: workspace.relative_display(&path)?,
+            deleted: true,
+            kind: kind.to_string(),
+        })
+    }
+
+    /// Move or rename one path inside the workspace; the destination may only
+    /// replace a file when `overwrite` says so.
+    pub fn rename_path(&self, request: RenamePathRequest) -> Result<RenamePathResponse> {
+        let workspace = self.with_root(request.workspace_root.as_deref())?;
+        let from = crate::file_edit::workspace_path(&workspace.root, &request.path)?;
+        let to = crate::file_edit::workspace_path(&workspace.root, &request.to)?;
+        if from == workspace.root || to == workspace.root {
+            return Err(ToolError::InvalidParameter(
+                "refusing to move the workspace root".into(),
+            ));
+        }
+        if in_repository_metadata(&workspace.root, &from) || in_repository_metadata(&workspace.root, &to) {
+            return Err(ToolError::InvalidParameter(
+                "refusing to move paths inside .git".into(),
+            ));
+        }
+        if fs::symlink_metadata(&from).is_err() {
+            return Err(ToolError::NotFound(request.path));
+        }
+        let to_meta = fs::symlink_metadata(&to).ok();
+        if to_meta.as_ref().is_some_and(|m| m.is_dir()) {
+            return Err(ToolError::InvalidParameter(format!(
+                "destination is a directory: {}",
+                request.to
+            )));
+        }
+        if to_meta.is_some() && !request.overwrite {
+            return Err(ToolError::WritePreconditionRequired(format!(
+                "destination exists: pass overwrite: true to replace {}",
+                request.to
+            )));
+        }
+        if request.create_parent_dirs
+            && let Some(parent) = to.parent()
+        {
+            fs::create_dir_all(parent)?;
+        }
+        let (first_lock, second_lock) = if from == to {
+            (crate::file_edit::file_lock(&from), None)
+        } else if from < to {
+            (
+                crate::file_edit::file_lock(&from),
+                Some(crate::file_edit::file_lock(&to)),
+            )
+        } else {
+            (
+                crate::file_edit::file_lock(&to),
+                Some(crate::file_edit::file_lock(&from)),
+            )
+        };
+        let _guard1 = first_lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard2 = second_lock
+            .as_ref()
+            .map(|lock| lock.lock().unwrap_or_else(|error| error.into_inner()));
+        let overwritten = fs::symlink_metadata(&to).is_ok();
+        fs::rename(&from, &to)?;
+        Ok(RenamePathResponse {
+            path: workspace.relative_display(&from)?,
+            to: workspace.relative_display(&to)?,
+            overwritten,
+            index_refresh: refresh_written_index(&workspace.root, &to, true),
+        })
+    }
+
+    /// Create one directory, or the whole chain when `recursive` is set.
+    pub fn create_dir(&self, request: CreateDirRequest) -> Result<CreateDirResponse> {
+        let workspace = self.with_root(request.workspace_root.as_deref())?;
+        let path = crate::file_edit::workspace_path(&workspace.root, &request.path)?;
+        if in_repository_metadata(&workspace.root, &path) {
+            return Err(ToolError::InvalidParameter(
+                "refusing to create directory inside .git".into(),
+            ));
+        }
+        if path.is_dir() {
+            return Ok(CreateDirResponse {
+                path: workspace.relative_display(&path)?,
+                created: false,
+            });
+        }
+        if path.exists() {
+            return Err(ToolError::NotDirectory(request.path));
+        }
+        if request.recursive {
+            fs::create_dir_all(&path)?;
+        } else {
+            fs::create_dir(&path)?;
+        }
+        Ok(CreateDirResponse {
+            path: workspace.relative_display(&path)?,
+            created: true,
+        })
+    }
     pub fn replace_range(&self, request: ReplaceRangeRequest) -> Result<ReplaceRangeResponse> {
         validate_line_range(request.start_line, request.end_line)?;
         check_write_size(request.replacement.len())?;
@@ -1102,6 +1240,18 @@ impl Workspace {
                 .unwrap_or_else(|| path.display().to_string())
         };
 
+        // A missing dependency path is usually an alias this tool cannot see:
+        // `@/components/Foo`, `~/lib/x` or `host:io` resolves in Vite or tsc,
+        // never on disk. Say so once instead of leaving the caller to guess.
+        if raw.replace('\\', "/").contains("node_modules/")
+            || candidate.to_string_lossy().replace('\\', "/").contains("node_modules/")
+        {
+            return Some(
+                "Hint: if this is a Vite/TypeScript workspace alias, check vite.config.ts or tsconfig.json"
+                    .to_string(),
+            );
+        }
+
         // Check the reverse direction too: `foo/bar/mod.rs` -> `foo/bar.rs`,
         // `foo/bar/index.ts` -> `foo/bar.ts`, and `foo/bar/__init__.py` -> `foo/bar.py`.
         if let (Some(parent), Some(file_name), Some(ext)) = (
@@ -1229,4 +1379,17 @@ impl Workspace {
         };
         Ok(value)
     }
+}
+
+/// Git's own directory is machinery, not user content: a delete or move that
+/// lands there cannot be undone by re-reading anything.
+fn in_repository_metadata(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .map(|relative| {
+            relative
+                .components()
+                .any(|part| part.as_os_str() == ".git")
+        })
+        .unwrap_or(false)
 }

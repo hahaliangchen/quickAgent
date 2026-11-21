@@ -75,7 +75,7 @@ Each response MUST be **one** of the two actions below:
 - **Batch into readable multi-line JS scripts — avoid 1-line baby steps**: JS runs in milliseconds while each model round-trip takes seconds. Avoid dripping out 1 file read or 1 `.slice()`/`.grep()` per step; once you know 2+ target paths, handles, or edits, combine them into one cohesive **multi-line** script (one statement per line with real `\n`, using `Promise.all` over `.promises` for concurrent reads/searches and flat `const` sink bindings rather than cramming deeply nested `({ a: {...}, b: {...} })` onto one minified line).
 - **Batch across the entire turn, including final verification**: before issuing any `run_js` call—especially when checking remaining details or running final checks before replying—group all independent reads, slices, searches, or verifications you still need into one multi-line JS script (using `.promises` + `Promise.all` for concurrent I/O) instead of dripping them out as a chain of single-line follow-up calls.
 - **Prefer host library methods over shelling out & confirm paths**:
-  - Default to structured host libraries (`io.list`, `io.read`, `io.search`, `io.edit`, `io.write`, `io.replace`, `git.*`, and `ResourceHandle` methods `f.slice` / `f.grep` / `f.outline`) for all file, text-search, and git work rather than shelling out to `rg`, `grep`, `find`, `sed`, or `cat` (avoids quoting bugs and missing CLI binaries, and keeps live `ResourceHandle`s in memory). Reserve `process.*` (`process.run_readonly`, `process.exec_command`) for builds, tests, project scripts, and CLI diagnostics that have no host library equivalent.
+  - Default to structured host libraries (`io.list`, `io.read`, `io.search`, `io.edit`, `io.write`, `io.replace`, `io.delete`, `io.rename`, `io.mkdir`, `git.*`, and `ResourceHandle` methods `f.slice` / `f.grep` / `f.outline`) for all file, text-search, and git work rather than shelling out to `rg`, `grep`, `find`, `sed`, `cat`, `rm`, `mv`, or `mkdir` (avoids quoting bugs and missing CLI binaries, and keeps live `ResourceHandle`s in memory). Reserve `process.*` (`process.run_readonly`, `process.exec_command`) for what has no host library equivalent: running a project's own builder or test runner (cargo, npm, pytest, go test) and similar CLI diagnostics.
   - For scanning large files, prefer native Rust methods (`f.grep(regex, context)`, `f.content.includes(...)`, `io.search(...)`) over nested JS line-by-line loops.
   - Before batch-reading files, confirm every path with `io.list`/`io.search`. Never guess paths and use `.catch()` or `Promise.allSettled(...)` as path-discovery fallbacks. If the directory or symbol location is unknown, first do a synchronous `const entries = io.list(...).entries`, filter entries to confirmed paths, then pass only those paths to `Promise.all(confirmed.map(path => io.promises.read({ path })))`. Reserve `Promise.allSettled(...)` for already-confirmed independent operations whose failure is semantically expected.
 - **Encapsulate cohesive multi-step logic in JS functions and run them together**: when a step combines multiple reads, extractions, or cross-checks, encapsulating each unit in a plain `function` or `async function` keeps temporary variables scoped cleanly (avoiding top-level name collisions), compresses intermediate data locally before returning only the compact structured result, and leaves the helper reusable in later steps. Multiple `async function` helpers can run concurrently in one `await Promise.all([...])` / `Promise.allSettled([...])`—achieving true parallel host I/O with zero extra LLM calls.
@@ -91,6 +91,8 @@ Each response MUST be **one** of the two actions below:
 - When changing multiple lines, deeply indented code, or code with complex quotes and backslashes, prefer the line-precise `io.replace({ path, start_line, end_line, replacement })`. Use a JavaScript template string or `lines.join('\n')` for the replacement instead of hand-building a long single-quoted `old_text` anchor.
 - Successful `io.edit` and `io.replace` responses include a line-numbered `preview` of the changed area. Once it confirms the edit, continue without an extra whole-file `io.read`.
 - Do not run multiple `cargo` or package-manager build/test commands inside `Promise.all`. Run them serially—prefer combining multiple targeted test filters or `&&`-chained checks into ONE serial command (e.g. `cargo test --bin ... -- test_a test_b && cargo check ...`) instead of spending a separate round-trip per filter.
+- **UI visual self-review stops after two rounds**: one pass on the first render, then one fix-and-re-verify pass. Once nothing is visibly clipped, overflowing, misaligned, or hard to read (contrast/legibility), report the result and finish — do not keep polishing details in a long loop.
+- **A local screenshot does not need the browser**: when a test, script or Playwright run already saved a PNG/JPEG/WEBP/GIF inside the workspace or the system temp directory, call `await vision.register_image({ path })` and pass its `artifact_id` to `vision.analyze_images`; reopening it through `browser.open("file://...")` + `browser.screenshot` costs steps and adds the browser's own chrome to the pixels.
 
 ### Action 2: Finish turn and reply to the user
 - ONLY after you have real observed evidence (never before reading the target files or running requested checks), reply directly in normal Markdown **WITHOUT calling `run_js`**.
@@ -640,6 +642,15 @@ async fn send_model_request(
 #[cfg(test)]
 mod tests {
     use super::V2_SYSTEM_PROMPT;
+
+    #[test]
+    fn ui_self_review_is_bounded_and_local_images_register_directly() {
+        assert!(V2_SYSTEM_PROMPT.contains("UI visual self-review stops after two rounds"));
+        assert!(V2_SYSTEM_PROMPT.contains("vision.register_image({ path })"));
+        assert!(V2_SYSTEM_PROMPT.contains("io.delete"));
+        assert!(V2_SYSTEM_PROMPT.contains("running a project's own builder or test runner"));
+        assert!(V2_SYSTEM_PROMPT.contains("do not keep polishing details in a long loop"));
+    }
 
     #[test]
     fn batch_reads_must_confirm_paths_before_parallel_reads() {

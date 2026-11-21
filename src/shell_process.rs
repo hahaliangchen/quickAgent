@@ -813,15 +813,6 @@ pub fn read_only_available() -> bool {
     crate::process_sandbox::bwrap_installed() && crate::shell_environment::resolve().is_ok()
 }
 
-pub fn read_only_definition() -> Value {
-    json!({"type":"function","function":{"name":READ_ONLY,
-        "description":"Run one read-only Bash command directly, mainly for builds, tests, and one-off diagnostics. Prefer git_status/git_diff/git_log or require(\"git\") for repository inspection, and use list_dir/search_text/read_file_lines for file and log navigation. Capture is capped at 8 MiB; long stdout/stderr is returned as a bounded head/tail preview with truncated:true and a durable output_asset/read_asset reference for the complete result. For a flow step that needs shell, declare an empty @virtual function describing the result needed; its implementer handles commands and API discovery. Project source and .git are read-only; build-output folders and a private /tmp are writable. Each call starts a fresh shell in workdir without stdin, profile or PTY. Save long build logs in a build-output folder and page them with read_file_lines/search_text instead of dumping raw output into context.",
-        "parameters":{"type":"object","properties":{
-            "cmd":{"type":"string","minLength":1},
-            "workdir":{"type":"string","description":"Directory inside the project, relative to its root. Default: the root."},
-            "timeout_ms":{"type":"integer","minimum":1000,"maximum":READ_ONLY_MAX_MS,"default":READ_ONLY_DEFAULT_MS}},
-            "required":["cmd"],"additionalProperties":false}}})
-}
 
 /// The project's build-output folders: directories git ignores, except git's
 /// own data, the host's state and nested checkouts such as other agents'

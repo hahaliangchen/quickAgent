@@ -558,7 +558,7 @@ fn record_file_touch(
         "read_file" | "read_file_lines" | "read_file_chunk" => {
             files_read.insert(path.to_owned());
         }
-        "write_file" | "edit_file" | "replace_range" => {
+        "write_file" | "edit_file" | "replace_range" | "delete_path" | "rename_path" | "create_dir" => {
             files_written.insert(path.to_owned());
         }
         _ => {}

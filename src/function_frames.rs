@@ -63,42 +63,15 @@ pub fn nodes(conn: &Connection, task: &str) -> Result<Vec<Node>> {
         .collect()
 }
 
-/// Direct children of a node, in planning order.
-pub fn children(conn: &Connection, task: &str, parent: &str) -> Result<Vec<Node>> {
-    let rows = conn
-        .prepare(
-            "SELECT data FROM agent_task_nodes WHERE task_id=?1 AND parent_id=?2 ORDER BY rowid",
-        )?
-        .query_map(params![task, parent], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut nodes = rows
-        .iter()
-        .map(|raw| Ok(serde_json::from_str::<Node>(raw)?))
-        .collect::<Result<Vec<_>>>()?;
-    nodes.sort_by_key(|n| n.ordinal);
-    Ok(nodes)
-}
 
 /// Main tasks and function calls are context boundaries.
 pub fn is_task(node: &Node) -> bool {
     node.kind == "task"
 }
 
-pub fn is_temp(node: &Node) -> bool {
-    node.metadata["role"] == "temp"
-}
 
 
 
-/// The window that holds a node's context. The conversation level and its
-/// main task share the main window; temporary tasks get their own.
-pub fn frame_scope(node: &Node) -> String {
-    if node.node_id == ROOT || (node.kind == "task" && !is_temp(node)) {
-        "main".into()
-    } else {
-        scope(&node.node_id)
-    }
-}
 
 pub fn get(conn: &Connection, task: &str, id: &str) -> Result<Node> {
     let raw: String = conn
@@ -112,13 +85,6 @@ pub fn get(conn: &Connection, task: &str, id: &str) -> Result<Node> {
     Ok(serde_json::from_str(&raw)?)
 }
 
-pub fn scope(id: &str) -> String {
-    if id == ROOT {
-        "main".into()
-    } else {
-        format!("node:{id}")
-    }
-}
 
 pub fn path(conn: &Connection, task: &str, id: &str) -> Result<Vec<Node>> {
     let mut current = get(conn, task, id)?;

@@ -26,6 +26,7 @@ mod values;
 pub use compiler::{compile, compile_body, compile_entry};
 #[allow(unused_imports)]
 pub use compiler::{compile_body_with_scope, compile_segment, compile_with_libraries, probe_as_entry, required_libraries, uncalled_functions};
+#[allow(unused_imports)]
 pub use runtime::{Action, Runtime, State};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -266,7 +267,6 @@ pub enum Effect {
 
 #[cfg(test)]
 pub const SKILL: &str = include_str!("../skills/task-program/SKILL.md");
-pub const ENVIRONMENT: &str = include_str!("../prompts/flow_environment.md");
 /// Add a workaround only where an equivalent runtime operation is known.
 fn unsupported_builtin(name: &str) -> String {
     let hint = match name {

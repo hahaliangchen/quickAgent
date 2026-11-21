@@ -30,19 +30,6 @@ impl StoredEvent {
     }
 }
 
-/// Legacy jobs have no saved owner. Recover it only when history is unambiguous;
-/// call IDs are local to an AI response, not unique across Agents or requests.
-pub fn tool_call_node(conn: &Connection, task: &str, call_id: &str) -> Result<Option<String>> {
-    let owners = conn.prepare(
-        "SELECT DISTINCT node_id FROM agent_task_events WHERE task_id=?1 AND ((kind='tool/call' AND json_extract(data,'$.callId')=?2) OR (kind='subagent/event' AND json_extract(data,'$.event_type')='tool/call' AND json_extract(data,'$.event.callId')=?2)) LIMIT 2",
-    )?.query_map(params![task,call_id], |r| r.get::<_,Option<String>>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(
-        owners.len() <= 1,
-        "ASYNC_JOB_OWNER_AMBIGUOUS: legacy call {call_id} belongs to multiple steps; resubmit the background task explicitly"
-    );
-    Ok(owners.into_iter().next().flatten())
-}
 
 /// All selections are explicit caller parameters. Results are always ascending
 /// by the persisted sequence, including a request for the newest N records.

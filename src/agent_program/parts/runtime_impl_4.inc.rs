@@ -51,10 +51,6 @@ impl Runtime {
         self.loop_guard.clear();
     }
 
-    #[cfg(test)]
-    pub fn set_segment_wall_limit_ms(&mut self, limit_ms: u64) {
-        self.segment_wall_limit_ms = limit_ms;
-    }
 
     /// Lightweight deterministic state fingerprint of the active frame + enclosing
     /// lexical environments + host queues, used by the React/Vue-style infinite loop
@@ -313,7 +309,6 @@ impl Runtime {
         ensure!(self.pending.as_ref().is_some_and(|action| action.id == id), "unknown or already completed action");
         self.resume(value, failed)
     }
-    pub fn is_pending_async_batch(&self) -> bool { !self.active_async_batch.is_empty() }
     pub fn resume(&mut self, value: Value, failed: bool) -> Result<()> {
         ensure!(
             self.program.version == VERSION,

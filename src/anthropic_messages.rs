@@ -523,17 +523,6 @@ pub fn tools_added(names: Vec<String>) -> Value {
     message
 }
 
-/// The tools the conversation already activated, read from the messages still
-/// in it: a tool whose activation left with folded history is announced again.
-pub fn activated_tools(messages: &[Value]) -> BTreeSet<String> {
-    messages
-        .iter()
-        .filter_map(|message| message.get(ADDED_TOOLS).and_then(Value::as_array))
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect()
-}
 
 /// Appends blocks to the turn they belong to; consecutive turns of one role are
 /// one turn on the wire.
@@ -922,7 +911,6 @@ mod tests {
         // The host's configuration directory, not the workspace.
         state.config_path = Some(root.path().join("providers.yml"));
         state.provider_routes.insert("deepseek".into(), crate::agent_service::AgentProviderRoute {
-            prefix_system_messages: false,
             responses: false,
             messages: true,
             messages_capabilities: Default::default(),
@@ -968,7 +956,6 @@ mod tests {
         let mut completions = state.clone();
         completions.provider_name = "plain".into();
         completions.provider_routes.insert("plain".into(), crate::agent_service::AgentProviderRoute {
-            prefix_system_messages: false,
             responses: false,
             messages: false,
             messages_capabilities: Default::default(),
@@ -1057,7 +1044,6 @@ mod tests {
         state.provider_url = format!("http://{address}/anthropic");
         state.api_key = "fixture-key".into();
         state.provider_routes.insert("deepseek".into(), crate::agent_service::AgentProviderRoute {
-            prefix_system_messages: false,
             responses: false,
             messages: true,
             messages_capabilities: [(

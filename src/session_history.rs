@@ -27,7 +27,7 @@ pub(crate) fn message_text(content: &Value) -> String {
 mod regression_tests;
 mod flow_folder;
 mod store;
-pub use store::{EventQuery, load_events, tool_call_node};
+pub use store::{EventQuery, load_events};
 
 pub fn saved_history_payload<'a>(kind: &str, data: &'a Value) -> Result<&'a Value> {
     let paths: &[&str] = match kind {
@@ -120,31 +120,6 @@ fn image_message(message: &Value) -> Option<Value> {
     (!images.is_empty()).then(|| json!({"content":images}))
 }
 
-pub fn tool() -> Value {
-    json!({"type":"function","function":{"name":"read_session_history",
-    "description":"Read saved conversation history only when current inputs lack needed information. Set view=index for a compact, expandable table of contents: open a turn, then a task node, whose tool calls are listed with their file, search or command; read a call or its result by its seq with view=records. Reads in the current user turn share a fixed snapshot; keep snapshot_seq while navigating or paging. To inspect work done after that snapshot, explicitly start a new snapshot. History-reading calls and results are excluded even by exact event_seq unless explicitly auditing them. Default scope=conversation reads the current conversation or a returned task_id. scope=project searches workspace conversations. Historical records do not prove current resource availability.",
-    "parameters":{"type":"object","properties":{
-        "scope":{"type":"string","enum":["conversation","project"]},
-        "view":{"type":"string","enum":["records","index"],"description":"index shows an expandable table of contents for a conversation; records reads actual historical entries."},
-        "task_id":{"type":"string","description":"Conversation returned by project search; defaults to the current conversation. Only conversations saved in this workspace can be read."},
-        "match_offset":{"type":"integer","minimum":0,"description":"Position in the ranked matches of a query search; use the returned next_search."},
-        "query":{"type":"string","maxLength":1000,"description":"Words separated by spaces, | or commas; \"quote a phrase\" to match it whole. A record matches if it contains any word; the ones containing the most words come first, then messages and programs before tool calls before tool output, then the newest. Chinese words need spaces between them."},
-        "role":{"type":"string","minLength":1,"maxLength":64,"description":"Saved actor name, e.g. agent, worker, tool or visual_tool; default all. Historical actor names remain searchable."},
-        "node_id":{"type":"string"},"turn":{"type":"integer","minimum":1},
-        "include_descendants":{"type":"boolean","default":false,"description":"Include events owned by descendants of node_id. Split nodes also expose their explicit source interval."},
-        "request_id":{"type":"integer","minimum":1,"description":"Goal ID from task history_reference, to restrict the saved event interval."},
-        "before_seq":{"type":"integer","minimum":0},"after_seq":{"type":"integer","minimum":-1,"description":"Exclusive lower bound from task history_reference; retain when paging within that human goal."},"event_seq":{"type":"integer","minimum":0},
-        "snapshot_seq":{"type":"integer","minimum":0,"description":"Inclusive upper bound returned by the first conversation history read; retain for pagination and exact reads."},
-        "snapshot_id":{"type":"integer","minimum":0,"description":"Project search snapshot; retain the value returned in next_search."},
-        "new_snapshot":{"type":"boolean","description":"Start an independent history browse including work completed since the previous snapshot. Do not set when paging or expanding its records."},
-        "audit_history_reads":{"type":"boolean","description":"Explicit audit only: include history-read calls and results. Ordinary history must leave this false."},
-        "limit":{"type":"integer","minimum":1,"maximum":12},
-        "char_offset":{"type":"integer","minimum":0},"max_chars":{"type":"integer","minimum":256,"maximum":12000},
-        "include_event":{"type":"boolean","description":"Return the original event envelope instead of just the sender's message/return or tool output; useful for inspecting provenance."},
-        "programs":{"type":"boolean","description":"Return the programs this conversation ran instead of messages: each turn's main program and the implementations written for its virtual functions, with their source. Filter with turn; read them only when earlier code matters to the current request."},
-        "include_context":{"type":"boolean","description":"Include recorded model input views for audit, filterable by the receiving role. Default false. An exact event_seq also resolves a context reference. These views cite the shared history; they are not new actions or independent facts."}
-    }}}})
-}
 
 /// The programs this conversation ran: each turn's main program and the
 /// implementations its AI wrote for virtual functions, in the order they ran.

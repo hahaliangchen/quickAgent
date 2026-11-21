@@ -44,6 +44,7 @@ mod project_notes;
 mod project_process;
 mod proxy_log;
 mod python_index;
+mod register_image;
 mod remote_sessions;
 mod request_context;
 mod rewind;

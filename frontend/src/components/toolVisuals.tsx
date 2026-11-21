@@ -6,9 +6,11 @@ import {
   IconDatabaseOutlineMedium, IconEditOutlineMedium, IconFolderOpenOutlineMedium, IconGoalOutlineMedium,
   IconInspectOutlineMedium, IconListPenOutlineMedium, IconPaperclipOutlineMedium, IconPinOutlineMedium,
   IconPlayOutlineMedium, IconQuestionOutlineMedium, IconQueueOutlineMedium, IconRefreshOutlineMedium,
-  IconSearchOutlineMedium, IconSkillOutlineMedium, IconUnarchiveOutlineMedium, IconUsersOutlineMedium,
+  IconSearchOutlineMedium, IconSkillOutlineMedium, IconTrashOutlineMedium, IconUnarchiveOutlineMedium, IconUsersOutlineMedium,
   IconWarningTriangleOutlineMedium, IconWorkspaceTreeOutlineMedium,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+
+import { summaryFor, text } from './toolSummary.ts'
 
 /** Colour family of a tool row's icon chip; the palette lives in ToolRow.module.css. */
 export type ToolTone = 'read' | 'edit' | 'run' | 'search' | 'task' | 'agent' | 'media' | 'web' | 'context' | 'danger' | 'neutral'
@@ -124,6 +126,10 @@ const EXACT: Record<string, Omit<ToolVisual, 'summary'>> = {
   read_program_guide: { tone: 'context', icon: <IconChecklistOutlineMedium />, title: '查看了编程指南' },
   parallel_read_batch: { tone: 'read', icon: <FileTextIcon />, title: '并行读取了文件' },
   install_dependencies: { tone: 'run', icon: <TerminalIcon />, title: '安装了依赖' },
+  // Path operations the io library performs without a shell.
+  create_dir: { tone: 'edit', icon: <IconFolderOpenOutlineMedium />, title: '创建了目录' },
+  rename_path: { tone: 'edit', icon: <IconEditOutlineMedium />, title: '移动了路径' },
+  delete_path: { tone: 'edit', icon: <IconTrashOutlineMedium />, title: '删除了路径' },
   ask_user: { tone: 'read', icon: <IconQuestionOutlineMedium />, title: '向你提问' },
 }
 
@@ -148,54 +154,6 @@ function fallback(name: string): Omit<ToolVisual, 'summary'> {
   return { tone: 'neutral', icon: <IconCordisPluginOutlineMedium />, title: name }
 }
 
-const text = (value: unknown) => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
-const count = (value: unknown) => Array.isArray(value) ? value.length : 0
-/** Host node IDs are long hashes; the leading characters are enough to tell them apart. */
-const shortNode = (value: unknown) => text(value) === 'n0' ? '主任务' : `子任务 ${text(value).slice(0, 7)}`
-
-function summaryFor(name: string, args: Record<string, unknown>): string | undefined {
-  switch (name) {
-    case 'web__search': return text(args.query)
-    case 'web__fetch': return `${args.cursor ? '续读 · ' : ''}${text(args.url)}`
-    case 'exec_command': return text(args.cmd)
-    case 'run_readonly_command': return text(args.cmd)
-    case 'git_status': return Array.isArray(args.paths) && args.paths.length > 0 ? `路径：${args.paths.map(value => text(value)).filter(Boolean).join('、')}` : '工作区状态'
-    case 'git_diff': return args.stat_only === true ? '变更统计' : [text(args.rev_range), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '工作区变更'].filter(Boolean).join(' · ')
-    case 'git_log': return [text(args.rev), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '提交历史'].filter(Boolean).join(' · ')
-    case 'read_git': return [text(args.view), text(args.path ?? args.file ?? args.ref)].filter(Boolean).join(' · ') || 'Git 证据'
-    case 'write_stdin': return `会话 ${String(args.session_id ?? '未知')} · ${typeof args.chars === 'string' && args.chars.length > 0 ? JSON.stringify(args.chars) : '等待输出'}`
-    case 'kill_session': return `会话 ${String(args.session_id ?? '未知')}`
-    case 'create_task': return [text(args.goal), text(args.reason) && `原因：${text(args.reason)}`].filter(Boolean).join(' · ')
-    case 'create_step': return [text(args.result) && `完成：${text(args.result)}`, text(args.next) && `下一步：${text(args.next)}`].filter(Boolean).join(' · ')
-    case 'handoff_step': {
-      const situation = text(args.situation ?? args.completed)
-      const sliceCount = Array.isArray(args.slices) ? args.slices.length : 0
-      return [
-        text(args.step_name) && `完成 ${text(args.step_name)}`,
-        situation && `当前情形：${situation}`,
-        text(args.next_step) && `进入 ${text(args.next_step)}`,
-        text(args.next_goal) && `下一轮目的：${text(args.next_goal)}`,
-        sliceCount > 0 ? `截取 ${sliceCount} 段上下文` : '',
-      ].filter(Boolean).join(' · ')
-    }
-    case 'set_next_step': return [text(args.current_step), text(args.next_step) && `下一步：${text(args.next_step)}`].filter(Boolean).join(' · ')
-    case 'plan_tasks': {
-      const tasks = Array.isArray(args.tasks) ? args.tasks : []
-      const titles = tasks.map(task => text((task as Record<string, unknown> | null)?.title)).filter(Boolean)
-      return `${tasks.length} 项${titles.length > 0 ? `：${titles.join('、')}` : ''}`
-    }
-    case 'start_task': return text(args.briefing) || text(args.node_id)
-    case 'branch_task': return [text(args.title), text(args.reason) && `原因：${text(args.reason)}`].filter(Boolean).join(' · ')
-    case 'return_task': return text(args.status === 'needs_user' ? args.question : args.result)
-    case 'split_task': return `${text(args.title)}${count(args.tasks) > 0 ? ` · 剩余 ${count(args.tasks)} 项` : ''}`
-    case 'scope_message': return `作用于${shortNode(args.node_id)}`
-    case 'update_task_definition': return text(args.objective)
-    case 'spawn_agent': return text(args.name) || text(args.task)
-    case 'compress_context': return text(args.reason)
-    default: return undefined
-  }
-}
-
 /** Icon, colour family, Chinese action title and summary for one tool call.
  * `result` is the parsed tool output when available: a return from the root
  * node (n0) finishes the main task rather than a subtask. */
@@ -211,5 +169,5 @@ export function toolVisual(name: string, args: unknown, result?: unknown): ToolV
   if (name === 'write_stdin' && (typeof record.chars !== 'string' || record.chars.length === 0)) {
     base = { ...base, title: '读取了命令输出' }
   }
-  return { ...base, summary: summaryFor(name, record) }
+  return { ...base, summary: summaryFor(name, record, result) }
 }

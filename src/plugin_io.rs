@@ -16,12 +16,6 @@ pub trait SessionIo: Send + Sync {
         _resource: Option<&'a str>, _module: bool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
-    /// Read an executable skill resource from this session's own plugin.
-    /// The host interprets only the generic program manifest, never business rules.
-    fn program_resource<'a>(&'a self, _state: &'a AgentServiceState, _task: &'a str,
-        _path: &'a str) -> BoxFuture<'a, Result<Vec<u8>>> {
-        Box::pin(async { anyhow::bail!("plugin program resources unavailable") })
-    }
     /// Ask the plugin whether a page-owned operation may run in this session.
     fn authorize_page_tool<'a>(
         &'a self, _state: &'a AgentServiceState, _task: &'a str, _tool: &'a str, _args: &'a Value,
@@ -114,13 +108,6 @@ pub async fn execute(
         .context("tool registry unavailable")?
         .execute(workspace, name, args)
         .await
-}
-pub async fn program_resource(state: &AgentServiceState, task: &str, path: &str) -> Result<Vec<u8>> {
-    ensure!(path.starts_with("skill:") && path.len() <= 4096, "program resources must be plugin skill paths");
-    let bytes = adapter(state, task)?.context("plugin program requires an owned plugin session")?
-        .program_resource(state, task, path).await?;
-    ensure!(!bytes.is_empty() && bytes.len() <= 256 * 1024, "plugin program resource is empty or too large");
-    Ok(bytes)
 }
 pub async fn authorize_program(state: &AgentServiceState, task: &str, resource: Option<&str>, module: bool) -> Result<()> {
     if let Some(adapter) = adapter(state, task)? {

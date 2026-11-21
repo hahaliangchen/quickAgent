@@ -81,7 +81,12 @@ impl PermissionMode {
     pub(crate) fn allows(self, name: &str) -> bool {
         match name {
             "exec_command" | "write_stdin" | "kill_session" => true,
-            "write_file" | "replace_range" | "edit_file" => !matches!(self, Self::ReadOnly),
+            "write_file"
+            | "replace_range"
+            | "edit_file"
+            | "delete_path"
+            | "rename_path"
+            | "create_dir" => !matches!(self, Self::ReadOnly),
             "run_program"
             | "install_dependencies"
             | "run_project_script"
@@ -104,7 +109,6 @@ impl PermissionMode {
 
 #[derive(Clone, Debug)]
 pub struct AgentProviderRoute {
-    pub prefix_system_messages: bool,
     /// The provider speaks the Responses API (`api: openai-responses`), as
     /// Codex does; requests then replay the model's reasoning items.
     pub responses: bool,
@@ -1728,6 +1732,18 @@ fn local_output_schema(name: &str) -> Option<Value> {
             "truncated":{"type":"boolean","description":"true when more matches (content) or files (files, count) exist than were returned"}}}),
         "write_file" | "edit_file" => written(json!({"created":{"type":"boolean"}})),
         "replace_range" => written(json!({"start_line":{"type":"integer"},"end_line":{"type":"integer"}})),
+        "delete_path" => json!({"type":"object","required":["path","deleted","kind"],"properties":{
+            "path":{"type":"string"},
+            "deleted":{"type":"boolean"},
+            "kind":{"enum":["file","directory"]}}}),
+        "rename_path" => json!({"type":"object","required":["path","to","overwritten","index_refresh"],"properties":{
+            "path":{"type":"string"},
+            "to":{"type":"string"},
+            "overwritten":{"type":"boolean"},
+            "index_refresh":{}}}),
+        "create_dir" => json!({"type":"object","required":["path","created"],"properties":{
+            "path":{"type":"string"},
+            "created":{"type":"boolean"}}}),
         _ => return None,
     })
 }
@@ -1770,6 +1786,9 @@ pub(crate) fn local_tools(
         "write_file",
         "replace_range",
         "edit_file",
+        "delete_path",
+        "rename_path",
+        "create_dir",
         "record_work_memory",
         "list_work_memory",
         "search_work_memory",

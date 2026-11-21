@@ -5,6 +5,9 @@ import ts from 'typescript'
 const source = await readFile(new URL('../src/model.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
 const { awaitingModel, chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState, cleanToolError } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+const summarySource = await readFile(new URL('../src/components/toolSummary.ts', import.meta.url), 'utf8')
+const { outputText: summaryOutput } = ts.transpileModule(summarySource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
+const { summaryFor } = await import('data:text/javascript;base64,' + Buffer.from(summaryOutput).toString('base64'))
 
 let seq = 0
 const event = (type, data) => ({ seq: ++seq, time: 1000 + seq, type, data: { turn: 1, ...data } })
@@ -16,6 +19,29 @@ const call = (frameId, callId, name, args, extra = {}) =>
 const result = (frameId, callId, text, isError = false) =>
   event('tool/result', { task_node_id: frameId, message: { role: 'tool', toolCallId: callId, isError, content: [{ type: 'text', text }] } })
 const program = '```js\nimport * as io from "host:io";\nconst cli = await io.read({path:"cli.js"});\nawait implementWatch(cli);\n\n/** @virtual */\nasync function implementWatch(cli) {\n  // Add --watch to the CLI.\n}\n```'
+
+test('path operations summarise the path they touch', () => {
+  assert.equal(summaryFor('create_dir', { path: 'scratch/nested' }), 'scratch/nested')
+  assert.equal(summaryFor('delete_path', { path: 'scratch/nested' }), 'scratch/nested')
+  assert.equal(summaryFor('delete_path', { path: 'tmp', recursive: true }), 'tmp · 整个目录')
+  assert.equal(summaryFor('rename_path', { path: 'a.txt', to: 'b/c.txt' }), 'a.txt → b/c.txt')
+  // Nothing is invented when a field is missing.
+  assert.equal(summaryFor('rename_path', { path: 'a.txt' }), 'a.txt')
+  assert.equal(summaryFor('delete_path', {}), '')
+})
+
+test('a settled write_stdin row stops claiming it is waiting for output', () => {
+  // While the session still runs, the row is genuinely waiting.
+  assert.equal(summaryFor('write_stdin', { session_id: 's1' }, { session_id: 's1', running: true }), '会话 s1 · 等待输出')
+  assert.equal(summaryFor('write_stdin', { session_id: 's1' }), '会话 s1 · 等待输出', 'no result yet')
+  // Once it settled, "等待输出" beside the right-hand exit code contradicts it.
+  const settled = summaryFor('write_stdin', { session_id: 's1' }, { session_id: 's1', running: false, exit_code: 0 })
+  assert.equal(settled, '会话 s1 · 拉取输出')
+  assert.equal(settled.includes('等待输出'), false)
+  // Typed input still names what was sent, settled or not.
+  assert.equal(summaryFor('write_stdin', { session_id: 's1', chars: 'y\n' }, { running: true }), '会话 s1 · "y\\n"')
+  assert.equal(summaryFor('write_stdin', { session_id: 's1', chars: 'q' }, { running: false, exit_code: 1 }), '会话 s1 · "q"')
+})
 
 test('tool argument progress grows without exposing arguments and closes when the message arrives', () => {
   seq = 0

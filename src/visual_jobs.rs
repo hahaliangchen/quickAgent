@@ -14,11 +14,9 @@ use std::{
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-struct Running {
-    task: String,
-    root: std::path::PathBuf,
-    cancel: CancellationToken,
-}
+/// A job this process is executing. The registry is only asked whether an id
+/// is still there, so the entry itself carries nothing.
+struct Running;
 static RUNNING: OnceLock<Mutex<BTreeMap<String, Running>>> = OnceLock::new();
 static CHANGED: Notify = Notify::const_new();
 fn running() -> &'static Mutex<BTreeMap<String, Running>> {
@@ -51,11 +49,6 @@ impl Drop for Guard {
     }
 }
 
-pub fn tool() -> Value {
-    json!({"type":"function","function":{
- "name":"image_analysis_results","description":"Read this conversation's queued visual checks. Wait only when no independent generation work remains. Results are also delivered automatically before the next model request. Never treat accepted/running as checked.",
- "parameters":{"type":"object","properties":{"wait_ms":{"type":"integer","minimum":0,"maximum":30000}},"additionalProperties":false}}})
-}
 
 pub fn sources(root: &Path, context: &VisualContext, args: &Value) -> Result<Vec<Value>> {
     args["artifact_ids"]
@@ -125,14 +118,7 @@ pub fn submit(
     let child = cancel.child_token();
     let mut executors = running().lock().unwrap();
     conn.execute("INSERT INTO agent_visual_jobs(id,task_id,turn,status,call_id,arguments,sources,created_at,updated_at,owner_node_id) VALUES (?1,?2,?3,'queued',?4,?5,?6,?7,?7,?8)",params![id,context.task_id(),context.turn.unwrap_or(0),call,args_text,json!(source).to_string(),now,owner])?;
-    executors.insert(
-        id.clone(),
-        Running {
-            task: context.task_id().to_owned(),
-            root: root.to_path_buf(),
-            cancel: child.clone(),
-        },
-    );
+    executors.insert(id.clone(), Running);
     drop(executors);
     let (state, context, args, call, model, job) = (
         state.clone(),
@@ -262,13 +248,6 @@ pub async fn results(
     Ok(result)
 }
 
-pub fn cancel(root: &Path, task: &str) {
-    for entry in running().lock().unwrap().values() {
-        if entry.root == root && entry.task == task {
-            entry.cancel.cancel();
-        }
-    }
-}
 
 pub fn outstanding_calls(root: &Path, task: &str) -> Result<Vec<(String, Option<String>)>> {
     reap(root, task)?;
@@ -276,10 +255,6 @@ pub fn outstanding_calls(root: &Path, task: &str) -> Result<Vec<(String, Option<
         .query_map([task],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-pub fn outstanding(root: &Path, task: &str) -> Result<bool> {
-    reap(root, task)?;
-    Ok(db(root)?.query_row("SELECT count(*) FROM agent_visual_jobs WHERE task_id=?1 AND (status IN ('queued','running') OR delivered=0)",[task],|r|r.get::<_,usize>(0))?>0)
-}
 
 #[cfg(test)]
 mod tests {

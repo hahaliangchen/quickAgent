@@ -1072,7 +1072,6 @@ mod tests {
         let mut state = crate::agent_service::tests::test_state(temp.path(), "127.0.0.1:1".parse().unwrap());
         state.provider_name = "deepseek-self".into();
         state.provider_routes.insert(state.provider_name.clone(), crate::agent_service::AgentProviderRoute {
-            prefix_system_messages: false,
             responses: false,
             messages: true,
             messages_capabilities: [("deepseek-flash".into(), crate::anthropic_messages::Capabilities {

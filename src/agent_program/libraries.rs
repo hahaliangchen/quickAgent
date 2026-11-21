@@ -106,6 +106,9 @@ pub fn builtin() -> Libraries {
             ("search", "search_text"),
             ("edit", "edit_file"),
             ("replace", "replace_range"),
+            ("delete", "delete_path"),
+            ("rename", "rename_path"),
+            ("mkdir", "create_dir"),
             ("workspace_info", "workspace_info"),
         ])),
         ("git".into(), named(&[
@@ -147,7 +150,13 @@ pub fn builtin() -> Libraries {
             "list_symbol_business_context",
             "search_symbol_business_context",
         ])),
-        ("vision".into(), same(&["view_image", "analyze_images", "image_analysis_results", "generate_image"])),
+        ("vision".into(), same(&[
+            "view_image",
+            "analyze_images",
+            "image_analysis_results",
+            "generate_image",
+            "register_image",
+        ])),
         ("attachments".into(), same(&["read_attachment"])),
         // The main conversation's own materials and records: only the main
         // script has them, as a function has only its arguments.
@@ -244,64 +253,11 @@ fn owned(packages: &Value) -> BTreeSet<&str> {
         .filter_map(Value::as_str)
         .collect()
 }
-/// Host tools in these definitions that no library has: neither a plugin's
-/// nor the AI loop's own. There is no catch-all library, so each one needs
-/// a place in `builtin`; a test keeps this list empty.
-#[cfg(test)]
-pub fn unassigned(definitions: &[Value], packages: &Value) -> Vec<String> {
-    let libraries = catalog(definitions, packages);
-    let bound = libraries
-        .values()
-        .flat_map(|methods| methods.values().map(String::as_str))
-        .collect::<BTreeSet<_>>();
-    let owned = owned(packages);
-    definitions
-        .iter()
-        .filter_map(|d| d["function"]["name"].as_str())
-        .filter(|name| !bound.contains(name) && !owned.contains(name) && !control(name))
-        .map(str::to_owned)
-        .collect()
-}
 
-/// The libraries enabled plugin packages contribute: third-party code a
-/// program loads with require when it runs, never a host: import.
-pub fn third_party(libraries: &Libraries, packages: &Value) -> BTreeSet<String> {
-    packages
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|package| package["enabled"] == true)
-        .filter_map(|package| {
-            package["library"]
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| package["id"].as_str().map(namespace))
-        })
-        .filter(|name| libraries.contains_key(name) && !builtin().contains_key(name))
-        .collect()
-}
 /// Host-owned namespaces cannot be claimed by plugins: the host's own
 /// libraries, and `host`, the import prefix.
 pub fn valid_namespace(name: &str) -> bool {
     identifier(name) && !reserved(name) && name != "host" && !builtin().contains_key(name)
-}
-/// The AI loop's own tools, called directly and never a library's method.
-pub fn control(name: &str) -> bool {
-    matches!(
-        name,
-        "read_program_guide"
-            | "read_tool_contracts"
-            | "define_task_body"
-            | "create_task"
-            | "list_skills"
-            | "read_skill"
-            | "unload_skill"
-            | "release_assets"
-            | "find_library_methods"
-            | "ask_user"
-            | "write_program"
-            | "handoff_step"
-    )
 }
 pub fn public_name(libraries: &Libraries, target: &str) -> Option<String> {
     libraries.iter().find_map(|(library, methods)| {

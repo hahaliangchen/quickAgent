@@ -147,14 +147,6 @@ impl ShellEnvironment {
     }
 }
 
-/// Local settings/diagnostics projection; a missing dependency is actionable data.
-pub fn description() -> Value {
-    let settings = read_settings(&crate::ai_proxy::config_path());
-    match settings {
-        Ok(settings) => cached_description(settings.active_path()),
-        Err(error) => status_json(Err(format!("{error:#}")), false, None, false),
-    }
-}
 
 fn parent(path: PathBuf) -> Option<PathBuf> {
     path.parent().map(Path::to_path_buf)

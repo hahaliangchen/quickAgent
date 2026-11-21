@@ -53,7 +53,7 @@ impl Drop for ResourceClaim {
     }
 }
 pub(crate) fn resource_key(workspace: &Path, name: &str, args: &Value) -> Result<Option<String>> {
-    if matches!(name, "write_file" | "edit_file" | "replace_range") {
+    if matches!(name, "write_file" | "edit_file" | "replace_range" | "delete_path" | "rename_path" | "create_dir") {
         let path = args["path"].as_str().context("write path required")?;
         return Ok(Some(format!("local:{}", crate::file_edit::workspace_path(workspace,path)?.display())));
     }
@@ -327,9 +327,74 @@ fn cached_image(
     }, stat))
 }
 
+fn capture_path_or_tree(
+    canonical_root: &Path,
+    path: &Path,
+    snapshot: &mut Snapshot,
+    budget: &mut usize,
+) -> Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.is_file() {
+        let relative = path
+            .strip_prefix(canonical_root)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        snapshot.insert(relative, image(path, budget)?);
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir)? {
+                let entry = entry?;
+                if entry.file_name() == ".git" {
+                    continue;
+                }
+                let entry_path = entry.path();
+                let entry_meta = fs::symlink_metadata(&entry_path)?;
+                if entry_meta.file_type().is_symlink() {
+                    continue;
+                }
+                if entry_meta.is_dir() {
+                    stack.push(entry_path);
+                } else if entry_meta.is_file() {
+                    ensure!(
+                        snapshot.len() < 20_000,
+                        "workspace exceeds change-tracking file limit"
+                    );
+                    let safe = safe_path_canonical(canonical_root, &entry_path.to_string_lossy())?;
+                    let relative = safe
+                        .strip_prefix(canonical_root)?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    snapshot.insert(relative, image(&safe, budget)?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn capture(root: &Path, name: &str, args: &Value) -> Result<Snapshot> {
     let mut snapshot = Snapshot::new();
     let mut budget = SNAPSHOT_LIMIT;
+    if name == "create_dir" {
+        return Ok(snapshot);
+    }
+    if matches!(name, "delete_path" | "rename_path") {
+        let canonical_root = fs::canonicalize(root)?;
+        let path = safe_path(root, args["path"].as_str().context("missing file path")?)?;
+        capture_path_or_tree(&canonical_root, &path, &mut snapshot, &mut budget)?;
+        if name == "rename_path" {
+            let to = safe_path(root, args["to"].as_str().context("missing destination path")?)?;
+            capture_path_or_tree(&canonical_root, &to, &mut snapshot, &mut budget)?;
+        }
+        return Ok(snapshot);
+    }
     if !crate::project_process::may_change_files(name) {
         let path = safe_path(root, args["path"].as_str().context("missing file path")?)?;
         let relative = path
@@ -817,7 +882,7 @@ pub fn summary(root: &Path, task: &str, turn: usize) -> Result<Value> {
 }
 
 pub fn is_mutation(name: &str) -> bool {
-    matches!(name, "write_file" | "replace_range" | "edit_file")
+    matches!(name, "write_file" | "replace_range" | "edit_file" | "delete_path" | "rename_path" | "create_dir")
         || crate::project_process::may_change_files(name)
 }
 
@@ -837,6 +902,9 @@ pub async fn execute_tracked(
     if !crate::project_process::may_change_files(&name) {
         // Boundary checks are mandatory even if optional snapshot capture fails.
         safe_path(&files, args["path"].as_str().context("missing file path")?)?;
+        if name == "rename_path" {
+            safe_path(&files, args["to"].as_str().context("missing destination path")?)?;
+        }
         invalidate_snapshot_cache(&files);
     }
     let capture_root = files.clone();

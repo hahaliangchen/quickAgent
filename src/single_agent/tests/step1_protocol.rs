@@ -527,7 +527,6 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
     state.provider_routes.insert(
         state.provider_name.clone(),
         AgentProviderRoute {
-            prefix_system_messages: false,
             responses: true,
             messages: false,
             messages_capabilities: Default::default(),
@@ -644,7 +643,6 @@ async fn step1_deepseek_messages_records_real_cache_and_cost_in_event_and_log() 
     state.provider_name = "deepseek-self".into();
     state.provider_url = format!("http://{addr}/v1");
     state.provider_routes.insert(state.provider_name.clone(), AgentProviderRoute {
-        prefix_system_messages: false,
         responses: false,
         messages: true,
         messages_capabilities: [("deepseek-flash".into(), crate::anthropic_messages::Capabilities {

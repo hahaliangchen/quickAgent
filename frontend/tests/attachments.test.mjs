@@ -17,7 +17,7 @@ createRoot(document.getElementById('root')).render(React.createElement(CordisPro
  })}}]})
  let browser
  try{
-  await server.listen();const origin=server.resolvedUrls.local[0];browser=await chromium.launch({headless:true});const page=await browser.newPage();page.setDefaultTimeout(15000);const errors=[];page.on('pageerror',e=>errors.push(String(e)))
+  await server.listen();const origin=server.resolvedUrls.local[0];browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EXECUTABLE_PATH?{executablePath:process.env.PLAYWRIGHT_EXECUTABLE_PATH}:{})});const page=await browser.newPage();page.setDefaultTimeout(15000);const errors=[];page.on('pageerror',e=>errors.push(String(e)))
   const uploads=[],prompts=[],slow=[];let fail=false
   await page.route('**/api/session/uploadFileBinary?*',async route=>{const req=route.request();assert.equal(req.headers()['content-type'],'application/octet-stream');const url=new URL(req.url());assert.equal(url.searchParams.get('sessionId'),'test-task');uploads.push({name:url.searchParams.get('name'),bytes:req.postDataBuffer()});if(url.searchParams.get('name')==='cancel.txt'){slow.push(route);return;}await route.fulfill({json:{ok:true,value:{receiptId:'receipt-'+uploads.length,file:{attachmentId:'sha256:test',name:uploads.at(-1).name,bytes:uploads.at(-1).bytes.length}}}})})
   await page.route('**/agent/tasks/test-task/messages',async route=>{prompts.push(route.request().postDataJSON());await route.fulfill({status:fail?500:202,json:fail?{error:'test rejection'}:{task_id:'test-task'}})})

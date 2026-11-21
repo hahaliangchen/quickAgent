@@ -5,7 +5,7 @@
 
 use super::{Session, append_event, context_doc, host_tools};
 use crate::agent_program;
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use serde_json::{Value, json};
 
 #[allow(clippy::too_many_arguments)]
@@ -65,6 +65,19 @@ pub(super) async fn proxy_rust_tool(
         "generate_image" => {
             let context = host_tools::visual_context(s, node)?;
             match crate::image_generation::execute(s.state, &context, &s.state.workspace, &args, s.cancel).await {
+                Ok(value) => (value, false),
+                Err(error) => (json!({"error": format!("{error:#}")}), true),
+            }
+        }
+        "register_image" => {
+            // Deliberately absent from host_tools::page_allows: a plugin page
+            // may not reach local files that the main conversation owns.
+            ensure!(
+                host_tools::page_allows(s, "register_image"),
+                "PLUGIN_SCOPE_DENIED: register_image"
+            );
+            let context = host_tools::visual_context(s, node)?;
+            match crate::register_image::execute(s.state, &context, &args).await {
                 Ok(value) => (value, false),
                 Err(error) => (json!({"error": format!("{error:#}")}), true),
             }

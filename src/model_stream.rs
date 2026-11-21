@@ -390,16 +390,6 @@ pub fn parse_run_submission(text: &str, finish_reason: Option<&str>) -> RunSubmi
     }
 }
 
-/// Remove legacy business-tool fields when projecting a context document to
-/// a provider. The durable message history is left untouched.
-pub fn code_only_request(mut body: Value) -> Value {
-    if let Some(object) = body.as_object_mut() {
-        object.remove("tools");
-        object.remove("tool_choice");
-        object.remove("parallel_tool_calls");
-    }
-    body
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunStreamEvent {

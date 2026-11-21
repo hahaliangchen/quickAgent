@@ -141,6 +141,37 @@
     }
 
     #[test]
+    fn a_missing_dependency_path_names_the_vite_or_tsconfig_alias_hint() {
+        let root = temp_workspace("not_found_node_modules");
+        let workspace = Workspace::new(&root).unwrap();
+        let read = |path: &str| {
+            workspace
+                .read_file(ReadFileRequest {
+                    workspace_root: None,
+                    path: path.to_owned(),
+                    max_bytes: 1024,
+                })
+                .unwrap_err()
+                .to_string()
+        };
+
+        let dependency = read("node_modules/@scope/missing/index.ts");
+        assert!(dependency.contains("path does not exist"), "{dependency}");
+        assert!(
+            dependency.contains(
+                "Hint: if this is a Vite/TypeScript workspace alias, check vite.config.ts or tsconfig.json"
+            ),
+            "{dependency}"
+        );
+
+        // Ordinary misses keep the existing hints and gain no alias sentence.
+        let plain = read("src/nothing_here.rs");
+        assert!(!plain.contains("workspace alias"), "{plain}");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn reads_absolute_paths_outside_workspace() {
         let root = temp_workspace("absolute_root");
         let workspace = Workspace::new(&root).unwrap();
@@ -1233,6 +1264,85 @@
         assert!(!matched_files.iter().any(|p| p.ends_with(".tmp")));
         assert!(matched_files.contains(&"target/dev.log"));
         assert!(matched_files.contains(&"target/logs/run.log"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn create_dir_rename_and_delete_stay_inside_the_workspace() {
+        let root = temp_workspace("file_ops");
+        let workspace = Workspace::new(&root).unwrap();
+        let dir = |path: &str, recursive: bool| {
+            workspace.create_dir(CreateDirRequest {
+                workspace_root: None,
+                path: path.to_owned(),
+                recursive,
+            })
+        };
+
+        // A chain is created once, then reported as already there.
+        let made = dir("a/b/c", true).unwrap();
+        assert_eq!(made.path, "a/b/c");
+        assert!(made.created);
+        assert!(root.join("a/b/c").is_dir());
+        assert!(!dir("a/b/c", true).unwrap().created);
+        // Without recursive the parent must already exist.
+        assert!(dir("nope/deeper", false).is_err());
+
+        // A file cannot become a directory, and traversal never leaves the workspace.
+        fs::write(root.join("plain.txt"), "hi").unwrap();
+        assert!(dir("plain.txt", true).is_err());
+        assert!(dir("../escape", true).is_err());
+
+        let rename = |path: &str, to: &str, overwrite: bool| {
+            workspace.rename_path(RenamePathRequest {
+                workspace_root: None,
+                path: path.to_owned(),
+                to: to.to_owned(),
+                overwrite,
+                create_parent_dirs: true,
+            })
+        };
+        let moved = rename("plain.txt", "a/b/c/moved.txt", false).unwrap();
+        assert_eq!(moved.path, "plain.txt");
+        assert_eq!(moved.to, "a/b/c/moved.txt");
+        assert!(!moved.overwritten);
+        assert!(!root.join("plain.txt").exists());
+        assert_eq!(fs::read_to_string(root.join("a/b/c/moved.txt")).unwrap(), "hi");
+        // Parents are created for the destination.
+        rename("a/b/c/moved.txt", "elsewhere/new/deep.txt", false).unwrap();
+        assert!(root.join("elsewhere/new/deep.txt").is_file());
+        // An existing destination needs the explicit flag.
+        fs::write(root.join("taken.txt"), "first").unwrap();
+        assert!(rename("elsewhere/new/deep.txt", "taken.txt", false).is_err());
+        let replaced = rename("elsewhere/new/deep.txt", "taken.txt", true).unwrap();
+        assert!(replaced.overwritten);
+        assert_eq!(fs::read_to_string(root.join("taken.txt")).unwrap(), "hi");
+        assert!(rename("missing.txt", "x.txt", false).is_err());
+        assert!(rename("taken.txt", "../escape.txt", false).is_err());
+
+        let delete = |path: &str, recursive: bool| {
+            workspace.delete_path(DeletePathRequest {
+                workspace_root: None,
+                path: path.to_owned(),
+                recursive,
+            })
+        };
+        assert_eq!(delete("taken.txt", false).unwrap().kind, "file");
+        assert!(!root.join("taken.txt").exists());
+        // A directory is only removed when the caller says so.
+        let refused = delete("elsewhere", false).unwrap_err().to_string();
+        assert!(refused.contains("recursive"), "{refused}");
+        assert!(root.join("elsewhere").exists());
+        assert_eq!(delete("elsewhere", true).unwrap().kind, "directory");
+        assert!(!root.join("elsewhere").exists());
+        assert!(delete("elsewhere", true).is_err(), "a second delete finds nothing");
+
+        // The workspace root and the repository metadata are never removable.
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+        assert!(delete(".git", true).is_err());
+        assert!(delete(".", true).is_err());
+        assert!(root.join(".git/objects").is_dir());
 
         let _ = fs::remove_dir_all(root);
     }

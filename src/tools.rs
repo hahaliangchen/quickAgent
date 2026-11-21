@@ -560,6 +560,58 @@ pub struct WriteFileResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct DeletePathRequest {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    pub path: String,
+    /// Directories need this: a plain delete removes files only.
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeletePathResponse {
+    pub path: String,
+    pub deleted: bool,
+    /// "file" or "directory".
+    pub kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenamePathRequest {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    pub path: String,
+    pub to: String,
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default = "default_true")]
+    pub create_parent_dirs: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenamePathResponse {
+    pub path: String,
+    pub to: String,
+    pub overwritten: bool,
+    pub index_refresh: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateDirRequest {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    pub path: String,
+    #[serde(default = "default_true")]
+    pub recursive: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateDirResponse {
+    pub path: String,
+    pub created: bool,
+}
+#[derive(Debug, Deserialize)]
 pub struct ReplaceRangeRequest {
     #[serde(default)]
     pub workspace_root: Option<String>,

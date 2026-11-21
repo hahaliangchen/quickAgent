@@ -21,17 +21,6 @@ const SHEET_FROM: usize = 3;
 const SHEET_BAR: u32 = 36;
 const SHEET_GAP: u32 = 12;
 
-pub fn tool() -> Value {
-    json!({"type":"function","function":{
-        "name":"analyze_images",
-        "description":"Analyze saved images with a dedicated vision model. Use for image interpretation and visual verification. Supply up to 9 artifact_ids from screenshot/image assets and your question; three or more images are shown to the vision model as one numbered sheet. When a plugin made an image and attached its review instructions, the vision model reads those instructions first and your question after them, so ask only about extra points. The result's analysis_id is what plugin tools that record a review take. Returns the model's original analysis as tool evidence. Reads existing original pixels; does not browse, recapture, select images for your next request, or change context.",
-        "parameters":{"type":"object","properties":{
-            "artifact_ids":{"type":"array","minItems":1,"maxItems":MAX_ANALYSIS_IMAGES,"uniqueItems":true,"items":{"type":"string","minLength":1}},
-            "question":{"type":"string","minLength":1},
-            "background":{"type":"boolean","description":"Optionally queue visual inspection while execution continues. By default the call waits synchronously. Background checks deliver completion to the same conversation."}
-        },"required":["artifact_ids","question"],"additionalProperties":false}
-    }})
-}
 
 pub fn validate_background(
     state: &AgentServiceState,
