@@ -1,0 +1,89 @@
+/* The pictures a single tool call handled, shown in that call's row: a
+   screenshot's own pixels, an image it generated, or the picture the vision
+   model was asked about. They stay outside the collapsible detail — "which
+   picture" is the result of the call — and a press opens the original in the
+   lightbox. Tokens keep both themes in step with the transcript. */
+
+.strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  /* The row's 20px leading box plus its 8px gap: pictures hang under the title
+     edge, and follow it when the font-size preference moves that edge. */
+  margin: 4px 0 6px calc(28px + var(--dsh-content-font-delta, 0px));
+}
+
+.thumb {
+  position: relative;
+  display: block;
+  width: 108px;
+  height: 66px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--codex-card-border, #d0d5dd);
+  border-radius: 8px;
+  background: var(--dsw-alias-markdown-code-block, #fafafa);
+  cursor: zoom-in;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+:global(body[data-ds-dark-theme]) .thumb {
+  border-color: rgb(255 255 255 / 18%);
+}
+
+.thumb:hover {
+  border-color: var(--codex-blue-primary, #1d9e75);
+  box-shadow: 0 3px 10px rgb(17 24 39 / 12%);
+}
+
+.thumb:focus-visible {
+  outline: 2px solid var(--codex-blue-primary, #1d9e75);
+  outline-offset: 2px;
+}
+
+/* The top of a screenshot is where its content starts, so a crop keeps it. */
+.image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top center;
+}
+
+/* A white screenshot glares in the dark theme; the lightbox keeps the original. */
+:global(body[data-ds-dark-theme]) .image {
+  filter: brightness(0.8);
+}
+
+.index {
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: 5px;
+  /* A fixed scrim, not a token pair: the number must read over any picture. */
+  background: rgb(0 0 0 / 55%);
+  color: #ffffff;
+  font-size: 10px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.more {
+  align-self: center;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--codex-border-subtle, #e2e5ea);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.more:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}

@@ -137,15 +137,15 @@ createRoot(document.getElementById('root')).render(
     // Chat B never chose it, so full access must not follow the switch.
     await openChat('chat B')
     await shows('ask', '执行前询问')
-    await pick('仅可查看')
-    await shows('read_only', '仅可查看')
-    assert.deepEqual(await saves(), [['A', 'full_access'], ['B', 'read_only']])
+    await pick('自动审批')
+    await shows('auto_review', '自动审批')
+    assert.deepEqual(await saves(), [['A', 'full_access'], ['B', 'auto_review']])
 
     // Going back and forth shows each chat's own level.
     await openChat('chat A')
     await shows('full_access', '完全权限')
     await openChat('chat B')
-    await shows('read_only', '仅可查看')
+    await shows('auto_review', '自动审批')
 
     // A reload reads both levels back from the backend, not from this page.
     await page.reload()
@@ -153,7 +153,7 @@ createRoot(document.getElementById('root')).render(
     await openChat('chat A')
     await shows('full_access', '完全权限')
     await openChat('chat B')
-    await shows('read_only', '仅可查看')
+    await shows('auto_review', '自动审批')
 
     // A new chat starts from the default, even while another chat holds full access.
     await openChat('new chat')
@@ -161,13 +161,22 @@ createRoot(document.getElementById('root')).render(
     // Choosing one for a chat that does not exist yet is kept for the chat its
     // first message creates, and is not written to any chat that already exists
     // (the reload above emptied the log of the saves made before it).
-    await pick('工作区内修改')
-    await shows('workspace_write', '工作区内修改')
+    await pick('自动审批')
+    await shows('auto_review', '自动审批')
     assert.equal((await saves()).length, 0, 'a new chat choice must not overwrite another chat')
     await openChat('chat A')
     await shows('full_access', '完全权限')
     await openChat('chat B')
-    await shows('read_only', '仅可查看')
+    await shows('auto_review', '自动审批')
+
+    // The menu offers only the levels that ask, review or grant; read-only and
+    // workspace-write are gone, so no chat can be put back on them.
+    await pill.click()
+    const menu = page.getByRole('dialog', { name: '工作区操作权限' })
+    assert.equal(await menu.getByRole('button').count(), 3, 'three levels are offered')
+    const menuText = (await menu.textContent()) ?? ''
+    assert.ok(!menuText.includes('仅可查看'), 'read-only is no longer offered')
+    assert.ok(!menuText.includes('工作区内修改'), 'workspace-write is no longer offered')
 
     assert.deepEqual(errors, [])
   } finally {

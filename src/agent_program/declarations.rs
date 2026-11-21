@@ -292,8 +292,8 @@ pub fn static_library_header(libraries: &Libraries) -> String {
         "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n\
          // IMPORTANT: Pre-bound `io.*`, `git.*`, `process.*` methods are SYNCHRONOUS.\n\
          // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`, `process.promises.run_readonly`) or `require(\"<lib>/promises\")`.\n\
-         // MANDATORY exact-text edit rule: for io.edit/io.replace, any old_text, new_text, or replacement containing a backslash must use String.raw tagged templates, never ordinary quoted JS strings.\n\
-         // String.raw preserves backslashes; put real line breaks directly in the raw template because `\\n` remains a literal backslash plus n.\n",
+         // MANDATORY exact-text edit rule: for io.edit/io.replace/io.write, use String.raw tagged templates for snippets containing backslashes that have NO backticks (`) or `${` (put real line breaks directly because `\\n` stays literal).\n\
+         // NEVER wrap a whole file or multi-line block that contains backticks (`) or `${` (such as Rust doc comments, Markdown, or TS templates) in a single String.raw`...` — unescaped backticks terminate the template literal early. Use a quoted line array `[\"line 1\", String.raw`line 2`].join(\"\\n\")` instead.\n",
     );
     out.push_str(&directory(libraries));
     out.push('\n');

@@ -345,6 +345,14 @@ pub(crate) async fn run_task_with_resource(
     )
     .await?;
 
+    // The admitted attachment parts own the frontend message bubble, so the
+    // timeline shows the image/file the user actually sent instead of dropping it.
+    let admitted = crate::attachments::admitted(state.workspace.root(), &task, turn)?;
+    let user_content = if admitted.is_empty() {
+        json!([{"type": "text", "text": prompt}])
+    } else {
+        Value::Array(admitted)
+    };
     append_event(
         &s,
         "user/message",
@@ -354,7 +362,7 @@ pub(crate) async fn run_task_with_resource(
             "message": {
                 "id": agent_service::uuid_like(),
                 "role": "user",
-                "content": [{"type": "text", "text": prompt}]
+                "content": user_content
             }
         }),
         true,
@@ -364,7 +372,17 @@ pub(crate) async fn run_task_with_resource(
     // Every new user turn ALWAYS starts with a brand-new empty JS VM!
     w.program = Some(Runtime::new_repl(libs.clone())?);
     w.next_ref_id = 1;
-    w.context_doc.begin_turn(turn, &prompt);
+    // The model only sees text: an admitted image is registered as durable
+    // image_artifact_id visual material and a file keeps its attachment_id with
+    // read instructions, so a picture-only turn with an empty prompt still
+    // reaches the model with its attachment context intact.
+    let turn_user_text =
+        crate::attachments::model_content(state.workspace.root(), &task, turn, &prompt)?
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+    w.context_doc.begin_turn(turn, &turn_user_text);
     save_window(&s, &w).await?;
 
     let allow_shell = s.plugin.is_none() && !s.ban_execution;

@@ -19,8 +19,9 @@ import { useDisclosure } from '../disclosure.ts'
 import css from '../dsh/tool/ToolRow.module.css'
 import { t } from '../i18n.ts'
 import { cleanToolError, type ToolResult } from '../model.ts'
-import { VisualArtifactPreview } from './VisualMaterials.tsx'
-import type { VisualRecord } from '../visual.ts'
+import { visualEvidenceOf } from '../visual.ts'
+import { useConversationTaskId } from './ConversationTask.tsx'
+import { VisualEvidenceStrip } from './VisualEvidenceStrip.tsx'
 import { toolVisual } from './toolVisuals.tsx'
 
 const SUMMARY_FIELDS = ['path', 'file_path', 'TargetFile', 'AbsolutePath', 'query', 'pattern', 'cmd', 'command', 'CommandLine', 'program', 'symbol', 'symbol_id', 'name', 'prompt', 'area']
@@ -232,10 +233,10 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
         }),
       ].filter((message): message is string => typeof message === 'string')
     : []
-  const visualArtifact = useMemo(() => {
-    const value = result ? parse(result.text) as VisualRecord : null
-    return value && typeof value === 'object' && value.visual_artifact ? value.visual_artifact as VisualRecord : undefined
-  }, [result])
+  const taskId = useConversationTaskId()
+  // The pictures this very call handled, shown in the row rather than inside its
+  // detail: a screenshot or an analysed image is the call's result.
+  const evidence = useMemo(() => visualEvidenceOf([{ name, result }], taskId), [name, result, taskId])
   const errorLine = result?.isError === true && !shellResult ? cleanToolError(result.text) : ''
   const nativeSummary = nativeResult
     ? nativeResult.outcome === 'exited'
@@ -390,7 +391,6 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
       >
         {expanded && (
           <div className={css.bodyWrap}>
-            {visualArtifact && <VisualArtifactPreview artifact={visualArtifact} />}
             {isShellSession && (
               <div className={css.shellMeta}>
                 <span>{typeof shellResult?.shell === 'string' ? shellResult.shell : 'Shell'} · {shellStatus}</span>
@@ -470,6 +470,7 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
           </div>
         )}
       </DisclosureRow>
+      {evidence.length > 0 && <VisualEvidenceStrip items={evidence} />}
     </div>
   )
 })

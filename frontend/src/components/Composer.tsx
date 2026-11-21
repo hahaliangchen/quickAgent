@@ -603,6 +603,8 @@ export function Composer({
                     <span>自动审批</span>
                   </>
                 )}
+                {/* Levels the picker no longer offers: a chat saved at one of them keeps
+                    showing it, so an older chat is never relabelled as a broader level. */}
                 {permissionMode === 'workspace_write' && (
                   <>
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6">
@@ -899,41 +901,7 @@ export function Composer({
           </div>
 
           <div className={codexCss.permOptionList}>
-            {/* 1. 仅可查看 (Read Only) */}
-            <button
-              type="button"
-              className={codexCss.permOptionItem}
-              onClick={() => handleSelectPermission('read_only')}
-            >
-              <span className={codexCss.permOptionIcon}>
-                <svg width="18" height="18" viewBox="0 0 16 16" fill="none" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" stroke="currentColor">
-                  <path d="M5.08545 8.13775L7.18455 10.2368C7.26636 10.3187 7.4003 10.3142 7.47649 10.2271L11.5148 5.61194" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M6.59624 2.14853C7.50155 1.80917 8.49914 1.80919 9.40444 2.14859L13.9245 3.84317V7.11961C13.9245 11.6089 10.5565 13.5975 8.00035 14.5779C5.44423 13.5975 2.07544 11.6089 2.07544 7.11961V3.84317L6.59624 2.14853Z" strokeLinejoin="round" />
-                </svg>
-              </span>
-              <div className={codexCss.permOptionBody}>
-                <span className={codexCss.permOptionTitle}>仅可查看</span>
-                <span className={codexCss.permOptionDesc}>只读模式，禁止修改文件或运行外部命令</span>
-              </div>
-              {permissionMode === 'read_only' && (
-                <span className={codexCss.permOptionCheck}>
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                </span>
-              )}
-            </button>
-
-            <button type="button" className={codexCss.permOptionItem} onClick={() => handleSelectPermission('workspace_write')}>
-              <span className={codexCss.permOptionIcon}>{ASK_ICON}</span>
-              <div className={codexCss.permOptionBody}>
-                <span className={codexCss.permOptionTitle}>工作区内修改</span>
-                <span className={codexCss.permOptionDesc}>Linux 上命令在工作区写入沙箱中运行；其他系统暂不允许运行命令。网络和文件读取不受沙箱限制。</span>
-              </div>
-              {permissionMode === 'workspace_write' && <span className={codexCss.permOptionCheck}>✓</span>}
-            </button>
-
-            {/* 2. 执行前询问 (Ask) */}
+            {/* 1. 执行前询问 (Ask) */}
             <button
               type="button"
               className={codexCss.permOptionItem}

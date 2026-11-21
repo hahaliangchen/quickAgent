@@ -13,6 +13,7 @@ mod step2_virtual;
 mod step3_handles;
 mod step4_durability;
 mod step5_image_generation;
+mod step6_attachments;
 
 use crate::agent_service::{self, AgentServiceState};
 use axum::{Json, Router, routing::post};

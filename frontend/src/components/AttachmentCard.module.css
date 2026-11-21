@@ -1,0 +1,138 @@
+/* Attachment previews a user message carries: the image itself, or a file's
+   name beside a glyph. They sit above the bubble in the same right-aligned
+   column, so a card borrows the bubble's 14px radius and hairline border and
+   keeps the accent colour for hover and focus only. Colours are design-platform
+   and codex-theme tokens, so both themes follow without an override. */
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  /* Each card is only as tall as its own thumbnail: stretching them to the
+     tallest sibling left a short preview floating above empty space. */
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  width: fit-content;
+  max-width: min(240px, 100%);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--codex-card-border, #d0d5dd);
+  border-radius: 14px;
+  background: var(--codex-card-bg, #ffffff);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+
+/* Images share one width so footers line up when a turn carries several. */
+.card[data-kind='image'] {
+  width: 220px;
+  cursor: zoom-in;
+}
+
+/* A white screenshot glares next to a dark transcript: the thumbnail is dimmed
+   here only, and the image opened from it stays untouched. */
+:global(body[data-ds-dark-theme]) .card {
+  background: #2a2c31;
+  border-color: #3d4048;
+}
+
+:global(body[data-ds-dark-theme]) .thumb {
+  filter: brightness(0.78);
+}
+
+/* A file that is not an image is one row tall: glyph, name. */
+.card[data-kind='file'] {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.card:hover {
+  border-color: var(--codex-blue-primary, #1d9e75);
+  box-shadow: 0 6px 18px rgb(17 24 39 / 10%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .card:hover {
+    transform: translateY(-1px);
+  }
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--codex-blue-primary, #1d9e75);
+  outline-offset: 2px;
+}
+
+/* The thumbnail fills the card width at its own aspect ratio. Only a page-long
+   screenshot is cropped, and it keeps its top, where the content starts. */
+.thumb {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 180px;
+  object-fit: cover;
+  object-position: top center;
+  background: var(--dsw-alias-markdown-code-block, #fafafa);
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 6px 10px;
+}
+
+.card[data-kind='image'] .foot {
+  border-top: 1px solid var(--codex-border-subtle, #e2e5ea);
+}
+
+.card[data-kind='file'] .foot {
+  padding: 0;
+}
+
+.glyph {
+  display: inline-flex;
+  flex: none;
+}
+
+/* A file type without its own colour falls back to a gray too faint to read as
+   an attachment; this builds the same glyph one tier darker. */
+.glyphPlain {
+  --dsh-file-type-icon-color: var(--dsw-alias-label-tertiary);
+}
+
+/* Names arrive already shortened in the middle (see AttachmentCard.tsx), so
+   the date or version that tells two screenshots apart survives; the ellipsis
+   here is only the last resort when a name is still too wide. */
+.name {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(18px + var(--dsh-content-font-delta-secondary, 0px));
+  color: var(--dsw-alias-label-primary);
+}
+
+.nameBase {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.card:hover .name {
+  color: var(--codex-blue-primary, #1d9e75);
+}

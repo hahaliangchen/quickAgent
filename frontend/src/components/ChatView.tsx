@@ -23,6 +23,8 @@ import { t } from '../i18n.ts'
 import { awaitingModel, chatItems, failedToolNames, flattenItems, formatDuration, splitTurnItems, type ChatItem, type TurnEndReason } from '../model.ts'
 import { useTaskDuration } from '../useTaskDuration.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
+import { AttachmentCards } from './AttachmentCard.tsx'
+import { ConversationTaskProvider } from './ConversationTask.tsx'
 import css from './ChatView.module.css'
 import { ProcessList, liveActivity, toolProgressLabel } from './ProcessList.tsx'
 import { ToolRow } from './ToolRow.tsx'
@@ -116,7 +118,7 @@ function Item({
       return (
         <div className={messageCss.userRow}>
           <div className={messageCss.userStack}>
-            {item.attachments?.length ? <div style={{display:'flex',flexWrap:'wrap',gap:8}}>{item.attachments.map((file,i)=><a key={i} href={file.url} target='_blank' rel='noreferrer' download={file.image?undefined:file.name} style={{display:'flex',flexDirection:'column',gap:4,padding:8,border:'1px solid #dce1e7',borderRadius:10,maxWidth:240}}>{file.image&&<img src={file.url} alt={file.name} style={{maxWidth:220,maxHeight:180,objectFit:'contain'}}/>}<span>{file.name}</span></a>)}</div>:null}
+            {item.attachments?.length ? <AttachmentCards items={item.attachments} /> : null}
             {item.text&&<div className={messageCss.bubble}>{projectUserText(item.text, [], slashNames, 'skill')}</div>}
           </div>
         </div>
@@ -472,7 +474,7 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
     return list
   }, [items, closedBefore, running])
 
-  return (
+  const frame = (
     <div className={chatCss.frame}>
       <div className={chatCss.root}>
         <div className={chatCss.scroll}>
@@ -553,4 +555,6 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
       </div>
     </div>
   )
+  // Rows name this conversation's saved pictures without a prop chain.
+  return <ConversationTaskProvider taskId={task?.task_id ?? ''}>{frame}</ConversationTaskProvider>
 }

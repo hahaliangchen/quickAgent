@@ -72,7 +72,7 @@ Each response MUST be **one** of the two actions below:
 - Call `run_js` with raw JavaScript statements to execute inside the live per-turn VM (NO markdown fences, NO fabricated `// =>` results).
 - You may optionally write a brief 1-sentence progress note in your assistant message text before calling `run_js`, and keep `code` 100% pure JavaScript.
 - Emit ONE `run_js` call per step so the host executes it and returns the real output in the `tool` message before your next step.
-- **Batch into readable multi-line JS scripts once you know your targets**: JS runs in milliseconds while each model round-trip takes seconds. During initial exploration, a short probe is fine; once you understand the file layout, symbols, or checks needed, prefer writing a cohesive **multi-line** script (one statement per line with real `\n`, flat `const` sink bindings rather than cramming deeply nested `({ a: {...}, b: {...} })` onto one minified line, which easily causes bracket typos).
+- **Batch into readable multi-line JS scripts — avoid 1-line baby steps**: JS runs in milliseconds while each model round-trip takes seconds. Avoid dripping out 1 file read or 1 `.slice()`/`.grep()` per step; once you know 2+ target paths, handles, or edits, combine them into one cohesive **multi-line** script (one statement per line with real `\n`, using `Promise.all` over `.promises` for concurrent reads/searches and flat `const` sink bindings rather than cramming deeply nested `({ a: {...}, b: {...} })` onto one minified line).
 - **Batch across the entire turn, including final verification**: before issuing any `run_js` call—especially when checking remaining details or running final checks before replying—group all independent reads, slices, searches, or verifications you still need into one multi-line JS script (using `.promises` + `Promise.all` for concurrent I/O) instead of dripping them out as a chain of single-line follow-up calls.
 - **Prefer host library methods over shelling out & confirm paths**:
   - Default to structured host libraries (`io.list`, `io.read`, `io.search`, `io.edit`, `io.write`, `io.replace`, `git.*`, and `ResourceHandle` methods `f.slice` / `f.grep` / `f.outline`) for all file, text-search, and git work rather than shelling out to `rg`, `grep`, `find`, `sed`, or `cat` (avoids quoting bugs and missing CLI binaries, and keeps live `ResourceHandle`s in memory). Reserve `process.*` (`process.run_readonly`, `process.exec_command`) for builds, tests, project scripts, and CLI diagnostics that have no host library equivalent.
@@ -134,20 +134,27 @@ Each response MUST be **one** of the two actions below:
 - If you cannot proceed without user clarification, call `host.ask_user({ question: "..." });` inside `run_js` to pause the turn and deliver your question directly.
 
 ## Multi-Step Interaction Example
-[Step 1 — assistant calls `run_js`]:
-`run_js({ code: "const f = io.read({ path: \"src/auth.rs\" });" })`
+[Step 1 — batch confirmed reads and searches into one multi-line `run_js` call]:
+```js
+const paths = ["src/auth.rs", "src/session.rs"];
+const [authFile, sessionFile] = await Promise.all(
+  paths.map(path => io.promises.read({ path }))
+);
+const authHits = authFile.grep(/verify_token|decode/, 4);
+const sessionSlice = sessionFile.slice(1, 60);
+```
 
-[Host returns `tool` result: `// => f (File "src/auth.rs", Ref#1, ...)` with numbered lines (up to 64KB), or a compact `Ref#1` + structural index if > 64KB]
+[Host returns `tool` result: `authFile` / `sessionFile` stay live in VM memory as handles while `authHits` and `sessionSlice` are shown cleanly in numbered lines.]
 
-[Step 2 — if > 64KB, slice or grep exact lines via handle methods; otherwise jump straight to your final reply]:
-`run_js({ code: "const verifyFn = f.slice(61, 75);" })`
+[Step 2 — batch follow-up slices, edits, and verification into one multi-line `run_js` call]:
+```js
+const e1 = io.replace({ path: "src/auth.rs", start_line: 61, end_line: 64, replacement: "..." });
+const check = process.exec_command({ cmd: "cargo test --bin app -- auth" });
+check;
+```
 
 [Step 3 — final Markdown reply WITHOUT calling `run_js`]:
-Found the vulnerability in `src/auth.rs` lines 61–75...
-
-```rust
-// Suggested fix (shown to user, never executed)
-```
+Fixed the token verification bypass in `src/auth.rs` lines 61–64 and verified tests pass...
 "#;
 
 const VIRTUAL_LEAF_SYSTEM_PROMPT: &str = r#"You are executing inside an isolated single-layer `@virtual` JavaScript function frame.

@@ -607,26 +607,41 @@ fn compile_inner(
         let caret_offset = prefix.len() + (col0 - start);
         format!("\n  {prefix}{window}{suffix}\n  {}^", " ".repeat(caret_offset))
     };
+    let template_backtick_hint = |line_1based: usize| -> &'static str {
+        let lines: Vec<&str> = source.lines().collect();
+        let idx = line_1based.saturating_sub(1);
+        let current_has_backtick = lines.get(idx).is_some_and(|l| l.contains('`'));
+        let prior_opens_template = lines
+            .get(..idx)
+            .is_some_and(|prev| prev.iter().any(|l| l.contains("String.raw`") || l.contains('`')));
+        if current_has_backtick && prior_opens_template {
+            "\n  Hint: an unescaped backtick (`) or ${ inside a template literal / String.raw terminates it early. For multi-line code or docs containing backticks, use a quoted line array `[\"line 1\", String.raw`...`].join(\"\\n\")`."
+        } else {
+            ""
+        }
+    };
     let module = parser.parse_module().map_err(|e| {
         let p = map.lookup_char_pos(e.span().lo);
         let col = p.col.0 + 1;
         anyhow::anyhow!(
-            "TS_PROGRAM {}:{}: {}{}",
+            "TS_PROGRAM {}:{}: {}{}{}",
             p.line,
             col,
             describe(format!("{:?}", e.kind())),
-            format_snippet(p.line, col)
+            format_snippet(p.line, col),
+            template_backtick_hint(p.line),
         )
     })?;
     if let Some(e) = parser.take_errors().first() {
         let p = map.lookup_char_pos(e.span().lo);
         let col = p.col.0 + 1;
         bail!(
-            "TS_PROGRAM {}:{}: {}{}",
+            "TS_PROGRAM {}:{}: {}{}{}",
             p.line,
             col,
             describe(format!("{:?}", e.kind())),
-            format_snippet(p.line, col)
+            format_snippet(p.line, col),
+            template_backtick_hint(p.line),
         );
     }
     if !internal {
