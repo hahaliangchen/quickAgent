@@ -66,6 +66,7 @@
 
             visual: Default::default(),
             visual_tool_settings: Default::default(),
+            image_generation_settings: Default::default(),
             delegate_agent_settings: Default::default(),
             config: None,
             config_path: None,

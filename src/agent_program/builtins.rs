@@ -317,7 +317,7 @@ fn text_encoding(name: &str, args: &[Value]) -> Result<Option<Value>> {
 }
 
 pub(super) fn call(name: &str, args: Vec<Value>) -> Result<Value> {
-    let (min, max) = arity(name).with_context(||format!("{name} is unavailable in the flow runtime. {}", crate::agent_program::NOT_AVAILABLE_HINT))?;
+    let (min, max) = arity(name).with_context(||super::unsupported_builtin(name))?;
     ensure!(
         (min..=max).contains(&args.len()),
         "invalid built-in argument count"

@@ -147,7 +147,7 @@ pub fn builtin() -> Libraries {
             "list_symbol_business_context",
             "search_symbol_business_context",
         ])),
-        ("vision".into(), same(&["view_image", "analyze_images", "image_analysis_results"])),
+        ("vision".into(), same(&["view_image", "analyze_images", "image_analysis_results", "generate_image"])),
         ("attachments".into(), same(&["read_attachment"])),
         // The main conversation's own materials and records: only the main
         // script has them, as a function has only its arguments.

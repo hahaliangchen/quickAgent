@@ -170,6 +170,33 @@ function $$arrayReverse(a){const n=a.length;for(let lo=0;lo<Math.floor(n/2);lo++
 function $$arrayShift(a){const n=a.length;if(n===0){a.length=0;return;}const first=a[0];for(let k=1;k<n;k++){if(k in a)a[k-1]=a[k];else delete a[k-1];}delete a[n-1];a.length=n-1;return first;}
 function $$arrayUnshift(a,...items){const n=a.length,m=items.length;if(m>0){for(let k=n;k>0;k--){if(k-1 in a)a[k+m-1]=a[k-1];else delete a[k+m-1];}for(let k=0;k<m;k++)a[k]=items[k];}a.length=n+m;return n+m;}
 function $$arraySplice(a,...args){const n=a.length,s=$$relativeIndex(args[0],n,0),count=args.length===0?0:args.length===1?n-s:Math.min(Math.max(Math.trunc(Number(args[1]))||0,0),n-s),m=Math.max(args.length-2,0),out=[];out.length=count;for(let i=0;i<count;i++)if(s+i in a)out[i]=a[s+i];if(m<count){for(let k=s;k<n-count;k++){if(k+count in a)a[k+m]=a[k+count];else delete a[k+m];}for(let k=n;k>n-count+m;k--)delete a[k-1];}else if(m>count){for(let k=n-count;k>s;k--){if(k+count-1 in a)a[k+m-1]=a[k+count-1];else delete a[k+m-1];}}for(let k=0;k<m;k++)a[s+k]=args[k+2];a.length=n-count+m;return out;}
+function $$integer(value) {
+  const n = $$numberBuiltin(value);
+  return Number.isNaN(n) ? 0 : Math.trunc(n);
+}
+function $$arrayToSpliced(a, ...args) {
+  $$requireCoercible(a);
+  const n = $$arrayLikeLength(a), start = $$integer(args[0]);
+  const from = start < 0 ? Math.max(n + start, 0) : Math.min(start, n);
+  const count = args.length === 0 ? 0 : args.length === 1 ? n - from : Math.min(Math.max($$integer(args[1]), 0), n - from);
+  const added = Math.max(args.length - 2, 0);
+  if (n - count + added > 1000000) throw new RangeError('Array exceeds runtime limit');
+  const out = [];
+  let to = 0;
+  for (let i = 0; i < from; i++) $$createData(out, to++, a[i]);
+  for (let i = 2; i < args.length; i++) $$createData(out, to++, args[i]);
+  for (let i = from + count; i < n; i++) $$createData(out, to++, a[i]);
+  return out;
+}
+function $$arrayWith(a, index, value) {
+  $$requireCoercible(a);
+  const n = $$arrayLikeLength(a), relative = $$integer(index);
+  const at = relative < 0 ? n + relative : relative;
+  if (at < 0 || at >= n) throw new RangeError('Array.with index out of range');
+  const out = [];
+  for (let i = 0; i < n; i++) $$createData(out, i, i === at ? value : a[i]);
+  return out;
+}
 function $$arrayCopyWithin(a,target,start,end){const n=a.length;let to=$$relativeIndex(target,n,0),from=$$relativeIndex(start,n,0),count=Math.min($$relativeIndex(end,n,n)-from,n-to),step=1;if(from<to&&to<from+count){step=-1;from+=count-1;to+=count-1;}for(let i=0;i<count;i++){if(from in a)a[to]=a[from];else delete a[to];from+=step;to+=step;}return a;}
 function $$sortApply(a,values){const n=a.length;for(let i=0;i<values.length;i++)a[i]=values[i];for(let i=values.length;i<n;i++)delete a[i];return a;}
 
@@ -189,7 +216,11 @@ function $$reflectDelete(target,key){if(!$$isObject(target))throw new TypeError(
 function $$reflectDescriptor(target,key){if(!$$isObject(target))throw new TypeError('Reflect target must be an object');return $$keyOperation('Reflect.getOwnPropertyDescriptor',target,$$toPropertyKey(key));}
 function $$objectDescriptor(target,key){$$requireCoercible(target);target=Object(target);return $$keyOperation('Object.getOwnPropertyDescriptor',target,$$toPropertyKey(key));}
 
-function $$getIteratorMethod(value,method){if(typeof method!=='function')throw new TypeError('Symbol.iterator must be callable');const iterator=$$invokeWithReceiver(method,value,[]);if(!$$isObject(iterator))throw new TypeError('Symbol.iterator must return an object');return {iterator,next:iterator.next,done:false};}
+function $$iteratorRecord(iterator) {
+  if (!$$isObject(iterator)) throw new TypeError('Iterator method must return an object');
+  return {iterator, next: iterator.next, done: false};
+}
+function $$getIteratorMethod(value,method){if(typeof method!=='function')throw new TypeError('Symbol.iterator must be callable');return $$iteratorRecord($$invokeWithReceiver(method,value,[]));}
 function $$getIterator(value){$$requireCoercible(value);return $$getIteratorMethod(value,value[Symbol.iterator]);}
 function $$iteratorStep(record,readValue=true){if(record.done)return {done:true,value:undefined};try{const step=$$invokeWithReceiver(record.next,record.iterator,[]);if(!$$isObject(step))throw new TypeError('Iterator result must be an object');if(step.done){record.done=true;return {done:true,value:undefined};}return {done:false,value:readValue?step.value:undefined};}catch(error){record.done=true;throw error;}}
 function $$iteratorCloseNormal(record){if(record.done)return;record.done=true;const method=record.iterator.return;if(method===undefined||method===null)return;if(typeof method!=='function')throw new TypeError('Iterator return must be callable');const result=$$invokeWithReceiver(method,record.iterator,[]);if(!$$isObject(result))throw new TypeError('Iterator return result must be an object');}
@@ -203,6 +234,101 @@ function $$constructSet(source){return $$constructCollection('Set',source);}
 function $$constructWeakMap(source){return $$constructCollection('WeakMap',source);}
 function $$constructWeakSet(source){return $$constructCollection('WeakSet',source);}
 function $$fromEntries(source){$$requireCoercible(source);const out={};for(const entry of source){if(!$$isObject(entry))throw new TypeError('Iterator entry must be an object');const key=entry[0],value=entry[1];$$createData(out,$$toPropertyKey(key),value);}return out;}
+
+function $$objectGroupBy(items, callback) { return $$groupBy(items, callback, false); }
+function $$mapGroupBy(items, callback) { return $$groupBy(items, callback, true); }
+function $$groupBy(items, callback, map) {
+  $$requireCoercible(items);
+  if (typeof callback !== 'function') throw new TypeError('groupBy callback must be callable');
+  const record = $$getIterator(items), out = map ? $$emptyCollection('Map') : $$createObject(null);
+  let index = 0;
+  try {
+    while (true) {
+      if (index >= 9007199254740991) throw new TypeError('groupBy index exceeds the maximum safe integer');
+      const step = $$iteratorStep(record);
+      if (step.done) return out;
+      const value = step.value, key = $$invokeWithReceiver(callback, undefined, [value, index]);
+      const property = map ? key : $$toPropertyKey(key);
+      let group = map ? $$collectionData('get', out, key) : out[property];
+      if (group === undefined) {
+        group = [];
+        if (map) $$collectionData('set', out, key, group);
+        else $$createData(out, property, group);
+      }
+      $$createData(group, group.length, value);
+      index++;
+    }
+  } catch (error) { $$iteratorCloseThrow(record, error); }
+}
+
+function $$promiseWithResolvers(ctor) {
+  if (!$$isConstructor(ctor)) throw new TypeError('Promise.withResolvers receiver must be a constructor');
+  let resolve, reject;
+  const promise = new ctor((res, rej) => {
+    if (resolve !== undefined || reject !== undefined) throw new TypeError('Promise capability already initialized');
+    resolve = res;
+    reject = rej;
+  });
+  if (typeof resolve !== 'function' || typeof reject !== 'function') throw new TypeError('Promise capability requires callable resolve and reject');
+  return {promise, resolve, reject};
+}
+
+function $$setRecord(other) {
+  if (!$$isObject(other)) throw new TypeError('Set operation requires a Set-like object');
+  const rawSize = $$numberBuiltin(other.size);
+  if (Number.isNaN(rawSize)) throw new TypeError('Set-like size must be numeric');
+  const size = Math.trunc(rawSize);
+  if (size < 0) throw new RangeError('Set-like size must not be negative');
+  const has = other.has;
+  if (typeof has !== 'function') throw new TypeError('Set-like has must be callable');
+  const keys = other.keys;
+  if (typeof keys !== 'function') throw new TypeError('Set-like keys must be callable');
+  return {size, has, keys};
+}
+
+function $$setOperation(set, other, op) {
+  const record = $$setRecord(other), size = $$collectionData('size', set);
+  if (op === 'isSubsetOf' && size > record.size) return false;
+  if (op === 'isSupersetOf' && size < record.size) return false;
+  const difference = op === 'difference', intersection = op === 'intersection';
+  const union = op === 'union', symmetric = op === 'symmetricDifference';
+  // Union/difference copy before asking for keys; symmetric difference copies
+  // after keys() and its next getter have run, as those can mutate the receiver.
+  let out = union || difference ? $$collectionData('copy', set) : intersection ? $$emptyCollection('Set') : undefined;
+  if (op === 'isSubsetOf' || ((difference || intersection || op === 'isDisjointFrom') && size <= record.size)) {
+    const iterator = $$collectionData('keys', difference ? out : set);
+    while (true) {
+      const step = $$iteratorPlan(iterator);
+      if (step.done) return out === undefined ? true : out;
+      const key = step.value, present = !!$$invokeWithReceiver(record.has, other, [key]);
+      if (difference && present) $$collectionData('delete', out, key);
+      if (intersection && present) $$collectionData('add', out, key);
+      if ((op === 'isSubsetOf' && !present) || (op === 'isDisjointFrom' && present)) return false;
+    }
+  }
+  const keys = $$iteratorRecord($$invokeWithReceiver(record.keys, other, []));
+  if (symmetric) out = $$collectionData('copy', set);
+  while (true) {
+    const step = $$iteratorStep(keys);
+    if (step.done) return out === undefined ? true : out;
+    const key = step.value;
+    if (union) $$collectionData('add', out, key);
+    else if (difference) $$collectionData('delete', out, key);
+    else {
+      const present = $$collectionData('has', set, key);
+      if (symmetric) {
+        const inResult = $$collectionData('has', out, key);
+        if (inResult && present) $$collectionData('delete', out, key);
+        else if (!inResult && !present) $$collectionData('add', out, key);
+      } else if (intersection) {
+        if (present) $$collectionData('add', out, key);
+      } else if (op === 'isSupersetOf' ? !present : present) {
+        $$iteratorCloseNormal(keys);
+        return false;
+      }
+    }
+  }
+}
 
 function $$objectRest(value,excluded){$$requireCoercible(value);const out={},source=Object(value),keys=Reflect.ownKeys(source);for(let i=0;i<keys.length;i++){const key=keys[i];if(!excluded.includes(key)&&Object.prototype.propertyIsEnumerable.call(source,key))$$createData(out,key,source[key]);}return out;}
 

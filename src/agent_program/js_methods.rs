@@ -60,7 +60,9 @@ pub(super) fn method_arity(name: &str) -> Option<(usize, usize)> {
         "slice" | "split" | "substring" | "substr" | "grep" => (0, 2),
         "head" | "tail" => (0, 1),
         "outline" => (0, 0),
-        "replace" | "replaceAll" => (2, 2),
+        "replace" | "replaceAll" | "with" => (2, 2),
+        "toSpliced" => (0, 64),
+        _ if super::js_collections::set_operation(name) => (1, 1),
         "trim" | "trimStart" | "trimEnd" | "valueOf" | "pop" | "shift" | "reverse" | "keys"
         | "values" | "entries" | "toReversed" => (0, 0),
         "concat" | "push" | "unshift" | "splice" => (0, 64),
@@ -87,6 +89,34 @@ fn regex_parts(heap: &Heap, value: &VmValue) -> Option<(String, String)> {
         VmValue::Reference(id) => heap.regex_parts(*id),
         _ => None,
     }
+}
+
+/// RegExp.escape encodes each code point, preserving lone UTF-16 surrogates as escapes.
+fn regexp_escape(value: &VmValue) -> Result<VmValue> {
+    use std::fmt::Write;
+    let units: Vec<u16> = match value {
+        VmValue::String(s) => s.encode_utf16().collect(),
+        VmValue::Utf16(s) => s.clone(),
+        _ => bail!("TypeError: RegExp.escape requires a string"),
+    };
+    let mut out = String::new();
+    for (index, point) in char::decode_utf16(units).enumerate() {
+        match point {
+            Err(lone) => write!(out, r"\u{:04x}", lone.unpaired_surrogate()).unwrap(),
+            Ok(c) if index == 0 && c.is_ascii_alphanumeric() => write!(out, r"\x{:02x}", c as u32).unwrap(),
+            Ok(c) if "^$\\.*+?()[]{}|/".contains(c) => { out.push('\\'); out.push(c); }
+            Ok('\t') => out.push_str(r"\t"),
+            Ok('\n') => out.push_str(r"\n"),
+            Ok('\u{b}') => out.push_str(r"\v"),
+            Ok('\u{c}') => out.push_str(r"\f"),
+            Ok('\r') => out.push_str(r"\r"),
+            Ok(c) if ",-=<>#&!%:;@~'\x60\"".contains(c) || c == ' ' => write!(out, r"\x{:02x}", c as u32).unwrap(),
+            Ok(c) if is_js_whitespace(c) => write!(out, r"\u{:04x}", c as u32).unwrap(),
+            Ok(c) => out.push(c),
+        }
+        ensure!(out.len() <= TEXT_RESULT_LIMIT, "RangeError: string result exceeds 4 MiB");
+    }
+    Ok(VmValue::String(out))
 }
 
 /// Byte offsets from the regex engine become Unicode scalar positions.
@@ -877,6 +907,8 @@ pub(super) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
     if super::js_collections::NAMES.contains(&name) || name.strip_prefix("new ").is_some_and(|n|super::js_collections::NAMES.contains(&n)) {return Some((0,64));}
     if matches!(name,"$$iterator"|"$$arrayFromIterator"|"$$collectionEntries"|"$$iteratorValue"|"$$iterableArray") {return Some((1,1));}
     Some(match name {
+        "Object.groupBy" | "Map.groupBy" | "RegExp.escape" | "Promise.withResolvers" => (0, usize::MAX),
+        "$$collectionData" => (2, 4),
         "$$rawEncodeURI"|"$$rawDecodeURI"|"$$rawEncodeURIComponent"|"$$rawDecodeURIComponent"=>(1,1),"String.raw"=>(1,64),
         "$$functionName"=>(3,3),"$$rawExponential"=>(2,2),
         "$$rawLocaleCompare"|"$$rawDateLocale"=>(4,4),"$$rawNumberLocale"=>(3,3),
@@ -1009,6 +1041,8 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
     if let Some(value)=heap.symbol_builtin(name,args)?{return Ok(value);}
     if let Some(value)=heap.descriptor_builtin(name,args)?{return Ok(value);}
     if let Some(value)=heap.prototype_builtin(name,args)?{return Ok(value);}
+    if name == "$$collectionData" { return super::js_collections::collection_data(heap, args); }
+    if name == "RegExp.escape" { return regexp_escape(&arg(args, 0)); }
     if name=="RegExp" {
         if let Some(VmValue::Reference(id))=args.first() && heap.regex_parts(*id).is_some() && args.get(1).is_none_or(|v|*v==VmValue::Undefined){return Ok(VmValue::Reference(*id));}
         return construct_regexp(heap,args);
@@ -1316,7 +1350,7 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
         _ => {
             // Only the explicitly JSON-based library crosses this boundary.
             // An unknown native must name itself before inspecting arguments.
-            ensure!(super::builtins::arity(name).is_some(),"TypeError: {name} is unavailable in the flow runtime. {}", crate::agent_program::NOT_AVAILABLE_HINT);
+            ensure!(super::builtins::arity(name).is_some(),"TypeError: {}", super::unsupported_builtin(name));
             let mut values = Vec::with_capacity(args.len());
             for value in args {
                 values.push(heap.to_json(value)?);

@@ -333,6 +333,9 @@ impl Heap {
                 )?;
             }
         }
+        for &name in super::super::js_collections::SET_OPERATIONS {
+            self.builtin_method("Set.prototype", name, &format!("Set.prototype.{name}"))?;
+        }
         for class in [
             "Map Iterator",
             "Set Iterator",
@@ -364,7 +367,7 @@ impl Heap {
         for (namespace, methods) in [
             (
                 "Object",
-                "create getPrototypeOf setPrototypeOf keys values entries fromEntries assign hasOwn is freeze defineProperty defineProperties getOwnPropertyDescriptor getOwnPropertyDescriptors getOwnPropertyNames getOwnPropertySymbols preventExtensions isExtensible seal isSealed isFrozen",
+                "create getPrototypeOf setPrototypeOf keys values entries fromEntries groupBy assign hasOwn is freeze defineProperty defineProperties getOwnPropertyDescriptor getOwnPropertyDescriptors getOwnPropertyNames getOwnPropertySymbols preventExtensions isExtensible seal isSealed isFrozen",
             ),
             ("Reflect", "apply construct defineProperty deleteProperty get getOwnPropertyDescriptor getPrototypeOf has isExtensible ownKeys preventExtensions set setPrototypeOf"),
             ("Symbol", "for keyFor"),
@@ -375,7 +378,9 @@ impl Heap {
                 "isInteger isSafeInteger isFinite isNaN parseInt parseFloat",
             ),
             ("Date", "now parse UTC"),
-            ("Promise", "resolve reject all allSettled race any"),
+            ("Promise", "resolve reject all allSettled race any withResolvers"),
+            ("Map", "groupBy"),
+            ("RegExp", "escape"),
             (
                 "Math",
                 "abs floor ceil round trunc sign sqrt cbrt exp log log2 log10 sin cos tan asin acos atan pow atan2 max min hypot random",

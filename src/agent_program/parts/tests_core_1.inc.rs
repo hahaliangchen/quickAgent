@@ -882,6 +882,14 @@ fn compatibility_builtin_contracts_parse_and_match_available_apis() {
         assert!(js_methods::builtin_arity(name).is_some(),"{name}");
         assert!(CAPABILITIES.contains(name),"guide omits {name}");
     }
+    for name in ["Object.groupBy", "Map.groupBy", "Promise.withResolvers", "RegExp.escape"] {
+        assert!(js_methods::builtin_arity(name).is_some(), "{name}");
+        assert!(CAPABILITIES.contains(name), "guide omits {name}");
+    }
+    for name in js_collections::SET_OPERATIONS.iter().copied().chain(["with", "toSpliced"]) {
+        assert!(js_methods::method_arity(name).is_some(), "{name}");
+        assert!(BUILTIN_CONTRACTS.contains(&format!("{name}(")) || BUILTIN_CONTRACTS.contains(&format!("{name}<")), "contract omits {name}");
+    }
 }
 
 // Test-only effect targets, declared just like plugin methods.
@@ -1144,10 +1152,10 @@ function main() {
 "#,
     ));
     assert_eq!(result, json!({"length":5,"first":195,"encoding":"utf-8","inline":2,"empty":0,"size":9,"utf8":1,"kind":"function","globalBuffer":true,"globalURL":true}));
-    // What the runtime lacks is rejected with a request not to rewrite it by hand.
+    // Decoding byte arrays is unavailable; Buffer.from encodes rather than decodes.
     for source in ["function main(){return new TextDecoder().decode([104]);}"] {
         let error = compile(source).err().expect("unsupported").to_string();
-        assert!(error.contains("Do not hand-write a replacement"), "{source}: {error}");
+        assert!(error.contains("UTF-8 decoding from byte arrays is unavailable"), "{source}: {error}");
     }
     assert_eq!(returned(runtime("function main(){return [Buffer.from('x','utf8').length, path.isAbsolute('/tmp')];}")), json!([1, true]));
     let other = returned(runtime("function main(){try{return Buffer.byteLength('x','base64');}catch(error){return error.message;}}"));
@@ -1481,4 +1489,13 @@ fn deterministic_expressions_return_without_model_actions() {
         json!("function* x(){yield call();}")
     );
 }
+#[test]
+fn regexp_arguments_become_search_query_regex_and_case_flag() {
+    let mut run = runtime("function main(){return io.search({query:/foo|bar/i});}");
+    let State::Action(action) = run.next() else { panic!("expected search tool action"); };
+    assert!(matches!(action.kind, ActionKind::Tool { ref name, ref args } if name == "search_text" && args["query"] == "foo|bar" && args["regex"] == true && args["case_sensitive"] == false));
 
+    let mut explicit = runtime("function main(){return io.search({query:/foo|bar/i,case_sensitive:true});}");
+    let State::Action(action) = explicit.next() else { panic!("expected explicit search tool action"); };
+    assert!(matches!(action.kind, ActionKind::Tool { ref name, ref args } if name == "search_text" && args["query"] == "foo|bar" && args["regex"] == true && args["case_sensitive"] == true));
+}

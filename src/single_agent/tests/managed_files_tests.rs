@@ -568,7 +568,7 @@ async fn a_failed_edit_tells_the_agent_what_the_file_has() -> Result<()> {
     let stale = json!({"path":"bundler.js","edits":[{"old_text":"  const out = [];\n  return out.join(',');","new_text":"  return '';"}]});
     let failed = super::super::business_tool(&main, "node", "edit_file", stale, "edit").await;
     let message = format!("{:#}", failed.expect_err("old_text is not in the file"));
-    assert!(message.contains("old_text not found") && message.contains("2|   const out = [];") && message.contains("3|   return out.join('\\n');"), "{message}");
+    assert!(message.contains("old_text not found") && message.contains("2|  const out = [];") && message.contains("3|  return out.join('\\n');"), "{message}");
     assert_eq!(fs::read_to_string(root.join("bundler.js"))?, "function build() {\n  const out = [];\n  return out.join('\\n');\n}\n");
     drop(conn);
     drop(state);

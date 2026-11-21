@@ -346,7 +346,7 @@ impl Compiler {
                     && self.global("require")
                 {
                     if call.args.len() != 1 || call.args[0].spread.is_some() {
-                        return self.error(call.span, "require takes exactly one library name");
+                        return self.error(call.span, &super::unsupported_builtin("require"));
                     }
                     if let Some(library) = required_name(call) {
                         if let Some((module, functions)) = node_builtin_module(&library)
@@ -441,7 +441,7 @@ impl Compiler {
                 if let ast::Callee::Expr(target) = &call.callee
                     && let ast::Expr::Member(member) = &**target
                     && let ast::Expr::Ident(namespace) = &*member.obj
-                    && matches!(namespace.sym.as_ref(), "path" | "url" | "os" | "Buffer")
+                    && matches!(namespace.sym.as_ref(), "path" | "url" | "os" | "Buffer" | "require")
                     && self.resolve(namespace.sym.as_ref()).is_none()
                     && !self.libraries.contains_key(namespace.sym.as_ref())
                 {
@@ -449,15 +449,9 @@ impl Compiler {
                         return self.error(call.span, "built-in method must be a static name");
                     };
                     let name = format!("{}.{}", namespace.sym, method.sym);
-                    let (min, max) = super::builtins::arity(&name).ok_or_else(|| {
-                        let p = self.at(call.span);
-                        anyhow::anyhow!(
-                            "TS_PROGRAM {}:{}: unsupported built-in {name}. {}",
-                            p.line,
-                            p.column,
-                            crate::agent_program::NOT_AVAILABLE_HINT
-                        )
-                    })?;
+                    let Some((min, max)) = super::builtins::arity(&name) else {
+                        return self.error(call.span, &super::unsupported_builtin(&name));
+                    };
                     if !(min..=max).contains(&call.args.len())
                         || call.args.iter().any(|arg| arg.spread.is_some())
                     {

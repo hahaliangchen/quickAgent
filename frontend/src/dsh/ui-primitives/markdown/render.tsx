@@ -24,6 +24,10 @@ import type {} from 'mdast-util-math'
 import { normalizeUri } from 'micromark-util-sanitize-uri'
 import type { CodeToolbarLabels } from '../CodeToolbar.tsx'
 import { CodeBlock } from './CodeBlock.tsx'
+import { groupExecutionBlocks } from './codeBlockMeta.ts'
+import type { GroupableBlockDescriptor } from './codeBlockMeta.ts'
+import { ExecutionGroup } from './ExecutionGroup.tsx'
+import type { ExecutionGroupAttachment, ExecutionGroupItem } from './ExecutionGroup.tsx'
 import { FlowDiagram } from './FlowDiagram.tsx'
 import { parseFlowData } from './flow-data.ts'
 import { parseFileLink } from './file-link.ts'
@@ -212,13 +216,94 @@ export interface MarkdownRenderContext {
  * @param context - The pass state; footnote numbering mutates in document order.
  * @returns One React node per rendered block.
  */
+function extractPlainText(node: Md.RootContent): string {
+  if ('value' in node && typeof node.value === 'string') return node.value
+  if ('children' in node && Array.isArray(node.children)) {
+    return (node.children as readonly Md.RootContent[]).map(extractPlainText).join('')
+  }
+  return ''
+}
+
+function toBlockDescriptor(node: Md.RootContent): GroupableBlockDescriptor {
+  if (node.type === 'code') {
+    return { type: 'code', lang: node.lang ?? undefined, value: node.value }
+  }
+  if (node.type === 'paragraph') {
+    return { type: 'paragraph', text: extractPlainText(node) }
+  }
+  return { type: node.type }
+}
+
 export function renderBlocks(
   blocks: readonly PositionedBlock[],
   context: MarkdownRenderContext,
 ): ReactNode[] {
-  return blocks
-    .map(block => renderNode(block.node, block.key, context))
-    .filter(element => element !== null)
+  const enableExecutionGroup = !context.streaming
+    && context.labels.code.toolbarLabels?.expandLabel !== undefined
+    && blocks.length >= 2
+
+  if (!enableExecutionGroup) {
+    return blocks
+      .map(block => renderNode(block.node, block.key, context))
+      .filter(element => element !== null)
+  }
+
+  const grouped = groupExecutionBlocks(blocks.map(block => toBlockDescriptor(block.node)))
+  const out: ReactNode[] = []
+
+  for (const part of grouped) {
+    if (part.kind === 'single') {
+      const block = blocks[part.blockIndex]
+      if (block === undefined) continue
+      const element = renderNode(block.node, block.key, context)
+      if (element !== null) out.push(element)
+      continue
+    }
+
+    const renderedByIndex = new Map<number, ReactNode>()
+    const fallbackElements: ReactNode[] = []
+    for (let idx = part.startIndex; idx <= part.endIndex; idx += 1) {
+      const block = blocks[idx]
+      if (block === undefined) continue
+      const el = renderNode(block.node, block.key, context)
+      if (el !== null) {
+        renderedByIndex.set(idx, el)
+        fallbackElements.push(el)
+      }
+    }
+
+    const items: ExecutionGroupItem[] = part.entries.map((ref) => {
+      const entryBlock = blocks[ref.blockIndex]
+      const attachments: ExecutionGroupAttachment[] = ref.attachments.map((att) => {
+        const attBlock = blocks[att.blockIndex]
+        return {
+          kind: att.kind,
+          key: String(attBlock?.key ?? att.blockIndex),
+          tone: att.tone,
+          text: att.text,
+          node: att.kind === 'note' ? renderedByIndex.get(att.blockIndex) : undefined,
+        }
+      })
+      return {
+        key: String(entryBlock?.key ?? ref.blockIndex),
+        entry: ref.entry,
+        attachments,
+      }
+    })
+
+    const firstKey = blocks[part.startIndex]?.key ?? part.startIndex
+    out.push(
+      <ExecutionGroup
+        key={`exec-group-${String(firstKey)}`}
+        items={items}
+        copyLabel={context.labels.code.copyLabel}
+        copiedLabel={context.labels.code.copiedLabel}
+        fallback={wrapBlockChildren(fallbackElements, false)}
+      />,
+    )
+  }
+
+  return out
 }
 
 /**

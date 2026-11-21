@@ -77,7 +77,7 @@ Each response MUST be **one** of the two actions below:
 - **Prefer host library methods over shelling out & confirm paths**:
   - Default to structured host libraries (`io.list`, `io.read`, `io.search`, `io.edit`, `io.write`, `io.replace`, `git.*`, and `ResourceHandle` methods `f.slice` / `f.grep` / `f.outline`) for all file, text-search, and git work rather than shelling out to `rg`, `grep`, `find`, `sed`, or `cat` (avoids quoting bugs and missing CLI binaries, and keeps live `ResourceHandle`s in memory). Reserve `process.*` (`process.run_readonly`, `process.exec_command`) for builds, tests, project scripts, and CLI diagnostics that have no host library equivalent.
   - For scanning large files, prefer native Rust methods (`f.grep(regex, context)`, `f.content.includes(...)`, `io.search(...)`) over nested JS line-by-line loops.
-  - When batch-reading multiple files, prefer paths confirmed by `io.list`/`io.search` (or wrap uncertain paths in `Promise.allSettled(...)`) so one missing file does not abort the rest of the batch.
+  - Before batch-reading files, confirm every path with `io.list`/`io.search`. Never guess paths and use `.catch()` or `Promise.allSettled(...)` as path-discovery fallbacks. If the directory or symbol location is unknown, first do a synchronous `const entries = io.list(...).entries`, filter entries to confirmed paths, then pass only those paths to `Promise.all(confirmed.map(path => io.promises.read({ path })))`. Reserve `Promise.allSettled(...)` for already-confirmed independent operations whose failure is semantically expected.
 - **Encapsulate cohesive multi-step logic in JS functions and run them together**: when a step combines multiple reads, extractions, or cross-checks, encapsulating each unit in a plain `function` or `async function` keeps temporary variables scoped cleanly (avoiding top-level name collisions), compresses intermediate data locally before returning only the compact structured result, and leaves the helper reusable in later steps. Multiple `async function` helpers can run concurrently in one `await Promise.all([...])` / `Promise.allSettled([...])`—achieving true parallel host I/O with zero extra LLM calls.
 - Host libraries (`io`, `git`, `process`, `host`, `session`, etc.) declared in the `.d.ts` below are pre-bound in scope and proxy synchronously into Rust.
 - All top-level variables (`const`, `let`, `function`) stay live in VM memory across `run_js` calls for the rest of the current user turn (do NOT re-declare variables that already succeeded in earlier `run_js` calls):
@@ -85,12 +85,12 @@ Each response MUST be **one** of the two actions below:
   - Results up to **`64KB`** per step are returned verbatim and stay in your conversation history for the entire turn — do NOT re-read or re-slice content already shown in an earlier `tool` message. If a batched array/object exceeds `64KB`, the first `64KB` is still printed verbatim and only overflow tail items are summarized.
   - Large files/results (`> 64KB`) stay live in VM memory as `ResourceHandle` (`Ref#N`) with a compact signature + structural/error index in the `tool` output (and any silent new file/command handles loaded in a step are noted in a 1-line `// [live handles added: ...]` footer so you can reuse them without re-reading).
   - Frozen turn snapshots are immutable host assets. Use `session.snapshot({ asset_id })` to restore the exact saved file, command output, or JSON value even after the workspace changes. `session.read_asset(...)` remains available for paged asset delivery.
-- **Lazy Resource Handles & Programmatic JS**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with zero-I/O methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. Use JS loops, regexes, sets, and maps to diff, verify, or extract across multiple files in a single step.
+- **Lazy Resource Handles & Programmatic JS**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with zero-I/O methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. Bind batch-read handles by name (e.g. `const [a, b] = await Promise.all([...])` or `const H = Object.fromEntries(paths.map((p, i) => [p, files[i]]))`) so you can reuse `a.slice(...)` / `H[path].grep(...)` across steps without re-reading unchanged files. Use JS loops, regexes, sets, and maps to diff, verify, or extract across multiple files in a single step.
 
 ## EDITING AND BUILDING
 - When changing multiple lines, deeply indented code, or code with complex quotes and backslashes, prefer the line-precise `io.replace({ path, start_line, end_line, replacement })`. Use a JavaScript template string or `lines.join('\n')` for the replacement instead of hand-building a long single-quoted `old_text` anchor.
 - Successful `io.edit` and `io.replace` responses include a line-numbered `preview` of the changed area. Once it confirms the edit, continue without an extra whole-file `io.read`.
-- Do not run multiple `cargo` or package-manager build/test commands inside `Promise.all`. Run them serially, or combine filters into one command, to avoid competing for the build lock.
+- Do not run multiple `cargo` or package-manager build/test commands inside `Promise.all`. Run them serially—prefer combining multiple targeted test filters or `&&`-chained checks into ONE serial command (e.g. `cargo test --bin ... -- test_a test_b && cargo check ...`) instead of spending a separate round-trip per filter.
 
 ### Action 2: Finish turn and reply to the user
 - ONLY after you have real observed evidence (never before reading the target files or running requested checks), reply directly in normal Markdown **WITHOUT calling `run_js`**.
@@ -551,43 +551,35 @@ async fn send_model_request(
                 stats["finish_reason"] != "content_filter",
                 "model response was filtered; no code was executed"
             );
-            diagnostics.completed(&stats["usage"]);
             Ok::<(Value, Value), anyhow::Error>((message, stats))
         }
         .await;
 
         match attempt_res {
             Ok((message, stats)) => {
-                let (actual_input, cached_tokens, output_tokens, reasoning_tokens) =
-                    crate::model_transport::extract_usage_counts(&stats["usage"]);
-                if actual_input > 0 {
+                let usage = &stats["usage"];
+                let counts = crate::model_transport::extract_usage_counts(usage);
+                let cost = usage.as_object().filter(|fields| !fields.is_empty()).and_then(|_| {
+                    crate::model_settings::request_cost(s.state, &s.model, counts, chrono::Utc::now())
+                });
+                let mut telemetry = counts.telemetry(cost);
+                telemetry["provider"] = json!(s.state.provider_name);
+                telemetry["model"] = json!(s.model);
+                diagnostics.completed(telemetry.clone());
+                if counts.total_input > 0 {
                     let estimated = crate::context_window::estimate(&body);
                     let route = format!("{}/{}", s.state.provider_name, s.model);
                     if let Some(calibration) = calibration.as_deref_mut() {
-                        calibration.observe(&route, estimated, actual_input as usize);
+                        calibration.observe(&route, estimated, counts.total_input as usize);
                     }
                 }
-                if actor == "agent" && actual_input > 0 {
-                    let cache_hit_pct =
-                        ((cached_tokens as f64 / actual_input as f64) * 1000.0).round() / 10.0;
-                    let _ = super::append_event(
-                        s,
-                        "context/usage",
-                        json!({
-                            "actor": actor,
-                            "turn": s.turn,
-                            "step": step,
-                            "estimated_input_tokens": actual_input,
-                            "cached_tokens": cached_tokens,
-                            "cache_hit_pct": cache_hit_pct,
-                            "output_tokens": output_tokens,
-                            "reasoning_tokens": reasoning_tokens,
-                            "input_budget": s.input_budget,
-                            "source": "provider_usage",
-                        }),
-                        false,
-                    )
-                    .await;
+                if usage.as_object().is_some_and(|fields| !fields.is_empty()) {
+                    telemetry["actor"] = json!(actor);
+                    telemetry["turn"] = json!(s.turn);
+                    telemetry["step"] = json!(step);
+                    telemetry["input_budget"] = json!(s.input_budget);
+                    telemetry["source"] = json!("provider_usage");
+                    let _ = super::append_event(s, "context/usage", telemetry, false).await;
                 }
                 let content = message["content"].as_str().unwrap_or("").to_owned();
                 let tool_calls = crate::model_stream::tool_calls(&message);
@@ -635,5 +627,20 @@ async fn send_model_request(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::V2_SYSTEM_PROMPT;
+
+    #[test]
+    fn batch_reads_must_confirm_paths_before_parallel_reads() {
+        assert!(V2_SYSTEM_PROMPT.contains("Never guess paths"));
+        assert!(V2_SYSTEM_PROMPT.contains("const entries = io.list(...).entries"));
+        assert!(V2_SYSTEM_PROMPT.contains(
+            "Promise.all(confirmed.map(path => io.promises.read({ path })))"
+        ));
+        assert!(!V2_SYSTEM_PROMPT.contains("wrap uncertain paths in"));
     }
 }

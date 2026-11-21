@@ -22,15 +22,71 @@
 
 .heading {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  align-items: center;
+  gap: 7px;
   min-width: 0;
 }
 
+.leading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
 .language {
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--dsw-alias-label-secondary);
   flex: none;
   font-family: var(--ds-font-family-code);
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: 0.03em;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  margin-right: 4px;
+  border-radius: 999px;
+  font-family: var(--ds-font-family-code);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  background: rgba(100, 116, 139, 0.08);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.badge[data-tone='success'] {
+  background: #edf8f2;
+  color: #197a58;
+}
+
+.badge[data-tone='error'] {
+  background: #fdf0f1;
+  color: #bd3b4b;
+}
+
+.badge[data-tone='warn'] {
+  background: #fdf6ea;
+  color: #a66217;
+}
+
+:global(body[data-ds-dark-theme]) .badge[data-tone='success'] {
+  background: rgba(52, 211, 153, 0.12);
+  color: #6ee7b7;
+}
+
+:global(body[data-ds-dark-theme]) .badge[data-tone='error'] {
+  background: rgba(244, 63, 94, 0.14);
+  color: #fda4af;
+}
+
+:global(body[data-ds-dark-theme]) .badge[data-tone='warn'] {
+  background: rgba(245, 158, 11, 0.14);
+  color: #fcd34d;
 }
 
 .title {

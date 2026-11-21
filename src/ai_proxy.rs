@@ -128,6 +128,8 @@ pub(crate) struct AiProxyConfig {
     model_capabilities: HashMap<String, HashMap<String, ModelCapabilities>>,
     #[serde(default)]
     visual_tool: crate::model_settings::ModelSettings,
+    #[serde(default)]
+    image_generation: crate::model_settings::ModelSettings,
     /// Task delegates; empty fields inherit the conversation's model.
     #[serde(default)]
     delegate_agent: crate::model_settings::ModelSettings,
@@ -148,6 +150,7 @@ pub(crate) fn apply_agent_config(
     config: &AiProxyConfig,
 ) {
     state.visual_tool_settings = config.visual_tool.clone();
+    state.image_generation_settings = config.image_generation.clone();
     state.delegate_agent_settings = config.delegate_agent.clone();
     let main_name = config
         .orchestrator_provider
@@ -204,6 +207,14 @@ pub(crate) fn apply_agent_config(
                                     tokens,
                                 )
                             })
+                        })
+                        .collect(),
+                    model_costs: provider
+                        .model_metadata
+                        .iter()
+                        .filter_map(|(id, metadata)| {
+                            let cost = serde_json::from_value(metadata.get("cost")?.clone()).ok()?;
+                            Some((id.clone(), cost))
                         })
                         .collect(),
                     long_context_thresholds: provider
@@ -604,6 +615,9 @@ pub(crate) fn load_config(config_path: &Path) -> anyhow::Result<AiProxyConfig> {
         .unwrap_or(false);
     config.visual_tool =
         serde_json::from_value(generation.get("visual_tool").cloned().unwrap_or(json!({})))?;
+    config.image_generation = serde_json::from_value(
+        generation.get("image_generation").cloned().unwrap_or(json!({})),
+    )?;
     config.delegate_agent = serde_json::from_value(
         generation
             .get("delegate_agent")
@@ -611,6 +625,7 @@ pub(crate) fn load_config(config_path: &Path) -> anyhow::Result<AiProxyConfig> {
             .unwrap_or(json!({})),
     )?;
     config.visual_tool.normalize()?;
+    config.image_generation.normalize()?;
     config.delegate_agent.normalize()?;
     config.plugin_models = serde_json::from_value(
         generation
@@ -761,7 +776,7 @@ fn settings_view(config: &AiProxyConfig, revision: String) -> Value {
         "orchestrator_model": config.orchestrator_model,
         "reasoning_effort": config.reasoning_effort,
         "fast_mode": config.fast_mode,
-                "visual_tool":config.visual_tool,"delegate_agent":config.delegate_agent,
+                "visual_tool":config.visual_tool,"image_generation":config.image_generation,"delegate_agent":config.delegate_agent,
         "plugin_models":config.plugin_models,"plugin_generation":config.plugin_generation,
         "web_search_provider":config.web_search_provider,
     })
@@ -809,7 +824,7 @@ pub(crate) fn catalog_view(config: &AiProxyConfig) -> Value {
     });
     json!({"version":1,"models":models,"defaults":{
         "agent":{"provider":config.orchestrator_provider,"model":config.orchestrator_model},
-        "visual_tool":config.visual_tool,"delegate_agent":config.delegate_agent,"plugin_generation":config.plugin_generation,
+        "visual_tool":config.visual_tool,"image_generation":config.image_generation,"delegate_agent":config.delegate_agent,"plugin_generation":config.plugin_generation,
     }})
 }
 

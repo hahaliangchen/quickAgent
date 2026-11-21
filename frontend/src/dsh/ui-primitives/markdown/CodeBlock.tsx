@@ -3,6 +3,10 @@ import type { CSSProperties, ReactNode, Ref } from 'react'
 import clsx from 'clsx'
 import { writeClipboard } from '../clipboard.ts'
 import { CodeToolbar, type CodeToolbarLabels } from '../CodeToolbar.tsx'
+import { IconCheckOutlineRegular, IconCopyOutlineRegular } from '../icons/index.tsx'
+import { Tooltip } from '../Tooltip.tsx'
+import { classifyCodeBlock, tokenizeTerminalLine } from './codeBlockMeta.ts'
+import { useIsPaperStyle } from './uiStyle.ts'
 import {
   StreamingHighlightSession, grammarLoadCount, highlightToHtml, subscribeGrammarLoaded,
 } from './highlight.ts'
@@ -71,19 +75,63 @@ function renderLine(line: readonly HighlightSpan[], index: number): ReactNode {
   )
 }
 
+function TerminalGlyph() {
+  return (
+    <svg className={css.glyph} width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.5" y="2.5" width="13" height="11" rx="2.5" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M4.75 6.25L7 8.25L4.75 10.25M8.5 10.25H11.25" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function WarningGlyph() {
+  return (
+    <svg className={css.diagGlyph} width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M8 2.2L14.2 13.1C14.48 13.6 14.12 14.2 13.55 14.2H2.45C1.88 14.2 1.52 13.6 1.8 13.1L8 2.2Z" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" />
+      <path d="M8 6.1V9.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <circle cx="8" cy="11.6" r="0.8" fill="currentColor" />
+    </svg>
+  )
+}
+
+function renderTerminalLines(lines: readonly string[]): ReactNode {
+  return (
+    <pre className={css.plain}><code>{lines.map((line, index) => (
+      <Fragment key={index}>
+        {index > 0 && '\n'}
+        <span className="line">
+          {tokenizeTerminalLine(line).map((token, tokenIndex) => (
+            token.kind === 'plain'
+              ? <Fragment key={tokenIndex}>{token.text}</Fragment>
+              : <span key={tokenIndex} className={css[`term_${token.kind}`]}>{token.text}</span>
+          ))}
+        </span>
+      </Fragment>
+    ))}</code></pre>
+  )
+}
+
 export function CodeBlock({
   code, lang, streaming, className, contentRef, lineNumbers = false, showHeader = true, copyLabel, copiedLabel, toolbarLabels, wrap,
 }: CodeBlockProps) {
   const trimmed = code.endsWith('\n') ? code.slice(0, -1) : code
-  const lineCount = trimmed.split('\n').length
+  const lines = useMemo(() => trimmed.split('\n'), [trimmed])
+  const lineCount = lines.length
+  const isPaperStyle = useIsPaperStyle()
   // Chat code cards (the ones that can fold) read like a source file: a
   // numbered gutter once the snippet is more than a few lines.
   const foldLabels = toolbarLabels?.expandLabel !== undefined && toolbarLabels.collapseLabel !== undefined
     && toolbarLabels.linesLabel !== undefined ? toolbarLabels : undefined
-  const numbered = lineNumbers || (foldLabels !== undefined && lineCount > 3)
-  const sourceLines = numbered ? trimmed.split('\n') : undefined
+  const meta = useMemo(
+    () => (foldLabels !== undefined && !isPaperStyle ? classifyCodeBlock(trimmed, lang) : undefined),
+    [foldLabels, isPaperStyle, trimmed, lang],
+  )
+  const isTerminalCard = meta?.variant === 'terminal'
+  const isDiagnosticStrip = meta?.variant === 'diagnostic' && showHeader
+  const numbered = lineNumbers || (foldLabels !== undefined && !isTerminalCard && !isDiagnosticStrip && lineCount > 3)
+  const sourceLines = numbered ? lines : undefined
   const rootRef = useRef<HTMLDivElement>(null)
-  const highlighting = useViewportHighlighting(rootRef, lang)
+  const highlighting = useViewportHighlighting(rootRef, isTerminalCard || isDiagnosticStrip ? undefined : lang)
   // Re-render when a lazy grammar finishes loading, so a fence that showed plain
   // text while its language's grammar imported picks up highlighting. The
   // snapshot value is opaque; only its change across renders drives the memo.
@@ -186,20 +234,63 @@ export function CodeBlock({
   // shiki's HTML output is a static span tree it generated from `code` (no
   // user HTML passes through), the sanctioned innerHTML consumption path per
   // shiki's own docs.
-  const body = streamedBody !== undefined
-    ? streamedBody
-    : html === undefined
-      ? (
-        <pre className={css.plain}><code>{sourceLines === undefined ? trimmed : sourceLines.map((line, index) => (
-          <Fragment key={index}>{index > 0 && '\n'}<span className="line">{line}</span></Fragment>
-        ))}</code></pre>
-      )
-      : (
-        <div dangerouslySetInnerHTML={{ __html: html }} />
-      )
+  const body = isTerminalCard
+    ? renderTerminalLines(lines)
+    : streamedBody !== undefined
+      ? streamedBody
+      : html === undefined
+        ? (
+          <pre className={css.plain}><code>{sourceLines === undefined ? trimmed : sourceLines.map((line, index) => (
+            <Fragment key={index}>{index > 0 && '\n'}<span className="line">{line}</span></Fragment>
+          ))}</code></pre>
+        )
+        : (
+          <div dangerouslySetInnerHTML={{ __html: html }} />
+        )
+
+  if (isDiagnosticStrip && meta !== undefined) {
+    const clipboardLabel = copied ? copiedLabel : copyLabel
+    return (
+      <div
+        ref={rootRef}
+        className={clsx(css.block, 'md-code-block', css.diagnosticStrip, className)}
+        data-variant="diagnostic"
+        data-tone={meta.tone}
+      >
+        <WarningGlyph />
+        <div ref={contentRef} className={css.diagContent} data-code-block-content>
+          <pre className={css.diagPre}><code>{trimmed}</code></pre>
+        </div>
+        <Tooltip label={clipboardLabel} side="top" portal>
+          <button type="button" className={css.diagCopy} aria-label={clipboardLabel} onClick={onCopy}>
+            {copied ? <IconCheckOutlineRegular size={14} /> : <IconCopyOutlineRegular size={14} />}
+          </button>
+        </Tooltip>
+      </div>
+    )
+  }
+
+  const leading = isTerminalCard
+    ? <TerminalGlyph />
+    : meta?.variant === 'source'
+      ? <span className={css.langDot} />
+      : undefined
+  const headerStatus = isTerminalCard && meta?.badge !== undefined && lineCount <= 4
+    ? undefined
+    : foldLabels?.linesLabel?.replace('{n}', String(lineCount))
 
   return (
-    <div ref={rootRef} className={clsx(css.block, 'md-code-block', numbered && css.numbered, toolbarLabels !== undefined && css.card, foldLabels !== undefined && css.source, className)}
+    <div ref={rootRef} className={clsx(
+      css.block,
+      'md-code-block',
+      numbered && css.numbered,
+      toolbarLabels !== undefined && css.card,
+      foldLabels !== undefined && css.source,
+      meta?.compact && css.compact,
+      className,
+    )}
+      data-variant={meta?.variant}
+      data-tone={meta?.tone}
       data-line-numbers={numbered || undefined}
       data-code-wrap={toolbarLabels === undefined ? undefined : wrapped}
       style={sourceLines === undefined ? undefined : {
@@ -208,9 +299,17 @@ export function CodeBlock({
       {/* These paired attributes are stable semantic hooks for owner styling and DOM tests. */}
       {showHeader && <div className={css.bannerWrap}>
         {toolbarLabels !== undefined ? <CodeToolbar
-          lang={lang} labels={toolbarLabels} copyLabel={copyLabel} copiedLabel={copiedLabel}
-          status={foldLabels?.linesLabel?.replace('{n}', String(lineCount))}
-          copied={copied} wrapped={wrapped} onCopy={onCopy}
+          lang={lang}
+          displayLang={meta?.label}
+          leading={leading}
+          badge={meta?.badge}
+          labels={toolbarLabels}
+          copyLabel={copyLabel}
+          copiedLabel={copiedLabel}
+          status={headerStatus}
+          copied={copied}
+          wrapped={wrapped}
+          onCopy={onCopy}
           onWrap={wrap === undefined ? () => { setWrapped(value => !value) } : undefined}
         /> : <div className={css.banner} data-code-block-banner>
           <div className={css.infostring}>{lang ?? ''}</div>

@@ -26,39 +26,65 @@ impl Default for TimeoutPolicy {
     }
 }
 
-/// Extract `(input_tokens, cached_tokens, output_tokens, reasoning_tokens)`
-/// across OpenAI Responses API, OpenAI Chat Completions, and Anthropic Messages.
-pub fn extract_usage_counts(usage: &Value) -> (u64, u64, u64, u64) {
-    let input = usage
-        .get("input_tokens")
-        .and_then(Value::as_u64)
-        .or_else(|| usage.get("prompt_tokens").and_then(Value::as_u64))
-        .unwrap_or(0);
-    let cached = usage
-        .pointer("/input_tokens_details/cached_tokens")
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            usage
-                .pointer("/prompt_tokens_details/cached_tokens")
-                .and_then(Value::as_u64)
-        })
-        .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
-        .unwrap_or(0);
-    let output = usage
-        .get("output_tokens")
-        .and_then(Value::as_u64)
-        .or_else(|| usage.get("completion_tokens").and_then(Value::as_u64))
-        .unwrap_or(0);
-    let reasoning = usage
-        .pointer("/output_tokens_details/reasoning_tokens")
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            usage
-                .pointer("/completion_tokens_details/reasoning_tokens")
-                .and_then(Value::as_u64)
-        })
-        .unwrap_or(0);
-    (input, cached, output, reasoning)
+/// Normalized input buckets across Responses, Chat Completions and Messages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UsageCounts {
+    pub total_input: u64,
+    pub uncached_input: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub output: u64,
+    pub reasoning: u64,
+}
+
+impl UsageCounts {
+    pub fn cache_hit_pct(self) -> f64 {
+        if self.total_input == 0 {
+            0.0
+        } else {
+            (self.cache_read as f64 / self.total_input as f64 * 1000.0).round() / 10.0
+        }
+    }
+
+    pub fn telemetry(self, cost: Option<crate::model_settings::RequestCost>) -> Value {
+        let mut fields = cost.map_or_else(|| json!({}), |cost| json!(cost));
+        fields["estimated_input_tokens"] = json!(self.total_input);
+        fields["uncached_input_tokens"] = json!(self.uncached_input);
+        fields["cached_tokens"] = json!(self.cache_read);
+        fields["cache_write_tokens"] = json!(self.cache_write);
+        fields["cache_hit_pct"] = json!(self.cache_hit_pct());
+        fields["output_tokens"] = json!(self.output);
+        fields["reasoning_tokens"] = json!(self.reasoning);
+        fields
+    }
+}
+
+pub fn extract_usage_counts(usage: &Value) -> UsageCounts {
+    let input = usage["input_tokens"].as_u64();
+    let prompt = usage["prompt_tokens"].as_u64();
+    let (total_input, uncached_input, cache_read, cache_write) =
+        if usage.get("cache_read_input_tokens").is_some() || usage.get("cache_creation_input_tokens").is_some() {
+            let uncached = input.unwrap_or(0);
+            let read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+            let write = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            (prompt.unwrap_or_else(|| uncached.saturating_add(read).saturating_add(write)), uncached, read, write)
+        } else {
+            let total = input.or(prompt).unwrap_or(0);
+            let read = usage["input_tokens_details"]["cached_tokens"].as_u64()
+                .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
+                .unwrap_or(0);
+            (total, total.saturating_sub(read), read, 0)
+        };
+    UsageCounts {
+        total_input,
+        uncached_input,
+        cache_read,
+        cache_write,
+        output: usage["output_tokens"].as_u64().or_else(|| usage["completion_tokens"].as_u64()).unwrap_or(0),
+        reasoning: usage["output_tokens_details"]["reasoning_tokens"].as_u64()
+            .or_else(|| usage["completion_tokens_details"]["reasoning_tokens"].as_u64())
+            .unwrap_or(0),
+    }
 }
 
 /// Streaming requests have no wall-clock deadline. The progress watchdog owns
@@ -301,26 +327,13 @@ impl ModelRequestLog {
         self.progress.lock().unwrap().phase = phase;
     }
 
-    /// Record final request completion with provider token & KV-cache usage stats.
-    pub fn completed(&self, usage: &Value) {
+    /// Record the same normalized usage and price as the session event.
+    pub fn completed(&self, mut telemetry: Value) {
         self.phase("completed");
-        let (input, cached, output, reasoning) = extract_usage_counts(usage);
-        let cache_hit_pct = if input > 0 {
-            ((cached as f64 / input as f64) * 1000.0).round() / 10.0
-        } else {
-            0.0
-        };
-        self.event(
-            "completed",
-            json!({
-                "total_ms": self.elapsed(),
-                "input_tokens": input,
-                "cached_tokens": cached,
-                "cache_hit_pct": cache_hit_pct,
-                "output_tokens": output,
-                "reasoning_tokens": reasoning,
-            }),
-        );
+        telemetry["total_ms"] = json!(self.elapsed());
+        // Retain the historical log field as an alias for total input.
+        telemetry["input_tokens"] = telemetry["estimated_input_tokens"].clone();
+        self.event("completed", telemetry);
     }
 
     fn deadline(&self, policy: TimeoutPolicy) -> (Instant, &'static str, Duration) {
@@ -564,6 +577,37 @@ fn error_chain(error: &anyhow::Error) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anthropic_usage_includes_cache_reads_and_writes_in_total_input() {
+        let mut usage = json!({"input_tokens":500,"cache_read_input_tokens":9500,
+            "cache_creation_input_tokens":1000,"prompt_tokens":11000,"output_tokens":10});
+        let counts = extract_usage_counts(&usage);
+        assert_eq!(counts, UsageCounts { total_input: 11_000, uncached_input: 500,
+            cache_read: 9500, cache_write: 1000, output: 10, reasoning: 0 });
+        assert_eq!(counts.cache_hit_pct(), 86.4);
+        let detail = counts.telemetry(None);
+        assert_eq!(detail["estimated_input_tokens"], 11_000);
+        assert_eq!(detail["cache_write_tokens"], 1000);
+        assert!(detail.get("cost_amount").is_none());
+        usage.as_object_mut().unwrap().remove("prompt_tokens");
+        assert_eq!(extract_usage_counts(&usage), counts);
+        assert_eq!(extract_usage_counts(&json!({"input_tokens":1,"cache_creation_input_tokens":2})).total_input, 3);
+    }
+
+    #[test]
+    fn openai_usage_keeps_total_input_and_detailed_reasoning() {
+        let responses = json!({"input_tokens":1200,"prompt_tokens":17,"input_tokens_details":{"cached_tokens":1140},
+            "output_tokens":20,"output_tokens_details":{"reasoning_tokens":12}});
+        let chat = json!({"prompt_tokens":1200,"prompt_tokens_details":{"cached_tokens":1140},
+            "completion_tokens":20,"completion_tokens_details":{"reasoning_tokens":12}});
+        let counts = UsageCounts { total_input: 1200, uncached_input: 60, cache_read: 1140,
+            cache_write: 0, output: 20, reasoning: 12 };
+        assert_eq!(extract_usage_counts(&responses), counts);
+        assert_eq!(extract_usage_counts(&chat), counts);
+        assert_eq!(counts.cache_hit_pct(), 95.0);
+        assert_eq!(extract_usage_counts(&Value::Null), UsageCounts::default());
+    }
 
     #[test]
     fn only_requests_that_got_no_answer_from_a_reachable_failure_are_retried() {

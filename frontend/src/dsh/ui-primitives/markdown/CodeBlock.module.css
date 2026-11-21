@@ -144,71 +144,277 @@
   user-select: none;
 }
 
-/* Chat code cards read like a GitHub source view: a framed white sheet, a
-   tinted header, a numbered gutter, monospace text that keeps its columns,
-   GitHub's syntax palette, and long blocks folded to a preview. Scoped to
-   these cards; other code surfaces keep the shared theme. */
+/* Chat code cards: ultra-whisper-light editorial paper surfaces with subtle
+   semantic left accent bars for terminal/verification output and crisp source
+   presentation. Colors stay deliberately airy so stacked short blocks feel light. */
 .source {
-  --gh-bg: #ffffff;
-  --gh-header: #f6f8fa;
-  --gh-border: #d1d9e0;
-  --gh-gutter: #59636e;
-  --gh-hover: #f6f8fa;
-  --gh-link: #0969da;
+  --gh-bg: #fbfcfd;
+  --gh-header: #f5f7fa;
+  --gh-border: #e6ebf0;
+  --gh-accent: transparent;
+  --gh-gutter: #7a8694;
+  --gh-hover: #f2f5f8;
+  --gh-link: #197a58;
   --gh-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   --dsl-code-block-background: var(--gh-bg);
-  --dsl-code-block-border-radius: 6px;
+  --dsl-code-block-border-radius: 10px;
   --shiki-background: var(--gh-bg);
   --shiki-foreground: #1f2328;
   --shiki-token-constant: #0550ae;
   --shiki-token-string: #0a3069;
-  --shiki-token-comment: #59636e;
+  --shiki-token-comment: #667380;
   --shiki-token-keyword: #cf222e;
   --shiki-token-parameter: #953800;
-  --shiki-token-function: #8250df;
-  --shiki-token-string-expression: #116329;
-  --shiki-token-punctuation: #1f2328;
+  --shiki-token-function: #7c4dff;
+  --shiki-token-string-expression: #157347;
+  --shiki-token-punctuation: #334155;
   --shiki-token-link: #0a3069;
 
   border: 1px solid var(--gh-border);
-  border-radius: 6px;
+  border-radius: 10px;
   overflow: clip;
 }
 
+.source.compact {
+  margin: 10px 0;
+}
+
+.source[data-variant='terminal'] {
+  --gh-bg: #fbfcfd;
+  --gh-header: #f5f7f9;
+  --gh-border: #e6ebef;
+  --gh-accent: #94a3b8;
+  box-shadow: inset 2.5px 0 0 var(--gh-accent);
+}
+
+.source[data-variant='terminal'][data-tone='success'] {
+  --gh-bg: #fafdfb;
+  --gh-header: #f4faf7;
+  --gh-border: #e3eee8;
+  --gh-accent: #52c195;
+}
+
+.source[data-variant='terminal'][data-tone='error'] {
+  --gh-bg: #fefafa;
+  --gh-header: #fcf4f4;
+  --gh-border: #f1e3e4;
+  --gh-accent: #e5838f;
+}
+
 :global(body[data-ds-dark-theme]) .source {
-  --gh-bg: #0d1117;
-  --gh-header: #151b23;
-  --gh-border: #3d444d;
-  --gh-gutter: #9198a1;
-  --gh-hover: #151b23;
-  --gh-link: #4493f8;
-  --shiki-foreground: #f0f6fc;
+  --gh-bg: #11151b;
+  --gh-header: #161b22;
+  --gh-border: #2a313b;
+  --gh-gutter: #8b949e;
+  --gh-hover: #1b222b;
+  --gh-link: #6ee7b7;
+  --shiki-foreground: #e6edf3;
   --shiki-token-constant: #79c0ff;
   --shiki-token-string: #a5d6ff;
-  --shiki-token-comment: #9198a1;
+  --shiki-token-comment: #8b949e;
   --shiki-token-keyword: #ff7b72;
   --shiki-token-parameter: #ffa657;
   --shiki-token-function: #d2a8ff;
   --shiki-token-string-expression: #7ee787;
-  --shiki-token-punctuation: #f0f6fc;
+  --shiki-token-punctuation: #e6edf3;
   --shiki-token-link: #a5d6ff;
 }
 
+:global(body[data-ds-dark-theme]) .source[data-variant='terminal'][data-tone='success'] {
+  --gh-bg: #111715;
+  --gh-header: #151e1b;
+  --gh-border: #21352d;
+  --gh-accent: #3fae84;
+}
+
+:global(body[data-ds-dark-theme]) .source[data-variant='terminal'][data-tone='error'] {
+  --gh-bg: #181314;
+  --gh-header: #1e1719;
+  --gh-border: #362427;
+  --gh-accent: #d96b79;
+}
+
 .source [data-code-block-banner] {
-  padding: 6px 10px 6px 16px;
+  padding: 5px 10px 5px 14px;
   background: var(--gh-header);
-  border-bottom: 1px solid var(--gh-border);
+  border-bottom: 1px solid color-mix(in srgb, var(--gh-border) 75%, transparent);
   border-radius: 0;
 }
 
 .source pre {
-  padding: 8px 16px;
-  font: 12px/20px var(--gh-mono);
+  padding: 9px 14px;
+  font: 12.5px/20px var(--gh-mono);
   border-radius: 0;
+}
+
+.source.compact pre {
+  padding: 8px 14px;
 }
 
 .source pre code {
   font-family: var(--gh-mono);
+}
+
+.glyph {
+  color: #5b6775;
+  display: block;
+}
+
+.source[data-tone='success'] .glyph {
+  color: #248864;
+}
+
+.source[data-tone='error'] .glyph {
+  color: #c24b5a;
+}
+
+:global(body[data-ds-dark-theme]) .glyph {
+  color: #94a3b8;
+}
+
+:global(body[data-ds-dark-theme]) .source[data-tone='success'] .glyph {
+  color: #6ee7b7;
+}
+
+:global(body[data-ds-dark-theme]) .source[data-tone='error'] .glyph {
+  color: #fda4af;
+}
+
+.langDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #64a88f;
+  opacity: 0.75;
+  display: block;
+}
+
+.term_prompt {
+  color: #8b97a6;
+  user-select: none;
+}
+
+.term_command {
+  color: #1e293b;
+  font-weight: 500;
+}
+
+.term_pass {
+  color: #187957;
+  font-weight: 550;
+}
+
+.term_fail {
+  color: #be3b4c;
+  font-weight: 550;
+}
+
+.term_muted {
+  color: #718096;
+}
+
+:global(body[data-ds-dark-theme]) .term_command {
+  color: #edf2f7;
+}
+
+:global(body[data-ds-dark-theme]) .term_pass {
+  color: #6ee7b7;
+}
+
+:global(body[data-ds-dark-theme]) .term_fail {
+  color: #fda4af;
+}
+
+:global(body[data-ds-dark-theme]) .term_muted {
+  color: #8b949e;
+}
+
+/* Single-line diagnostic strip: ultra-compact, no separate banner bar. */
+.diagnosticStrip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 10px 0;
+  padding: 7px 10px 7px 13px;
+  border-radius: 9px;
+  border: 1px solid #f0e6da;
+  background: #fdfbf8;
+  box-shadow: inset 2.5px 0 0 #e3a264;
+  color: #5b4331;
+}
+
+.diagnosticStrip[data-tone='error'] {
+  border-color: #f1e3e4;
+  background: #fefafa;
+  box-shadow: inset 2.5px 0 0 #e5838f;
+  color: #5d3037;
+}
+
+:global(body[data-ds-dark-theme]) .diagnosticStrip {
+  border-color: #3a3025;
+  background: #1a1612;
+  box-shadow: inset 2.5px 0 0 #d99b52;
+  color: #f0d7b8;
+}
+
+:global(body[data-ds-dark-theme]) .diagnosticStrip[data-tone='error'] {
+  border-color: #362427;
+  background: #181314;
+  box-shadow: inset 2.5px 0 0 #d96b79;
+  color: #f6ccd1;
+}
+
+.diagGlyph {
+  flex: none;
+  color: #c9813b;
+}
+
+.diagnosticStrip[data-tone='error'] .diagGlyph {
+  color: #c65362;
+}
+
+:global(body[data-ds-dark-theme]) .diagGlyph {
+  color: #f3b56c;
+}
+
+:global(body[data-ds-dark-theme]) .diagnosticStrip[data-tone='error'] .diagGlyph {
+  color: #fda4af;
+}
+
+.diagContent {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.diagPre {
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  color: inherit;
+  font: 12.5px/19px ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace !important;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diagCopy {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.diagCopy:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .source.numbered pre {
@@ -272,13 +478,14 @@
   outline-offset: -2px;
 }
 
-/* Borderless Paper style: soft tinted code slab with zero outer/inner borders */
+/* Borderless Paper style: soft tinted code slab with zero outer/inner borders (untouched) */
 :global(body[data-ui-style='paper']) .source {
   --gh-bg: #f2f4f7;
   --gh-header: #eceff3;
   --gh-hover: #e7ebf0;
   border: none;
   border-radius: 14px;
+  box-shadow: none;
 }
 
 :global(body[data-ds-dark-theme][data-ui-style='paper']) .source {
@@ -287,6 +494,7 @@
   --gh-hover: #21201d;
   border: none;
   border-radius: 14px;
+  box-shadow: none;
 }
 
 :global(body[data-ui-style='paper']) .source [data-code-block-banner] {

@@ -186,6 +186,8 @@ struct SettingsEdit {
     #[serde(default)]
     visual_tool: Option<crate::model_settings::ModelSettings>,
     #[serde(default)]
+    image_generation: Option<crate::model_settings::ModelSettings>,
+    #[serde(default)]
     delegate_agent: Option<crate::model_settings::ModelSettings>,
     #[serde(default)]
     plugin_models: Option<HashMap<String, Vec<crate::model_catalog::ModelRef>>>,
@@ -522,9 +524,14 @@ fn save_settings(
     config.model_capabilities = model_capabilities;
     config.orchestrator_provider = nonempty(request.orchestrator_provider);
     config.orchestrator_model = nonempty(request.orchestrator_model);
-    for (edit, target) in [
-        (request.visual_tool, &mut config.visual_tool),
-        (request.delegate_agent, &mut config.delegate_agent),
+    for (name, edit, target) in [
+        ("visual_tool", request.visual_tool, &mut config.visual_tool),
+        (
+            "image_generation",
+            request.image_generation,
+            &mut config.image_generation,
+        ),
+        ("delegate_agent", request.delegate_agent, &mut config.delegate_agent),
     ] {
         if let Some(mut edit) = edit {
             edit.normalize()?;
@@ -544,10 +551,15 @@ fn save_settings(
             let route = config
                 .providers
                 .get(provider)
-                .context("configured tool/compression provider is unavailable")?;
+                .with_context(|| format!("configured {name} provider is unavailable"))?;
+            let compatible = if name == "image_generation" {
+                matches!(route.api_type.as_str(), "openai-completions" | "openai-responses")
+            } else {
+                route.api_type == "openai-completions"
+            };
             anyhow::ensure!(
-                route.api_type == "openai-completions",
-                "configured tool/compression provider is incompatible"
+                compatible,
+                "configured {name} provider is incompatible"
             );
             anyhow::ensure!(
                 route.model_map.contains_key(model),
@@ -788,7 +800,7 @@ fn save_settings(
         "reasoning_effort": config.reasoning_effort,
         "fast_mode": config.fast_mode,
         "model_capabilities": config.model_capabilities,
-                "visual_tool":config.visual_tool,"delegate_agent":config.delegate_agent,
+                "visual_tool":config.visual_tool,"image_generation":config.image_generation,"delegate_agent":config.delegate_agent,
         "plugin_models":config.plugin_models,"plugin_generation":config.plugin_generation,
     });
     generation_settings

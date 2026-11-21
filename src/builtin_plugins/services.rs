@@ -299,6 +299,7 @@ impl Plugin for AgentTasksPlugin {
             permission_mode: crate::agent_service::PermissionMode::default(),
             visual: Default::default(),
             visual_tool_settings: Default::default(),
+            image_generation_settings: Default::default(),
             delegate_agent_settings: Default::default(),
             config: Some(settings.config.clone()),
             config_path: Some(settings.path.clone()),

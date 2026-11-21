@@ -177,7 +177,8 @@ export function processEntries(items: readonly ChatItem[]): ProcessEntry[] {
       else entries.push({ kind: 'tools', key: item.key, tools: [item] })
     } else {
       if (item.kind === 'program' && item.event === 'failed' && previousToolError !== undefined && sameErrorMessage(previousToolError, item.text)) {
-        entries.push({ kind: 'item', key: item.key, item: { ...item, text: '' } })
+        // The runtime reports a failed tool both as tool/result and program/error.
+        // Keep the actionable detail in the tool row and suppress the duplicate notice.
         previousToolError = undefined
         step = undefined
         continue

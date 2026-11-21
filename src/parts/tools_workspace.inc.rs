@@ -731,7 +731,11 @@ impl Workspace {
         let original = fs::read(&path)?;
         crate::file_edit::check_hash(Some(&original), request.expected_code_hash.as_deref())?;
         let content = String::from_utf8(original.clone())?;
-        let (updated, changed_ranges) = crate::file_edit::text_edits_with_ranges(&content, &request.edits)?;
+        let (updated, changed_ranges) = crate::file_edit::text_edits_with_ranges_replace_all(
+            &content,
+            &request.edits,
+            request.replace_all,
+        )?;
         check_write_size(updated.len())?;
         let changed = crate::file_edit::commit(&path, Some(&original), updated.as_bytes())?;
         drop(_guard);

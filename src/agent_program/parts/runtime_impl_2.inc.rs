@@ -407,8 +407,9 @@ impl Runtime {
                 Ok(None)
             }
             HeapNode::PromiseResolver { capability, reject } => {
-                self.call_resolver(capability, reject, args.into_iter().next().unwrap_or(VmValue::Undefined))?;
+                // Thenable resolution can push a helper frame. Store in the caller first.
                 self.store(destination, VmValue::Undefined)?;
+                self.call_resolver(capability, reject, args.into_iter().next().unwrap_or(VmValue::Undefined))?;
                 Ok(None)
             }
             HeapNode::Native(name) => {
@@ -473,6 +474,11 @@ impl Runtime {
                 }
                 if let Some(helper)=super::js_functions::resumable_builtin(&name) {ensure!(self.frames.len()<64,"maximum helper call depth limit");let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,args,destination)?;self.push_frame(frame);return Ok(None);}
 
+                if name == "Promise.withResolvers" {
+                    let frame = Self::vm_frame(&self.program, &mut self.heap, self.module_env, "$$promiseWithResolvers", vec![receiver], destination)?;
+                    self.push_frame(frame);
+                    return Ok(None);
+                }
                 if let Some(method)=name.strip_prefix("Promise.") {
                     ensure!(Some(receiver.clone())==self.heap.intrinsic("Promise"),"TypeError: Promise static methods currently require the intrinsic Promise constructor");
                     if matches!(method,"resolve"|"reject") {
@@ -517,7 +523,7 @@ impl Runtime {
                             self.store(destination, VmValue::Number(JsNumber::new(length as f64)))?;
                             return Ok(None);
                         }
-                        let helper=match method {"sort"=>Some("$$sort"),"toSorted"=>Some("$$toSorted"),"push"=>Some("$$arrayPush"),"pop"=>Some("$$arrayPop"),"fill"=>Some("$$arrayFill"),"reverse"=>Some("$$arrayReverse"),"shift"=>Some("$$arrayShift"),"unshift"=>Some("$$arrayUnshift"),"splice"=>Some("$$arraySplice"),"copyWithin"=>Some("$$arrayCopyWithin"),_=>None};
+                        let helper=match method {"sort"=>Some("$$sort"),"toSorted"=>Some("$$toSorted"),"push"=>Some("$$arrayPush"),"pop"=>Some("$$arrayPop"),"fill"=>Some("$$arrayFill"),"reverse"=>Some("$$arrayReverse"),"shift"=>Some("$$arrayShift"),"unshift"=>Some("$$arrayUnshift"),"splice"=>Some("$$arraySplice"),"toSpliced"=>Some("$$arrayToSpliced"),"with"=>Some("$$arrayWith"),"copyWithin"=>Some("$$arrayCopyWithin"),_=>None};
                         if let Some(helper)=helper{let mut a=vec![receiver];a.extend(args);let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,helper,a,destination)?;self.push_frame(frame);return Ok(None);}
                     }
                     if kind=="Object" && method=="toString" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$objectToString",vec![receiver],destination)?;self.push_frame(frame);return Ok(None);}
@@ -592,6 +598,12 @@ impl Runtime {
                         };
                         ensure!(valid,"TypeError: incompatible {class} method receiver");
                     }else{bail!("TypeError: incompatible {class} method receiver");}
+                    if class == "Set" && super::js_collections::set_operation(method) {
+                        let other = args.into_iter().next().unwrap_or(VmValue::Undefined);
+                        let frame = Self::vm_frame(&self.program, &mut self.heap, self.module_env, "$$setOperation", vec![receiver, other, VmValue::String(method.into())], destination)?;
+                        self.push_frame(frame);
+                        return Ok(None);
+                    }
                     if method=="next" {let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$iteratorNext",vec![receiver],destination)?;self.push_frame(frame);return Ok(None);}
                     return self.invoke_method(receiver,method,args,destination,true);
                 }

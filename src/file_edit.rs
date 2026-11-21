@@ -298,7 +298,7 @@ pub fn preview_for_line_ranges(content: &str, ranges: &[(usize, usize)]) -> Stri
             if !output.is_empty() && !output.ends_with('\n') {
                 output.push('\n');
             }
-            output.push_str(&format!("L{line_number}: {}", lines[line_number - 1]));
+            output.push_str(&format!("L{line_number}|{}", lines[line_number - 1]));
             if output.chars().count() >= 4000 {
                 output = output.chars().take(3999).collect();
                 output.push('…');
@@ -338,7 +338,7 @@ fn numbered(lines: &[&str], first: usize, count: usize) -> String {
         if line.chars().count() > 200 {
             text.push('…');
         }
-        format!("{}| {}", i + 1, text)
+        format!("{}|{}", i + 1, text)
     }).collect::<Vec<_>>().join("\n")
 }
 
@@ -405,9 +405,15 @@ pub fn text_edits(source: &str, edits: &[crate::tools::TextEdit]) -> Result<Stri
 }
 
 /// Apply text edits and return byte spans of their replacements in the updated file.
-pub fn text_edits_with_ranges(
+pub fn text_edits_with_ranges(source: &str, edits: &[crate::tools::TextEdit]) -> Result<(String, Vec<(usize, usize)>)> {
+    text_edits_with_ranges_replace_all(source, edits, false)
+}
+
+/// Apply every matching anchor when requested; the default remains unique-anchor editing.
+pub fn text_edits_with_ranges_replace_all(
     source: &str,
     edits: &[crate::tools::TextEdit],
+    replace_all: bool,
 ) -> Result<(String, Vec<(usize, usize)>)> {
     if edits.is_empty() || edits.len() > 100 {
         return Err(ToolError::InvalidEdit(
@@ -430,8 +436,8 @@ pub fn text_edits_with_ranges(
         } else {
             &normalized
         };
-        let mut offsets = source.match_indices(anchor);
-        let Some((start, _)) = offsets.next() else {
+        let matches = source.match_indices(anchor).collect::<Vec<_>>();
+        if matches.is_empty() {
             return Err(ToolError::InvalidEdit(match closest_lines(source, &edit.old_text) {
                 Some(lines) => format!(
                     "edit {index}: old_text not found; no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."
@@ -440,19 +446,17 @@ pub fn text_edits_with_ranges(
                     "edit {index}: old_text not found, and no line of it appears in the file; no edits applied"
                 ),
             }));
-        };
-        let next_char = start + anchor.chars().next().unwrap().len_utf8();
-        if offsets.next().is_some() || source[next_char..].contains(anchor) {
+        }
+        if !replace_all && matches.len() > 1 {
             return Err(ToolError::InvalidEdit(format!(
                 "edit {index}: old_text is ambiguous: {}; supply more surrounding text; no edits applied",
                 occurrences(source, anchor)
             )));
         }
-        replacements.push((
-            start,
-            start + anchor.len(),
-            normalize(&edit.new_text).replace('\n', ending),
-        ));
+        let replacement = normalize(&edit.new_text).replace('\n', ending);
+        for (start, _) in matches {
+            replacements.push((start, start + anchor.len(), replacement.clone()));
+        }
     }
     replacements.sort_by_key(|edit| edit.0);
     if replacements.windows(2).any(|pair| pair[0].1 > pair[1].0) {
@@ -491,9 +495,9 @@ mod tests {
         let source = "fn a() {\n    let x = 1;\n    let y = 2;\n    return x + y;\n}\n\nfn b() {}\n";
         let message = error(source, "    let x = 1;\n    let y = 3;\n    return x + y;");
         assert!(message.contains("no edits applied") && message.contains("lines in the file now are 1-5"), "{message}");
-        assert!(message.contains("3|     let y = 2;") && message.contains("Copy old_text exactly"), "{message}");
+        assert!(message.contains("3|    let y = 2;") && message.contains("Copy old_text exactly"), "{message}");
         let typo = error("const x = 2;\nconst y = 3;\n", "const x = 1;");
-        assert!(typo.contains("1| const x = 2;"), "{typo}");
+        assert!(typo.contains("1|const x = 2;"), "{typo}");
         let unrelated = error(source, "nothing like this");
         assert!(unrelated.contains("no line of it appears in the file") && !unrelated.contains("|"), "{unrelated}");
     }
@@ -509,9 +513,9 @@ mod tests {
     fn changed_preview_merges_hunks_and_keeps_line_numbers() {
         let source = (1..=20).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
         let preview = preview_for_line_ranges(&source, &[(2, 2), (7, 8)]);
-        assert!(preview.contains("L1: line 1"));
-        assert!(preview.contains("L13: line 13"));
-        assert!(!preview.contains("L14: line 14"));
+        assert!(preview.contains("L1|line 1"));
+        assert!(preview.contains("L13|line 13"));
+        assert!(!preview.contains("L14|line 14"));
     }
 
     #[test]
@@ -529,7 +533,18 @@ mod tests {
             &[crate::tools::TextEdit { old_text: "two".into(), new_text: "TWO\nTWO-B".into() }],
         ).unwrap();
         assert_eq!(updated, "one\nTWO\nTWO-B\nthree\nfour\n");
-        assert_eq!(preview_for_byte_ranges(&updated, &ranges).lines().next(), Some("L1: one"));
-        assert!(preview_for_byte_ranges(&updated, &ranges).contains("L3: TWO-B"));
+        assert_eq!(preview_for_byte_ranges(&updated, &ranges).lines().next(), Some("L1|one"));
+        assert!(preview_for_byte_ranges(&updated, &ranges).contains("L3|TWO-B"));
+    }
+    #[test]
+    fn replace_all_updates_every_matching_anchor() {
+        let edits = [crate::tools::TextEdit { old_text: "let value = 1;".into(), new_text: "let value = 2;".into() }];
+        let (updated, ranges) = text_edits_with_ranges_replace_all(
+            "let value = 1;\nlet value = 1;\n",
+            &edits,
+            true,
+        ).unwrap();
+        assert_eq!(updated, "let value = 2;\nlet value = 2;\n");
+        assert_eq!(ranges.len(), 2);
     }
 }

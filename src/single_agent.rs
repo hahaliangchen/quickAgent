@@ -20,6 +20,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
 mod context_doc;
@@ -42,6 +43,32 @@ use host_tools::{business_tool, business_tool_inner};
 
 /// Production loops have no step cap; tests pass small bounds of their own.
 pub(crate) const NO_ROUND_LIMIT: usize = usize::MAX;
+/// A completed turn is eligible for economic folding only after the provider's
+/// short-lived prompt cache is expected to have expired.
+pub(crate) const IDLE_CACHE_TTL_MS: u64 = 10 * 60 * 1000;
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis().min(u64::MAX as u128) as u64)
+}
+
+fn idle_soft_fold_due(
+    now_ms: u64,
+    last_model_request_at_ms: Option<u64>,
+    active_turn_is_new: bool,
+    has_unfolded_completed_turn: bool,
+    estimated: usize,
+    hard: usize,
+    completed_turns: usize,
+) -> bool {
+    active_turn_is_new
+        && last_model_request_at_ms.is_some_and(|last_ms| {
+            now_ms.saturating_sub(last_ms) >= IDLE_CACHE_TTL_MS
+        })
+        && (has_unfolded_completed_turn
+            || (estimated >= hard.saturating_div(2) && completed_turns > 1))
+}
 
 fn default_next_ref_id() -> usize {
     1
@@ -64,6 +91,8 @@ pub(crate) struct Window {
     pub(crate) token_calibration: crate::context_window::TokenCalibration,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pinned_system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_model_request_at_ms: Option<u64>,
 }
 
 /// Per-invocation host session context shared by the agent driver, host tool
@@ -386,6 +415,9 @@ pub(crate) async fn run_task_with_resource(
             }
             Err(error) => return Err(error),
         };
+        // The timestamp is persisted with the next window save and is deliberately
+        // recorded only after a model response has completed successfully.
+        w.last_model_request_at_ms = Some(unix_now_ms());
         #[cfg(test)]
         if std::env::var_os("LIVE_DEBUG_STEPS").is_some() {
             let head: String = reply.content.chars().take(160).collect();
@@ -492,6 +524,110 @@ async fn maybe_fold_before_request(
         crate::model_settings::long_context_threshold(s.state, s.model),
     );
     let mut changed = false;
+    let active_turn_is_new = w
+        .context_doc
+        .active_turn()
+        .is_some_and(|turn| turn.segments.is_empty());
+    let completed: Vec<usize> = w
+        .context_doc
+        .turns
+        .iter()
+        .filter(|turn| turn.turn < s.turn && turn.assistant_reply.is_some())
+        .map(|turn| turn.turn)
+        .collect();
+    let has_unfolded_completed_turn = completed.iter().any(|turn_number| {
+        w.context_doc
+            .turns
+            .iter()
+            .find(|turn| turn.turn == *turn_number)
+            .is_some_and(|turn| turn.folded.is_none())
+    });
+    if idle_soft_fold_due(
+        unix_now_ms(),
+        w.last_model_request_at_ms,
+        active_turn_is_new,
+        has_unfolded_completed_turn,
+        estimated,
+        hard,
+        completed.len(),
+    ) {
+        let before_tokens = estimated;
+        let mut folded_turns = 0usize;
+        for turn_number in completed.iter().copied() {
+            let Some(turn_doc) = w.context_doc.turns.iter().find(|turn| turn.turn == turn_number)
+            else {
+                continue;
+            };
+            if turn_doc.folded.is_some() {
+                continue;
+            }
+            let manifest = turn_doc.snapshot_manifest.clone().unwrap_or_else(|| {
+                json!({
+                    "kind": "frozen_turn_snapshots",
+                    "turn": turn_number,
+                    "frozen": true,
+                    "read": "session.snapshot({ asset_id })"
+                })
+                .to_string()
+            });
+            let code_asset_id = turn_doc.snapshot_code_asset_id.clone();
+            if w.context_doc.fold_turn(turn_number, manifest, code_asset_id) {
+                folded_turns += 1;
+                changed = true;
+            }
+        }
+        if changed {
+            let refreshed = model_call::build_request_body(s, w, libs);
+            estimated = w.token_calibration.estimate(&refreshed, &route);
+        }
+
+        // After an idle Level-1 fold, keep the conclusions of the latest two
+        // completed turns in the hot rendering window. Older folded turns stay
+        // durable and remain recoverable through the annotated manifest.
+        let mut level2_changed = false;
+        if completed.len() > 2 && estimated >= hard.saturating_div(2) {
+            let keep_from = completed[completed.len() - 2];
+            if w
+                .context_doc
+                .active_start_turn
+                .map_or(true, |active_start| active_start < keep_from) {
+                w.context_doc.active_start_turn = Some(keep_from);
+                if let Some(retained) = w
+                    .context_doc
+                    .turns
+                    .iter_mut()
+                    .find(|turn| turn.turn == keep_from)
+                    && let Some(folded) = retained.folded.as_mut()
+                {
+                    let mut manifest: Value =
+                        serde_json::from_str(&folded.manifest).unwrap_or_else(|_| json!({}));
+                    manifest["archived_before_turn"] = json!(keep_from);
+                    manifest["archived_access"] =
+                        json!("session.read_history({ turn: ... })");
+                    folded.manifest = manifest.to_string();
+                }
+                level2_changed = true;
+                changed = true;
+                let refreshed = model_call::build_request_body(s, w, libs);
+                estimated = w.token_calibration.estimate(&refreshed, &route);
+            }
+        }
+        if folded_turns > 0 || level2_changed {
+            let idle_ms = w
+                .last_model_request_at_ms
+                .map(|last_ms| unix_now_ms().saturating_sub(last_ms))
+                .unwrap_or_default();
+            tracing::info!(
+                task = s.task,
+                turn = s.turn,
+                idle_ms,
+                before_tokens,
+                after_tokens = estimated,
+                folded_turns,
+                "idle soft-fold completed"
+            );
+        }
+    }
     if estimated >= hard {
         let completed: Vec<usize> = w
             .context_doc
@@ -729,6 +865,12 @@ async fn execute_js_step(
     if w.next_ref_id == 0 {
         w.next_ref_id = 1;
     }
+    let mut fallback_file_refs = std::collections::BTreeMap::new();
+    let file_refs = w
+        .context_doc
+        .active_turn_mut()
+        .map(|turn| &mut turn.file_handle_refs)
+        .unwrap_or(&mut fallback_file_refs);
     let (final_state, external_tool_calls, hints) = vm_driver::drive_vm_segment(
         s,
         &mut runtime,
@@ -737,6 +879,7 @@ async fn execute_js_step(
         step,
         allow_shell,
         &mut w.next_ref_id,
+        file_refs,
     )
     .await?;
     let logs = runtime.logs_since(log_start);
@@ -1181,5 +1324,87 @@ mod context_guard_tests {
             "maximum context window reached"
         )));
         assert!(!is_context_length_error(&anyhow::anyhow!("network timeout")));
+    }
+
+    #[test]
+    fn idle_soft_fold_respects_hot_cache_and_turn_boundary() {
+        assert!(!idle_soft_fold_due(
+            IDLE_CACHE_TTL_MS - 1,
+            Some(0),
+            true,
+            true,
+            1,
+            100,
+            1,
+        ));
+        assert!(!idle_soft_fold_due(
+            IDLE_CACHE_TTL_MS,
+            Some(0),
+            false,
+            true,
+            1,
+            100,
+            1,
+        ));
+        assert!(idle_soft_fold_due(
+            IDLE_CACHE_TTL_MS,
+            Some(0),
+            true,
+            true,
+            1,
+            100,
+            1,
+        ));
+    }
+
+    #[test]
+    fn idle_soft_fold_keeps_folded_reply_and_snapshot_recall() {
+        let mut doc = context_doc::ContextDocument::default();
+        doc.begin_turn(1, "old topic");
+        doc.active_turn_mut().unwrap().segments.push(context_doc::TraceSegment {
+            source: "const old = 1;".into(),
+            inline_receipts: vec!["// => old = 1".into()],
+            error_note: None,
+            assistant_message: Some(json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call-old",
+                    "type": "function",
+                    "function": {
+                        "name": "run_js",
+                        "arguments": "{\"code\":\"const old = 1;\"}"
+                    }
+                }]
+            })),
+            tool_call_id: Some("call-old".into()),
+            is_rejection: false,
+        });
+        doc.finish_turn("old assistant reply");
+        doc.begin_turn(2, "new topic");
+        let before = serde_json::to_string(&doc.render_conversation_messages()).unwrap();
+        assert!(idle_soft_fold_due(
+            IDLE_CACHE_TTL_MS,
+            Some(0),
+            true,
+            true,
+            10,
+            100,
+            1,
+        ));
+        assert!(doc.fold_turn(
+            1,
+            r#"{"frozen":true,"read":"session.snapshot({ asset_id })"}"#,
+            None,
+        ));
+        let after = serde_json::to_string(&doc.render_conversation_messages()).unwrap();
+        assert_ne!(after, before, "folding must change the rendered wire");
+        let wire = doc.render_conversation_messages();
+        assert!(wire.iter().any(|message| message["content"] == "old assistant reply"));
+        assert!(wire.iter().any(|message| {
+            message["role"] == "tool"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("session.snapshot"))
+        }));
     }
 }

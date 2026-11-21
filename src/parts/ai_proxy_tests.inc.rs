@@ -423,7 +423,7 @@
                 "deepseek":{"baseURL":"https://api.deepseek.com/v1","api":"openai-completions","models":[
                     {"id":"deepseek-flash","contextWindow":1048576,"maxTokens":393216,
                      "reasoningEfforts":{"low":"low","high":"high","max":"max","false":null,"minimal":"minimal"},
-                     "cost":{"longContextThreshold":272000}}
+                     "cost":{"longContextThreshold":272000,"input":1.0,"output":2.0,"cacheRead":0.02,"currency":"CNY","timeOfUse":"deepseek-cn","offPeakMultiplier":0.5}}
                 ]},
                 "subapi":{"baseURL":"http://relay.example/v1","api":"openai-completions","models":[
                     {"id":"gpt-6.1-sol","contextWindow":1050000,"maxTokens":128000,
@@ -446,6 +446,15 @@
         let mut state = crate::agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
         apply_agent_config(&mut state, &loaded);
         assert_eq!(crate::model_settings::long_context_threshold(&state, "deepseek-flash"), Some(272_000));
+        let counts = crate::model_transport::UsageCounts { total_input: 1_000_000, cache_read: 1_000_000, ..Default::default() };
+        let at = "2026-11-09T04:00:00Z".parse().unwrap();
+        let cost = crate::model_settings::request_cost(&state, "deepseek-flash", counts, at).unwrap();
+        assert_eq!(cost.cost_amount, 0.01);
+        assert_eq!(cost.pricing_tier, "off_peak");
+        assert_eq!(serde_json::to_value(cost).unwrap()["cost_currency"], "CNY");
+        let mut subapi = state.clone();
+        subapi.provider_name = "subapi".into();
+        assert!(crate::model_settings::request_cost(&subapi, "gpt-6.1-sol", counts, at).is_none());
         // An entry that names its levels is selectable without repeating them;
         // `false` and `minimal` fold onto levels the host can save.
         assert_eq!(

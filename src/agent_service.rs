@@ -96,6 +96,7 @@ impl PermissionMode {
             | "browser_upload"
             | "browser_screenshot" => matches!(self, Self::FullAccess | Self::Ask | Self::AutoReview),
             "browser_close" => matches!(self, Self::FullAccess | Self::Ask | Self::AutoReview),
+            "generate_image" => true,
             _ => true,
         }
     }
@@ -122,6 +123,8 @@ pub struct AgentProviderRoute {
     pub context_windows: HashMap<String, usize>,
     /// Configured economic line before a model enters its long-context price tier.
     pub long_context_thresholds: HashMap<String, usize>,
+    /// Optional per-million token rates declared by each model.
+    pub model_costs: HashMap<String, crate::model_settings::ModelCost>,
 }
 
 impl AgentProviderRoute {
@@ -155,6 +158,7 @@ pub struct AgentServiceState {
 
     pub visual: crate::visual_artifacts::VisualSettings,
     pub visual_tool_settings: crate::model_settings::ModelSettings,
+    pub image_generation_settings: crate::model_settings::ModelSettings,
     /// Model for task delegates; all-empty means "same as the conversation".
     pub delegate_agent_settings: crate::model_settings::ModelSettings,
     pub config: Option<Arc<tokio::sync::RwLock<crate::ai_proxy::AiProxyConfig>>>,

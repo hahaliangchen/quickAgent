@@ -79,7 +79,7 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
                         );
                         assert!(
                             user.contains("LARGE INDEX")
-                                && user.contains("L260: pub fn critical_handler"),
+                                && user.contains("L260|pub fn critical_handler"),
                             "expected Tier-3 structural symbol index in EPHEMERAL_PEEK: {user}"
                         );
                         assert!(
@@ -104,8 +104,8 @@ async fn step3_lazy_handle_demand_paging_slice_multirange_grep_outline_head_tail
                             "small handle projections must all fit inline and wipe EPHEMERAL_PEEK: {user}"
                         );
                         assert!(
-                            user.contains("260: pub fn critical_handler")
-                                && user.contains("261:     // SECRET_BUG_MARKER")
+                            user.contains("260|pub fn critical_handler")
+                                && user.contains("261|    // SECRET_BUG_MARKER")
                                 && user.contains("skipped 257 lines")
                                 && user.contains("pub fn shutdown_engine()")
                                 && (user.contains("\"plainThrew\":true")
@@ -227,7 +227,7 @@ async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_de
                         }
                         2 => {
                             assert!(
-                                user.contains("2: // SECRET_RAW_A_ONLY_CHILD_SEES"),
+                                user.contains("2|// SECRET_RAW_A_ONLY_CHILD_SEES"),
                                 "demand-paged .grep() must materialize only the requested line on demand: {user}"
                             );
                             completion("Pass-by-Handle 零拷贝透传与按需分页全部验证通过。")
@@ -240,7 +240,7 @@ async fn step3_pass_by_handle_zero_outer_expansion_child_auto_deref_and_alias_de
                 // Child MUST receive clean line-numbered source code inline (NOT escaped JSON!)
                 assert!(
                     !user.contains("EPHEMERAL_PEEK")
-                        && user.contains("1: //! Module ")
+                        && user.contains("1|//! Module ")
                         && !user.contains("\"content\": \"//!"),
                     "virtual child must auto-dereference handle into clean inline line-numbered view: {user}"
                 );
@@ -341,4 +341,90 @@ async fn step3_ephemeral_peek_deduplicates_aliases_in_same_step() {
     .await
     .unwrap();
     server.abort();
+}
+
+#[tokio::test]
+async fn step3_turn_scoped_handle_dedup_reuses_ref_and_collapses_unchanged_reread() {
+    let ws = TestWorkspace::new("cac-v2-step3-turn-dedup");
+    std::fs::write(
+        ws.path().join("demo.rs"),
+        "pub fn alpha() {}\npub fn beta() {}\n",
+    )
+    .unwrap();
+    init_task_row(ws.path(), "step3-turn-dedup");
+
+    let seq = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |Json(body): Json<Value>| {
+            let seq = seq.clone();
+            async move {
+                let idx = seq.fetch_add(1, Ordering::SeqCst);
+                let tool_out = last_tool_output(&body);
+                Json(match idx {
+                    0 => run_js("const first = io.read({ path: \"demo.rs\" });"),
+                    1 => {
+                        assert!(
+                            tool_out.contains("Ref#1") && tool_out.contains("1|pub fn alpha() {}"),
+                            "first read must expand inline with Ref#1: {tool_out}"
+                        );
+                        // Re-read unchanged file in Step 2: should reuse Ref#1 and NOT re-dump body.
+                        run_js("const second = io.read({ path: \"demo.rs\" });")
+                    }
+                    2 => {
+                        assert!(
+                            tool_out.contains("Ref#1")
+                                && tool_out.contains("unchanged since step 1")
+                                && !tool_out.contains("1|pub fn alpha() {}"),
+                            "unchanged re-read in Step 2 must collapse to 1-line reuse receipt: {tool_out}"
+                        );
+                        // Explicit .slice() on `second` MUST still work and print the lines!
+                        run_js("second.slice(1, 2);")
+                    }
+                    3 => {
+                        assert!(
+                            tool_out.contains("1|pub fn alpha() {}"),
+                            "explicit .slice() on reused live handle must print normally: {tool_out}"
+                        );
+                        // Edit the file, then re-read in next step -> fresh Ref#2 and full new body!
+                        run_js("const ed = io.edit({ path: \"demo.rs\", old_text: \"pub fn alpha() {}\", new_text: \"pub fn alpha_v2() {}\" });")
+                    }
+                    4 => run_js("const third = io.read({ path: \"demo.rs\" });"),
+                    5 => {
+                        assert!(
+                            tool_out.contains("Ref#2") && tool_out.contains("1|pub fn alpha_v2() {}"),
+                            "re-read after edit must mint fresh Ref#2 and expand updated content: {tool_out}"
+                        );
+                        completion("跨步句柄自动复用与修改刷新验证通过。")
+                    }
+                    other => panic!("unexpected round {other}"),
+                })
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let state: AgentServiceState =
+        agent_service::tests::test_state(ws.path(), listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    run_task(
+        state,
+        "step3-turn-dedup".into(),
+        "fake".into(),
+        "Verify turn-scoped handle reuse".into(),
+        8,
+        CancellationToken::new(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+    assert_eq!(
+        assistant_messages(ws.path(), "step3-turn-dedup"),
+        vec!["跨步句柄自动复用与修改刷新验证通过。"]
+    );
 }

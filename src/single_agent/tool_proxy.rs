@@ -62,6 +62,13 @@ pub(super) async fn proxy_rust_tool(
             Ok(val) => (val, false),
             Err(err) => (json!({"error": format!("{err:#}")}), true),
         },
+        "generate_image" => {
+            let context = host_tools::visual_context(s, node)?;
+            match crate::image_generation::execute(s.state, &context, &s.state.workspace, &args, s.cancel).await {
+                Ok(value) => (value, false),
+                Err(error) => (json!({"error": format!("{error:#}")}), true),
+            }
+        }
         "analyze_images" => {
             let context = host_tools::visual_context(s, node)?;
             let result = if args["background"] == true {
@@ -301,7 +308,6 @@ fn normalize_edit_file_args(args: &mut Value) {
     {
         let old_text = obj.remove("old_text").unwrap();
         let new_text = obj.remove("new_text").unwrap();
-        obj.remove("replace_all");
         obj.insert(
             "edits".into(),
             json!([{"old_text": old_text, "new_text": new_text}]),

@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub(super) const NAMES: &[&str] = &["Map", "Set", "WeakMap", "WeakSet"];
+pub(super) const SET_OPERATIONS: &[&str] = &[
+    "union", "intersection", "difference", "symmetricDifference",
+    "isSubsetOf", "isSupersetOf", "isDisjointFrom",
+];
+pub(super) fn set_operation(name: &str) -> bool {
+    SET_OPERATIONS.contains(&name)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Kind {
     Map,
@@ -38,7 +46,7 @@ impl Kind {
         })
     }
     pub fn method(self, name: &str) -> bool {
-        matches!(name, "has" | "delete")
+        (self == Self::Set && set_operation(name)) || matches!(name, "has" | "delete")
             || if self.map() {
                 matches!(name, "get" | "set")
             } else {
@@ -382,6 +390,29 @@ pub(super) fn construct(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result
     }
     Ok(VmValue::Reference(id))
 }
+// Internal operations bypass mutable properties on Set/Map instances and prototypes.
+pub(super) fn collection_data(heap: &mut Heap, args: &[VmValue]) -> Result<VmValue> {
+    let [VmValue::String(op), receiver @ VmValue::Reference(id), values @ ..] = args else {
+        bail!("TypeError: incompatible collection receiver");
+    };
+    let HeapNode::Collection(c) = heap.get(*id)? else {
+        bail!("TypeError: incompatible collection receiver");
+    };
+    match op.as_str() {
+        "size" => Ok(VmValue::Number(JsNumber::new(c.size as f64))),
+        "copy" => {
+            let copy = Collection {
+                kind: c.kind,
+                entries: c.entries.iter().flatten().cloned().map(Some).collect(),
+                size: c.size,
+                index: None,
+            };
+            Ok(VmValue::Reference(heap.allocate(HeapNode::Collection(copy))?))
+        }
+        _ => call(heap, receiver.clone(), op, values),
+    }
+}
+
 pub(super) fn call(
     heap: &mut Heap,
     receiver: VmValue,

@@ -125,25 +125,40 @@ pub fn wire_body(state: &AgentServiceState, model: &str, chat: &Value) -> Value 
 }
 
 fn with_cache_breakpoints(mut body: Value) -> Value {
-    if let Some(system) = body.get("system").and_then(Value::as_str).map(str::to_owned) {
+    if let Some(system) = body["system"].as_str().filter(|text| !text.trim().is_empty()) {
         body["system"] = json!([{"type":"text","text":system,"cache_control":{"type":"ephemeral"}}]);
     }
-    if let Some(tools) = body["tools"].as_array_mut() {
-        if let Some(last) = tools.last_mut() {
-            last["cache_control"] = json!({"type":"ephemeral"});
-        }
+    if let Some(last) = body["tools"].as_array_mut().and_then(|tools| tools.last_mut()) {
+        last["cache_control"] = json!({"type":"ephemeral"});
     }
     if let Some(messages) = body["messages"].as_array_mut() {
-        let non_system = messages.iter().filter(|message| message["role"] != "system").count();
-        if non_system > 1
-            && let Some(last) = messages.iter_mut().rev().find(|message| message["role"] != "system")
-            && let Some(content) = last["content"].as_array_mut()
-            && let Some(block) = content.last_mut()
-        {
-            block["cache_control"] = json!({"type":"ephemeral"});
+        let history: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| (message["role"] != "system").then_some(index))
+            .collect();
+        let mut newest = history.iter().rev().copied();
+        if let Some(last) = newest.next() {
+            // Stay one tool round behind the tail so a recent prefix can be reused.
+            let earlier = newest.clone().nth(1)
+                .filter(|&i| cacheable_tail(&messages[i]).is_some())
+                .or_else(|| newest.find(|&i| messages[i]["role"] == "user" && cacheable_tail(&messages[i]).is_some()));
+            for i in std::iter::once(last).chain(earlier) {
+                if let Some(block) = cacheable_tail(&messages[i]) {
+                    messages[i]["content"][block]["cache_control"] = json!({"type":"ephemeral"});
+                }
+            }
         }
     }
     body
+}
+
+fn cacheable_tail(message: &Value) -> Option<usize> {
+    message["content"].as_array()?.iter().rposition(|block| match block["type"].as_str() {
+        Some("text") => block["text"].as_str().is_some_and(|text| !text.trim().is_empty()),
+        Some("image" | "tool_use" | "tool_result") => true,
+        _ => false,
+    })
 }
 
 /// A request for a body already in the route's wire form. Responses and Chat
@@ -439,6 +454,8 @@ fn baseline_tools(chat: &Value) -> BTreeSet<String> {
 /// baseline tools ready to call, every other tool deferred until a
 /// `tool_addition` block activates it.
 fn catalog_tools(chat: &Value, baseline: &BTreeSet<String>) -> Vec<Value> {
+    // Context-as-Code v2 declares run_js directly, without tool activation history.
+    let defer = chat.get(CATALOG).is_some() || !baseline.is_empty();
     let mut seen = BTreeSet::new();
     let mut ordered = Vec::new();
     for definition in chat[CATALOG]
@@ -457,7 +474,7 @@ fn catalog_tools(chat: &Value, baseline: &BTreeSet<String>) -> Vec<Value> {
         .into_iter()
         .map(|definition| {
             let mut tool = wire_tool(definition);
-            if !definition["function"]["name"].as_str().is_some_and(|name| baseline.contains(name)) {
+            if defer && !definition["function"]["name"].as_str().is_some_and(|name| baseline.contains(name)) {
                 tool["defer_loading"] = json!(true);
             }
             tool
@@ -736,6 +753,50 @@ mod tests {
         assert_eq!(wire["messages"].as_array().unwrap().last().unwrap()["content"].as_array().unwrap().last().unwrap()["cache_control"]["type"], "ephemeral");
     }
 
+    #[test]
+    fn v2_run_js_stays_active_and_system_updates_stay_in_history() {
+        let mut chat = chat(&["run_js"], &[], &[]);
+        chat.as_object_mut().unwrap().remove(CATALOG);
+        let capabilities = Capabilities { tool_update: true, system_prompt_update: true };
+        let first = with_cache_breakpoints(body(&chat, capabilities));
+        chat["messages"].as_array_mut().unwrap().extend([
+            json!({"role":"assistant","content":"ready"}),
+            json!({"role":"developer","content":"new constraints"}),
+            json!({"role":"system","content":"more details"}),
+            json!({"role":"user","content":"continue"}),
+        ]);
+        let wire = with_cache_breakpoints(body(&chat, capabilities));
+        assert_eq!(wire["tools"], first["tools"]);
+        assert_eq!(wire["tools"][0]["name"], "run_js");
+        assert!(wire["tools"][0].get("defer_loading").is_none());
+        assert_eq!(wire["system"], first["system"]);
+        assert_eq!(wire["messages"][2], json!({"role":"system","content":[{"type":"text","text":"new constraints"}]}));
+        assert_eq!(wire["messages"][3], json!({"role":"system","content":[{"type":"text","text":"more details"}]}));
+        assert!(!tool_changes(&wire));
+    }
+
+    #[test]
+    fn cache_breakpoints_slide_over_non_system_messages_and_skip_ineligible_blocks() {
+        let wire = with_cache_breakpoints(json!({
+            "system":"stable",
+            "tools":[{"name":"unused"},{"name":"run_js"}],
+            "messages":[
+                {"role":"user","content":[{"type":"text","text":"start"}]},
+                {"role":"assistant","content":[{"type":"tool_use","id":"call_1"}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1"}]},
+                {"role":"system","content":[{"type":"text","text":"new guidance"}]},
+                {"role":"assistant","content":[{"type":"thinking","thinking":"private"}]},
+                {"role":"user","content":[{"type":"text","text":"continue"},{"type":"text","text":" "}]},
+                {"role":"system","content":[{"type":"text","text":"more guidance"}]}
+            ]
+        }));
+        assert_eq!(wire.to_string().matches("cache_control").count(), 4);
+        assert_eq!(wire["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(wire["tools"][1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(wire["messages"][2]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(wire["messages"][5]["content"][0]["cache_control"]["type"], "ephemeral");
+    }
+
     /// The conversion under test, named so the fixtures above stay readable.
     fn body_(chat: &Value, capabilities: Capabilities) -> Value {
         body(chat, capabilities)
@@ -871,6 +932,7 @@ mod tests {
             max_output_tokens: Default::default(),
             context_windows: Default::default(),
                 long_context_thresholds: Default::default(),
+                model_costs: Default::default(),
         });
         let body = json!({"model":"deepseek-flash","stream":true,"messages":[]});
         let header = |state: &crate::agent_service::AgentServiceState| {
@@ -916,6 +978,7 @@ mod tests {
             max_output_tokens: Default::default(),
             context_windows: Default::default(),
                 long_context_thresholds: Default::default(),
+                model_costs: Default::default(),
         });
         assert_eq!(wire_body(&completions, "deepseek-flash", &chat), chat);
         let _ = std::fs::remove_dir_all(root);
@@ -1009,6 +1072,7 @@ mod tests {
             max_output_tokens: Default::default(),
             context_windows: Default::default(),
                 long_context_thresholds: Default::default(),
+                model_costs: Default::default(),
         });
         let conn = crate::agent_service::open_db(root.path()).unwrap();
         conn.execute(

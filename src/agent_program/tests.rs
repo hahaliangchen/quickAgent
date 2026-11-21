@@ -20,6 +20,9 @@ mod work_budget;
 #[path = "tests_bindings.rs"]
 mod bindings;
 
+#[path = "tests_modern_builtins.rs"]
+mod modern_builtins;
+
 include!("parts/tests_core_1.inc.rs");
 include!("parts/tests_core_2.inc.rs");
 include!("parts/tests_core_3.inc.rs");

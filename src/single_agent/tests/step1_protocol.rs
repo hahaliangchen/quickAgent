@@ -78,8 +78,8 @@ async fn step1_analyze_code_pure_js_dts_rust_proxy_peek_projection_and_return_he
             );
             assert!(
                 tool_out.contains("authFile (File \"src/auth.rs\", Ref#1")
-                    && tool_out.contains("61: pub fn verify_token")
-                    && tool_out.contains("63:     decode_without_verify(token).is_ok()"),
+                    && tool_out.contains("61|pub fn verify_token")
+                    && tool_out.contains("63|    decode_without_verify(token).is_ok()"),
                 "<= 64KB file must appear permanently inline with line numbers: {tool_out}"
             );
 
@@ -355,7 +355,7 @@ async fn step1_final_statement_only_display_rule() {
         6 => {
             let tool_out = last_tool_output(&body);
             assert!(
-                tool_out.contains("LOG:1: INTERMEDIATE_LINE_1_SHOULD_STAY_SILENT")
+                tool_out.contains("LOG:1|INTERMEDIATE_LINE_1_SHOULD_STAY_SILENT")
                     && !tool_out.contains("// => logged"),
                 "variable consumed by console.log must NOT duplicate outside console: {tool_out}"
             );
@@ -537,6 +537,7 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
             max_output_tokens: Default::default(),
             context_windows: Default::default(),
                 long_context_thresholds: Default::default(),
+                model_costs: Default::default(),
         },
     );
     let server = tokio::spawn(async move {
@@ -613,6 +614,74 @@ async fn step1_responses_api_replays_encrypted_reasoning_items() {
     assert_eq!(usage_json["cache_hit_pct"], json!(95.0));
     assert_eq!(usage_json["output_tokens"], json!(20));
     assert_eq!(usage_json["reasoning_tokens"], json!(12));
+}
+
+#[tokio::test]
+async fn step1_deepseek_messages_records_real_cache_and_cost_in_event_and_log() {
+    let ws = TestWorkspace::new("cac-v2-deepseek-pricing");
+    let task = "step1-deepseek";
+    init_task_row(ws.path(), task);
+    async fn reply(Json(body): Json<Value>) -> Response {
+        assert_eq!(body["model"], "deepseek-flash");
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"][0]["name"], "run_js");
+        assert!(body["tools"][0].get("defer_loading").is_none());
+        let sse = [
+            json!({"type":"message_start","message":{"id":"msg_test","usage":{"input_tokens":500,"cache_read_input_tokens":9500,"cache_creation_input_tokens":1000}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":"Done."}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}),
+            json!({"type":"message_stop"}),
+        ].into_iter().map(|record| format!("event: {}\ndata: {record}\n\n", record["type"].as_str().unwrap())).collect::<String>();
+        Response::builder().header(header::CONTENT_TYPE, "text/event-stream").body(Body::from(sse)).unwrap()
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/v1/messages", post(reply))).await.unwrap();
+    });
+    let mut state = agent_service::tests::test_state(ws.path(), addr);
+    state.provider_name = "deepseek-self".into();
+    state.provider_url = format!("http://{addr}/v1");
+    state.provider_routes.insert(state.provider_name.clone(), AgentProviderRoute {
+        prefix_system_messages: false,
+        responses: false,
+        messages: true,
+        messages_capabilities: [("deepseek-flash".into(), crate::anthropic_messages::Capabilities {
+            tool_update: true, system_prompt_update: true,
+        })].into_iter().collect(),
+        url: state.provider_url.clone(), api_key: String::new(), models: Default::default(),
+        max_output_tokens: Default::default(), context_windows: Default::default(),
+        long_context_thresholds: Default::default(),
+        model_costs: [("deepseek-flash".into(), serde_json::from_value(json!({
+            "input":1.0,"output":2.0,"cacheRead":0.02,"currency":"CNY"
+        })).unwrap())].into_iter().collect(),
+    });
+    run_task(state, task.into(), "deepseek-flash".into(), "test usage".into(), 5, CancellationToken::new(), 1, false).await.unwrap();
+    server.abort();
+    let conn = agent_service::open_db(ws.path()).unwrap();
+    let event: String = conn.query_row(
+        "SELECT data FROM agent_task_events WHERE task_id=?1 AND kind='context/usage' AND json_extract(data,'$.source')='provider_usage'",
+        [task], |row| row.get(0),
+    ).unwrap();
+    let event: Value = serde_json::from_str(&event).unwrap();
+    let log = std::fs::read_dir(ws.path().join("logs")).unwrap().flatten()
+        .filter(|file| file.file_name().to_string_lossy().starts_with("model-requests-"))
+        .flat_map(|file| std::fs::read_to_string(file.path()).unwrap().lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()).collect::<Vec<_>>())
+        .find(|record| record["stage"] == "completed" && record["identity"]["task_id"] == task).unwrap();
+    for (key, expected) in [
+        ("estimated_input_tokens", json!(11_000)), ("uncached_input_tokens", json!(500)),
+        ("cached_tokens", json!(9500)), ("cache_write_tokens", json!(1000)),
+        ("cache_hit_pct", json!(86.4)), ("output_tokens", json!(20)), ("reasoning_tokens", json!(0)),
+        ("cost_currency", json!("CNY")), ("pricing_tier", json!("standard")),
+        ("model", json!("deepseek-flash")), ("provider", json!("deepseek-self")),
+    ] {
+        assert_eq!(event[key], expected, "event {key}");
+        assert_eq!(log["detail"][key], expected, "transport {key}");
+    }
+    assert!((event["cost_amount"].as_f64().unwrap() - 0.00173).abs() < 1e-12);
+    assert_eq!(log["detail"]["cost_amount"], event["cost_amount"]);
 }
 
 #[tokio::test]

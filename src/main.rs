@@ -22,6 +22,7 @@ mod frame_view;
 mod go_index;
 mod http_probe;
 mod image_analysis;
+mod image_generation;
 mod index_refresh;
 mod interjections;
 mod mcp;

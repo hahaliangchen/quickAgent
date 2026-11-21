@@ -2,7 +2,7 @@
 //! JavaScript-subset interpreter. Closures are not yet connected to execution.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 #[path="js_prototypes.rs"]
 mod prototypes;
@@ -429,6 +429,9 @@ impl Heap {
             VmValue::Utf16(_) => bail!("unpaired UTF-16 surrogate cannot cross the Unicode JSON host boundary; use JSON.stringify to preserve escaped code units"),
             VmValue::Promise(_) => bail!("promise cannot cross the JSON host boundary"),
             VmValue::Reference(id) => {
+                if let Some((pattern, flags)) = self.regex_parts(*id) {
+                    return Ok(json!({"$flow_regex": {"pattern": pattern, "flags": flags}}));
+                }
                 if let Some(value)=self.boxed_value(*id).filter(|v|!matches!(v,VmValue::Symbol(_))){return self.export_json(value,active,depth+1);}
                 if let Some(ms) = self.date_value(*id) {
                     return Ok(if ms.is_finite() { Value::String(super::js_date::iso(ms)?) } else { Value::Null });

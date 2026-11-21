@@ -6,7 +6,7 @@
 
 use super::{
     TestWorkspace, all_messages_text, assert_valid_tool_pairing, assistant_messages, completion,
-    extract_asset_id, init_task_row, last_tool_output, run_js,
+    extract_asset_id, init_task_row, last_tool_output, run_js, spawn_mock_provider,
 };
 use crate::agent_service::{self, AgentServiceState};
 use crate::single_agent::{host_folder, run_task};
@@ -602,6 +602,7 @@ async fn step4_multiturn_folding_snapshot_handle_refresh_baselines_and_level2_tr
             max_output_tokens: Default::default(),
             context_windows: [("fake".into(), 200_000)].into_iter().collect(),
             long_context_thresholds: [("fake".into(), 100)].into_iter().collect(),
+            model_costs: Default::default(),
         },
     );
     let server = tokio::spawn(async move {
@@ -669,4 +670,110 @@ async fn step4_multiturn_folding_snapshot_handle_refresh_baselines_and_level2_tr
             "Turn 3 confirmed Level-2 truncation.",
         ]
     );
+}
+
+#[tokio::test]
+async fn step4_idle_soft_fold_respects_hot_window_and_preserves_history() {
+    let ws = TestWorkspace::new("cac-v2-idle-fold");
+    init_task_row(ws.path(), "step4-idle-fold");
+    let (state, captured, server) = spawn_mock_provider(ws.path(), |idx, body| match idx {
+        0 => run_js("const old = 1;"),
+        1 => completion("Turn 1 complete."),
+        2 => {
+            let all_text = all_messages_text(&body);
+            assert!(
+                all_text.contains("const old = 1;"),
+                "hot-cache Turn 2 must keep the unfolded prefix"
+            );
+            assert!(
+                !all_text.contains("Turn 1 folded"),
+                "hot-cache Turn 2 must not soft-fold"
+            );
+            run_js("const hot = 2;")
+        }
+        3 => completion("Turn 2 complete."),
+        4 => {
+            assert_valid_tool_pairing(&body);
+            let all_text = all_messages_text(&body);
+            assert!(
+                all_text.contains("Turn 1 complete."),
+                "folding must preserve the completed assistant reply"
+            );
+            let manifest = last_tool_output(&body);
+            assert!(
+                manifest.contains("frozen_turn_snapshots") && manifest.contains("session.snapshot"),
+                "folding must preserve durable snapshot recall metadata: {manifest}"
+            );
+            completion("Turn 3 observed idle soft-fold.")
+        }
+        other => panic!("unexpected mock request {other}"),
+    })
+    .await;
+
+    run_task(
+        state.clone(),
+        "step4-idle-fold".into(),
+        "fake".into(),
+        "Turn 1".into(),
+        5,
+        CancellationToken::new(),
+        1,
+        false,
+    )
+    .await
+    .unwrap();
+    run_task(
+        state.clone(),
+        "step4-idle-fold".into(),
+        "fake".into(),
+        "Turn 2".into(),
+        5,
+        CancellationToken::new(),
+        2,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let conn = agent_service::open_db(ws.path()).unwrap();
+    let raw: String = conn
+        .query_row(
+            "SELECT state FROM agent_runtime_windows WHERE task_id=?1 AND scope='main'",
+            ["step4-idle-fold"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut saved: Value = serde_json::from_str(&raw).unwrap();
+    assert!(saved["last_model_request_at_ms"].as_u64().is_some());
+    saved["last_model_request_at_ms"] = 0.into();
+    conn.execute(
+        "UPDATE agent_runtime_windows SET state=?1 WHERE task_id=?2 AND scope='main'",
+        rusqlite::params![serde_json::to_string(&saved).unwrap(), "step4-idle-fold"],
+    )
+    .unwrap();
+    drop(conn);
+
+    run_task(
+        state,
+        "step4-idle-fold".into(),
+        "fake".into(),
+        "Turn 3".into(),
+        5,
+        CancellationToken::new(),
+        3,
+        false,
+    )
+    .await
+    .unwrap();
+    server.abort();
+
+    assert_eq!(
+        assistant_messages(ws.path(), "step4-idle-fold"),
+        vec![
+            "Turn 1 complete.",
+            "Turn 2 complete.",
+            "Turn 3 observed idle soft-fold.",
+        ]
+    );
+    assert_eq!(captured.lock().unwrap().len(), 5);
 }

@@ -101,6 +101,7 @@ const EXACT: Record<string, Omit<ToolVisual, 'summary'>> = {
   read_attachment: { tone: 'read', icon: <IconPaperclipOutlineMedium />, title: '读取了附件' },
   // Images and the web.
   analyze_images: { tone: 'media', icon: <ImageIcon />, title: '分析了图片' },
+  generate_image: { tone: 'media', icon: <ImageIcon />, title: '生成了图片' },
   image_analysis_results: { tone: 'media', icon: <ImageIcon />, title: '获取了图片分析' },
   view_image: { tone: 'media', icon: <ImageIcon />, title: '查看了图片' },
   browser_screenshot: { tone: 'media', icon: <ImageIcon />, title: '截取了页面' },

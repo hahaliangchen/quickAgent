@@ -360,7 +360,7 @@
                 expected_code_hash: None,
             })
             .unwrap();
-        assert!(response.preview.as_deref().is_some_and(|preview| preview.contains("L2: BETA")));
+        assert!(response.preview.as_deref().is_some_and(|preview| preview.contains("L2|BETA")));
         assert_eq!(
             fs::read_to_string(root.join("demo.txt")).unwrap(),
             "alpha\nBETA\ngamma\n"
@@ -381,12 +381,13 @@
                     TextEdit { old_text: "two".to_string(), new_text: "TWO".to_string() },
                     TextEdit { old_text: "six".to_string(), new_text: "SIX".to_string() },
                 ],
+                replace_all: false,
                 expected_code_hash: None,
             })
             .unwrap();
         let preview = response.preview.expect("changed edit has preview");
-        assert!(preview.contains("L2: TWO") && preview.contains("L6: SIX"), "{preview}");
-        assert!(preview.contains("L1: one") && preview.contains("L7: seven"), "{preview}");
+        assert!(preview.contains("L2|TWO") && preview.contains("L6|SIX"), "{preview}");
+        assert!(preview.contains("L1|one") && preview.contains("L7|seven"), "{preview}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -612,6 +613,8 @@
         // Code that only looks like a pattern stays literal.
         let or = search(serde_json::json!({"query":"a || b"}));
         assert_eq!((or.match_mode, or.matches.len()), ("literal", 1));
+        let spaced_pipe = search(serde_json::json!({"query":" | "}));
+        assert_eq!((spaced_pipe.match_mode, spaced_pipe.matches.len()), ("literal", 0));
         let index = search(serde_json::json!({"query":"arr[0]"}));
         assert_eq!((index.match_mode, index.matches.len()), ("literal", 1));
 

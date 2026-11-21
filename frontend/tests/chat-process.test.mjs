@@ -202,8 +202,7 @@ test('tool JSON failures become readable summaries and duplicate program errors 
   assert.equal(toolEntry?.kind, 'tools')
   assert.equal(JSON.parse(toolEntry.tools[0].result.text).error, 'invalid_edit: old_text did not match')
   const program = entries.find(entry => entry.kind === 'item' && entry.item.kind === 'program')
-  assert.equal(program?.kind, 'item')
-  assert.equal(program.item.text, '')
+  assert.equal(program, undefined)
   const runtimeItems = chatItems([
     call('main', 'edit2', 'edit_file', { path: 'src/a.ts' }),
     result('main', 'edit2', '{"error":"invalid_edit: old_text did not match"}', true),

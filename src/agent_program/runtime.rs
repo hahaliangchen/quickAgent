@@ -344,9 +344,39 @@ fn json_args(args: Vec<VmValue>, heap: &super::heap::Heap) -> Result<Vec<Value>>
     args.iter()
         .map(|value| match value {
             VmValue::Undefined => Ok(Value::Null),
-            value => heap.to_json(value),
+            value => Ok(normalize_tool_value(heap.to_json(value)?)),
         })
         .collect()
+}
+
+/// The VM serializes RegExp as `$flow_regex`; io.search accepts its source as
+/// query plus the explicit regex switch used by the Rust tool contract.
+fn normalize_tool_value(mut value: Value) -> Value {
+    if let Value::Object(object) = &mut value {
+        if let Some(query) = object.get("query")
+            && let Some(regex) = query.get("$flow_regex").and_then(Value::as_object)
+            && let Some(pattern) = regex.get("pattern").and_then(Value::as_str)
+        {
+            let ignore_case = regex
+                .get("flags")
+                .and_then(Value::as_str)
+                .is_some_and(|flags| flags.contains('i'));
+            object.insert("query".into(), Value::String(pattern.to_owned()));
+            object.insert("regex".into(), Value::Bool(true));
+            if ignore_case && !object.contains_key("case_sensitive") {
+                object.insert("case_sensitive".into(), Value::Bool(false));
+            }
+            return value;
+        }
+        for child in object.values_mut() {
+            *child = normalize_tool_value(std::mem::take(child));
+        }
+    } else if let Value::Array(items) = &mut value {
+        for child in items {
+            *child = normalize_tool_value(std::mem::take(child));
+        }
+    }
+    value
 }
 
 include!("parts/runtime_impl_1.inc.rs");

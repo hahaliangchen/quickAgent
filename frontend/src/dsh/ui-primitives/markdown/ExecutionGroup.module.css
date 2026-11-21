@@ -1,0 +1,503 @@
+/* Unified execution workspace panel for grouped chat Markdown terminal/test blocks.
+   Active only in default hairline mode; Borderless Paper mode renders the original blocks. */
+
+.panel {
+  --eg-surface: #ffffff;
+  --eg-surface-subtle: #f8fafb;
+  --eg-surface-hover: #f2f6f9;
+  --eg-border: #e5ebf0;
+  --eg-divider: #eef2f6;
+  --eg-text: #1e293b;
+  --eg-text-secondary: #5a6776;
+  --eg-text-muted: #7b8794;
+  --eg-tab-active-bg: #e7f6ef;
+  --eg-tab-active-text: #116e4f;
+  --eg-pass-bg: #e9f7f0;
+  --eg-pass-border: #cdebd9;
+  --eg-pass-text: #147551;
+  --eg-fail-bg: #fdecee;
+  --eg-fail-border: #f5cfd4;
+  --eg-fail-text: #c23646;
+  --eg-fail-row-bg: #fff8f8;
+  --eg-fail-row-border: #f2d8dc;
+  --eg-neutral-bg: #f1f5f9;
+  --eg-neutral-border: #e2e8f0;
+  --eg-neutral-text: #52606d;
+  --eg-well-bg: #ffffff;
+  --eg-well-border: #e7ecf1;
+  --eg-gutter: #9aa5b1;
+  --eg-diag-bg: #fef2f2;
+  --eg-diag-border: #f4ccd1;
+  --eg-diag-text: #b43343;
+  --eg-diag-warn-bg: #fdf8f0;
+  --eg-diag-warn-border: #f0dec2;
+  --eg-diag-warn-text: #945d1f;
+  --eg-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  margin: 14px 0;
+  border: 1px solid var(--eg-border);
+  border-radius: 12px;
+  background: var(--eg-surface);
+  box-shadow: 0 1px 2px rgb(15 23 42 / 3%);
+  overflow: hidden;
+  color: var(--eg-text);
+  font-family: var(--dsw-font-family);
+}
+
+:global(body[data-ds-dark-theme]) .panel {
+  --eg-surface: #11151b;
+  --eg-surface-subtle: #151a22;
+  --eg-surface-hover: #1b222c;
+  --eg-border: #262e39;
+  --eg-divider: #1f2630;
+  --eg-text: #e6edf3;
+  --eg-text-secondary: #9aa6b4;
+  --eg-text-muted: #768390;
+  --eg-tab-active-bg: #152d24;
+  --eg-tab-active-text: #6ee7b7;
+  --eg-pass-bg: #132921;
+  --eg-pass-border: #1e4234;
+  --eg-pass-text: #6ee7b7;
+  --eg-fail-bg: #2b161a;
+  --eg-fail-border: #4d252c;
+  --eg-fail-text: #fda4af;
+  --eg-fail-row-bg: #1a1315;
+  --eg-fail-row-border: #3b2429;
+  --eg-neutral-bg: #1b222c;
+  --eg-neutral-border: #2b3440;
+  --eg-neutral-text: #9aa6b4;
+  --eg-well-bg: #0d1117;
+  --eg-well-border: #232b35;
+  --eg-gutter: #636e7b;
+  --eg-diag-bg: #231417;
+  --eg-diag-border: #4a262d;
+  --eg-diag-text: #fda4af;
+  --eg-diag-warn-bg: #211b12;
+  --eg-diag-warn-border: #463721;
+  --eg-diag-warn-text: #f3b56c;
+  box-shadow: none;
+}
+
+.tabBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--eg-divider);
+  background: var(--eg-surface);
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--eg-text-secondary);
+  font: 500 12.5px/18px var(--dsw-font-family);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.tab:hover {
+  background: var(--eg-surface-hover);
+  color: var(--eg-text);
+}
+
+.tab[aria-selected='true'] {
+  background: var(--eg-tab-active-bg);
+  color: var(--eg-tab-active-text);
+}
+
+.tabActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.summaryBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 11px 14px 10px;
+}
+
+.metrics {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: 600 13px/18px var(--dsw-font-family);
+}
+
+.metricPass {
+  color: var(--eg-pass-text);
+}
+
+.metricFail {
+  color: var(--eg-fail-text);
+}
+
+.metricIgnored {
+  color: var(--eg-text-secondary);
+  font-weight: 500;
+}
+
+.metricDot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  flex: none;
+}
+
+.metricPass .metricDot {
+  background: var(--eg-pass-bg);
+  color: var(--eg-pass-text);
+}
+
+.metricFail .metricDot {
+  background: var(--eg-fail-bg);
+  color: var(--eg-fail-text);
+}
+
+.metricIgnored .metricDot {
+  background: var(--eg-neutral-bg);
+  color: var(--eg-text-muted);
+}
+
+.summaryRight {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--eg-text-muted);
+  font: 400 12px/18px var(--dsw-font-family);
+}
+
+.toggleAllBtn {
+  border: 0;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--eg-text-secondary);
+  font: 500 12px/18px var(--dsw-font-family);
+  cursor: pointer;
+}
+
+.toggleAllBtn:hover {
+  background: var(--eg-surface-hover);
+  color: var(--eg-text);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 0 12px 12px;
+}
+
+.row {
+  border: 1px solid var(--eg-border);
+  border-radius: 9px;
+  background: var(--eg-surface-subtle);
+  overflow: hidden;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.row[data-tone='error'] {
+  border-color: var(--eg-fail-row-border);
+  background: var(--eg-fail-row-bg);
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.rowTrigger {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.rowTrigger:hover .cmdText {
+  color: var(--eg-text);
+}
+
+.chevron {
+  flex: none;
+  color: var(--eg-text-muted);
+  transition: transform 140ms ease;
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+.cmdGlyph {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  border-radius: 5px;
+  border: 1px solid var(--eg-border);
+  background: var(--eg-surface);
+  color: var(--eg-text-secondary);
+}
+
+.row[data-tone='error'] .cmdGlyph {
+  border-color: var(--eg-fail-row-border);
+  color: var(--eg-fail-text);
+}
+
+.cmdText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 500 12.5px/18px var(--eg-mono);
+  color: var(--eg-text);
+}
+
+.rowControls {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.statusPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--eg-neutral-border);
+  background: var(--eg-neutral-bg);
+  color: var(--eg-neutral-text);
+  font: 500 11.5px/16px var(--eg-mono);
+  white-space: nowrap;
+}
+
+.statusPill[data-tone='success'] {
+  border-color: var(--eg-pass-border);
+  background: var(--eg-pass-bg);
+  color: var(--eg-pass-text);
+}
+
+.statusPill[data-tone='error'] {
+  border-color: var(--eg-fail-border);
+  background: var(--eg-fail-bg);
+  color: var(--eg-fail-text);
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--eg-text-muted);
+  cursor: pointer;
+}
+
+.iconBtn:hover {
+  background: var(--eg-surface-hover);
+  color: var(--eg-text);
+}
+
+.rowBody {
+  padding: 2px 12px 12px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.exitLine {
+  font: 600 12px/18px var(--eg-mono);
+  color: var(--eg-text-secondary);
+}
+
+.exitLine[data-tone='success'] {
+  color: var(--eg-pass-text);
+}
+
+.exitLine[data-tone='error'] {
+  color: var(--eg-fail-text);
+}
+
+.well {
+  border: 1px solid var(--eg-well-border);
+  border-radius: 8px;
+  background: var(--eg-well-bg);
+  overflow-x: auto;
+}
+
+.wellPre {
+  margin: 0 !important;
+  padding: 9px 12px !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  font: 12px/20px var(--eg-mono) !important;
+  color: var(--eg-text);
+  white-space: pre;
+}
+
+.wellPre code {
+  display: block;
+  font: inherit;
+  background: none;
+  padding: 0;
+}
+
+.wellLine {
+  display: flex;
+  gap: 12px;
+  min-height: 20px;
+}
+
+.lineNo {
+  flex: none;
+  min-width: 2ch;
+  text-align: end;
+  color: var(--eg-gutter);
+  user-select: none;
+}
+
+.lineText {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.term_prompt {
+  color: var(--eg-gutter);
+  user-select: none;
+}
+
+.term_command {
+  color: var(--eg-text);
+  font-weight: 550;
+}
+
+.term_pass {
+  color: var(--eg-pass-text);
+  font-weight: 550;
+}
+
+.term_fail {
+  color: var(--eg-fail-text);
+  font-weight: 550;
+}
+
+.term_muted {
+  color: var(--eg-text-muted);
+}
+
+.attachedNote {
+  font: 400 12.5px/20px var(--dsw-font-family);
+  color: var(--eg-text-secondary);
+}
+
+.attachedNote :where(p) {
+  margin: 0;
+}
+
+.attachedDiag {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--eg-diag-border);
+  background: var(--eg-diag-bg);
+  color: var(--eg-diag-text);
+}
+
+.attachedDiag[data-tone='warn'] {
+  border-color: var(--eg-diag-warn-border);
+  background: var(--eg-diag-warn-bg);
+  color: var(--eg-diag-warn-text);
+}
+
+.diagPre {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  font: 500 12px/18px var(--eg-mono) !important;
+  color: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tabPane {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.paneHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--eg-text-muted);
+  font: 500 12px/18px var(--dsw-font-family);
+}
+
+.copyPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--eg-border);
+  border-radius: 7px;
+  background: var(--eg-surface-subtle);
+  color: var(--eg-text-secondary);
+  font: 500 12px/16px var(--dsw-font-family);
+  cursor: pointer;
+}
+
+.copyPill:hover {
+  background: var(--eg-surface-hover);
+  color: var(--eg-text);
+}

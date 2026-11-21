@@ -3,7 +3,7 @@
 use super::heap::{Heap, HeapNode, VmValue};
 use anyhow::Result;
 
-pub(super) const ARRAY: &str = "at includes indexOf lastIndexOf slice concat push pop shift unshift splice reverse join flat fill sort toSorted toReversed keys values entries map filter forEach some every find findIndex findLast findLastIndex flatMap reduce reduceRight";
+pub(super) const ARRAY: &str = "at includes indexOf lastIndexOf slice concat push pop shift unshift splice reverse join flat fill sort toSorted toReversed toSpliced with keys values entries map filter forEach some every find findIndex findLast findLastIndex flatMap reduce reduceRight";
 pub(super) const STRING: &str = "localeCompare at includes indexOf lastIndexOf slice concat startsWith endsWith trim trimStart trimEnd toLowerCase toUpperCase toLocaleLowerCase toLocaleUpperCase split replace replaceAll match matchAll search charAt charCodeAt codePointAt substring substr repeat padStart padEnd";
 pub(super) const DATE: &str = "toLocaleString toLocaleDateString toLocaleTimeString getTime toISOString toJSON getFullYear getMonth getDate getDay getHours getMinutes getSeconds getMilliseconds getUTCFullYear getUTCMonth getUTCDate getUTCDay getUTCHours getUTCMinutes getUTCSeconds getUTCMilliseconds";
 fn contains(list: &str, name: &str) -> bool {
@@ -65,6 +65,9 @@ pub(super) fn native_length(id: &str) -> usize {
     match id {
         "AsyncGenerator.next"|"AsyncGenerator.return"|"AsyncGenerator.throw"|"AsyncGeneratorFunction"|"Generator.next"|"Generator.return"|"Generator.throw"|"GeneratorFunction"=>return 1,
         "Symbol"=>return 0,"Symbol.for"|"Symbol.keyFor"|"Symbol.toPrimitive"|"Function.hasInstance"=>return 1,
+        "Object.groupBy" | "Map.groupBy" => return 2,
+        "Promise.withResolvers" => return 0,
+        "RegExp.escape" => return 1,
         "Object.defineProperty"|"Reflect.defineProperty"|"Reflect.apply"|"Reflect.set"=>return 3,
         "Object.defineProperties"|"Object.getOwnPropertyDescriptor"|"Reflect.getOwnPropertyDescriptor"|"Reflect.get"|"Reflect.construct"|"Reflect.has"|"Reflect.deleteProperty"|"Reflect.setPrototypeOf"=>return 2,
         "Object.getOwnPropertyDescriptors"|"Object.getOwnPropertyNames"|"Object.getOwnPropertySymbols"|"Object.preventExtensions"|"Object.isExtensible"|"Object.seal"|"Object.isSealed"|"Object.isFrozen"|"Reflect.ownKeys"|"Reflect.getPrototypeOf"|"Reflect.isExtensible"|"Reflect.preventExtensions"=>return 1,
@@ -78,6 +81,7 @@ pub(super) fn native_length(id: &str) -> usize {
         return match name {
             "set" => 2,
             "get" | "has" | "delete" | "add" | "forEach" => 1,
+            _ if super::js_collections::set_operation(name) => 1,
             _ => 0,
         };
     }
@@ -121,7 +125,7 @@ pub(super) fn native_length(id: &str) -> usize {
         "Date" => 7,
         "Array.from" => 1,
         "Array.slice" | "String.slice" | "String.substring" | "String.substr" | "Array.splice"
-        | "String.replace" | "String.replaceAll" | "String.split" => 2,
+        | "String.replace" | "String.replaceAll" | "String.split" | "Array.toSpliced" | "Array.with" => 2,
         "Array.concat" | "String.concat" | "Array.push" | "Array.unshift" => 1,
         "Array.map"
         | "Array.filter"
@@ -198,6 +202,7 @@ pub(super) fn resumable_builtin(name:&str)->Option<&'static str>{Some(match name
     "Reflect.getOwnPropertyDescriptor"=>"$$reflectDescriptor",
     "new Map"=>"$$constructMap","new Set"=>"$$constructSet","new WeakMap"=>"$$constructWeakMap","new WeakSet"=>"$$constructWeakSet",
     "Object.fromEntries"=>"$$fromEntries",
+    "Object.groupBy"=>"$$objectGroupBy", "Map.groupBy"=>"$$mapGroupBy",
     "$$getAsyncIterator"=>"$$getAsyncIterator",
     "$$getIterator"=>"$$getIterator","$$iteratorStep"=>"$$iteratorStep","$$iteratorCloseNormal"=>"$$iteratorCloseNormal","$$iteratorCloseThrow"=>"$$iteratorCloseThrow",
     "$$iterator"=>"$$getIterator","$$iterableArray"=>"$$iterableToArray",

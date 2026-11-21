@@ -115,7 +115,7 @@ fn format_range(lines: &[&str], start_1: usize, end_1: usize) -> String {
     let s = start_1.max(1).min(total);
     let e = end_1.max(s).min(total);
     (s..=e)
-        .map(|n| format!("{n}: {}", lines[n - 1]))
+        .map(|n| format!("{n}|{}", lines[n - 1]))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -234,7 +234,7 @@ fn eval_grep(heap: &Heap, lines: &[&str], args: &[VmValue]) -> Result<String> {
         }
         for i in *s..=*e {
             if out_lines.len() < MAX_GREP_LINES {
-                out_lines.push(format!("{}: {}", i + 1, lines[i]));
+                out_lines.push(format!("{}|{}", i + 1, lines[i]));
             } else {
                 truncated += 1;
             }
@@ -282,7 +282,7 @@ fn eval_outline(lines: &[&str]) -> String {
             || trimmed.starts_with("### ");
         if is_symbol {
             let preview: String = trimmed.chars().take(120).collect();
-            entries.push(format!("{}: {}", idx + 1, preview));
+            entries.push(format!("{}|{}", idx + 1, preview));
             if entries.len() >= 80 {
                 entries.push("// ... (outline capped at 80 entries)".to_owned());
                 break;

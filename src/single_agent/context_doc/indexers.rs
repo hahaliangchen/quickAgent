@@ -32,7 +32,7 @@ pub(super) fn format_large_source_index(
             || t.starts_with("def ")
             || t.starts_with("# ");
         if is_sym {
-            symbols.push(format!("  L{}: {}", idx + 1, compact_single_line(t, 120)));
+            symbols.push(format!("  L{}|{}", idx + 1, compact_single_line(t, 120)));
             if symbols.len() >= 80 {
                 break;
             }
@@ -42,7 +42,7 @@ pub(super) fn format_large_source_index(
         .iter()
         .take(15)
         .enumerate()
-        .map(|(i, l)| format!("{}: {l}", i + 1))
+        .map(|(i, l)| format!("{}|{l}", i + 1))
         .collect::<Vec<_>>()
         .join("\n");
     let tail_start = total.saturating_sub(15);
@@ -50,7 +50,7 @@ pub(super) fn format_large_source_index(
         .iter()
         .skip(tail_start)
         .enumerate()
-        .map(|(i, l)| format!("{}: {l}", tail_start + i + 1))
+        .map(|(i, l)| format!("{}|{l}", tail_start + i + 1))
         .collect::<Vec<_>>()
         .join("\n");
     let title = path_hint.unwrap_or(label);
@@ -81,7 +81,7 @@ pub(super) fn format_large_log_index(name: &str, exit: &Value, combined: &str) -
             || lower.contains("failed")
             || lower.contains("exception")
         {
-            hits.push(format!("  L{}: {}", idx + 1, compact_single_line(line, 140)));
+            hits.push(format!("  L{}|{}", idx + 1, compact_single_line(line, 140)));
             if hits.len() >= 30 {
                 break;
             }
@@ -92,7 +92,7 @@ pub(super) fn format_large_log_index(name: &str, exit: &Value, combined: &str) -
         .iter()
         .skip(tail_start)
         .enumerate()
-        .map(|(i, l)| format!("{}: {l}", tail_start + i + 1))
+        .map(|(i, l)| format!("{}|{l}", tail_start + i + 1))
         .collect::<Vec<_>>()
         .join("\n");
     let hit_block = if hits.is_empty() {
@@ -153,9 +153,22 @@ pub(super) fn describe_item_shape(sample: &Value) -> String {
 pub(super) fn add_line_numbers(text: &str, start_line: usize) -> String {
     text.lines()
         .enumerate()
-        .map(|(idx, line)| format!("{}: {line}", start_line + idx))
+        .map(|(idx, line)| format!("{}|{line}", start_line + idx))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_line_numbers;
+
+    #[test]
+    fn line_numbers_keep_separator_separate_from_source_indentation() {
+        assert_eq!(
+            add_line_numbers("fn main() {}\n    let x = 1;", 300),
+            "300|fn main() {}\n301|    let x = 1;"
+        );
+    }
 }
 
 pub(super) fn format_comment_block(label: &str, body: &str) -> String {

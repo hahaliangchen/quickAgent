@@ -476,6 +476,10 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result
 /// the AI turned to grep in a shell. A pattern that matches the empty
 /// string (`a || b` read as regex) stays literal, as does `arr[0]`.
 fn written_as_regex(query: &str) -> bool {
+    // A separator-only query such as " | " is ordinary text, not an alternation.
+    if query.trim() == "|" {
+        return false;
+    }
     let marked = query.contains('|')
         || query.contains('\\')
         || query.contains(".*")
@@ -593,6 +597,8 @@ pub struct EditFileRequest {
     pub workspace_root: Option<String>,
     pub path: String,
     pub edits: Vec<TextEdit>,
+    #[serde(default)]
+    pub replace_all: bool,
     pub expected_code_hash: Option<String>,
 }
 

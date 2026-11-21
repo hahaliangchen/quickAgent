@@ -267,9 +267,20 @@ pub enum Effect {
 #[cfg(test)]
 pub const SKILL: &str = include_str!("../skills/task-program/SKILL.md");
 pub const ENVIRONMENT: &str = include_str!("../prompts/flow_environment.md");
-/// Said wherever the runtime lacks something code reached for: a rewrite
-/// by hand runs as slow VM loops, so the gap is reported and filled by the host.
-pub const NOT_AVAILABLE_HINT: &str = "Use the exact supported alternative: Buffer.byteLength/Buffer.from for UTF-8 bytes, new URL for URL parsing, path.isAbsolute for path checks, and require(name) for a dynamic library name. For anything else, consult read_program_guide or a host library. Do not hand-write a replacement; report the capability as missing when no permitted route exists.";
+/// Add a workaround only where an equivalent runtime operation is known.
+fn unsupported_builtin(name: &str) -> String {
+    let hint = match name {
+        "TextEncoder.encodeInto" => " Use new TextEncoder().encode(text) to get a new UTF-8 byte array; in-place encoding is unavailable.",
+        "TextDecoder" | "TextDecoder.decode" | "TextDecoderStream" => " UTF-8 decoding from byte arrays is unavailable; Buffer.from only encodes strings here.",
+        "Buffer.alloc" | "Buffer.allocUnsafe" => " Buffer objects are unavailable; Buffer.from(text, 'utf8') produces a byte array from a string.",
+        "URL.parse" | "URL.canParse" | "url.resolve" => " Use new URL(input, base) to parse or resolve a URL; invalid inputs throw.",
+        name if name.starts_with("url.") => " For URL parsing, use new URL(input, base).",
+        name if name.starts_with("path.") => " Supported path operations: join, resolve, relative, normalize, dirname, basename, extname, and isAbsolute.",
+        "require" | "require.resolve" => " Use require(name) with one library name to load it dynamically.",
+        _ => "",
+    };
+    format!("unsupported built-in {name} in the flow runtime.{hint}")
+}
 pub const CAPABILITIES: &str = include_str!("../prompts/flow_capabilities.md");
 pub const BUILTIN_CONTRACTS: &str = include_str!("../prompts/flow_builtin_contracts.d.ts");
 

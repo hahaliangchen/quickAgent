@@ -8,7 +8,7 @@
 //! - Handles passed to `@virtual` in the same step (Pass-by-Handle) keep compact
 //!   signatures in the outer trace and auto-dereference cleanly inside the child frame.
 
-use super::INLINE_LIMIT_CHARS;
+use super::{INLINE_LIMIT_CHARS, ShownFileHandle};
 use super::indexers::{
     add_line_numbers, describe_item_shape, format_comment_block, format_large_array_index,
     format_large_log_index, format_large_source_index,
@@ -59,14 +59,41 @@ pub(in crate::single_agent) fn fnv1a64(text: &str) -> u64 {
 /// Attach a monotonic `"__ref": "Ref#N"` handle tag to file-read results and
 /// medium/large command outputs so they act as first-class Lazy Resource Handles.
 pub(in crate::single_agent) fn tag_resource_handle(value: &mut Value, next_ref_id: &mut usize) {
+    let mut empty = BTreeMap::new();
+    tag_resource_handle_in_turn(value, next_ref_id, &mut empty);
+}
+
+/// Like [`tag_resource_handle`], but reuses an existing `Ref#N` handle identity
+/// when an unchanged file `(path, content_hash)` is re-read in the same turn.
+pub(in crate::single_agent) fn tag_resource_handle_in_turn(
+    value: &mut Value,
+    next_ref_id: &mut usize,
+    file_refs: &mut BTreeMap<String, (u64, String)>,
+) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
     if obj.contains_key("__ref") {
         return;
     }
-    let is_file = obj.get("path").and_then(Value::as_str).is_some()
-        && obj.get("content").and_then(Value::as_str).is_some();
+    if let (Some(path), Some(content)) = (
+        obj.get("path").and_then(Value::as_str),
+        obj.get("content").and_then(Value::as_str),
+    ) {
+        let hash = fnv1a64(content);
+        if let Some((prev_hash, prev_ref)) = file_refs.get(path)
+            && *prev_hash == hash
+        {
+            obj.insert("__ref".into(), Value::String(prev_ref.clone()));
+            return;
+        }
+        let id = *next_ref_id;
+        *next_ref_id += 1;
+        let ref_id = format!("Ref#{id}");
+        file_refs.insert(path.to_owned(), (hash, ref_id.clone()));
+        obj.insert("__ref".into(), Value::String(ref_id));
+        return;
+    }
     let is_large_cmd = obj.contains_key("exit_code")
         && (obj
             .get("stdout")
@@ -81,7 +108,7 @@ pub(in crate::single_agent) fn tag_resource_handle(value: &mut Value, next_ref_i
                 .chars()
                 .count()
             > COMMAND_HANDLE_MIN_CHARS);
-    if is_file || is_large_cmd {
+    if is_large_cmd {
         let id = *next_ref_id;
         *next_ref_id += 1;
         obj.insert("__ref".into(), Value::String(format!("Ref#{id}")));
@@ -118,13 +145,26 @@ pub(in crate::single_agent) fn collect_delegated_markers(
     }
 }
 
+/// Outcome of checking whether a file handle should expand its body/index in this step.
+enum FileDisplayState {
+    /// First time this `(path, content_hash)` is expanded in the turn's visible wire history.
+    Show,
+    /// Delegated to `@virtual` or already expanded earlier in this exact same step.
+    SameStepOrDelegated,
+    /// Unchanged file already expanded in an earlier still-visible step of this turn.
+    UnchangedInTurn { prior_ref: String, prior_step: usize },
+}
+
 /// Per-step display tracker: enforces the 64KB per-step inline budget,
-/// deduplicates aliases within a step, and honors Pass-by-Handle delegation.
+/// deduplicates aliases within a step, reuses unchanged file handles across
+/// steps in the same turn, and honors Pass-by-Handle delegation.
 pub(super) struct DisplayTracker<'a> {
     delegated_refs: Option<&'a BTreeSet<String>>,
     delegated_hashes: Option<&'a BTreeSet<u64>>,
     seen_refs: BTreeSet<String>,
     seen_hashes: BTreeSet<u64>,
+    prior_shown_files: Option<&'a mut BTreeMap<String, ShownFileHandle>>,
+    segment_index: usize,
     remaining_inline_budget: usize,
     is_virtual_param: bool,
 }
@@ -133,12 +173,16 @@ impl<'a> DisplayTracker<'a> {
     pub(super) fn from_hints(
         hints: &'a SegmentContextHints,
         inline_budget_chars: usize,
+        prior_shown_files: Option<&'a mut BTreeMap<String, ShownFileHandle>>,
+        segment_index: usize,
     ) -> Self {
         Self {
             delegated_refs: Some(&hints.delegated_refs),
             delegated_hashes: Some(&hints.delegated_content_hashes),
             seen_refs: BTreeSet::new(),
             seen_hashes: BTreeSet::new(),
+            prior_shown_files,
+            segment_index,
             remaining_inline_budget: inline_budget_chars.min(INLINE_LIMIT_CHARS),
             is_virtual_param: false,
         }
@@ -150,6 +194,8 @@ impl<'a> DisplayTracker<'a> {
             delegated_hashes: None,
             seen_refs: BTreeSet::new(),
             seen_hashes: BTreeSet::new(),
+            prior_shown_files: None,
+            segment_index: 0,
             remaining_inline_budget: INLINE_LIMIT_CHARS,
             is_virtual_param: true,
         }
@@ -185,6 +231,51 @@ impl<'a> DisplayTracker<'a> {
             return false;
         }
         true
+    }
+
+    /// Check whether a file handle should expand, stay compact (same-step/delegated),
+    /// or emit a compact turn-scoped reuse receipt because an identical version was
+    /// already expanded in an earlier still-visible step of this turn.
+    fn claim_file_display(
+        &mut self,
+        path: &str,
+        ref_id: Option<&str>,
+        content_hash: u64,
+    ) -> FileDisplayState {
+        if !self.claim_display(ref_id, Some(content_hash)) {
+            return FileDisplayState::SameStepOrDelegated;
+        }
+        if !path.is_empty()
+            && let Some(prior) = self
+                .prior_shown_files
+                .as_deref()
+                .and_then(|map| map.get(path))
+            && prior.content_hash == content_hash
+        {
+            return FileDisplayState::UnchangedInTurn {
+                prior_ref: prior.ref_id.clone(),
+                prior_step: prior.segment_index + 1,
+            };
+        }
+        FileDisplayState::Show
+    }
+
+    /// Record that `(path, content_hash)` actually had its inline body or structural
+    /// index expanded in this segment so later unchanged re-reads stay compact.
+    fn record_file_shown(&mut self, path: &str, ref_id: Option<&str>, content_hash: u64) {
+        if path.is_empty() {
+            return;
+        }
+        if let Some(map) = self.prior_shown_files.as_deref_mut() {
+            map.insert(
+                path.to_owned(),
+                ShownFileHandle {
+                    ref_id: ref_id.unwrap_or("").to_owned(),
+                    content_hash,
+                    segment_index: self.segment_index,
+                },
+            );
+        }
     }
 
     fn take_inline_budget(&mut self, chars: usize) -> bool {
@@ -252,9 +343,16 @@ pub(super) fn format_segment_feedback(
     hints: &SegmentContextHints,
     ignore_trailing_return: bool,
     inline_budget_chars: usize,
+    prior_shown_files: Option<&mut BTreeMap<String, ShownFileHandle>>,
+    segment_index: usize,
 ) -> Vec<String> {
     let mut receipts = Vec::new();
-    let mut tracker = DisplayTracker::from_hints(hints, inline_budget_chars);
+    let mut tracker = DisplayTracker::from_hints(
+        hints,
+        inline_budget_chars,
+        prior_shown_files,
+        segment_index,
+    );
 
     if !console_logs.is_empty() {
         let joined = console_logs.join("\n");
@@ -779,19 +877,37 @@ pub(super) fn format_binding(
         );
         let h = fnv1a64(content);
 
-        // Pass-by-Handle: if delegated to `@virtual` in this same step, stay compact in outer trace!
-        if tracker.is_delegated(ref_id, Some(h)) {
-            return sig;
-        }
-        // Already displayed earlier in the same step (alias): stay compact!
-        if !tracker.claim_display(ref_id, Some(h)) {
-            return sig;
+        // Pass-by-Handle, same-step alias, or turn-scoped unchanged re-read: stay compact!
+        match tracker.claim_file_display(path, ref_id, h) {
+            FileDisplayState::SameStepOrDelegated => return sig,
+            FileDisplayState::UnchangedInTurn {
+                prior_ref,
+                prior_step,
+            } => {
+                let effective_ref = ref_id
+                    .filter(|r| !r.is_empty())
+                    .or_else(|| (!prior_ref.is_empty()).then_some(prior_ref.as_str()));
+                let ref_part = effective_ref
+                    .map(|r| format!(" | {r}"))
+                    .unwrap_or_default();
+                let asset_part = obj
+                    .get("__asset_id")
+                    .and_then(Value::as_str)
+                    .map(|id| format!(" | asset: {id}"))
+                    .unwrap_or_default();
+                return format!(
+                    "// => {name} = [File({path:?}){ref_part} | {line_count} lines, {content_chars} chars{asset_part} | unchanged since step {prior_step} — reuse live handle via {name}.slice()/{name}.grep()]"
+                );
+            }
+            FileDisplayState::Show => {}
         }
         if content_chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(content_chars) {
+            tracker.record_file_shown(path, ref_id, h);
             let ref_part = ref_id.map(|r| format!("{r}, ")).unwrap_or_default();
             let label = format!("{name} (File {path:?}, {ref_part}{line_count} lines)");
             return format_comment_block(&label, &add_line_numbers(content, 1));
         }
+        tracker.record_file_shown(path, ref_id, h);
         return format!(
             "{sig}\n{}",
             format_large_source_index(&format!("{name}.content ({path})"), content, Some(path))
@@ -869,43 +985,52 @@ pub(super) fn format_binding(
                 .is_some_and(|o| is_file_handle_obj(o, tracker.is_virtual_param))
         });
         if all_file_handles {
-            let summaries: Vec<String> = arr
-                .iter()
-                .map(|item| {
-                    let p = item["path"].as_str().unwrap_or("");
-                    match item.get("__ref").and_then(Value::as_str) {
-                        Some(r) => format!("{r}({p:?})"),
-                        None => format!("File({p:?})"),
-                    }
-                })
-                .collect();
-            let mut out = format!(
-                "// => {name} = [Array({}) of Handles: {}]",
-                arr.len(),
-                summaries.join(", ")
-            );
+            let mut summaries: Vec<String> = Vec::with_capacity(arr.len());
+            let mut expanded_blocks: Vec<String> = Vec::new();
             for (idx, item) in arr.iter().enumerate() {
                 let p = item["path"].as_str().unwrap_or("");
                 let c = item["content"].as_str().unwrap_or("");
                 let r = item.get("__ref").and_then(Value::as_str);
                 let h = fnv1a64(c);
-                if tracker.claim_display(r, Some(h)) {
-                    let chars = c.chars().count();
-                    if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
-                        out.push('\n');
-                        out.push_str(&format_comment_block(
-                            &format!("{name}[{idx}] (File {p:?})"),
-                            &add_line_numbers(c, 1),
-                        ));
-                    } else if chars > INLINE_LIMIT_CHARS {
-                        out.push('\n');
-                        out.push_str(&format_large_source_index(
-                            &format!("{name}[{idx}].content ({p})"),
-                            c,
-                            Some(p),
-                        ));
+                let base_chip = match r {
+                    Some(ref_id) => format!("{ref_id}({p:?})"),
+                    None => format!("File({p:?})"),
+                };
+                match tracker.claim_file_display(p, r, h) {
+                    FileDisplayState::SameStepOrDelegated => {
+                        summaries.push(base_chip);
+                    }
+                    FileDisplayState::UnchangedInTurn { prior_step, .. } => {
+                        summaries.push(format!("{base_chip} [unchanged since step {prior_step}]"));
+                    }
+                    FileDisplayState::Show => {
+                        summaries.push(base_chip);
+                        let chars = c.chars().count();
+                        if chars <= INLINE_LIMIT_CHARS && tracker.take_inline_budget(chars) {
+                            tracker.record_file_shown(p, r, h);
+                            expanded_blocks.push(format_comment_block(
+                                &format!("{name}[{idx}] (File {p:?})"),
+                                &add_line_numbers(c, 1),
+                            ));
+                        } else if chars > INLINE_LIMIT_CHARS {
+                            tracker.record_file_shown(p, r, h);
+                            expanded_blocks.push(format_large_source_index(
+                                &format!("{name}[{idx}].content ({p})"),
+                                c,
+                                Some(p),
+                            ));
+                        }
                     }
                 }
+            }
+            let mut out = format!(
+                "// => {name} = [Array({}) of Handles: {}]",
+                arr.len(),
+                summaries.join(", ")
+            );
+            for block in expanded_blocks {
+                out.push('\n');
+                out.push_str(&block);
             }
             return out;
         }
@@ -958,28 +1083,39 @@ pub(super) fn format_binding(
         })
     {
         let mut lines = vec![format!("// => {name} = {{ // Map({}) of ResourceHandles", map.len())];
+        let mut to_expand: Vec<(&str, &str, Option<&str>, &str, u64)> = Vec::new();
         for (k, v) in map {
             let obj = v.as_object().unwrap();
-            lines.push(format!(
-                "//   {k:?}: {}",
-                file_handle_signature(obj, tracker.is_virtual_param)
-            ));
+            let c = obj.get("content").and_then(Value::as_str).unwrap_or("");
+            let p = obj.get("path").and_then(Value::as_str).unwrap_or(k);
+            let r = obj.get("__ref").and_then(Value::as_str);
+            let h = fnv1a64(c);
+            let sig = file_handle_signature(obj, tracker.is_virtual_param);
+            match tracker.claim_file_display(p, r, h) {
+                FileDisplayState::SameStepOrDelegated => {
+                    lines.push(format!("//   {k:?}: {sig}"));
+                }
+                FileDisplayState::UnchangedInTurn { prior_step, .. } => {
+                    lines.push(format!(
+                        "//   {k:?}: {sig} [unchanged since step {prior_step}]"
+                    ));
+                }
+                FileDisplayState::Show => {
+                    lines.push(format!("//   {k:?}: {sig}"));
+                    to_expand.push((k, p, r, c, h));
+                }
+            }
         }
         lines.push("// }".into());
-        // If total content fits easily within remaining 64KB budget (and not delegated), expand inline!
-        let total_content_chars: usize = map
-            .values()
-            .filter_map(|v| v.get("content").and_then(Value::as_str))
-            .map(|c| c.chars().count())
+        // If newly shown content fits easily within remaining 64KB budget, expand inline!
+        let total_new_chars: usize = to_expand
+            .iter()
+            .map(|(_, _, _, c, _)| c.chars().count())
             .sum();
-        if total_content_chars <= tracker.remaining_inline_budget {
-            for (k, v) in map {
-                let obj = v.as_object().unwrap();
-                let c = obj.get("content").and_then(Value::as_str).unwrap_or("");
-                let p = obj.get("path").and_then(Value::as_str).unwrap_or(k);
-                let r = obj.get("__ref").and_then(Value::as_str);
-                let h = fnv1a64(c);
-                if tracker.claim_display(r, Some(h)) && tracker.take_inline_budget(c.chars().count()) {
+        if total_new_chars <= tracker.remaining_inline_budget {
+            for (k, p, r, c, h) in to_expand {
+                if tracker.take_inline_budget(c.chars().count()) {
+                    tracker.record_file_shown(p, r, h);
                     lines.push(format_comment_block(
                         &format!("{name}[{k:?}] (File {p:?})"),
                         &add_line_numbers(c, 1),

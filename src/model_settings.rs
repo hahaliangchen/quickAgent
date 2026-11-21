@@ -74,6 +74,80 @@ pub fn long_context_threshold(state: &AgentServiceState, model: &str) -> Option<
     declared(&route.long_context_thresholds, &route.models, model).copied()
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCost {
+    input: f64,
+    output: f64,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
+    #[serde(default)]
+    currency: CostCurrency,
+    long_context_threshold: Option<u64>,
+    long_context_input_multiplier: Option<f64>,
+    long_context_output_multiplier: Option<f64>,
+    time_of_use: Option<String>,
+    off_peak_multiplier: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum CostCurrency {
+    #[default]
+    Usd,
+    Cny,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RequestCost {
+    pub cost_amount: f64,
+    pub cost_currency: CostCurrency,
+    pub pricing_tier: &'static str,
+}
+
+pub fn deepseek_cn_peak(at: chrono::DateTime<chrono::Utc>) -> bool {
+    use chrono::{Datelike, Timelike, Weekday};
+    let beijing = at.with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+    !matches!(beijing.weekday(), Weekday::Sat | Weekday::Sun)
+        && matches!(beijing.hour(), 9..=11 | 14..=17)
+}
+
+impl ModelCost {
+    pub fn at(&self, counts: crate::model_transport::UsageCounts, at: chrono::DateTime<chrono::Utc>) -> RequestCost {
+        let input = counts.uncached_input as f64 * self.input
+            + counts.cache_read as f64 * self.cache_read.unwrap_or(self.input)
+            + counts.cache_write as f64 * self.cache_write.unwrap_or(self.input);
+        let output = counts.output as f64 * self.output;
+        let (pricing_tier, input_multiplier, output_multiplier) = if self.time_of_use.as_deref() == Some("deepseek-cn") {
+            if deepseek_cn_peak(at) {
+                ("peak", 1.0, 1.0)
+            } else {
+                let discount = self.off_peak_multiplier.unwrap_or(0.5);
+                ("off_peak", discount, discount)
+            }
+        } else if self.long_context_threshold.is_some_and(|n| n > 0 && counts.total_input > n) {
+            ("long_context", self.long_context_input_multiplier.unwrap_or(1.0), self.long_context_output_multiplier.unwrap_or(1.0))
+        } else {
+            ("standard", 1.0, 1.0)
+        };
+        RequestCost {
+            cost_amount: (input * input_multiplier + output * output_multiplier) / 1_000_000.0,
+            cost_currency: self.currency,
+            pricing_tier,
+        }
+    }
+}
+
+pub fn request_cost(
+    state: &AgentServiceState,
+    model: &str,
+    counts: crate::model_transport::UsageCounts,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Option<RequestCost> {
+    let route = state.provider_routes.get(&state.provider_name)?;
+    Some(declared(&route.model_costs, &route.models, model)?.at(counts, at))
+}
+
 fn declared_max_output(state: &AgentServiceState, model: &str) -> Option<usize> {
     let route = state.provider_routes.get(&state.provider_name)?;
     declared(&route.max_output_tokens, &route.models, model).copied()
@@ -219,6 +293,58 @@ impl ModelSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn utc(value: &str) -> chrono::DateTime<chrono::Utc> {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn deepseek_flash_pricing_uses_beijing_weekdays_and_half_price_off_peak() {
+        use crate::model_transport::UsageCounts;
+        let price: ModelCost = serde_json::from_value(serde_json::json!({
+            "input":1.0,"output":2.0,"cacheRead":0.02,"cacheWrite":0.5,"currency":"CNY",
+            "timeOfUse":"deepseek-cn"
+        })).unwrap();
+        let counts = UsageCounts { total_input: 11_000, uncached_input: 500, cache_read: 9500,
+            cache_write: 1000, output: 200, reasoning: 100 };
+        let peak = price.at(counts, utc("2026-11-09T01:00:00Z"));
+        let off_peak = price.at(counts, utc("2026-11-09T04:00:00Z"));
+        assert_eq!(peak.pricing_tier, "peak");
+        assert_eq!(off_peak.pricing_tier, "off_peak");
+        assert!((peak.cost_amount - 0.00159).abs() < 1e-12);
+        assert_eq!(off_peak.cost_amount, peak.cost_amount * 0.5);
+        assert_eq!(serde_json::to_value(peak).unwrap()["cost_currency"], "CNY");
+        for (timestamp, is_peak) in [
+            ("2026-11-09T00:59:59Z", false), ("2026-11-09T01:00:00Z", true),
+            ("2026-11-09T03:59:59Z", true), ("2026-11-09T04:00:00Z", false),
+            ("2026-11-09T06:00:00Z", true), ("2026-11-09T09:59:59Z", true),
+            ("2026-11-09T10:00:00Z", false), ("2026-11-14T01:00:00Z", false),
+            ("2026-11-15T06:00:00Z", false),
+        ] {
+            assert_eq!(deepseek_cn_peak(utc(timestamp)), is_peak, "{timestamp}");
+        }
+    }
+
+    #[test]
+    fn gpt_long_context_uses_distinct_multipliers_and_defaults_cache_rates_to_input() {
+        use crate::model_transport::UsageCounts;
+        let price: ModelCost = serde_json::from_value(serde_json::json!({
+            "input":2.0,"output":10.0,"longContextThreshold":272000,
+            "longContextInputMultiplier":2.0,"longContextOutputMultiplier":1.5
+        })).unwrap();
+        let time = utc("2026-11-09T01:00:00Z");
+        let mut counts = UsageCounts { total_input: 272_000, uncached_input: 100_000,
+            cache_read: 160_000, cache_write: 12_000, output: 5_000, reasoning: 2_000 };
+        let standard = price.at(counts, time);
+        assert_eq!(standard.pricing_tier, "standard");
+        assert!((standard.cost_amount - 0.594).abs() < 1e-12);
+        counts.total_input += 1;
+        counts.uncached_input += 1;
+        let long = price.at(counts, time);
+        assert_eq!(long.pricing_tier, "long_context");
+        assert!((long.cost_amount - 1.163004).abs() < 1e-12);
+        assert_eq!(serde_json::to_value(long).unwrap()["cost_currency"], "USD");
+    }
+
     #[test]
     fn independent_overrides_preserve_main_and_empty_fields_inherit() {
         let root = std::env::temp_dir().join(crate::visual_artifacts::new_id());
@@ -245,6 +371,7 @@ mod tests {
                 max_output_tokens: [("mapped-model".into(), 64_000)].into_iter().collect(),
                 context_windows: Default::default(),
                 long_context_thresholds: Default::default(),
+                model_costs: Default::default(),
             },
         );
         let routed = ModelSettings {
@@ -357,6 +484,7 @@ mod tests {
                 max_output_tokens: [("deepseek-flash".into(), 393_216)].into_iter().collect(),
                 context_windows: [("deepseek-flash".into(), 1_048_576)].into_iter().collect(),
                 long_context_thresholds: Default::default(),
+                model_costs: Default::default(),
             },
         );
         // The declared 1M window is what a request may use, not the fallback.

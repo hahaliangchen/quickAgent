@@ -25,6 +25,7 @@ pub(super) async fn drive_vm_segment(
     step: usize,
     allow_shell: bool,
     next_ref_id: &mut usize,
+    file_refs: &mut BTreeMap<String, (u64, String)>,
 ) -> Result<(State, usize, context_doc::SegmentContextHints)> {
     let mut external_tool_calls = 0usize;
     let mut hints = context_doc::SegmentContextHints::default();
@@ -63,7 +64,11 @@ pub(super) async fn drive_vm_segment(
                             )
                             .await?;
                             if !is_error {
-                                context_doc::tag_resource_handle(&mut result, next_ref_id);
+                                context_doc::tag_resource_handle_in_turn(
+                                    &mut result,
+                                    next_ref_id,
+                                    file_refs,
+                                );
                             }
                             runtime.resume_action(&action.id, result, is_error)?;
                         }
@@ -90,7 +95,11 @@ pub(super) async fn drive_vm_segment(
                             let mut items = Vec::with_capacity(results.len());
                             for (mut res, is_err) in results {
                                 if !is_err {
-                                    context_doc::tag_resource_handle(&mut res, next_ref_id);
+                                    context_doc::tag_resource_handle_in_turn(
+                                        &mut res,
+                                        next_ref_id,
+                                        file_refs,
+                                    );
                                 }
                                 items.push(json!({"failed": is_err, "value": res}));
                             }

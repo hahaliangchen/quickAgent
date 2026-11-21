@@ -508,9 +508,9 @@ async fn step2_promise_all_parallel_reads_via_io_promises() {
                     1 => {
                         let tool_out = last_tool_output(&body);
                         assert!(
-                            tool_out.contains("Ref#1:2: line2_a")
-                                && tool_out.contains("Ref#2:2: line2_b")
-                                && tool_out.contains("Ref#3:2: line2_c"),
+                            tool_out.contains("Ref#1:2|line2_a")
+                                && tool_out.contains("Ref#2:2|line2_b")
+                                && tool_out.contains("Ref#3:2|line2_c"),
                             "concurrent io.promises Promise.all must preserve order, refs, and ResourceHandle methods: {tool_out}"
                         );
                         completion("并发读取 3 个文件成功。")

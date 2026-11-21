@@ -22,6 +22,7 @@ pub(super) fn page_allows(s: &Session<'_>, name: &str) -> bool {
             | "read_program_guide"
             | "read_attachment"
             | "analyze_images"
+            | "generate_image"
             | "image_analysis_results"
             | "view_image"
             | "list_skills"

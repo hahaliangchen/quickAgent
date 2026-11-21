@@ -291,7 +291,9 @@ pub fn static_library_header(libraries: &Libraries) -> String {
     let mut out = String::from(
         "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n\
          // IMPORTANT: Pre-bound `io.*`, `git.*`, `process.*` methods are SYNCHRONOUS.\n\
-         // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`, `process.promises.run_readonly`) or `require(\"<lib>/promises\")`.\n",
+         // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`, `process.promises.run_readonly`) or `require(\"<lib>/promises\")`.\n\
+         // MANDATORY exact-text edit rule: for io.edit/io.replace, any old_text, new_text, or replacement containing a backslash must use String.raw tagged templates, never ordinary quoted JS strings.\n\
+         // String.raw preserves backslashes; put real line breaks directly in the raw template because `\\n` remains a literal backslash plus n.\n",
     );
     out.push_str(&directory(libraries));
     out.push('\n');
@@ -335,9 +337,9 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "read_file_lines" => "args: { path: string; start_line: number; end_line?: number; max_chars?: number; start_column?: number; force_read?: boolean }): ResourceHandle & { next_start_line: number | null; next_column?: number | null; partial_line?: boolean; returned_chars?: number; source_format?: { byte_exact: boolean; fragment: boolean; column_unit: string } }",
                 "read_file_chunk" => "args: { path: string; byte_offset?: number; start_line?: number; max_bytes?: number; max_lines?: number }): ResourceHandle & { eof: boolean; next_byte_offset: number | null }",
                 "list_dir" => "args: { path?: string; recursive?: boolean; max_depth?: number; respect_gitignore?: boolean; glob?: string | string[]; exclude?: string | string[]; kind?: 'file' | 'directory' | 'symlink' | 'other'; modified_after?: string; modified_before?: string; sort_by?: 'path' | 'modified_desc' | 'modified_asc' | 'size_desc' | 'size_asc'; max_entries?: number }): { root: string; entries: Array<{ path: string; kind: string; size_bytes?: number; modified_at?: string; modified_ms?: number }>; unexpanded_dirs?: string[]; hints?: string[]; truncated: boolean }",
-                "search_text" => "args: { query: string; path?: string; paths?: string[]; regex?: boolean; case_sensitive?: boolean; respect_gitignore?: boolean; glob?: string | string[]; exclude?: string | string[]; context_lines?: number; max_matches?: number; max_matches_per_file?: number; output_mode?: 'content' | 'files' | 'count' }): { query: string; match_mode: string; output_mode: string; matches: Array<{ path: string; line: number; column: number; text: string; line_chars?: number; before?: string[]; after?: string[] }>; files?: string[]; counts?: Array<{ path: string; count: number }>; total?: number; truncated: boolean }",
+                "search_text" => "args: { query: string | RegExp; path?: string; paths?: string[]; regex?: boolean; case_sensitive?: boolean; respect_gitignore?: boolean; glob?: string | string[]; exclude?: string | string[]; context_lines?: number; max_matches?: number; max_matches_per_file?: number; output_mode?: 'content' | 'files' | 'count' }): { query: string; match_mode: string; output_mode: string; matches: Array<{ path: string; line: number; column: number; text: string; line_chars?: number; before?: string[]; after?: string[] }>; files?: string[]; counts?: Array<{ path: string; count: number }>; total?: number; truncated: boolean }",
                 "write_file" => "args: { path: string; content: string; create_parent_dirs?: boolean; expected_code_hash?: string }): { path: string; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown }",
-                "edit_file" => "args: { path: string; edits: Array<{ old_text: string; new_text: string }>; expected_code_hash?: string } | { path: string; old_text: string; new_text: string; expected_code_hash?: string }): { path: string; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown; preview?: string }",
+                "edit_file" => "args: { path: string; edits: Array<{ old_text: string; new_text: string }>; replace_all?: boolean; expected_code_hash?: string } | { path: string; old_text: string; new_text: string; replace_all?: boolean; expected_code_hash?: string }): { path: string; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown; preview?: string }",
                 "replace_range" => "args: { path: string; start_line: number; end_line: number; replacement: string; expected_old_text?: string; expected_code_hash?: string }): { path: string; start_line: number; end_line: number; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown; preview?: string }",
                 "workspace_info" => "args?: { workspace_root?: string }): { workspace_root: string; platform: string; allowed_scope: string; default_ignored_dirs: string[] }",
                 "git_status" => "args?: { paths?: string[]; include_untracked?: boolean; max_entries?: number }): { head: string | null; branch: string | null; clean: boolean; staged: string[]; modified: string[]; untracked: string[]; total_entries: number; truncated: boolean }",
@@ -375,6 +377,7 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "read_attachment" => "args: { attachment_id: string; char_offset?: number; max_chars?: number; page_index?: number; slide?: number; picture?: string }): unknown",
                 "analyze_images" => "args: { artifact_ids: string[]; question: string; background?: boolean }): unknown",
                 "image_analysis_results" => "args?: { wait_ms?: number }): unknown",
+                "generate_image" => "args: { prompt: string; model?: string; reference_paths?: string[]; reference_artifact_ids?: string[]; size?: string; quality?: 'low' | 'medium' | 'high' | 'auto'; background?: 'opaque' | 'transparent' | 'auto'; output_path?: string }): { artifact_id: string; visual_artifact: Record<string, unknown>; model: string; mode: 'generate' | 'edit'; size: string; width: number; height: number; bytes: number; output_path?: string; revised_prompt?: string }",
                 "record_work_memory" => "args: { summary: string; files_changed?: string[]; implementation?: string; tests?: string; risks?: string; source_task_id?: string; kind?: string; applies_to?: string; source_refs?: string[] }): { memory_path: string; recorded: unknown }",
                 "list_work_memory" => "args?: { limit?: number }): { memory_path: string; memories: unknown[] }",
                 "search_work_memory" => "args: { query: string; limit?: number }): { memory_path: string; query: string; matches: unknown[] }",
@@ -910,6 +913,11 @@ mod tests {
         assert!(header.contains("scope?: 'conversation' | 'project'"));
         assert!(header.contains("snapshot_seq?: number"));
         assert!(header.contains("stream?: 'stdout' | 'stderr'"));
+        assert!(header.contains("MANDATORY exact-text edit rule"));
+        assert!(header.contains("String.raw"));
+        assert!(header.contains("query: string | RegExp"));
+        assert!(header.contains("function generate_image"));
+        assert!(header.contains("reference_artifact_ids?: string[]"));
         let browser = static_library_header(&std::collections::BTreeMap::from([(
             "browser".to_owned(),
             std::collections::BTreeMap::from([("open".to_owned(), "browser_open".to_owned())]),

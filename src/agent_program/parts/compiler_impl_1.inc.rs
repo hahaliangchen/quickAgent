@@ -472,7 +472,10 @@ impl Compiler {
                     "Set" | "WeakSet"=>"; an array with includes handles a small set, but not all Set semantics",
                     _=>"",
                 };
-                return self.error(new.span,&format!("new {name}(...) is not supported in this runtime yet{alternative}. {}", crate::agent_program::NOT_AVAILABLE_HINT));
+                if matches!(name.as_str(), "TextDecoder" | "TextDecoderStream") {
+                    return self.error(new.span, &super::unsupported_builtin(&name));
+                }
+                return self.error(new.span,&format!("new {name}(...) is not supported in this runtime yet{alternative}."));
             }
             E::This(_)=>Expr::Variable("\0this".into()),
             E::Class(node)=>return self.error(node.class.span,"class expressions are not supported in this runtime yet; declare the class with a class statement"),
@@ -799,7 +802,7 @@ impl Compiler {
                     Some(Expr::Native(format!("console.{property}")))
                 } else {
                     let name = format!("{namespace}.{property}");
-                    (matches!(namespace, "Math" | "Number" | "String" | "Date" | "Object" | "Array" | "JSON" | "Reflect" | "Symbol")
+                    (matches!(namespace, "Math" | "Number" | "String" | "Date" | "Object" | "Array" | "JSON" | "Reflect" | "Symbol" | "Map" | "RegExp" | "Promise")
                         && self.global(namespace)
                         && super::js_methods::builtin_arity(&name).is_some())
                     .then_some(Expr::Member(Box::new(Expr::Intrinsic(namespace.into())),Box::new(Expr::Value(json!(property)))))
@@ -963,8 +966,9 @@ impl Compiler {
                 else {
                     return Ok(None);
                 };
-                if !matches!(namespace.sym.as_ref(), "Math" | "Number" | "String" | "Date" | "Object" | "Array" | "JSON" | "Reflect" | "Symbol")
+                if !matches!(namespace.sym.as_ref(), "Math" | "Number" | "String" | "Date" | "Object" | "Array" | "JSON" | "Reflect" | "Symbol" | "Map" | "RegExp" | "Promise")
                     || !self.global(namespace.sym.as_ref())
+                    || namespace.sym == *"Promise" && method.sym != *"withResolvers"
                 {
                     return Ok(None);
                 }
@@ -974,7 +978,7 @@ impl Compiler {
         };
         let Some((min, max)) = super::js_methods::builtin_arity(&name) else {
             return match &**callee {
-                ast::Expr::Member(_) => self.error(call.span, &format!("unsupported built-in {name}. {}", crate::agent_program::NOT_AVAILABLE_HINT)),
+                ast::Expr::Member(_) => self.error(call.span, &super::unsupported_builtin(&name)),
                 _ => Ok(None),
             };
         };

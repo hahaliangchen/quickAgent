@@ -15,7 +15,9 @@ mod format;
 mod indexers;
 
 pub use format::SegmentContextHints;
-pub(super) use format::{collect_delegated_markers, tag_resource_handle};
+pub(super) use format::{
+    collect_delegated_markers, tag_resource_handle, tag_resource_handle_in_turn,
+};
 
 use crate::agent_program::Runtime;
 use format::{DisplayTracker, format_binding, format_segment_feedback};
@@ -77,6 +79,16 @@ pub struct ContextDocument {
     pub active_start_turn: Option<usize>,
 }
 
+/// Record of a file handle whose body or structural index was already expanded
+/// in the current turn's visible wire history, enabling turn-scoped dedup.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShownFileHandle {
+    pub ref_id: String,
+    pub content_hash: u64,
+    /// 0-based `TurnDoc.segments` index where this version was expanded.
+    pub segment_index: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnDoc {
     pub turn: usize,
@@ -91,6 +103,14 @@ pub struct TurnDoc {
     /// `// [live handles added: ...]` notes list only newly created handles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub live_handles: Vec<String>,
+    /// Turn-scoped `(content_hash, Ref#N)` registry by path so re-reading an
+    /// unchanged file reuses its existing `Ref#N` handle identity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub file_handle_refs: BTreeMap<String, (u64, String)>,
+    /// Files whose full body or >64KB structural index is currently visible in
+    /// this turn's unfolded segments (evicted automatically on `fold_active_prefix`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shown_file_handles: BTreeMap<String, ShownFileHandle>,
     /// Transient note for a rejected/uncompiled submission (`executed: false`);
     /// cleared as soon as the next valid segment executes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +182,8 @@ impl ContextDocument {
     pub fn begin_turn(&mut self, turn: usize, user_text: impl Into<String>) {
         if let Some(unfinished) = self.active_turn_mut() {
             unfinished.live_handles.clear();
+            unfinished.file_handle_refs.clear();
+            unfinished.shown_file_handles.clear();
             unfinished.pending_rejection = None;
             unfinished.assistant_reply = Some("[Turn ended before final reply.]".into());
         }
@@ -172,6 +194,8 @@ impl ContextDocument {
             virtual_header: None,
             segments: Vec::new(),
             live_handles: Vec::new(),
+            file_handle_refs: BTreeMap::new(),
+            shown_file_handles: BTreeMap::new(),
             pending_rejection: None,
             folded: None,
             folded_prefix: None,
@@ -241,6 +265,8 @@ impl ContextDocument {
             virtual_header: Some(header),
             segments: Vec::new(),
             live_handles: Vec::new(),
+            file_handle_refs: BTreeMap::new(),
+            shown_file_handles: BTreeMap::new(),
             pending_rejection: None,
             folded: None,
             folded_prefix: None,
@@ -293,22 +319,26 @@ impl ContextDocument {
         assistant_message: Option<Value>,
         tool_call_id: Option<String>,
     ) {
-        let mut receipts = format_segment_feedback(
-            &source,
-            runtime,
-            pre_fingerprints,
-            console_logs,
-            hints,
-            extra_note.is_some(),
-            self.inline_budget_chars(),
-        );
-        if !hints.virtual_receipts.is_empty() {
-            let mut combined = hints.virtual_receipts.clone();
-            combined.extend(receipts);
-            receipts = combined;
-        }
+        let inline_budget = self.inline_budget_chars();
         let live_handles = collect_live_handles(runtime);
         if let Some(turn) = self.active_turn_mut() {
+            let segment_index = turn.segments.len();
+            let mut receipts = format_segment_feedback(
+                &source,
+                runtime,
+                pre_fingerprints,
+                console_logs,
+                hints,
+                extra_note.is_some(),
+                inline_budget,
+                Some(&mut turn.shown_file_handles),
+                segment_index,
+            );
+            if !hints.virtual_receipts.is_empty() {
+                let mut combined = hints.virtual_receipts.clone();
+                combined.extend(receipts);
+                receipts = combined;
+            }
             append_new_handle_note(&mut receipts, &turn.live_handles, &live_handles);
             turn.segments.push(TraceSegment {
                 source,
@@ -335,16 +365,8 @@ impl ContextDocument {
         assistant_message: Option<Value>,
         tool_call_id: Option<String>,
     ) {
+        let inline_budget = self.inline_budget_chars();
         let empty_hints = SegmentContextHints::default();
-        let mut receipts = format_segment_feedback(
-            &source,
-            runtime,
-            pre_fingerprints,
-            console_logs,
-            &empty_hints,
-            false,
-            self.inline_budget_chars(),
-        );
         let err_summary = error["message"]
             .as_str()
             .or_else(|| error["error"].as_str())
@@ -356,6 +378,18 @@ impl ContextDocument {
         );
         let live_handles = collect_live_handles(runtime);
         if let Some(turn) = self.active_turn_mut() {
+            let segment_index = turn.segments.len();
+            let mut receipts = format_segment_feedback(
+                &source,
+                runtime,
+                pre_fingerprints,
+                console_logs,
+                &empty_hints,
+                false,
+                inline_budget,
+                Some(&mut turn.shown_file_handles),
+                segment_index,
+            );
             append_new_handle_note(&mut receipts, &turn.live_handles, &live_handles);
             turn.segments.push(TraceSegment {
                 source,
@@ -382,22 +416,26 @@ impl ContextDocument {
         assistant_message: Option<Value>,
         tool_call_id: Option<String>,
     ) {
-        let mut receipts = format_segment_feedback(
-            &source,
-            runtime,
-            pre_fingerprints,
-            console_logs,
-            hints,
-            false,
-            self.inline_budget_chars(),
-        );
-        if !hints.virtual_receipts.is_empty() {
-            let mut combined = hints.virtual_receipts.clone();
-            combined.extend(receipts);
-            receipts = combined;
-        }
+        let inline_budget = self.inline_budget_chars();
         let live_handles = collect_live_handles(runtime);
         if let Some(turn) = self.active_turn_mut() {
+            let segment_index = turn.segments.len();
+            let mut receipts = format_segment_feedback(
+                &source,
+                runtime,
+                pre_fingerprints,
+                console_logs,
+                hints,
+                false,
+                inline_budget,
+                Some(&mut turn.shown_file_handles),
+                segment_index,
+            );
+            if !hints.virtual_receipts.is_empty() {
+                let mut combined = hints.virtual_receipts.clone();
+                combined.extend(receipts);
+                receipts = combined;
+            }
             append_new_handle_note(&mut receipts, &turn.live_handles, &live_handles);
             turn.segments.push(TraceSegment {
                 source,
@@ -416,6 +454,8 @@ impl ContextDocument {
     pub fn finish_turn(&mut self, assistant_markdown: impl Into<String>) {
         if let Some(turn) = self.active_turn_mut() {
             turn.live_handles.clear();
+            turn.file_handle_refs.clear();
+            turn.shown_file_handles.clear();
             turn.pending_rejection = None;
             turn.assistant_reply = Some(assistant_markdown.into());
         }
@@ -548,6 +588,10 @@ impl ContextDocument {
             assistant_message,
             tool_call_id,
         });
+        // Any file whose inline body/index lived in segments[..cutoff] is no
+        // longer visible in the wire history; evict it so a later re-read expands.
+        turn.shown_file_handles
+            .retain(|_, entry| entry.segment_index >= cutoff);
         true
     }
 
@@ -582,11 +626,11 @@ impl ContextDocument {
             let mut rendered_fold = false;
             if let Some(folded) = &turn.folded {
                 out.push(folded_assistant_message(folded, turn.turn));
-                out.push(json!({"role":"tool","tool_call_id":folded.tool_call_id.as_deref().unwrap_or("call_folded"),"content":folded.manifest}));
+                out.push(json!({"role":"tool","tool_call_id":folded_call_id(folded, turn.turn),"content":folded.manifest}));
                 rendered_fold = true;
             } else if let Some(prefix) = &turn.folded_prefix {
                 out.push(folded_assistant_message(prefix, turn.turn));
-                out.push(json!({"role":"tool","tool_call_id":prefix.tool_call_id.as_deref().unwrap_or("call_folded_prefix"),"content":prefix.manifest}));
+                out.push(json!({"role":"tool","tool_call_id":folded_call_id(prefix, turn.turn),"content":prefix.manifest}));
             }
 
             for (seg_idx, seg) in turn.segments.iter().enumerate() {
@@ -696,11 +740,15 @@ fn fold_message(turn: &TurnDoc, turn_number: usize) -> (Option<Value>, Option<St
     (original, Some(call_id))
 }
 
-fn folded_assistant_message(fold: &impl FoldMessage, turn: usize) -> Value {
-    let call_id = fold
-        .tool_call_id()
+fn folded_call_id(fold: &impl FoldMessage, turn: usize) -> std::borrow::Cow<'_, str> {
+    fold.tool_call_id()
         .filter(|id| !id.is_empty())
-        .unwrap_or("call_folded");
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|| format!("call_folded_t{turn}").into())
+}
+
+fn folded_assistant_message(fold: &impl FoldMessage, turn: usize) -> Value {
+    let call_id = folded_call_id(fold, turn);
     let mut message = fold
         .assistant_message()
         .cloned()
@@ -715,7 +763,6 @@ fn folded_assistant_message(fold: &impl FoldMessage, turn: usize) -> Value {
         obj.insert("content".into(), Value::Null);
         obj.insert("tool_calls".into(), json!([{"id":call_id,"type":"function","function":{"name":"run_js","arguments":json!({"code":fold.code()}).to_string()}}]));
     }
-    let _ = turn;
     message
 }
 
@@ -994,6 +1041,75 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_messages_wire_validates_completed_and_active_folds() {
+        let mut doc = ContextDocument::default();
+        doc.begin_turn(1, "completed goal");
+        for turn in 1..=2 {
+            if turn == 2 {
+                doc.begin_turn(turn, "active goal");
+            }
+            for step in 0..3 {
+                let id = format!("call_t{turn}_s{step}");
+                doc.active_turn_mut().unwrap().segments.push(TraceSegment {
+                    source: format!("const step{step} = {step};"),
+                    inline_receipts: vec![],
+                    error_note: None,
+                    assistant_message: Some(assistant(&id, true)),
+                    tool_call_id: Some(id),
+                    is_rejection: false,
+                });
+            }
+            if turn == 1 {
+                doc.finish_turn("done");
+                assert!(doc.fold_turn(turn, "completed manifest", None));
+            } else {
+                assert!(doc.fold_active_prefix(turn, 2, "active manifest", None));
+                // Older persisted prefix folds could omit this field.
+                doc.active_turn_mut().unwrap().folded_prefix.as_mut().unwrap().tool_call_id = None;
+            }
+        }
+        let temp = crate::single_agent::tests::TestWorkspace::new("cac-v2-anthropic-fold");
+        let mut state = crate::agent_service::tests::test_state(temp.path(), "127.0.0.1:1".parse().unwrap());
+        state.provider_name = "deepseek-self".into();
+        state.provider_routes.insert(state.provider_name.clone(), crate::agent_service::AgentProviderRoute {
+            prefix_system_messages: false,
+            responses: false,
+            messages: true,
+            messages_capabilities: [("deepseek-flash".into(), crate::anthropic_messages::Capabilities {
+                tool_update: true, system_prompt_update: true,
+            })].into_iter().collect(),
+            url: state.provider_url.clone(), api_key: String::new(), models: Default::default(),
+            max_output_tokens: Default::default(), context_windows: Default::default(),
+            long_context_thresholds: Default::default(), model_costs: Default::default(),
+        });
+        let mut messages = vec![json!({"role":"system","content":"static rules"})];
+        messages.extend(doc.render_conversation_messages());
+        let chat = json!({"model":"deepseek-flash","messages":messages,
+            "tools":[{"type":"function","function":{"name":"run_js","parameters":{"type":"object"}}}]});
+        let wire = crate::anthropic_messages::wire_body(&state, "deepseek-flash", &chat);
+        let history = wire["messages"].as_array().unwrap();
+        assert_eq!(history.iter().map(|m| m["role"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["user", "assistant", "user", "assistant", "user", "assistant", "user", "assistant", "user"]);
+        assert_eq!(history[1]["content"][0]["type"], "tool_use");
+        assert_eq!(history[5]["content"][0], json!({"type":"thinking","thinking":"keep","signature":"sig"}));
+        assert_eq!(history[7]["content"][0], history[5]["content"][0]);
+        for (index, expected_id) in [(1, "call_t1_s0"), (5, "call_folded_t2"), (7, "call_t2_s2")] {
+            let calls = history[index]["content"].as_array().unwrap();
+            let results = history[index + 1]["content"].as_array().unwrap();
+            let call = calls.last().unwrap();
+            assert_eq!(calls.iter().filter(|block| block["type"] == "tool_use").count(), 1);
+            assert_eq!(results.len(), 1);
+            assert_eq!(call["type"], "tool_use");
+            assert_eq!(call["name"], "run_js");
+            assert_eq!(call["id"], expected_id);
+            assert_eq!(results[0]["type"], "tool_result");
+            assert_eq!(results[0]["tool_use_id"], call["id"]);
+        }
+        assert!(wire["tools"][0].get("defer_loading").is_none());
+        assert!(wire.to_string().matches("cache_control").count() <= 4);
+    }
+
+    #[test]
     fn active_start_turn_filters_archived_older_turns_from_rendering() {
         let mut doc = ContextDocument::default();
         doc.begin_turn(1, "old");
@@ -1012,5 +1128,164 @@ mod tests {
         let wire = doc.render_conversation_messages();
         assert!(!wire.iter().any(|message| message["content"] == "old"));
         assert!(wire.iter().any(|message| message["content"] == "recent"));
+    }
+
+    #[test]
+    fn tag_resource_handle_in_turn_reuses_ref_for_unchanged_file_and_mints_new_on_edit() {
+        let mut next_ref_id = 1usize;
+        let mut file_refs = BTreeMap::new();
+
+        let mut read1 = json!({"path": "src/demo.rs", "content": "fn a() {}\n"});
+        tag_resource_handle_in_turn(&mut read1, &mut next_ref_id, &mut file_refs);
+        assert_eq!(read1["__ref"], "Ref#1");
+        assert_eq!(next_ref_id, 2);
+
+        // Re-reading the exact same unchanged content reuses Ref#1 without bumping next_ref_id.
+        let mut read2 = json!({"path": "src/demo.rs", "content": "fn a() {}\n"});
+        tag_resource_handle_in_turn(&mut read2, &mut next_ref_id, &mut file_refs);
+        assert_eq!(read2["__ref"], "Ref#1");
+        assert_eq!(next_ref_id, 2);
+
+        // Once the file changes, a fresh Ref#2 is minted.
+        let mut read3 = json!({"path": "src/demo.rs", "content": "fn a() { let x = 1; }\n"});
+        tag_resource_handle_in_turn(&mut read3, &mut next_ref_id, &mut file_refs);
+        assert_eq!(read3["__ref"], "Ref#2");
+        assert_eq!(next_ref_id, 3);
+    }
+
+    #[test]
+    fn turn_scoped_handle_dedup_collapses_unchanged_reread_and_reexpands_on_edit_or_fold() {
+        use crate::agent_program::{Runtime, State, libraries::Libraries, runtime::ActionKind};
+
+        let mut libs: Libraries = BTreeMap::new();
+        libs.insert(
+            "io".to_owned(),
+            BTreeMap::from([("read".to_owned(), "read_file".to_owned())]),
+        );
+
+        let mut doc = ContextDocument::default();
+        doc.begin_turn(1, "inspect demo.rs");
+        let mut rt = Runtime::new_repl(libs.clone()).unwrap();
+        let mut next_ref_id = 1usize;
+        let hints = SegmentContextHints::default();
+        let empty_fps = BTreeMap::new();
+
+        let mut run_read_step = |doc: &mut ContextDocument,
+                                 rt: &mut Runtime,
+                                 code: &str,
+                                 content: &str,
+                                 call_id: &str| {
+            rt.prepare_segment(code, libs.clone(), false).unwrap();
+            loop {
+                match rt.next() {
+                    State::Action(action) => {
+                        let ActionKind::Tool { name, .. } = action.kind else {
+                            panic!("unexpected action");
+                        };
+                        assert_eq!(name, "read_file");
+                        let mut res = json!({
+                            "path": "src/demo.rs",
+                            "content": content,
+                        });
+                        let file_refs = &mut doc.active_turn_mut().unwrap().file_handle_refs;
+                        tag_resource_handle_in_turn(&mut res, &mut next_ref_id, file_refs);
+                        rt.resume_action(&action.id, res, false).unwrap();
+                    }
+                    State::Returned(_) => break,
+                    other => panic!("unexpected VM state: {other:?}"),
+                }
+            }
+            doc.record_completed_segment(
+                code.to_owned(),
+                rt,
+                &empty_fps,
+                &[],
+                None,
+                &hints,
+                Some(assistant(call_id, false)),
+                Some(call_id.to_owned()),
+            );
+        };
+
+        // Step 1: first read expands full line-numbered content inline.
+        run_read_step(
+            &mut doc,
+            &mut rt,
+            "const f1 = io.read({ path: \"src/demo.rs\" });",
+            "fn alpha() {}\nfn beta() {}\n",
+            "c1",
+        );
+        let seg1 = doc.active_turn().unwrap().segments[0]
+            .inline_receipts
+            .join("\n");
+        assert!(seg1.contains("1|fn alpha() {}"), "{seg1}");
+
+        // Step 2: unchanged re-read reuses Ref#1 and emits a 1-line compact reuse receipt
+        // instead of repeating the full file body.
+        run_read_step(
+            &mut doc,
+            &mut rt,
+            "const f2 = io.read({ path: \"src/demo.rs\" });",
+            "fn alpha() {}\nfn beta() {}\n",
+            "c2",
+        );
+        let seg2 = doc.active_turn().unwrap().segments[1]
+            .inline_receipts
+            .join("\n");
+        assert!(
+            seg2.contains("Ref#1") && seg2.contains("unchanged since step 1"),
+            "{seg2}"
+        );
+        assert!(!seg2.contains("1|fn alpha() {}"), "{seg2}");
+
+        // Step 3: explicit .slice() on the live handle is NEVER suppressed by handle dedup.
+        rt.prepare_segment("f2.slice(1, 2);", libs.clone(), false)
+            .unwrap();
+        assert!(matches!(rt.next(), State::Returned(_)));
+        doc.record_completed_segment(
+            "f2.slice(1, 2);".to_owned(),
+            &rt,
+            &empty_fps,
+            &[],
+            None,
+            &hints,
+            Some(assistant("c3", false)),
+            Some("c3".to_owned()),
+        );
+        let seg3 = doc.active_turn().unwrap().segments[2]
+            .inline_receipts
+            .join("\n");
+        assert!(seg3.contains("1|fn alpha() {}"), "{seg3}");
+
+        // Step 4: after folding away segments[..2] (where Step 1 lived), re-reading the same
+        // unchanged file MUST expand again so the model never suffers amnesia.
+        assert!(doc.fold_active_prefix(1, 2, "{\"folded\":true}", None));
+        run_read_step(
+            &mut doc,
+            &mut rt,
+            "const f3 = io.read({ path: \"src/demo.rs\" });",
+            "fn alpha() {}\nfn beta() {}\n",
+            "c4",
+        );
+        let seg4 = doc.active_turn().unwrap().segments[3]
+            .inline_receipts
+            .join("\n");
+        assert!(seg4.contains("1|fn alpha() {}"), "{seg4}");
+
+        // Step 5: once the file is modified on disk, reading it mints Ref#2 and expands new content.
+        run_read_step(
+            &mut doc,
+            &mut rt,
+            "const f4 = io.read({ path: \"src/demo.rs\" });",
+            "fn alpha_v2() {}\nfn beta() {}\n",
+            "c5",
+        );
+        let seg5 = doc.active_turn().unwrap().segments[4]
+            .inline_receipts
+            .join("\n");
+        assert!(
+            seg5.contains("Ref#2") && seg5.contains("1|fn alpha_v2() {}"),
+            "{seg5}"
+        );
     }
 }
