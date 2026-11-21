@@ -373,13 +373,16 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "search_symbol_business_context" => "args: { query: string; limit?: number }): { memory_path: string; query: string; matches: unknown[] }",
                 _ => "args?: Record<string, unknown>): unknown",
             };
+            if target == "run_readonly_command" {
+                out.push_str("  /** Run one-off builds, tests, or CLI diagnostics only — prefer `io.list`/`io.read`/`io.search` and `git.*` for file and git work. */\n");
+            }
             out.push_str(&format!("  function {method}({sig};\n"));
         }
         if library == "host" {
             out.push_str("  function context(): { task: string; turn: number; scope: string; tools: string[] };\n");
             out.push_str("  function tools(): { libraries: string[]; orchestration_libraries: Array<{ name: string; description: string; methods: string[] }> };\n");
             if super::libraries::allows_delegation(libraries) {
-                out.push_str("  /** Run an isolated non-shell AI worker frame in parallel via `Promise.all`; `context` keys become live variables inside the worker (including `ResourceHandle`s). */\n  function delegate(task: string): Promise<unknown>;\n  function delegate(args: { name?: string; task: string; context?: Record<string, unknown> }): Promise<unknown>;\n");
+                out.push_str("  /** Run an isolated AI worker frame for a single lightweight task (parallelizable via `Promise.all` / `Promise.allSettled`); `context` fields are exposed as safe variables and via `context.<key>`. */\n  function delegate(task: string): Promise<unknown>;\n  function delegate(args: { name?: string; task: string; context?: Record<string, unknown> }): Promise<unknown>;\n");
             }
         }
         if matches!(library.as_str(), "io" | "git" | "process") {
