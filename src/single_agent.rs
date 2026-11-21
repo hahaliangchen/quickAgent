@@ -970,9 +970,6 @@ fn snapshot_turn_state(s: &Session<'_>, w: &Window) -> Result<String> {
     let turn = w.context_doc.turns.iter().find(|turn| turn.turn == s.turn);
     let mut asset_refs = std::collections::BTreeSet::new();
     let mut notes = Vec::new();
-    let live_vm_handles = turn
-        .map(|turn| turn.live_handles.clone())
-        .unwrap_or_default();
     if let Some(turn) = turn {
         for segment in &turn.segments {
             for receipt in &segment.inline_receipts {
@@ -1006,7 +1003,18 @@ fn snapshot_turn_state(s: &Session<'_>, w: &Window) -> Result<String> {
             Value::Object(values)
         })
         .unwrap_or_else(|| json!({}));
-    let mut binding_assets = Vec::new();
+    struct BindingCandidate {
+        names: Vec<String>,
+        value: Value,
+        kind: &'static str,
+        bytes: usize,
+        path: Option<String>,
+        exit_code: Option<Value>,
+        content_key: String,
+    }
+    let mut candidates = Vec::<BindingCandidate>::new();
+    let mut by_content = std::collections::HashMap::<String, usize>::new();
+    let mut latest_by_path = std::collections::HashMap::<String, usize>::new();
     let mut small_bindings = serde_json::Map::new();
     if let Some(object) = bindings.as_object() {
         for (name, value) in object {
@@ -1018,33 +1026,98 @@ fn snapshot_turn_state(s: &Session<'_>, w: &Window) -> Result<String> {
             });
             let is_command = object.is_some_and(|o| o.get("exit_code").is_some());
             let is_large = serialized.len() > 4 * 1024;
-            if (is_file || is_command || is_large) && binding_assets.len() < 32 {
+            if is_file || is_command || is_large {
                 let kind = if is_file { "file" } else if is_command { "command" } else { "json" };
-                let asset = crate::context_assets::register_pending(
-                    s.state.workspace.root(),
-                    s.task,
-                    &format!("turn_binding_{kind}"),
-                    &json!({"turn":s.turn,"name":name}),
-                    value,
-                )?;
-                let mut entry = json!({
-                    "name": name,
-                    "asset_id": asset["asset_id"],
-                    "kind": kind,
-                    "bytes": serialized.len(),
-                    "lines": value.get("content").and_then(Value::as_str).or_else(|| value.get("stdout").and_then(Value::as_str)).map(|text| text.lines().count()),
+                let path = object.and_then(|o| o.get("path")).and_then(Value::as_str).map(str::to_owned);
+                let content_key = crate::visual_artifacts::hash(&serialized);
+                if let Some(previous) = path.as_ref().and_then(|path| latest_by_path.get(path).copied()) {
+                    if candidates[previous].content_key != content_key {
+                        // A later binding for the same path is the current version.
+                        let previous_key = candidates[previous].content_key.clone();
+                        if by_content.get(&previous_key) == Some(&previous) {
+                            by_content.remove(&previous_key);
+                        }
+                        for previous_name in candidates[previous].names.clone() {
+                            small_bindings.insert(previous_name, candidates[previous].value.clone());
+                        }
+                        candidates[previous].names.clear();
+                    }
+                }
+                if let Some(&index) = by_content.get(&content_key) {
+                    candidates[index].names.push(name.clone());
+                    if let Some(path) = path.as_ref() {
+                        latest_by_path.insert(path.clone(), index);
+                    }
+                    continue;
+                }
+                let index = candidates.len();
+                candidates.push(BindingCandidate {
+                    names: vec![name.clone()],
+                    value: value.clone(),
+                    kind,
+                    bytes: serialized.len(),
+                    path: path.clone(),
+                    exit_code: object.and_then(|o| o.get("exit_code")).cloned(),
+                    content_key: content_key.clone(),
                 });
-                if let Some(path) = object.and_then(|o| o.get("path")).and_then(Value::as_str) {
-                    entry["path"] = json!(path);
+                by_content.insert(content_key, index);
+                if let Some(path) = path {
+                    latest_by_path.insert(path, index);
                 }
-                if let Some(exit_code) = object.and_then(|o| o.get("exit_code")) {
-                    entry["exit_code"] = exit_code.clone();
-                }
-                binding_assets.push(entry);
             } else {
                 small_bindings.insert(name.clone(), value.clone());
             }
         }
+    }
+    let mut selected = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| !candidate.names.is_empty())
+        .collect::<Vec<_>>();
+    selected.sort_by_key(|(_, candidate)| {
+        let priority = match candidate.kind {
+            "file" => 0,
+            "command" => 1,
+            _ => 2,
+        };
+        (priority, std::cmp::Reverse(candidate.names.first().cloned().unwrap_or_default()))
+    });
+    let selected_indices = selected.iter().take(16).map(|(index, _)| *index).collect::<std::collections::HashSet<_>>();
+    let mut binding_assets = Vec::new();
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        if candidate.names.is_empty() {
+            continue;
+        }
+        if !selected_indices.contains(&index) {
+            for name in candidate.names {
+                small_bindings.insert(name, candidate.value.clone());
+            }
+            continue;
+        }
+        let asset = crate::context_assets::register_pending(
+            s.state.workspace.root(),
+            s.task,
+            &format!("turn_binding_{}", candidate.kind),
+            &json!({"turn":s.turn,"name":candidate.names.first().cloned().unwrap_or_default()}),
+            &candidate.value,
+        )?;
+        let mut entry = json!({
+            "name": candidate.names.first().cloned().unwrap_or_default(),
+            "asset_id": asset["asset_id"],
+            "kind": candidate.kind,
+            "bytes": candidate.bytes,
+            "lines": candidate.value.get("content").and_then(Value::as_str).or_else(|| candidate.value.get("stdout").and_then(Value::as_str)).map(|text| text.lines().count()),
+        });
+        if candidate.names.len() > 1 {
+            entry["aliases"] = json!(candidate.names.into_iter().skip(1).collect::<Vec<_>>());
+        }
+        if let Some(path) = candidate.path {
+            entry["path"] = json!(path);
+        }
+        if let Some(exit_code) = candidate.exit_code {
+            entry["exit_code"] = exit_code;
+        }
+        binding_assets.push(entry);
     }
     let small_bindings_ref = crate::context_assets::register_pending(
         s.state.workspace.root(),
@@ -1067,8 +1140,15 @@ fn snapshot_turn_state(s: &Session<'_>, w: &Window) -> Result<String> {
             *note = note.chars().take(240).collect::<String>() + "…";
         }
     }
-    let asset_refs = asset_refs.into_iter().take(32).collect::<Vec<_>>();
-    let live_vm_handles = live_vm_handles.into_iter().take(32).collect::<Vec<_>>();
+    let binding_asset_ids = binding_assets
+        .iter()
+        .filter_map(|entry| entry["asset_id"].as_str().map(|id| format!("asset: {id}")))
+        .collect::<std::collections::BTreeSet<_>>();
+    let asset_refs = asset_refs
+        .into_iter()
+        .filter(|asset| !binding_asset_ids.contains(asset))
+        .take(16)
+        .collect::<Vec<_>>();
     let outputs_ref = crate::context_assets::register_pending(
         s.state.workspace.root(),
         s.task,
@@ -1083,7 +1163,6 @@ fn snapshot_turn_state(s: &Session<'_>, w: &Window) -> Result<String> {
         "binding_assets":binding_assets,
         "step_outputs":{"asset_id":outputs_ref["asset_id"],"read":"session.snapshot({ asset_id: ... })"},
         "asset_refs":asset_refs,
-        "live_vm_handles":live_vm_handles,
         "notes":notes,
         "frozen":true,
     }).to_string())

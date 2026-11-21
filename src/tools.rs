@@ -551,6 +551,8 @@ pub struct WriteFileResponse {
     pub created: bool,
     pub code_hash: String,
     pub index_refresh: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -575,6 +577,8 @@ pub struct ReplaceRangeResponse {
     pub changed: bool,
     pub code_hash: String,
     pub index_refresh: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

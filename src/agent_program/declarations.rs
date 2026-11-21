@@ -320,13 +320,13 @@ pub fn static_library_header(libraries: &Libraries) -> String {
         for (method, target) in methods {
             let sig = match target.as_str() {
                 "read_file" => "args: { path: string; max_chars?: number; max_bytes?: number }): ResourceHandle",
-                "read_file_lines" => "args: { path: string; start_line: number; end_line?: number; max_chars?: number }): ResourceHandle & { next_start_line: number | null }",
+                "read_file_lines" => "args: { path: string; start_line: number; end_line?: number; max_chars?: number; start_column?: number; force_read?: boolean }): ResourceHandle & { next_start_line: number | null; next_column?: number | null; partial_line?: boolean; returned_chars?: number; source_format?: { byte_exact: boolean; fragment: boolean; column_unit: string } }",
                 "read_file_chunk" => "args: { path: string; byte_offset?: number; start_line?: number; max_bytes?: number; max_lines?: number }): ResourceHandle & { eof: boolean; next_byte_offset: number | null }",
-                "list_dir" => "args: { path?: string; recursive?: boolean; max_depth?: number; glob?: string | string[]; exclude?: string | string[]; max_entries?: number }): { root: string; entries: Array<{ path: string; kind: string; size_bytes?: number; modified_at?: string; modified_ms?: number }>; unexpanded_dirs?: string[]; hints?: string[]; truncated: boolean }",
-                "search_text" => "args: { query: string; path?: string; paths?: string[]; regex?: boolean; glob?: string | string[]; exclude?: string | string[]; context_lines?: number; max_matches?: number; output_mode?: 'content' | 'files' | 'count' }): { query: string; match_mode: string; output_mode: string; matches: Array<{ path: string; line: number; column: number; text: string; before?: string[]; after?: string[] }>; files?: string[]; counts?: Array<{ path: string; count: number }>; total?: number; truncated: boolean }",
+                "list_dir" => "args: { path?: string; recursive?: boolean; max_depth?: number; respect_gitignore?: boolean; glob?: string | string[]; exclude?: string | string[]; kind?: 'file' | 'directory' | 'symlink' | 'other'; modified_after?: string; modified_before?: string; sort_by?: 'path' | 'modified_desc' | 'modified_asc' | 'size_desc' | 'size_asc'; max_entries?: number }): { root: string; entries: Array<{ path: string; kind: string; size_bytes?: number; modified_at?: string; modified_ms?: number }>; unexpanded_dirs?: string[]; hints?: string[]; truncated: boolean }",
+                "search_text" => "args: { query: string; path?: string; paths?: string[]; regex?: boolean; case_sensitive?: boolean; respect_gitignore?: boolean; glob?: string | string[]; exclude?: string | string[]; context_lines?: number; max_matches?: number; max_matches_per_file?: number; output_mode?: 'content' | 'files' | 'count' }): { query: string; match_mode: string; output_mode: string; matches: Array<{ path: string; line: number; column: number; text: string; line_chars?: number; before?: string[]; after?: string[] }>; files?: string[]; counts?: Array<{ path: string; count: number }>; total?: number; truncated: boolean }",
                 "write_file" => "args: { path: string; content: string; create_parent_dirs?: boolean; expected_code_hash?: string }): { path: string; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown }",
-                "edit_file" => "args: { path: string; edits: Array<{ old_text: string; new_text: string }>; expected_code_hash?: string } | { path: string; old_text: string; new_text: string; expected_code_hash?: string }): { path: string; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown }",
-                "replace_range" => "args: { path: string; start_line: number; end_line: number; replacement: string; expected_old_text?: string; expected_code_hash?: string }): { path: string; start_line: number; end_line: number; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown }",
+                "edit_file" => "args: { path: string; edits: Array<{ old_text: string; new_text: string }>; expected_code_hash?: string } | { path: string; old_text: string; new_text: string; expected_code_hash?: string }): { path: string; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown; preview?: string }",
+                "replace_range" => "args: { path: string; start_line: number; end_line: number; replacement: string; expected_old_text?: string; expected_code_hash?: string }): { path: string; start_line: number; end_line: number; bytes_written: number; go_reindexed: boolean; changed: boolean; created: boolean; code_hash: string; index_refresh: unknown; preview?: string }",
                 "workspace_info" => "args?: { workspace_root?: string }): { workspace_root: string; platform: string; allowed_scope: string; default_ignored_dirs: string[] }",
                 "git_status" => "args?: { paths?: string[]; include_untracked?: boolean; max_entries?: number }): { head: string | null; branch: string | null; clean: boolean; staged: string[]; modified: string[]; untracked: string[]; total_entries: number; truncated: boolean }",
                 "git_diff" => "args?: { rev_range?: string; staged?: boolean; paths?: string[]; stat_only?: boolean; unified?: number; max_lines?: number; max_chars?: number }): { diff: string; files: string[]; truncated: boolean; stat_only: boolean }",
@@ -895,5 +895,11 @@ mod tests {
         assert!(header.contains("context?: Record<string, unknown>"));
         assert!(!header.contains("read_file"));
         assert!(!header.contains("parameters"));
+    }
+
+    #[test]
+    fn edit_declarations_advertise_line_preview() {
+        let header = static_library_header(&libraries::builtin());
+        assert!(header.contains("index_refresh: unknown; preview?: string"));
     }
 }

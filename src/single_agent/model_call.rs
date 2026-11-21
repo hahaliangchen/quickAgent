@@ -87,6 +87,11 @@ Each response MUST be **one** of the two actions below:
   - Frozen turn snapshots are immutable host assets. Use `session.snapshot({ asset_id })` to restore the exact saved file, command output, or JSON value even after the workspace changes. `session.read_asset(...)` remains available for paged asset delivery.
 - **Lazy Resource Handles & Programmatic JS**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with zero-I/O methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. Use JS loops, regexes, sets, and maps to diff, verify, or extract across multiple files in a single step.
 
+## EDITING AND BUILDING
+- When changing multiple lines, deeply indented code, or code with complex quotes and backslashes, prefer the line-precise `io.replace({ path, start_line, end_line, replacement })`. Use a JavaScript template string or `lines.join('\n')` for the replacement instead of hand-building a long single-quoted `old_text` anchor.
+- Successful `io.edit` and `io.replace` responses include a line-numbered `preview` of the changed area. Once it confirms the edit, continue without an extra whole-file `io.read`.
+- Do not run multiple `cargo` or package-manager build/test commands inside `Promise.all`. Run them serially, or combine filters into one command, to avoid competing for the build lock.
+
 ### Action 2: Finish turn and reply to the user
 - ONLY after you have real observed evidence (never before reading the target files or running requested checks), reply directly in normal Markdown **WITHOUT calling `run_js`**.
 - Everything in your plain assistant reply (without `run_js`) is delivered verbatim to the user and NEVER executed as JS (so ```` ```js ```` / ```` ```rust ```` example blocks need zero escaping).

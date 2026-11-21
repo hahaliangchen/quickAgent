@@ -8,6 +8,34 @@ export interface ToolResult {
   readonly time: number
 }
 
+/** Turn structured tool failures into the short message shown in a row. */
+export function cleanToolError(raw: string): string {
+  const text = raw.trim()
+  if (text === '') return ''
+  const pick = (value: unknown): string | undefined => {
+    if (typeof value === 'string') return value
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+    const record = value as Record<string, unknown>
+    for (const key of ['error', 'message']) {
+      const candidate = record[key]
+      if (typeof candidate === 'string' && candidate.trim() !== '') return candidate.trim()
+      const nested = pick(candidate)
+      if (nested !== undefined) return nested
+    }
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown
+    return pick(parsed) ?? text
+  } catch {
+    return text
+  }
+}
+
+export function sameErrorMessage(left: string, right: string): boolean {
+  return cleanToolError(left).trim() !== '' && cleanToolError(left).trim() === cleanToolError(right).trim()
+}
+
 export type TurnEndReason =
   | { readonly kind: 'completed'; readonly goalAchieved?: boolean | undefined; readonly unresolved?: readonly string[] | undefined }
   | { readonly kind: 'aborted' }
@@ -131,11 +159,14 @@ export type ProcessEntry =
 export function processEntries(items: readonly ChatItem[]): ProcessEntry[] {
   const entries: ProcessEntry[] = []
   let step: { kind: 'step'; key: string; reply: AssistantItem; tools: ToolItem[] } | undefined
+  let previousToolError: string | undefined
   for (const item of items) {
     if (item.kind === 'assistant') {
+      previousToolError = undefined
       step = { kind: 'step', key: item.key, reply: item, tools: [] }
       entries.push(step)
     } else if (item.kind === 'tool') {
+      previousToolError = item.result?.isError === true ? cleanToolError(item.result.text) : undefined
       if (step !== undefined && item.line === undefined && item.frame === step.reply.frame && item.step === step.reply.step) {
         step.tools.push(item)
         continue
@@ -145,6 +176,13 @@ export function processEntries(items: readonly ChatItem[]): ProcessEntry[] {
       if (last?.kind === 'tools') (last.tools as ToolItem[]).push(item)
       else entries.push({ kind: 'tools', key: item.key, tools: [item] })
     } else {
+      if (item.kind === 'program' && item.event === 'failed' && previousToolError !== undefined && sameErrorMessage(previousToolError, item.text)) {
+        entries.push({ kind: 'item', key: item.key, item: { ...item, text: '' } })
+        previousToolError = undefined
+        step = undefined
+        continue
+      }
+      previousToolError = undefined
       step = undefined
       entries.push({ kind: 'item', key: item.key, item })
     }

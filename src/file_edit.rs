@@ -260,6 +260,77 @@ pub fn line_replacement(
     Ok(output)
 }
 
+/// Render compact, line-numbered context around changed regions in the updated file.
+/// Ranges are 1-based inclusive line ranges and overlapping context windows merge.
+pub fn preview_for_line_ranges(content: &str, ranges: &[(usize, usize)]) -> String {
+    if ranges.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut windows = ranges
+        .iter()
+        .map(|&(start, end)| {
+            let start = start.max(1).saturating_sub(5).max(1);
+            let end = end.max(start).saturating_add(5).min(lines.len());
+            (start, end)
+        })
+        .collect::<Vec<_>>();
+    windows.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in windows {
+        if let Some((_, previous_end)) = merged.last_mut() {
+            if start <= *previous_end + 1 {
+                *previous_end = (*previous_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    let mut output = String::new();
+    for (window_index, (start, end)) in merged.into_iter().enumerate() {
+        if window_index > 0 {
+            output.push_str("\n…\n");
+        }
+        for line_number in start..=end {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&format!("L{line_number}: {}", lines[line_number - 1]));
+            if output.chars().count() >= 4000 {
+                output = output.chars().take(3999).collect();
+                output.push('…');
+                return output;
+            }
+        }
+    }
+    output
+}
+
+fn line_number_at(content: &str, byte_offset: usize) -> usize {
+    content.as_bytes()[..byte_offset.min(content.len())]
+        .iter()
+        .copied()
+        .filter(|&byte| byte == b'\n')
+        .count()
+        + 1
+}
+
+/// Convert byte spans in the updated file into line ranges for `preview_for_line_ranges`.
+pub fn preview_for_byte_ranges(content: &str, ranges: &[(usize, usize)]) -> String {
+    let line_ranges = ranges
+        .iter()
+        .map(|&(start, end)| {
+            let first = line_number_at(content, start);
+            let last = line_number_at(content, end.saturating_sub(1).max(start));
+            (first, last.max(first))
+        })
+        .collect::<Vec<_>>();
+    preview_for_line_ranges(content, &line_ranges)
+}
+
 /// The file's lines from `first` (0-based), numbered as the file numbers them.
 fn numbered(lines: &[&str], first: usize, count: usize) -> String {
     lines.iter().enumerate().skip(first).take(count).map(|(i, line)| {
@@ -330,6 +401,14 @@ fn occurrences(source: &str, anchor: &str) -> String {
 }
 
 pub fn text_edits(source: &str, edits: &[crate::tools::TextEdit]) -> Result<String> {
+    text_edits_with_ranges(source, edits).map(|(output, _)| output)
+}
+
+/// Apply text edits and return byte spans of their replacements in the updated file.
+pub fn text_edits_with_ranges(
+    source: &str,
+    edits: &[crate::tools::TextEdit],
+) -> Result<(String, Vec<(usize, usize)>)> {
     if edits.is_empty() || edits.len() > 100 {
         return Err(ToolError::InvalidEdit(
             "provide between 1 and 100 edits".into(),
@@ -381,11 +460,18 @@ pub fn text_edits(source: &str, edits: &[crate::tools::TextEdit]) -> Result<Stri
             "edit anchors overlap; no edits applied".into(),
         ));
     }
+    let mut ranges = Vec::with_capacity(replacements.len());
+    let mut delta: i64 = 0;
+    for (begin, end, text) in &replacements {
+        let final_begin = (*begin as i64 + delta).max(0) as usize;
+        ranges.push((final_begin, final_begin + text.len()));
+        delta += text.len() as i64 - (*end - *begin) as i64;
+    }
     let mut output = source.to_owned();
     for (begin, end, text) in replacements.into_iter().rev() {
         output.replace_range(begin..end, &text);
     }
-    Ok(output)
+    Ok((output, ranges))
 }
 
 #[cfg(test)]
@@ -417,5 +503,33 @@ mod tests {
         let message = error("x = 1;\ny = 2;\nx = 1;\n", "x = 1;");
         assert!(message.contains("it occurs 2 times, at lines 1, 3") && message.contains("supply more surrounding text"), "{message}");
         assert!(error("aa;\n", "a").contains("at line 1"));
+    }
+
+    #[test]
+    fn changed_preview_merges_hunks_and_keeps_line_numbers() {
+        let source = (1..=20).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
+        let preview = preview_for_line_ranges(&source, &[(2, 2), (7, 8)]);
+        assert!(preview.contains("L1: line 1"));
+        assert!(preview.contains("L13: line 13"));
+        assert!(!preview.contains("L14: line 14"));
+    }
+
+    #[test]
+    fn changed_preview_has_a_hard_character_limit() {
+        let source = (1..=100).map(|line| format!("{line}: {}", "x".repeat(100))).collect::<Vec<_>>().join("\n");
+        let preview = preview_for_line_ranges(&source, &[(1, 100)]);
+        assert!(preview.chars().count() <= 4000, "preview too long: {}", preview.chars().count());
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn text_edit_ranges_point_into_the_updated_file() {
+        let (updated, ranges) = text_edits_with_ranges(
+            "one\ntwo\nthree\nfour\n",
+            &[crate::tools::TextEdit { old_text: "two".into(), new_text: "TWO\nTWO-B".into() }],
+        ).unwrap();
+        assert_eq!(updated, "one\nTWO\nTWO-B\nthree\nfour\n");
+        assert_eq!(preview_for_byte_ranges(&updated, &ranges).lines().next(), Some("L1: one"));
+        assert!(preview_for_byte_ranges(&updated, &ranges).contains("L3: TWO-B"));
     }
 }

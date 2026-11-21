@@ -10,6 +10,8 @@ use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+const SHELL_MODULE_ONLY_MESSAGE: &str = "SHELL_MODULE_ONLY: Shell execution is disabled in this session or restricted plugin context (allow_shell=false).";
+
 pub(super) fn page_allows(s: &Session<'_>, name: &str) -> bool {
     let Some(owner) = &s.plugin else {
         return true;
@@ -189,7 +191,7 @@ pub(super) async fn business_tool_inner(
 ) -> Result<Value> {
     ensure!(
         !crate::project_process::is_execution(name) || allow_shell,
-        "SHELL_MODULE_ONLY: Shell execution requires top-level program code in an execution-enabled code session; @virtual helpers cannot run shell."
+        SHELL_MODULE_ONLY_MESSAGE
     );
     ensure!(page_allows(s, name), "PLUGIN_SCOPE_DENIED: {name}");
     if name == "read_session_history" {
@@ -946,4 +948,15 @@ fn outside_read_paths(
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SHELL_MODULE_ONLY_MESSAGE;
+
+    #[test]
+    fn shell_denial_message_describes_the_allow_shell_boundary() {
+        assert!(SHELL_MODULE_ONLY_MESSAGE.contains("allow_shell=false"));
+        assert!(!SHELL_MODULE_ONLY_MESSAGE.contains("@virtual helpers cannot run shell"));
+    }
 }

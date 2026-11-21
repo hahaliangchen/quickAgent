@@ -529,6 +529,8 @@ async fn step4_multiturn_folding_snapshot_handle_refresh_baselines_and_level2_tr
                         assert!(folded_code.contains("io.read") && folded_code.contains("Turn 1 folded"));
                         assert_eq!(msgs[3]["role"], "tool");
                         let manifest: Value = serde_json::from_str(msgs[3]["content"].as_str().unwrap()).unwrap();
+                        assert!(manifest["binding_assets"].as_array().is_some_and(|assets| assets.len() <= 16));
+                        assert!(manifest.get("live_vm_handles").is_none());
                         let file_asset = manifest["binding_assets"]
                             .as_array()
                             .unwrap()

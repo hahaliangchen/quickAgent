@@ -4,7 +4,7 @@ import test from 'node:test'
 import ts from 'typescript'
 const source = await readFile(new URL('../src/model.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
-const { awaitingModel, chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+const { awaitingModel, chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState, cleanToolError } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
 
 let seq = 0
 const event = (type, data) => ({ seq: ++seq, time: 1000 + seq, type, data: { turn: 1, ...data } })
@@ -186,6 +186,31 @@ test('a later opaque tool error is not replaced by an older shell snapshot', () 
   const row = shellRows(events)[0]
   assert.equal(row.result.text, 'latest error')
   assert.equal(row.result.isError, true)
+})
+
+test('tool JSON failures become readable summaries and duplicate program errors are collapsed', () => {
+  seq = 0
+  assert.equal(cleanToolError('{"error":"invalid_edit: old_text did not match"}'), 'invalid_edit: old_text did not match')
+  assert.equal(cleanToolError('{"message":"ReferenceError: missing"}'), 'ReferenceError: missing')
+  const items = chatItems([
+    call('main', 'edit', 'edit_file', { path: 'src/a.ts' }),
+    result('main', 'edit', '{"error":"invalid_edit: old_text did not match"}', true),
+    event('program/error', { task_node_id: 'main', error: { message: 'invalid_edit: old_text did not match' } }),
+  ])
+  const entries = processEntries(items)
+  const toolEntry = entries.find(entry => entry.kind === 'tools')
+  assert.equal(toolEntry?.kind, 'tools')
+  assert.equal(JSON.parse(toolEntry.tools[0].result.text).error, 'invalid_edit: old_text did not match')
+  const program = entries.find(entry => entry.kind === 'item' && entry.item.kind === 'program')
+  assert.equal(program?.kind, 'item')
+  assert.equal(program.item.text, '')
+  const runtimeItems = chatItems([
+    call('main', 'edit2', 'edit_file', { path: 'src/a.ts' }),
+    result('main', 'edit2', '{"error":"invalid_edit: old_text did not match"}', true),
+    event('program/error', { task_node_id: 'main', error: { message: 'ReferenceError: missing' } }),
+  ])
+  const runtimeProgram = processEntries(runtimeItems).find(entry => entry.kind === 'item' && entry.item.kind === 'program')
+  assert.equal(runtimeProgram.item.text, 'ReferenceError: missing')
 })
 
 /** The shape of a real turn: the main AI looks around, writes a program, the program reads a file and calls a virtual function. */

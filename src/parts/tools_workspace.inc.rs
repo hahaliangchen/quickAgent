@@ -658,6 +658,7 @@ impl Workspace {
             changed,
             code_hash: crate::symbol_description::content_hash(request.content.as_bytes()),
             index_refresh,
+            preview: None,
         })
     }
 
@@ -697,6 +698,13 @@ impl Workspace {
             code_hash: crate::symbol_description::content_hash(updated.as_bytes()),
             go_reindexed: index_refresh["status"] == "updated" && index_refresh["language"] == "go",
             index_refresh,
+            preview: changed.then(|| crate::file_edit::preview_for_line_ranges(
+                &updated,
+                &[(
+                    request.start_line,
+                    request.start_line + request.replacement.lines().count().max(1) - 1,
+                )],
+            )),
         })
     }
 
@@ -723,7 +731,7 @@ impl Workspace {
         let original = fs::read(&path)?;
         crate::file_edit::check_hash(Some(&original), request.expected_code_hash.as_deref())?;
         let content = String::from_utf8(original.clone())?;
-        let updated = crate::file_edit::text_edits(&content, &request.edits)?;
+        let (updated, changed_ranges) = crate::file_edit::text_edits_with_ranges(&content, &request.edits)?;
         check_write_size(updated.len())?;
         let changed = crate::file_edit::commit(&path, Some(&original), updated.as_bytes())?;
         drop(_guard);
@@ -736,6 +744,7 @@ impl Workspace {
             code_hash: crate::symbol_description::content_hash(updated.as_bytes()),
             go_reindexed: index_refresh["status"] == "updated" && index_refresh["language"] == "go",
             index_refresh,
+            preview: changed.then(|| crate::file_edit::preview_for_byte_ranges(&updated, &changed_ranges)),
         })
     }
 

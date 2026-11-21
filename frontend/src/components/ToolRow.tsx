@@ -18,7 +18,7 @@ import {
 import { useDisclosure } from '../disclosure.ts'
 import css from '../dsh/tool/ToolRow.module.css'
 import { t } from '../i18n.ts'
-import type { ToolResult } from '../model.ts'
+import { cleanToolError, type ToolResult } from '../model.ts'
 import { VisualArtifactPreview } from './VisualMaterials.tsx'
 import type { VisualRecord } from '../visual.ts'
 import { toolVisual } from './toolVisuals.tsx'
@@ -236,7 +236,7 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
     const value = result ? parse(result.text) as VisualRecord : null
     return value && typeof value === 'object' && value.visual_artifact ? value.visual_artifact as VisualRecord : undefined
   }, [result])
-  const errorLine = result?.isError === true && !shellResult ? result.text.split('\n')[0] ?? '' : ''
+  const errorLine = result?.isError === true && !shellResult ? cleanToolError(result.text) : ''
   const nativeSummary = nativeResult
     ? nativeResult.outcome === 'exited'
       ? `退出码 ${String(nativeResult.process_exit_code ?? '未知')}${nativeDiagnostics.length > 0 ? ` · ${nativeDiagnostics.length} 项输出诊断` : ''}`

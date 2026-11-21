@@ -349,7 +349,7 @@
         let root = temp_workspace("replace");
         fs::write(root.join("demo.txt"), "alpha\nbeta\ngamma\n").unwrap();
         let workspace = Workspace::new(&root).unwrap();
-        workspace
+        let response = workspace
             .replace_range(ReplaceRangeRequest {
                 workspace_root: None,
                 path: "demo.txt".to_string(),
@@ -360,10 +360,33 @@
                 expected_code_hash: None,
             })
             .unwrap();
+        assert!(response.preview.as_deref().is_some_and(|preview| preview.contains("L2: BETA")));
         assert_eq!(
             fs::read_to_string(root.join("demo.txt")).unwrap(),
             "alpha\nBETA\ngamma\n"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_file_returns_merged_line_numbered_preview() {
+        let root = temp_workspace("edit_preview");
+        fs::write(root.join("demo.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n").unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+        let response = workspace
+            .edit_file(EditFileRequest {
+                workspace_root: None,
+                path: "demo.txt".to_string(),
+                edits: vec![
+                    TextEdit { old_text: "two".to_string(), new_text: "TWO".to_string() },
+                    TextEdit { old_text: "six".to_string(), new_text: "SIX".to_string() },
+                ],
+                expected_code_hash: None,
+            })
+            .unwrap();
+        let preview = response.preview.expect("changed edit has preview");
+        assert!(preview.contains("L2: TWO") && preview.contains("L6: SIX"), "{preview}");
+        assert!(preview.contains("L1: one") && preview.contains("L7: seven"), "{preview}");
         let _ = fs::remove_dir_all(root);
     }
 
