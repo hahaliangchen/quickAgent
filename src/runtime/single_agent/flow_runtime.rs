@@ -238,6 +238,7 @@ fn execute_orchestration_call<'a>(
         let mut action_count = 0usize;
         let node = format!("lib_{library}_{method}_{parent_step}");
 
+        let mut total_timer_wait_ms = 0u64;
         let (val, is_err) = loop {
             if lib_session.cancel.is_cancelled() {
                 bail!("cancelled");
@@ -425,6 +426,26 @@ fn execute_orchestration_call<'a>(
                     }
                 }
                 ConcurrentState::Waiting => {
+                    if let Some(due) = runtime.next_timer_at() {
+                        let wait_ms = due.saturating_sub(runtime.timer_now_ms()).max(0) as u64;
+                        if wait_ms > 60_000 || total_timer_wait_ms.saturating_add(wait_ms) > 120_000
+                        {
+                            break (
+                                json!({"code": "LIBRARY_TIMER_LIMIT", "message": format!("Library {library}.{method} timer wait ({wait_ms}ms) exceeded limit")}),
+                                true,
+                            );
+                        }
+                        let sleep_ms = wait_ms.saturating_add(1);
+                        tokio::select! {
+                            _ = lib_session.cancel.cancelled() => {
+                                bail!("cancelled");
+                            }
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {
+                                total_timer_wait_ms = total_timer_wait_ms.saturating_add(sleep_ms);
+                            }
+                        }
+                        continue;
+                    }
                     break (
                         json!({"code": "LIBRARY_DEADLOCK", "message": format!("Library {library}.{method} entered waiting state with no pending jobs")}),
                         true,

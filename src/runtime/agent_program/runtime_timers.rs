@@ -37,8 +37,12 @@ impl Runtime {
         self.timer_test_time = Some(now);
     }
 
+    /// Current VM timer clock in milliseconds (test clock in tests, wall clock in production).
+    pub fn timer_now_ms(&self) -> i64 {
+        self.timer_now()
+    }
+
     /// Absolute wall-clock wake time; persists unchanged across pause/restart.
-    #[cfg(test)]
     pub fn next_timer_at(&self) -> Option<i64> {
         if self.finished {
             return None;

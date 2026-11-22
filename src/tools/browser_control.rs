@@ -621,15 +621,28 @@ async fn open(ws: &str, url: &str) -> Result<Value> {
     crate::tools::process_sandbox::check_not_host_control_url_async(url).await?;
     let mut cdp = connect_cdp(ws).await?;
     arm_diagnostics(&mut cdp).await?;
-    cdp.call("Page.navigate", json!({"url":url})).await?;
+    let nav = cdp.call("Page.navigate", json!({"url":url})).await?;
+    if let Some(error_text) = nav
+        .get("errorText")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+    {
+        anyhow::bail!(
+            "navigation failed ({error_text}) for {url}; verify the target server is running and reachable"
+        );
+    }
     timeout(Duration::from_secs(20), async {
         let mut stable=0;
+        let mut last_href = String::new();
+        let mut last_ready = String::new();
         for _ in 0..40 {
             let state=eval(ws,"({href:location.href,ready:document.readyState,loaded:(performance.getEntriesByType('navigation')[0]||{}).loadEventEnd>0})").await?;
-            let ready=state["ready"]=="complete" && state["loaded"]==true && page_url_matches(state["href"].as_str().unwrap_or(""),url);
+            last_href = state["href"].as_str().unwrap_or("").to_owned();
+            last_ready = state["ready"].as_str().unwrap_or("").to_owned();
+            let ready=last_ready=="complete" && state["loaded"]==true && page_url_matches(&last_href,url);
             stable=if ready {stable+1}else{0};if stable>=2 {return Ok::<(),anyhow::Error>(());}
             tokio::time::sleep(Duration::from_millis(250)).await;
-        }anyhow::bail!("page load did not become ready")
+        }anyhow::bail!("page load did not become ready for {url} (last href={last_href:?}, readyState={last_ready:?})")
     }).await.context("page load timed out")??;
     read(ws, "").await
 }

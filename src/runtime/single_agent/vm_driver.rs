@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_INFLIGHT_JOBS: usize = 64;
+const MAX_SINGLE_TIMER_WAIT_MS: u64 = 60_000;
+const MAX_SEGMENT_TIMER_WAIT_MS: u64 = 120_000;
 
 /// Execute one prepared JS segment in `runtime` until it returns or fails.
 /// Returns `(terminal_state, external_call_count, segment_context_hints)`.
@@ -29,6 +31,7 @@ pub(super) async fn drive_vm_segment(
     file_refs: &mut BTreeMap<String, (u64, String)>,
 ) -> Result<(State, usize, context_doc::SegmentContextHints)> {
     let mut external_tool_calls = 0usize;
+    let mut total_timer_wait_ms = 0u64;
     let mut hints = context_doc::SegmentContextHints::default();
     let mut spawned_ids = BTreeSet::<String>::new();
     let mut inflight_jobs: tokio::task::JoinSet<
@@ -315,14 +318,91 @@ pub(super) async fn drive_vm_segment(
                 }
             }
             ConcurrentState::Waiting => {
-                let Some(joined) = inflight_jobs.join_next().await else {
-                    return Ok((State::Waiting, external_tool_calls, hints));
-                };
-                let (action_id, value, is_error, receipt) = joined??;
-                if let Some(line) = receipt {
-                    hints.virtual_receipts.push(line);
+                let next_timer_wait = runtime
+                    .next_timer_at()
+                    .map(|due| due.saturating_sub(runtime.timer_now_ms()).max(0) as u64);
+
+                if !inflight_jobs.is_empty() {
+                    if let Some(wait_ms) = next_timer_wait {
+                        let sleep_ms = wait_ms.min(MAX_SINGLE_TIMER_WAIT_MS).saturating_add(1);
+                        tokio::select! {
+                            _ = s.cancel.cancelled() => {
+                                inflight_jobs.abort_all();
+                                bail!("cancelled");
+                            }
+                            joined = inflight_jobs.join_next() => {
+                                if let Some(joined) = joined {
+                                    let (action_id, value, is_error, receipt) = joined??;
+                                    if let Some(line) = receipt {
+                                        hints.virtual_receipts.push(line);
+                                    }
+                                    runtime.resume_action(&action_id, value, is_error)?;
+                                }
+                            }
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {
+                                total_timer_wait_ms = total_timer_wait_ms.saturating_add(sleep_ms);
+                            }
+                        }
+                    } else {
+                        tokio::select! {
+                            _ = s.cancel.cancelled() => {
+                                inflight_jobs.abort_all();
+                                bail!("cancelled");
+                            }
+                            joined = inflight_jobs.join_next() => {
+                                if let Some(joined) = joined {
+                                    let (action_id, value, is_error, receipt) = joined??;
+                                    if let Some(line) = receipt {
+                                        hints.virtual_receipts.push(line);
+                                    }
+                                    runtime.resume_action(&action_id, value, is_error)?;
+                                }
+                            }
+                        }
+                    }
+                    continue;
                 }
-                runtime.resume_action(&action_id, value, is_error)?;
+
+                if let Some(wait_ms) = next_timer_wait {
+                    if wait_ms > MAX_SINGLE_TIMER_WAIT_MS
+                        || total_timer_wait_ms.saturating_add(wait_ms) > MAX_SEGMENT_TIMER_WAIT_MS
+                    {
+                        return Ok((
+                            State::Failed(json!({
+                                "code": "TIMER_LIMIT_EXCEEDED",
+                                "name": "Error",
+                                "message": format!(
+                                    "JS timer wait ({wait_ms}ms, cumulative {total_timer_wait_ms}ms) exceeds per-step limit ({MAX_SINGLE_TIMER_WAIT_MS}ms single / {MAX_SEGMENT_TIMER_WAIT_MS}ms total); use browser.wait or shorter delays."
+                                ),
+                            })),
+                            external_tool_calls,
+                            hints,
+                        ));
+                    }
+                    let sleep_ms = wait_ms.saturating_add(1);
+                    tokio::select! {
+                        _ = s.cancel.cancelled() => {
+                            bail!("cancelled");
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {
+                            total_timer_wait_ms = total_timer_wait_ms.saturating_add(sleep_ms);
+                        }
+                    }
+                    continue;
+                }
+
+                // Neither inflight async host calls nor pending JS timers remain:
+                // the segment awaited an unsettled Promise (e.g. `await new Promise(() => {})`).
+                // Surface this as a recoverable JS error rather than killing the entire task.
+                return Ok((
+                    State::Failed(json!({
+                        "code": "UNSETTLED_PROMISE",
+                        "name": "Error",
+                        "message": "JS segment suspended on an unsettled Promise with no pending host action or timer (e.g. `await new Promise(() => {})`). Resolve all awaited Promises or remove hanging awaits.",
+                    })),
+                    external_tool_calls,
+                    hints,
+                ));
             }
             ConcurrentState::Returned(val) => {
                 inflight_jobs.abort_all();

@@ -11,7 +11,7 @@ export function AgentApiPlugin(ctx: Context): void { ctx.provide('agentApi', api
 export const shellPlugins = [
   { name: 'agent-sidebar', inject: ['slots'], apply(ctx: Context) { ctx.slots.register({ name: 'agent.sidebar' }, Sidebar) } },
   { name: 'agent-chat', inject: ['slots', 'agentApi'], apply(ctx: Context) { ctx.slots.register({ name: 'agent.chat' }, ChatView) } },
-  // The flow graph reads the agent's frames itself; it is given only which conversation to show.
-  { name: 'agent-flow', inject: ['slots', 'agentApi'], apply(ctx: Context) { ctx.slots.register({ name: 'agent.flow' }, FlowView) } },
+  // The flow graph is drawn from the conversation's own events, handed in by the page.
+  { name: 'agent-flow', inject: ['slots'], apply(ctx: Context) { ctx.slots.register({ name: 'agent.flow' }, FlowView) } },
   { name: 'agent-composer', inject: ['slots', 'agentApi'], apply(ctx: Context) { ctx.slots.register({ name: 'agent.composer' }, Composer) } },
 ]

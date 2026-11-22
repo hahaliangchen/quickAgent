@@ -152,6 +152,10 @@ pub struct TraceSegment {
     /// to preserve KV-cache, but omitted from clean archived `.js` files.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_rejection: bool,
+    /// Mid-turn user interjection delivered at this exact point in the turn.
+    /// Replayed append-only as a `user` message without mutating earlier prefix bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interjection: Option<String>,
 }
 
 impl ContextDocument {
@@ -301,6 +305,30 @@ impl ContextDocument {
                 assistant_message,
                 tool_call_id,
                 is_rejection: true,
+                interjection: None,
+            });
+            turn.pending_rejection = None;
+        }
+    }
+
+    /// Append a mid-turn user interjection at the current point of the active turn,
+    /// strictly append-only so every earlier message remains byte-identical for KV-cache.
+    pub fn record_interjection(
+        &mut self,
+        text: impl Into<String>,
+        preceding_assistant_reply: Option<String>,
+    ) {
+        if let Some(turn) = self.active_turn_mut() {
+            turn.segments.push(TraceSegment {
+                source: String::new(),
+                inline_receipts: Vec::new(),
+                error_note: None,
+                assistant_message: preceding_assistant_reply
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|content| json!({"role": "assistant", "content": content})),
+                tool_call_id: None,
+                is_rejection: false,
+                interjection: Some(text.into()),
             });
             turn.pending_rejection = None;
         }
@@ -347,6 +375,7 @@ impl ContextDocument {
                 assistant_message,
                 tool_call_id,
                 is_rejection: false,
+                interjection: None,
             });
             turn.live_handles = live_handles;
             turn.pending_rejection = None;
@@ -398,6 +427,7 @@ impl ContextDocument {
                 assistant_message,
                 tool_call_id,
                 is_rejection: false,
+                interjection: None,
             });
             turn.live_handles = live_handles;
             turn.pending_rejection = None;
@@ -444,6 +474,7 @@ impl ContextDocument {
                 assistant_message,
                 tool_call_id,
                 is_rejection: false,
+                interjection: None,
             });
             turn.live_handles = live_handles;
             turn.pending_rejection = None;
@@ -640,6 +671,13 @@ impl ContextDocument {
                         .as_ref()
                         .is_some_and(|prefix| seg_idx < prefix.cutoff)
                 {
+                    continue;
+                }
+                if let Some(interjection) = &seg.interjection {
+                    if let Some(msg) = &seg.assistant_message {
+                        out.push(msg.clone());
+                    }
+                    out.push(json!({"role": "user", "content": interjection}));
                     continue;
                 }
                 let tool_output = format_tool_output(seg);
@@ -898,7 +936,7 @@ fn render_archive_js(turn: &TurnDoc) -> String {
         ),
     };
     for seg in &turn.segments {
-        if seg.is_rejection {
+        if seg.is_rejection || seg.interjection.is_some() {
             continue;
         }
         out.push('\n');
@@ -950,6 +988,7 @@ mod tests {
                 assistant_message: Some(assistant("call-1", true)),
                 tool_call_id: Some("call-1".into()),
                 is_rejection: false,
+                interjection: None,
             });
             turn.segments.push(TraceSegment {
                 source: "const b = a + 1;".into(),
@@ -958,6 +997,7 @@ mod tests {
                 assistant_message: Some(assistant("call-2", false)),
                 tool_call_id: Some("call-2".into()),
                 is_rejection: false,
+                interjection: None,
             });
         }
         doc.finish_turn("done");
@@ -999,6 +1039,7 @@ mod tests {
                 assistant_message: Some(assistant(&format!("c{i}"), i == 0)),
                 tool_call_id: Some(format!("c{i}")),
                 is_rejection: false,
+                interjection: None,
             });
         }
         assert!(doc.fold_active_prefix(1, 2, "{\"live_vm\":true}", None));
@@ -1057,6 +1098,7 @@ mod tests {
                     assistant_message: Some(assistant(&id, true)),
                     tool_call_id: Some(id),
                     is_rejection: false,
+                    interjection: None,
                 });
             }
             if turn == 1 {
@@ -1119,6 +1161,7 @@ mod tests {
             assistant_message: Some(assistant("old", false)),
             tool_call_id: Some("old".into()),
             is_rejection: false,
+            interjection: None,
         });
         doc.finish_turn("old reply");
         doc.begin_turn(2, "recent");

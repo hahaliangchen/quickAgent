@@ -223,6 +223,58 @@ impl<'s, 'a> ContextEngine<'s, 'a> {
         .await
     }
 
+    /// Atomically consume any pending user interjections for the main task,
+    /// emit `user/interjection_delivered`, append them to `w.context_doc`
+    /// without mutating prior KV-cache prefix bytes, and persist `w` in one tx.
+    pub(super) async fn deliver_interjections(
+        &self,
+        w: &mut Window,
+        preceding_assistant_reply: Option<&str>,
+    ) -> Result<usize> {
+        let s = self.session;
+        if s.scope != "main" {
+            return Ok(0);
+        }
+        let task = s.task.to_owned();
+        let scope = s.scope.clone();
+        let mut draft = w.clone();
+        let mut preceding = preceding_assistant_reply.map(str::to_owned);
+        let (delivered_count, updated_window) = db(s.state.workspace.root(), move |conn| {
+            if !crate::context::interjections::pending(conn, &task)? {
+                return Ok((0usize, None));
+            }
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let messages = crate::context::interjections::take(&tx, &task)?;
+            if messages.is_empty() {
+                tx.commit()?;
+                return Ok((0usize, None));
+            }
+            let mut count = 0usize;
+            for msg in messages {
+                if let Some(text) = msg["content"].as_str().filter(|t| !t.trim().is_empty()) {
+                    draft
+                        .context_doc
+                        .record_interjection(text.to_owned(), preceding.take());
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                let encoded = serde_json::to_string(&draft)?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO agent_runtime_windows(task_id,scope,state) VALUES (?1,?2,?3)",
+                    params![task, scope, encoded],
+                )?;
+            }
+            tx.commit()?;
+            Ok((count, (count > 0).then_some(draft)))
+        })
+        .await?;
+        if let Some(updated) = updated_window {
+            *w = updated;
+        }
+        Ok(delivered_count)
+    }
+
     pub(super) async fn maybe_fold_before_request(
         &self,
         w: &mut Window,
@@ -964,6 +1016,7 @@ mod context_guard_tests {
                 })),
                 tool_call_id: Some("call-old".into()),
                 is_rejection: false,
+                interjection: None,
             });
         doc.finish_turn("old assistant reply");
         doc.begin_turn(2, "new topic");

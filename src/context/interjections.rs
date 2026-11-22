@@ -9,13 +9,9 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use rusqlite::{Connection, params};
-#[cfg(test)]
-use rusqlite::Transaction;
+use rusqlite::{Connection, Transaction, params};
 use serde::Deserialize;
-use serde_json::json;
-#[cfg(test)]
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub fn schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -55,7 +51,6 @@ pub fn submit(root: &std::path::Path, task: &str, text: &str) -> Result<i64> {
     Ok(seq)
 }
 
-#[cfg(test)]
 pub fn pending(conn: &Connection, task: &str) -> Result<bool> {
     schema(conn)?;
     Ok(conn.query_row(
@@ -67,7 +62,6 @@ pub fn pending(conn: &Connection, task: &str) -> Result<bool> {
 
 /// Mark undelivered interjections delivered and return them as window
 /// messages, inside the caller's transaction that also saves the window.
-#[cfg(test)]
 pub fn take(tx: &Transaction, task: &str) -> Result<Vec<Value>> {
     schema(tx)?;
     let rows = tx

@@ -311,7 +311,7 @@ export function ConversationPage({
             <div className={root.viewArea} style={tab === 'flow' ? { height: '100%', flex: 1, minHeight: 520, display: 'flex' } : undefined}>
               {tab === 'chat'
                 ? <>{renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: openTask, onChangesUpdated: session.reload, onRevealRightPanel: revealRightPanel })}</>
-                : <>{renderSlot('agent.flow', { taskId: workspace.taskId, running })}</>}
+                : <>{renderSlot('agent.flow', { taskId: workspace.taskId, events: session.events, task, running })}</>}
             </div>
           </div>
           <div className={root.composerSeat}>

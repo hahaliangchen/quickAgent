@@ -390,6 +390,19 @@ pub(super) async fn business_tool_inner(
             normalized,
             true,
         )
+    } else if matches!(name, "verify_check" | "verify_test")
+        && let Some(ext_dir) = outside_exec
+            .first()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir())
+    {
+        let mut normalized = args.clone();
+        normalized["path"] = json!(".");
+        (
+            std::sync::Arc::new(crate::tools::Workspace::new(&ext_dir)?),
+            normalized,
+            true,
+        )
     } else {
         (tool_workspace, args, false)
     };
@@ -736,19 +749,22 @@ async fn execute_sandboxed_shell_tool(
 }
 
 #[derive(Clone, Debug)]
-struct OutsideEditTarget {
+pub(super) struct OutsideEditTarget {
     display_path: String,
     work_root: std::path::PathBuf,
     rel_path: String,
 }
 
-fn detect_outside_edit(
+pub(super) fn detect_outside_edit(
     workspace: &crate::tools::Workspace,
     name: &str,
     args: &Value,
 ) -> Result<Option<OutsideEditTarget>> {
     use std::path::{Component, Path, PathBuf};
-    if !matches!(name, "write_file" | "edit_file" | "replace_range") {
+    if !matches!(
+        name,
+        "write_file" | "edit_file" | "replace_range" | "delete_path" | "create_dir"
+    ) {
         return Ok(None);
     }
     let Some(raw_path) = args["path"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
@@ -848,7 +864,7 @@ fn detect_outside_edit(
     }))
 }
 
-fn outside_exec_or_index_paths(
+pub(super) fn outside_exec_or_index_paths(
     workspace: &std::path::Path,
     name: &str,
     args: &Value,
@@ -874,6 +890,55 @@ fn outside_exec_or_index_paths(
                 .filter(|s| !s.is_empty())
             {
                 raw_candidates.push(p);
+            }
+        }
+        "verify_check" | "verify_test" => {
+            if let Some(p) = args["path"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                raw_candidates.push(p);
+            }
+        }
+        "rename_path" => {
+            for key in ["path", "to"] {
+                if let Some(p) = args[key]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    raw_candidates.push(p);
+                }
+            }
+        }
+        "apply_edits" => {
+            if let Some(files) = args["files"].as_array() {
+                for item in files {
+                    if let Some(p) = item["path"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        raw_candidates.push(p);
+                    }
+                }
+            }
+        }
+        "git_commit" | "git_restore" => {
+            if let Some(w) = args["workspace_root"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                raw_candidates.push(w);
+            }
+            if let Some(paths) = args["paths"].as_array() {
+                for item in paths {
+                    if let Some(p) = item.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        raw_candidates.push(p);
+                    }
+                }
             }
         }
         "sync_git"
@@ -911,7 +976,7 @@ fn outside_exec_or_index_paths(
     found
 }
 
-fn outside_read_paths(
+pub(super) fn outside_read_paths(
     workspace: &std::path::Path,
     extra_roots: &[std::path::PathBuf],
     name: &str,
@@ -927,6 +992,7 @@ fn outside_read_paths(
             | "git_status"
             | "git_diff"
             | "git_log"
+            | "git_blame"
             | "code_index__status"
             | "code_index__list"
             | "code_index__search"

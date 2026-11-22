@@ -164,6 +164,7 @@ impl AgentTurnRunner<'_> {
             )
             .await?;
 
+            context.deliver_interjections(&mut w, None).await?;
             let estimated_request = context.maybe_fold_before_request(&mut w, &libs).await?;
             match model
                 .request_next_action(&context, &mut w, &libs, step, estimated_request)
@@ -196,6 +197,13 @@ impl AgentTurnRunner<'_> {
                     context.save_window(&w).await?;
                 }
                 NextAction::FinalReply(markdown) => {
+                    if context
+                        .deliver_interjections(&mut w, Some(&markdown))
+                        .await?
+                        > 0
+                    {
+                        continue;
+                    }
                     context
                         .finish_turn_with_reply(&mut w, step, markdown)
                         .await?;

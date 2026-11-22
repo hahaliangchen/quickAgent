@@ -36,16 +36,8 @@
   font: inherit;
 }
 
-.requestState {
-  color: var(--codex-text-muted, #6b7280);
-}
-
 .spacer {
   flex: 1;
-}
-
-.alert {
-  color: var(--dsw-alias-state-error-primary, #d23c3c);
 }
 
 .pill {
@@ -72,32 +64,20 @@
   overflow: hidden;
 }
 
+/* The graph fills the canvas, or all of it but the drawer. */
+.graph {
+  position: absolute;
+  inset: 0;
+}
+
+.graph[data-narrow] {
+  /* The drawer's width plus its margin, or half the canvas on a narrow window. */
+  right: min(402px, 50%);
+}
+
 .empty {
   padding: 28px;
   color: var(--codex-text-muted, #6b7280);
-}
-
-/* Says why a turn draws one frame: its tools were called directly. */
-.note {
-  position: absolute;
-  left: 16px;
-  bottom: 16px;
-  z-index: 5;
-  max-width: min(420px, calc(100% - 32px));
-  padding: 8px 12px;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
-  border-radius: 10px;
-  background: var(--dsw-alias-bg-layer-1, #ffffff);
-  color: var(--codex-text-muted, #6b7280);
-  font: inherit;
-  font-size: 12.5px;
-  line-height: 1.5;
-  text-align: left;
-  cursor: pointer;
-}
-
-.note:hover {
-  background: var(--codex-hover-bg, #f5f6f7);
 }
 
 .drawer {
@@ -175,11 +155,6 @@
   color: var(--codex-text-muted, #6b7280);
 }
 
-.live {
-  margin: 0;
-  color: #2f6fd6;
-}
-
 .text {
   margin: 0;
   white-space: pre-wrap;
@@ -191,15 +166,9 @@
   color: var(--dsw-alias-state-error-primary, #d23c3c);
 }
 
-.value summary {
-  cursor: pointer;
-  font-family: var(--dsh-font-mono, ui-monospace, monospace);
-  font-size: 12.5px;
-}
-
-.value pre,
-.returned,
-.source pre {
+/* The drawer prints an argument, a thought or a result in place. */
+pre.value,
+.returned {
   max-height: 320px;
   overflow: auto;
   margin: 4px 0 0;
@@ -209,42 +178,25 @@
   white-space: pre-wrap;
   word-break: break-word;
   font-size: 12px;
+  font-family: var(--dsh-font-mono, ui-monospace, monospace);
 }
 
-.source pre {
-  white-space: pre;
-  word-break: normal;
+.failedValue {
+  border: 1px solid rgba(210, 60, 60, 0.2);
+  background: rgba(210, 60, 60, 0.06);
 }
 
-.lineNumber {
-  display: inline-block;
-  width: 3.5em;
-  padding-right: 10px;
-  text-align: right;
-  color: var(--codex-text-muted, #9ca3af);
-  user-select: none;
-}
-
-.callLine {
-  background: rgba(59, 130, 246, 0.12);
-}
-
-.link {
-  align-self: flex-start;
-  padding: 0;
-  border: none;
-  background: none;
-  color: #2563eb;
+.summaryText {
+  color: var(--dsw-alias-label-tertiary, #6b7280);
   font-size: 12px;
-  cursor: pointer;
+  white-space: nowrap;
 }
 
-.hint {
-  margin: 0;
-  color: var(--codex-text-muted, #6b7280);
-}
-
-.steps {
-  display: flex;
-  flex-direction: column;
+.live {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(47, 111, 214, 0.1);
+  color: #2f6fd6;
+  font-size: 11.5px;
+  font-weight: 500;
 }

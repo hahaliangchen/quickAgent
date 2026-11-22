@@ -127,6 +127,10 @@ impl<'s, 'a> JsStepRunner<'s, 'a> {
                         assistant_msg,
                         call_id,
                     );
+                    w.program = Some(runtime);
+                    if context.deliver_interjections(w, Some(&answer)).await? > 0 {
+                        return Ok(StepFlow::Continue);
+                    }
                     context.finish_turn_with_reply(w, step, answer).await?;
                     return Ok(StepFlow::Stop);
                 }
@@ -143,6 +147,10 @@ impl<'s, 'a> JsStepRunner<'s, 'a> {
                             assistant_msg,
                             call_id,
                         );
+                        w.program = Some(runtime);
+                        if context.deliver_interjections(w, Some(&reply_md)).await? > 0 {
+                            return Ok(StepFlow::Continue);
+                        }
                         context.finish_turn_with_reply(w, step, reply_md).await?;
                         return Ok(StepFlow::Stop);
                     }
@@ -243,9 +251,35 @@ impl<'s, 'a> JsStepRunner<'s, 'a> {
                 Ok(StepFlow::Continue)
             }
             State::Action(_) | State::Waiting => {
+                let err = json!({
+                    "code": "UNEXPECTED_VM_SUSPEND",
+                    "name": "Error",
+                    "message": "JS segment suspended in an unexpected waiting state with no runnable action; recover by simplifying or re-running the step.",
+                });
+                append_event(
+                    s,
+                    "program/error",
+                    json!({
+                        "actor": "agent",
+                        "turn": s.turn,
+                        "step": step,
+                        "error": err,
+                    }),
+                    false,
+                )
+                .await?;
+                w.context_doc.record_failed_segment(
+                    source,
+                    &runtime,
+                    &pre_fps,
+                    &logs,
+                    &err,
+                    assistant_msg,
+                    call_id,
+                );
                 w.program = Some(runtime);
                 context.save_window(w).await?;
-                bail!("VM suspended in an unexpected waiting state");
+                Ok(StepFlow::Continue)
             }
         }
     }
