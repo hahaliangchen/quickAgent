@@ -4,56 +4,11 @@ import css from './CodexDock.module.css'
 /** The rail's icons: a 2px round stroke on a 24px grid, like the workbench's. */
 const STROKE = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { display: 'block' } } as const
 
-export type DockTab = 'home' | 'skills' | 'git'
-
-export interface DockPluginEntry {
-  readonly key: string
-  readonly owner: string
-  readonly page: string
-  readonly title: string
-}
-
-function PluginDockIcon({ owner }: { owner: string }) {
-  const id = owner.toLowerCase()
-  if (id.includes('ppt') || id.includes('slide')) {
-    return (
-      <svg {...STROKE} aria-hidden="true">
-        <rect x="3" y="4" width="18" height="12" rx="2" />
-        <path d="M8 20h8M12 16v4" />
-        <path d="M8 9h4M8 12h8" />
-      </svg>
-    )
-  }
-  if (id.includes('excel') || id.includes('sheet')) {
-    return (
-      <svg {...STROKE} aria-hidden="true">
-        <rect x="3.5" y="4" width="17" height="16" rx="2" />
-        <path d="M3.5 9.5h17M3.5 14.5h17M9.5 4v16" />
-      </svg>
-    )
-  }
-  if (id.includes('word') || id.includes('doc')) {
-    return (
-      <svg {...STROKE} aria-hidden="true">
-        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
-        <path d="M14 3v5h5M8.5 13h7M8.5 16.5h5" />
-      </svg>
-    )
-  }
-  return (
-    <svg {...STROKE} aria-hidden="true">
-      <rect x="4" y="4" width="16" height="16" rx="3" />
-      <path d="M8 9h8M8 13h8M8 17h5" />
-    </svg>
-  )
-}
+export type DockTab = 'home' | 'skills' | 'git' | 'office'
 
 interface CodexDockProps {
   activeTab?: DockTab
-  activePluginKey?: string | undefined
-  pluginPages?: readonly DockPluginEntry[] | undefined
   onSelectTab?: (tab: DockTab) => void
-  onSelectPlugin?: (entry: DockPluginEntry) => void
   onNewChat?: () => void
   onOpenSettings?: () => void
   onToggleTheme?: () => void
@@ -62,10 +17,7 @@ interface CodexDockProps {
 
 export function CodexDock({
   activeTab = 'home',
-  activePluginKey,
-  pluginPages = [],
   onSelectTab,
-  onSelectPlugin,
   onNewChat,
   onOpenSettings,
   onToggleTheme,
@@ -77,11 +29,11 @@ export function CodexDock({
         {/* 1. App Logo / Home */}
         <button
           type="button"
-          className={clsx(css.dockBtn, css.homeBtn, !activePluginKey && activeTab === 'home' && css.active)}
+          className={clsx(css.dockBtn, css.homeBtn, activeTab === 'home' && css.active)}
           title="首页 / 新会话"
           onClick={() => {
             onSelectTab?.('home')
-            if (!activePluginKey && activeTab === 'home') onNewChat?.()
+            if (activeTab === 'home') onNewChat?.()
           }}
         >
           <svg {...STROKE} aria-hidden="true">
@@ -92,7 +44,7 @@ export function CodexDock({
 
         <button
           type="button"
-          className={clsx(css.dockBtn, !activePluginKey && activeTab === 'skills' && css.active)}
+          className={clsx(css.dockBtn, activeTab === 'skills' && css.active)}
           title="技能工作台"
           aria-label="技能工作台"
           onClick={() => onSelectTab?.('skills')}
@@ -105,7 +57,7 @@ export function CodexDock({
 
         <button
           type="button"
-          className={clsx(css.dockBtn, !activePluginKey && activeTab === 'git' && css.active)}
+          className={clsx(css.dockBtn, activeTab === 'git' && css.active)}
           title="Git"
           aria-label="Git"
           onClick={() => onSelectTab?.('git')}
@@ -116,18 +68,19 @@ export function CodexDock({
           </svg>
         </button>
 
-        {pluginPages.map(entry => (
-          <button
-            key={entry.key}
-            type="button"
-            className={clsx(css.dockBtn, activePluginKey === entry.key && css.active)}
-            title={entry.title}
-            aria-label={entry.title}
-            onClick={() => onSelectPlugin?.(entry)}
-          >
-            <PluginDockIcon owner={entry.owner} />
-          </button>
-        ))}
+        <button
+          type="button"
+          className={clsx(css.dockBtn, activeTab === 'office' && css.active)}
+          title="办公创作台（PPT / Word / Markdown / Excel / PDF）"
+          aria-label="办公创作台"
+          onClick={() => onSelectTab?.('office')}
+        >
+          <svg {...STROKE} aria-hidden="true">
+            <path d="M12 3 3.5 7.5 12 12l8.5-4.5Z" />
+            <path d="M3.5 12 12 16.5l8.5-4.5" />
+            <path d="M3.5 16.5 12 21l8.5-4.5" />
+          </svg>
+        </button>
       </div>
 
       <div className={css.bottomGroup}>

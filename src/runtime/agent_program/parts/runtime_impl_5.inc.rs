@@ -9,7 +9,7 @@ impl Runtime {
         // Old snapshots gain a start time once. Restores and host replies do
         // not refresh this deadline or the current instruction segment.
         if self.started_at_ms==0 {self.started_at_ms=chrono::Utc::now().timestamp_millis();}
-        if !self.finished && self.remaining_time().is_zero() {self.expire_time_budget();}
+        if !self.finished && !self.unbounded_instructions && self.remaining_time().is_zero() {self.expire_time_budget();}
         if self.program.version != VERSION {
             self.pending = None;
             self.finished = true;
@@ -241,7 +241,7 @@ impl Runtime {
             }
             self.total_vm_steps = self.total_vm_steps.saturating_add(1);
             if self.total_vm_steps % 256 == 0 {
-                if self.remaining_time().is_zero() {
+                if !self.unbounded_instructions && self.remaining_time().is_zero() {
                     self.expire_time_budget();
                     return State::Failed(self.error.clone().unwrap());
                 }

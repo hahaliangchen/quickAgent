@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ConversationPage, HeroPage, SkillPackagesPage, type Tab } from './components/AgentPage.tsx'
 import { SkillWorkbench } from './components/SkillWorkbench.tsx'
 import { PluginPageHost } from './components/PluginPageHost.tsx'
+import { OfficeStudioView } from './components/OfficeStudioView.tsx'
 import { CodeChatDock } from './components/CodeChatDock.tsx'
-import { CodexDock, type DockPluginEntry } from './components/CodexDock.tsx'
+import { CodexDock } from './components/CodexDock.tsx'
 import { CodexRightPanel } from './components/CodexRightPanel.tsx'
 import { SettingsModal } from './components/SettingsModal.tsx'
 import { WorkspaceModal } from './components/WorkspaceModal.tsx'
 import { ShellSetupDialog } from './components/ShellSetupDialog.tsx'
 import { isCodeShellContext } from './shellSetup.ts'
 import type { AgentSlotProps } from './cordis/slot-contract.ts'
-import { usePluginPages } from './plugins/react.tsx'
 import { toggleTheme } from './theme.ts'
 import { useAgentWorkspace } from './useAgentWorkspace.ts'
 import css from './App.module.css'
@@ -18,31 +18,12 @@ import css from './App.module.css'
 /** Assemble the task model and the Codex 4-column layout + SettingsModal overlay. */
 export function App({ renderSlot }: AgentSlotProps) {
   const workspace = useAgentWorkspace()
-  const { packages } = usePluginPages()
   const [tab, setTab] = useState<Tab>('chat')
   const [workbench, setWorkbench] = useState(false)
   const [git, setGit] = useState(false)
-  const [activePluginPage, setActivePluginPage] = useState<DockPluginEntry | null>(null)
-  const dockPluginPages = useMemo<DockPluginEntry[]>(
-    () =>
-      packages
-        .filter(pkg => pkg.enabled && pkg.origin === 'external' && !pkg.mcp && pkg.pages.length > 0)
-        .map(pkg => {
-          const primary = pkg.pages[0]!
-          return {
-            key: `${pkg.id}:${primary.id}`,
-            owner: pkg.id,
-            page: primary.id,
-            title: primary.title || pkg.title,
-          }
-        }),
-    [packages],
-  )
-  useEffect(() => {
-    if (activePluginPage && !dockPluginPages.some(entry => entry.key === activePluginPage.key)) {
-      setActivePluginPage(null)
-    }
-  }, [activePluginPage, dockPluginPages])
+  const [office, setOffice] = useState(false)
+  const [officeMounted, setOfficeMounted] = useState(false)
+  const [officeResetSignal, setOfficeResetSignal] = useState(0)
   const [dark, setDark] = useState(() => document.body.hasAttribute('data-ds-dark-theme'))
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -117,25 +98,25 @@ export function App({ renderSlot }: AgentSlotProps) {
 
   const gitWorkspace = workspace.task?.workspace ?? workspace.activeWorkspace ?? workspace.info?.workspace ?? ''
   const actualSidebarWidth = sidebarCollapsed ? 0 : sidebarWidth
-  const pluginViewOpen = activePluginPage !== null
 
   return (
     <div className={css.appFrame} data-ds-dark-theme={dark ? '' : undefined}>
       {/* 1. Activity Dock (48px fixed on left) */}
       <CodexDock
-        activeTab={git ? 'git' : workbench || tab === 'skill-pages' ? 'skills' : 'home'}
-        activePluginKey={activePluginPage?.key}
-        pluginPages={dockPluginPages}
+        activeTab={office ? 'office' : git ? 'git' : workbench || tab === 'skill-pages' ? 'skills' : 'home'}
         onSelectTab={selected => {
-          setActivePluginPage(null)
+          if (selected === 'office') {
+            if (office) setOfficeResetSignal(n => n + 1)
+            setOffice(true)
+            setOfficeMounted(true)
+            setGit(false)
+            setWorkbench(false)
+            return
+          }
+          setOffice(false)
           setGit(selected === 'git')
           if (selected === 'skills') setWorkbench(true)
           else if (selected === 'home') { setWorkbench(false); if (tab === 'skill-pages') handleNewChat() }
-        }}
-        onSelectPlugin={entry => {
-          setGit(false)
-          setWorkbench(false)
-          setActivePluginPage(entry)
         }}
         dark={dark}
         onNewChat={handleNewChat}
@@ -147,14 +128,14 @@ export function App({ renderSlot }: AgentSlotProps) {
       />
 
       {/* 2. Codex Sidebar (collapsible & resizable) */}
-      {!sidebarCollapsed && !workbench && !git && !pluginViewOpen && (
+      {!sidebarCollapsed && !workbench && !git && !office && (
         <div className={css.sidebarCol} style={{ width: actualSidebarWidth }}>
           {sidebar}
         </div>
       )}
 
       {/* Drag handle for Sidebar */}
-      {!sidebarCollapsed && !workbench && !git && !pluginViewOpen && (
+      {!sidebarCollapsed && !workbench && !git && !office && (
         <div
           className={css.dragHandle}
           onPointerDown={(e) => {
@@ -177,13 +158,21 @@ export function App({ renderSlot }: AgentSlotProps) {
 
       {/* 3. Center Main Column (Header + Conversation + Floating Composer) */}
       <div className={css.centerCol}>
-        {activePluginPage ? (
-          <div className={css.dockedView}>
-            <div className={css.dockedPage}>
-              <PluginPageHost owner={activePluginPage.owner} page={activePluginPage.page} workspaceRoot={gitWorkspace} />
-            </div>
+        {officeMounted && (
+          <div style={{ display: office ? 'flex' : 'none', flex: 1, minHeight: 0, minWidth: 0 }}>
+            <OfficeStudioView
+              workspaceRoot={gitWorkspace}
+              resetSignal={officeResetSignal}
+              onManagePlugins={() => {
+                setOffice(false)
+                setWorkbench(false)
+                setGit(false)
+                setTab('skill-pages')
+              }}
+            />
           </div>
-        ) : git ? <div className={css.dockedView}>
+        )}
+        {!office && (git ? <div className={css.dockedView}>
           <div className={css.dockedPage}><PluginPageHost owner="git" page="history" workspaceRoot={gitWorkspace} /></div>
           {gitWorkspace && <CodeChatDock workspace={gitWorkspace} renderSlot={renderSlot} onOpenInChat={id => { setGit(false); setWorkbench(false); setTab('chat'); workspace.openTask(id) }} />}
         </div>
@@ -198,11 +187,11 @@ export function App({ renderSlot }: AgentSlotProps) {
             rightPanelOpen={rightPanelOpen}
             onToggleRightPanel={() => setRightPanelOpen(v => !v)}
           />
-        )}
+        ))}
       </div>
 
       {/* Drag handle for Right Panel */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !pluginViewOpen && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !office && (
         <div
           className={css.dragHandle}
           title="拖动调整面板宽度"
@@ -225,7 +214,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       )}
 
       {/* 4. Right Inspector Panel (Changes, Sources) */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !pluginViewOpen && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !office && (
         <CodexRightPanel
           width={rightPanelWidth}
           taskId={workspace.taskId}

@@ -628,6 +628,22 @@ fn vm_stage0_saved_budget_and_whole_program_deadline_survive_restore() {
 }
 
 #[test]
+fn repl_sessions_are_not_killed_by_legacy_whole_program_wall_deadline() {
+    let libs = libraries::builtin();
+    let mut repl = Runtime::new_repl(libs.clone()).unwrap();
+    repl.append_segment("const x = 40; return x;", libs.clone(), true).unwrap();
+    let State::Returned(first) = repl.next() else { panic!("expected returned value") };
+    assert_eq!(first, json!(40));
+    let mut snapshot = serde_json::to_value(&repl).unwrap();
+    // Simulate a multi-hour agent turn (started 4 hours ago).
+    snapshot["started_at_ms"] = json!(chrono::Utc::now().timestamp_millis() - 4 * 60 * 60 * 1000);
+    let mut restored: Runtime = serde_json::from_value(snapshot).unwrap();
+    restored.append_segment("return x + 2;", libs, true).unwrap();
+    let State::Returned(second) = restored.next() else { panic!("multi-hour REPL session must not expire") };
+    assert_eq!(second, json!(42));
+}
+
+#[test]
 fn vm_stage0_unsupported_syntax_diagnostics_name_the_feature() {
     for (source,name) in [("new WeakRef({})","WeakRef"),("new Proxy({}, {})","Proxy")] {
         let error=compile(source).unwrap_err().to_string();
