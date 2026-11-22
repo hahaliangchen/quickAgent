@@ -53,6 +53,7 @@ pub fn package() -> Result<Package> {
     let contributions = Arc::new(NativeContributions {
         tools,
         frontend_entries: vec!["git.history".into()],
+        on_unmount: None,
     });
     let root = std::env::var_os("GROW_RESOURCES_DIR")
         .map(PathBuf::from)

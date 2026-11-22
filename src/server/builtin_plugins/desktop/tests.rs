@@ -42,6 +42,7 @@ fn window() -> Window {
 struct Mock {
     window: Arc<Mutex<Window>>,
     inputs: Arc<AtomicUsize>,
+    stops: Arc<AtomicUsize>,
     pause: Option<Arc<tokio::sync::Notify>>,
 }
 impl Mock {
@@ -49,11 +50,15 @@ impl Mock {
         Self {
             window: Arc::new(Mutex::new(window())),
             inputs: Arc::default(),
+            stops: Arc::default(),
             pause: None,
         }
     }
 }
 impl DesktopBackend for Mock {
+    fn stop(&self) {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+    }
     async fn windows(&self) -> Result<Vec<Window>> {
         Ok(vec![self.window.lock().unwrap().clone()])
     }
@@ -144,7 +149,9 @@ fn workspace(root: &Path) -> Arc<crate::tools::Workspace> {
 #[tokio::test]
 async fn desktop_opt_in_mount_contracts_permissions_and_stop() -> Result<()> {
     let tmp = Scratch::new();
-    let (runtime, catalog) = install(Mock::new(), None);
+    let backend = Mock::new();
+    let stops = backend.stops.clone();
+    let (runtime, catalog) = install(backend, None);
     let registry = &catalog.packages;
     let namespace =
         || libraries::catalog(&registry.tools(&registry.enabled()), &registry.catalog());
@@ -214,6 +221,7 @@ async fn desktop_opt_in_mount_contracts_permissions_and_stop() -> Result<()> {
     )
     .await?;
     skill_packages::set_enabled(&runtime, registry, "desktop", false, false)?;
+    assert_eq!(stops.load(Ordering::SeqCst), 1);
     assert!(catalog.handler("desktop__list_windows").is_err());
     assert!(!namespace().contains_key("desktop"));
     skill_packages::set_enabled(&runtime, registry, "desktop", true, false)?;

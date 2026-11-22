@@ -58,34 +58,50 @@ pub(super) fn optional_id(args: &Value) -> Result<Option<&str>> {
     Ok(Some(id))
 }
 
+pub(super) const SENSITIVE_WINDOWS: &[&str] = &[
+    "polkit",
+    "policykit",
+    "pinentry",
+    "gnomekeyring",
+    "1password",
+    "keepass",
+    "bitwarden",
+    "kwallet",
+    "passwordmanager",
+    "authenticationrequired",
+    "authenticate",
+    "sudoprompt",
+    "screenlocker",
+    "gnomescreensaver",
+    "kscreenlocker",
+    "seahorse",
+    "gcrprompter",
+    "xdgdesktopportalkde",
+];
+
 pub(super) fn sensitive(title: &str, class: &str) -> bool {
     let canonical = |s: &str| s.to_ascii_lowercase().replace(['-', '_', ' ', '.'], "");
     let title = canonical(title);
     let class = canonical(class);
-    [
-        "polkit",
-        "policykit",
-        "pinentry",
-        "gnomekeyring",
-        "1password",
-        "keepass",
-        "bitwarden",
-        "kwallet",
-        "passwordmanager",
-        "authenticationrequired",
-        "authenticate",
-        "sudoprompt",
-        "screenlocker",
-        "gnomescreensaver",
-        "kscreenlocker",
-        "seahorse",
-        "gcrprompter",
-    ]
-    .iter()
-    .any(|term| title.contains(term) || class.contains(term))
+    SENSITIVE_WINDOWS
+        .iter()
+        .any(|term| title.contains(term) || class.contains(term))
+}
+
+pub(super) fn focus_window(windows: &[Window], id: &str) -> Result<Window> {
+    select_window(windows, Some(id), false, false)
 }
 
 pub(super) fn window(windows: &[Window], id: Option<&str>, require_active: bool) -> Result<Window> {
+    select_window(windows, id, true, require_active)
+}
+
+fn select_window(
+    windows: &[Window],
+    id: Option<&str>,
+    require_visible: bool,
+    require_active: bool,
+) -> Result<Window> {
     let matches = |w: &&Window| id.map_or(w.active, |id| w.window_id == id);
     let mut candidates = windows.iter().filter(matches);
     let window = candidates
@@ -103,7 +119,7 @@ pub(super) fn window(windows: &[Window], id: Option<&str>, require_active: bool)
             "desktop operation refused for a protected window",
         ));
     }
-    if !window.visible
+    if (require_visible && !window.visible)
         || window.width == 0
         || window.height == 0
         || (require_active && !window.active)

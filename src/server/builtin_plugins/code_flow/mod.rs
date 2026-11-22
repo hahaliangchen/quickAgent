@@ -30,6 +30,7 @@ pub fn package() -> Result<Package> {
             },
         )]),
         frontend_entries: vec!["code-flow.architecture".into()],
+        on_unmount: None,
     });
     let root = std::env::var_os("GROW_RESOURCES_DIR")
         .map(PathBuf::from)

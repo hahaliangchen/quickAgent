@@ -6,7 +6,19 @@ use tokio::{
     process::Command,
 };
 
-pub(super) struct Linux;
+#[derive(Default)]
+pub(super) struct Linux {
+    portal: super::portal::Portal,
+}
+
+fn kde_wayland() -> bool {
+    std::env::var_os("SWAYSOCK").is_none()
+        && std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|names| {
+            names
+                .split(':')
+                .any(|name| name.eq_ignore_ascii_case("KDE"))
+        })
+}
 const MAX_IMAGE: usize = visual_artifacts::MAX_ORIGINAL_BYTES;
 const MAX_TEXT: usize = 64 * 1024;
 const MAX_LIST: usize = 1024 * 1024;
@@ -354,18 +366,10 @@ async fn screenshot_to_file(
     prefix_args: &[&str],
     output_flag: &str,
 ) -> Result<Vec<u8>> {
-    struct RemoveOnDrop(std::path::PathBuf);
-    impl Drop for RemoveOnDrop {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    let path = std::env::temp_dir().join(format!(
-        "quickagent-desktop-{}.png",
-        crate::server::agent_service::uuid_like()
-    ));
-    let _cleanup = RemoveOnDrop(path.clone());
+    let temp = tempfile::Builder::new()
+        .prefix("quickagent-desktop-")
+        .tempdir()?;
+    let path = temp.path().join("capture.png");
     let path_str = path
         .to_str()
         .context("temporary screenshot path is not valid UTF-8")?;
@@ -385,18 +389,24 @@ async fn screenshot_to_file(
             format!("{tool} failed; verify that the helper can access the desktop"),
         ));
     }
-    let meta = tokio::fs::metadata(&path)
-        .await
-        .map_err(|e| fault("DESKTOP_BACKEND_FAILED", format!("{tool} did not write screenshot: {e}")))?;
+    let meta = tokio::fs::metadata(&path).await.map_err(|e| {
+        fault(
+            "DESKTOP_BACKEND_FAILED",
+            format!("{tool} did not write screenshot: {e}"),
+        )
+    })?;
     if meta.len() > MAX_IMAGE as u64 {
         return Err(fault(
             "DESKTOP_OUTPUT_LIMIT",
             format!("{tool} exceeded its output budget"),
         ));
     }
-    let data = tokio::fs::read(&path)
-        .await
-        .map_err(|e| fault("DESKTOP_BACKEND_FAILED", format!("could not read {tool} output: {e}")))?;
+    let data = tokio::fs::read(&path).await.map_err(|e| {
+        fault(
+            "DESKTOP_BACKEND_FAILED",
+            format!("could not read {tool} output: {e}"),
+        )
+    })?;
     if data.is_empty() {
         return Err(fault(
             "DESKTOP_BACKEND_FAILED",
@@ -427,6 +437,10 @@ async fn wayland_fullscreen_screenshot() -> Result<Vec<u8>> {
 }
 
 impl DesktopBackend for Linux {
+    fn stop(&self) {
+        self.portal.stop();
+    }
+
     async fn windows(&self) -> Result<Vec<Window>> {
         match display()? {
             Display::X11 => {
@@ -437,6 +451,7 @@ impl DesktopBackend for Linux {
                 }
                 Ok(windows)
             }
+            Display::Wayland if kde_wayland() => kwin::windows().await,
             Display::Wayland => Ok(sway_windows(&serde_json::from_str(
                 &sway_command(&["-t", "get_tree", "-r"]).await?,
             )?)),
@@ -451,6 +466,19 @@ impl DesktopBackend for Linux {
                     "root".to_owned()
                 };
                 output("import", &["-window", &id, "png:-"], MAX_IMAGE).await
+            }
+            Display::Wayland if kde_wayland() => {
+                let Some(window) = window else {
+                    return screenshot_to_file("spectacle", &["-b", "-n", "-f"], "-o").await;
+                };
+                // Screenshot is read-only: never focus a window as a side effect.
+                let cancel = CancellationToken::new();
+                let before = kwin::verify(window, None, false, &cancel).await?;
+                let pixels = screenshot_to_file("spectacle", &["-b", "-n", "-f"], "-o").await?;
+                let after = kwin::verify(window, None, false, &cancel).await?;
+                let screen = kwin::same_screen(&before, &after)?;
+                let rect = kwin::Rect::from_window(window);
+                tokio::task::spawn_blocking(move || kwin::crop_png(&pixels, screen, rect)).await?
             }
             Display::Wayland => {
                 if let Some(window) = window {
@@ -497,12 +525,21 @@ impl DesktopBackend for Linux {
             }
         }
     }
+    async fn focus_target(&self, id: &str) -> Result<Window> {
+        let windows = self.windows().await?;
+        if matches!(display()?, Display::Wayland) && kde_wayland() {
+            guard::focus_window(&windows, id)
+        } else {
+            guard::window(&windows, Some(id), false)
+        }
+    }
     async fn focus(&self, window: &Window, cancel: &CancellationToken) -> Result<()> {
         match display()? {
             Display::X11 => {
                 let id = x11_live(window, false).await?.window_id;
                 mutate("wmctrl", &["-ia", &id], None, cancel).await
             }
+            Display::Wayland if kde_wayland() => kwin::focus(window, cancel).await,
             Display::Wayland => {
                 let current =
                     guard::window(&self.windows().await?, Some(&window.window_id), false)?;
@@ -552,6 +589,9 @@ impl DesktopBackend for Linux {
         cancel: &CancellationToken,
     ) -> Result<()> {
         if matches!(display()?, Display::Wayland) {
+            if kde_wayland() {
+                return self.portal.mouse(window, point, action, cancel).await;
+            }
             return Err(missing(
                 "verified Wayland pointer routing (ydotool cannot verify a compositor target); use AT-SPI or an X11 session",
             ));
@@ -647,6 +687,7 @@ impl DesktopBackend for Linux {
                     }
                 }
             }
+            Display::Wayland if kde_wayland() => self.portal.keyboard(window, input, cancel).await,
             Display::Wayland => {
                 verify_sway(window).await?;
                 match input {
@@ -709,6 +750,9 @@ impl DesktopBackend for Linux {
         match display()? {
             Display::X11 => {
                 x11_live(window, true).await?;
+            }
+            Display::Wayland if kde_wayland() => {
+                kwin::verify(window, None, false, cancel).await?;
             }
             Display::Wayland => verify_sway(window).await?,
         }

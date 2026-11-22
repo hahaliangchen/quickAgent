@@ -52,6 +52,7 @@ pub fn package() -> Result<Package> {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
     crate::server::skill_packages::load_builtin(&root.join("src/server/builtin_plugins/code_index"), Arc::new(NativeContributions {
         tools, frontend_entries: vec![],
+        on_unmount: None,
     }))
 }
 

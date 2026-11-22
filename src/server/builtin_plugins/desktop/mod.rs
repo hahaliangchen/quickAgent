@@ -20,7 +20,11 @@ use tokio_util::sync::CancellationToken;
 mod grid;
 mod guard;
 #[cfg(target_os = "linux")]
+mod kwin;
+#[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod portal;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -102,9 +106,7 @@ struct Window {
     width: u32,
     height: u32,
     active: bool,
-    #[serde(skip)]
     visible: bool,
-    #[serde(skip)]
     pid: Option<u32>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,6 +145,7 @@ struct SemanticNode {
 
 #[allow(dead_code)] // Unsupported platforms use the default degradation for each capability.
 trait DesktopBackend: Send + Sync + 'static {
+    fn stop(&self) {}
     fn windows(&self) -> impl Future<Output = Result<Vec<Window>>> + Send {
         async { Err(unavailable()) }
     }
@@ -151,6 +154,9 @@ trait DesktopBackend: Send + Sync + 'static {
     }
     fn clipboard_read(&self) -> impl Future<Output = Result<String>> + Send {
         async { Err(unavailable()) }
+    }
+    fn focus_target(&self, id: &str) -> impl Future<Output = Result<Window>> + Send {
+        async move { guard::window(&self.windows().await?, Some(id), false) }
     }
     fn focus(
         &self,
@@ -330,8 +336,10 @@ impl<B: DesktopBackend> Desktop<B> {
         let _input = self.input.acquire(cancel).await?;
         match name {
             "desktop__focus_window" => {
-                window_id.context("window_id is required")?;
-                self.backend.focus(&target.await?, cancel).await?;
+                let id = window_id.context("window_id is required")?;
+                self.backend
+                    .focus(&self.backend.focus_target(id).await?, cancel)
+                    .await?;
             }
             "desktop__clipboard_write" => {
                 self.backend
@@ -399,6 +407,10 @@ impl<B: DesktopBackend> Desktop<B> {
 
 fn with_backend<B: DesktopBackend>(backend: B) -> Result<Package> {
     let desktop = Arc::new(Desktop::new(backend));
+    let on_unmount = {
+        let desktop = desktop.clone();
+        Arc::new(move || desktop.backend.stop())
+    };
     let definitions: Vec<Value> = serde_json::from_str(include_str!("tools.json"))?;
     let mut tools = BTreeMap::new();
     for definition in definitions {
@@ -437,12 +449,13 @@ fn with_backend<B: DesktopBackend>(backend: B) -> Result<Package> {
         Arc::new(NativeContributions {
             tools,
             frontend_entries: vec![],
+            on_unmount: Some(on_unmount),
         }),
     )
 }
 pub(super) fn package() -> Result<Package> {
     #[cfg(target_os = "linux")]
-    return with_backend(linux::Linux);
+    return with_backend(linux::Linux::default());
     #[cfg(not(target_os = "linux"))]
     return with_backend(Unsupported);
 }

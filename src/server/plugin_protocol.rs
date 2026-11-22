@@ -77,5 +77,6 @@ pub struct NativeTool {
 pub struct NativeContributions {
     pub tools: BTreeMap<String, NativeTool>,
     pub frontend_entries: Vec<String>,
+    pub on_unmount: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 pub type NativeBackend = Arc<NativeContributions>;

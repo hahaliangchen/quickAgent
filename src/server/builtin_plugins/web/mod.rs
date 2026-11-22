@@ -432,6 +432,7 @@ pub fn package() -> Result<crate::server::skill_packages::Package> {
         Arc::new(NativeContributions {
             tools,
             frontend_entries: vec![],
+            on_unmount: None,
         }),
     )
 }

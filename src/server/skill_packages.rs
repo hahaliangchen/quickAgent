@@ -694,6 +694,9 @@ impl Plugin for PackagePlugin {
         if let Some(connection) = self.0.mcp.clone() {
             ctx.effect(move || connection.stop());
         }
+        if let Some(cleanup) = native.as_ref().and_then(|backend| backend.on_unmount.clone()) {
+            ctx.effect(move || cleanup());
+        }
         ctx.effect(move || stop.cancel());
         let ctx_scope = ctx.scope();
         let handler: ToolHandler = Arc::new(move |workspace, name, args| {
@@ -1093,6 +1096,7 @@ mod tests {
                 },
             )]),
             frontend_entries: vec![],
+            on_unmount: None,
         });
         let builtin = load_builtin(&root, native).unwrap();
         assert!(builtin.origin == Origin::Builtin);
