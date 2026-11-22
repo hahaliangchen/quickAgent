@@ -68,3 +68,126 @@ pub async fn favicon_png() -> impl IntoResponse {
     }
     star_png().await.into_response()
 }
+
+/// Read an image from the local desktop clipboard when Linux WebKitGTK does not
+/// populate `ClipboardEvent.clipboardData` for bitmap-only pastes.
+pub async fn clipboard_image() -> Response {
+    #[cfg(target_os = "linux")]
+    {
+        match read_linux_clipboard_image().await {
+            Some((mime, bytes)) => (
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                bytes,
+            )
+                .into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        StatusCode::NO_CONTENT.into_response()
+    }
+}
+
+#[cfg(target_os = "linux")]
+const MAX_CLIPBOARD_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+const PREFERRED_IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+#[cfg(target_os = "linux")]
+fn pick_clipboard_image_mime(types_stdout: &str) -> Option<&'static str> {
+    let available: std::collections::BTreeSet<&str> = types_stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    PREFERRED_IMAGE_MIMES
+        .into_iter()
+        .find(|mime| available.contains(mime))
+}
+
+#[cfg(target_os = "linux")]
+async fn run_clipboard_cmd(program: &str, args: &[&str], max_bytes: usize) -> Option<Vec<u8>> {
+    use std::process::Stdio;
+    use tokio::{io::AsyncReadExt, process::Command};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut data = Vec::new();
+        stdout.take(max_bytes as u64 + 1).read_to_end(&mut data).await.ok()?;
+        if data.is_empty() || data.len() > max_bytes {
+            return None;
+        }
+        let status = child.wait().await.ok()?;
+        status.success().then_some(data)
+    })
+    .await
+    .ok()?
+}
+
+#[cfg(target_os = "linux")]
+async fn read_linux_clipboard_image() -> Option<(&'static str, Vec<u8>)> {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland");
+    if wayland {
+        if let Some(types_bytes) = run_clipboard_cmd("wl-paste", &["--list-types"], 64 * 1024).await
+            && let Some(mime) = pick_clipboard_image_mime(&String::from_utf8_lossy(&types_bytes))
+            && let Some(bytes) = run_clipboard_cmd(
+                "wl-paste",
+                &["--no-newline", "--type", mime],
+                MAX_CLIPBOARD_IMAGE_BYTES,
+            )
+            .await
+        {
+            return Some((mime, bytes));
+        }
+    }
+    if std::env::var_os("DISPLAY").is_some()
+        && let Some(types_bytes) =
+            run_clipboard_cmd("xclip", &["-selection", "clipboard", "-t", "TARGETS", "-o"], 64 * 1024)
+                .await
+        && let Some(mime) = pick_clipboard_image_mime(&String::from_utf8_lossy(&types_bytes))
+        && let Some(bytes) = run_clipboard_cmd(
+            "xclip",
+            &["-selection", "clipboard", "-t", mime, "-o"],
+            MAX_CLIPBOARD_IMAGE_BYTES,
+        )
+        .await
+    {
+        return Some((mime, bytes));
+    }
+    None
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::pick_clipboard_image_mime;
+
+    #[test]
+    fn picks_preferred_image_mime_and_ignores_text_only_clipboards() {
+        assert_eq!(
+            pick_clipboard_image_mime("text/plain\nimage/jpeg\nimage/png\n"),
+            Some("image/png")
+        );
+        assert_eq!(
+            pick_clipboard_image_mime("text/plain\nimage/webp\n"),
+            Some("image/webp")
+        );
+        assert_eq!(
+            pick_clipboard_image_mime("text/plain;charset=utf-8\ntext/html\n"),
+            None
+        );
+    }
+}

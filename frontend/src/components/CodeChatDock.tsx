@@ -7,6 +7,7 @@ import { WORKSPACE_PATH_TYPE } from '../codeChat.ts'
 import { useAgentApi, useCordis } from '../cordis/react.tsx'
 import type { AgentSlotProps } from '../cordis/slot-contract.ts'
 import { randomId } from '../randomId.ts'
+import { extractClipboardFiles, isPasteShortcut, readFallbackClipboardImages } from '../clipboardPaste.ts'
 import { useSession } from '../useSession.ts'
 import { Icon } from './WorkbenchIcon.tsx'
 import { ShellSetupDialog } from './ShellSetupDialog.tsx'
@@ -58,6 +59,12 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
   const input = useRef<HTMLTextAreaElement>(null)
   const panel = useRef<HTMLElement>(null)
   const filePicker = useRef<HTMLInputElement>(null)
+  const pasteEventSeen = useRef(false)
+  const fallbackPasteTimer = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (fallbackPasteTimer.current !== null) window.clearTimeout(fallbackPasteTimer.current)
+  }, [])
+
   const attachments = useAttachmentDraft()
   const [models, setModels] = useState<readonly CatalogModel[]>([])
   /** provider/model picked here; empty follows the agent default. */
@@ -183,8 +190,37 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
         <textarea ref={input} rows={2} value={draft} placeholder={tags.length ? '问问这些代码…' : '描述你的需求或提出代码问题…'} disabled={sending}
           title="Enter 发送 · Shift+Enter 换行"
           onChange={event => setDraft(event.target.value)}
-          onPaste={event => { if (event.clipboardData.files.length) { event.preventDefault(); attachments.add(event.clipboardData.files) } }}
-          onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() } }} />
+          onPaste={event => {
+            pasteEventSeen.current = true
+            if (fallbackPasteTimer.current !== null) {
+              window.clearTimeout(fallbackPasteTimer.current)
+              fallbackPasteTimer.current = null
+            }
+            const files = extractClipboardFiles(event.clipboardData)
+            const plainText = event.clipboardData?.getData('text/plain') ?? ''
+            if (files.length && !sending) {
+              if (!plainText) event.preventDefault()
+              attachments.add(files)
+            } else if (!files.length && !plainText && !sending) {
+              void readFallbackClipboardImages().then(fallbackFiles => {
+                if (fallbackFiles.length) attachments.add(fallbackFiles)
+              })
+            }
+          }}
+          onKeyDown={event => {
+            if (isPasteShortcut(event) && !sending) {
+              pasteEventSeen.current = false
+              if (fallbackPasteTimer.current !== null) window.clearTimeout(fallbackPasteTimer.current)
+              fallbackPasteTimer.current = window.setTimeout(() => {
+                fallbackPasteTimer.current = null
+                if (pasteEventSeen.current) return
+                void readFallbackClipboardImages().then(fallbackFiles => {
+                  if (fallbackFiles.length) attachments.add(fallbackFiles)
+                })
+              }, 40)
+            }
+            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() }
+          }} />
         <div className={css.actions}>
           <button type="button" className={clsx(css.toolButton, css.newChat)} title="新对话" aria-label="新对话" disabled={running} onClick={forget}><span className={css.plus}>+</span></button>
           <button type="button" className={clsx(css.toolButton, css.attach)} title="添加附件" aria-label="添加附件" disabled={sending} onClick={() => filePicker.current?.click()}><Icon name="clip" size={15} /></button>

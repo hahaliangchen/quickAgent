@@ -1261,6 +1261,10 @@ pub async fn run(
         .route("/agent/settings", get(crate::server::agent_web::settings_page))
         .route("/agent/info", get(crate::server::agent_web::info))
         .route(
+            "/agent/clipboard-image",
+            get(crate::server::agent_web::clipboard_image),
+        )
+        .route(
             "/agent/workspace/files",
             get(crate::server::agent_service::workspace_files),
         )

@@ -1,4 +1,5 @@
 import { randomId } from '../randomId.ts'
+import { extractClipboardFiles, isPasteShortcut, readFallbackClipboardImages } from '../clipboardPaste.ts'
 import { availableEfforts, resolveEffort } from '../reasoningEffort.ts'
 import {AttachmentRail,useAttachmentDraft,type AttachmentSubmission} from './Attachments.tsx'
 import { PREFILL_EVENT, recentPrefill } from './RewindControl.tsx'
@@ -369,7 +370,24 @@ export function Composer({
     }
   }
 
+  const pasteEventSeen = useRef(false)
+  const fallbackPasteTimer = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (fallbackPasteTimer.current !== null) window.clearTimeout(fallbackPasteTimer.current)
+  }, [])
+
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isPasteShortcut(event) && !disabled && !running && !submitting) {
+      pasteEventSeen.current = false
+      if (fallbackPasteTimer.current !== null) window.clearTimeout(fallbackPasteTimer.current)
+      fallbackPasteTimer.current = window.setTimeout(() => {
+        fallbackPasteTimer.current = null
+        if (pasteEventSeen.current) return
+        void readFallbackClipboardImages().then(files => {
+          if (files.length) attachments.add(files)
+        })
+      }, 40)
+    }
     if (menuOpen) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
@@ -530,7 +548,23 @@ export function Composer({
               rows={1}
               value={draft}
               disabled={disabled||submitting}
-              onPaste={event=>{const files=Array.from(event.clipboardData.files);if(files.length&&!running){attachments.add(files);if(!event.clipboardData.getData('text/plain'))event.preventDefault()}}}
+              onPaste={event => {
+                pasteEventSeen.current = true
+                if (fallbackPasteTimer.current !== null) {
+                  window.clearTimeout(fallbackPasteTimer.current)
+                  fallbackPasteTimer.current = null
+                }
+                const files = extractClipboardFiles(event.clipboardData)
+                const plainText = event.clipboardData?.getData('text/plain') ?? ''
+                if (files.length && !running) {
+                  attachments.add(files)
+                  if (!plainText) event.preventDefault()
+                } else if (!files.length && !plainText && !running && !disabled && !submitting) {
+                  void readFallbackClipboardImages().then(fallbackFiles => {
+                    if (fallbackFiles.length) attachments.add(fallbackFiles)
+                  })
+                }
+              }}
               placeholder={midTurn ? '补充或纠正方向，回车插话；也可以排队等这轮结束' : placeholder}
               aria-label={placeholder}
               onChange={(event) => {
