@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 
 test('builtin and external page contributions obey Cordis ownership, dependencies and disposal', async () => {
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), server: { middlewareMode: true }, optimizeDeps: { noDiscovery: true, entries: [], include: [] }, appType: 'custom' })
+  const server = await createServer({ root: fileURLToPath(new URL('../', import.meta.url)), configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, entries: [], include: [] }, appType: 'custom' })
   try {
     const { Context } = await server.ssrLoadModule('/src/dsh/cordis/index.ts')
     const { PluginPages } = await server.ssrLoadModule('/src/plugins/pages.ts')

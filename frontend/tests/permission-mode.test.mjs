@@ -18,6 +18,7 @@ test('two chats keep their own permission level across switching and a reload', 
   const server = await createServer({
     root: fileURLToPath(new URL('../', import.meta.url)),
     configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)),
+    cacheDir: 'node_modules/.vite-permission-mode-test',
     server: { port: 0, host: '127.0.0.1', hmr: false },
     plugins: [{ name: 'permission-mode-test', configureServer(server) {
       server.middlewares.use(async (req, res, next) => {

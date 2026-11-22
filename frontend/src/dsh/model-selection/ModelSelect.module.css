@@ -287,3 +287,32 @@
   height: 12px;
   color: var(--dsw-alias-label-tertiary);
 }
+
+
+/* A cell that holds a switch instead of a value: the row is the setting. */
+.switchCell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 7px;
+  border-radius: 7px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* A hairline between the panes and the settings below them. */
+.divider {
+  height: 0;
+  margin: 3px 0;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.backCell {
+  margin-bottom: 3px;
+}
+
+.backLabel {
+  font-weight: 500;
+}

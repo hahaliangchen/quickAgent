@@ -13,6 +13,8 @@ import { useSession } from './useSession.ts'
 
 export type SettingsTab = 'general' | 'models' | 'tools' | 'plugins'
 
+type ModelPick = Readonly<{ model: string; provider: string }>
+
 function routeTaskId(): string | undefined {
   const match = /^#\/tasks\/(.+)$/.exec(location.hash)
   return match?.[1] === undefined ? undefined : decodeURIComponent(match[1])
@@ -46,8 +48,8 @@ export function useAgentWorkspace() {
   const [parent, setParent] = useState<Task>()
   const [settingsOpen, setSettingsOpen] = useState(isSettingsRoute)
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
-  const [selectedModelOverride, setSelectedModelOverride] = useState<string>()
-  const [selectedProviderOverride, setSelectedProviderOverride] = useState<string>()
+  const [selectedModel, setSelectedModel] = useState<ModelPick & { taskId: string | undefined }>()
+  const [newSessionModel, setNewSessionModel] = useState<ModelPick>()
   const [selectedEffortOverride, setSelectedEffortOverride] = useState<string | null>()
   const [selectedFastModeOverride, setSelectedFastModeOverride] = useState<boolean>()
 
@@ -95,8 +97,8 @@ export function useAgentWorkspace() {
   const closeFolderDialog = useCallback(() => setFolderDialogOpen(false), [])
 
   useEffect(() => {
-    setSelectedModelOverride(undefined)
-    setSelectedProviderOverride(undefined)
+    setSelectedModel(undefined)
+    if (taskId !== undefined) setNewSessionModel(undefined)
     setSelectedEffortOverride(undefined)
     setSelectedFastModeOverride(undefined)
   }, [taskId])
@@ -149,7 +151,7 @@ export function useAgentWorkspace() {
   }, [api, taskId, refreshTasks])
 
   const session = useSession(taskId, refreshTasks)
-  const task = session.task
+  const task = session.task?.task_id === taskId ? session.task : undefined
   // The open chat's own permission level, saved as soon as it is chosen.
   const savePermissionMode = useCallback(async (id: string, mode: PermissionMode) => {
     const updated = await api.updateTask(id, { permission_mode: mode })
@@ -237,8 +239,7 @@ export function useAgentWorkspace() {
   }, [api, settings])
 
   const selectModel = useCallback(async (providerId: string, modelId: string): Promise<void> => {
-    setSelectedModelOverride(modelId)
-    setSelectedProviderOverride(providerId)
+    setSelectedModel({ taskId, model: modelId, provider: providerId })
     let rowError: string | undefined
     try {
       const latest = settings ?? await api.getSettings()
@@ -269,9 +270,7 @@ export function useAgentWorkspace() {
       await persistDefaults({ provider: providerId, model: modelId, reasoning_effort: defaultEffort, fast_mode: false })
       setNotice(rowError)
     } catch (cause) {
-      // The pick is in force for this chat but the next one will not inherit it,
-      // so say so: silence here reads as "the default moved" and it did not.
-      setNotice(`已用于当前对话，但没能存成新会话的默认模型：${messageOf(cause)}`)
+      setNotice(`已用于当前对话，但未能更新全局默认模型：${messageOf(cause)}`)
     }
   }, [api, persistDefaults, refreshTasks, session.reload, settings, task?.status, taskId])
 
@@ -307,13 +306,16 @@ export function useAgentWorkspace() {
   const heroPhase = taskId === undefined || (task?.status === 'draft' && session.events.length === 0)
   const composerNote = !ready && info !== undefined ? t('app.notReady') : notice ?? session.error
 
-  const modelName = selectedModelOverride ?? task?.model ?? info?.model ?? settings?.orchestrator_model
+  const activePick = selectedModel?.taskId === taskId ? selectedModel : undefined
+  const draftPick = taskId === undefined ? newSessionModel : undefined
+  const sessionModel = activePick?.model ?? task?.model ?? draftPick?.model
+  const modelName = sessionModel ?? info?.model ?? settings?.orchestrator_model
   const requestedEffort = selectedEffortOverride !== undefined
     ? selectedEffortOverride
     : (task?.reasoning_effort ?? settings?.reasoning_effort ?? '')
   // The same model can be offered by several providers, e.g. a personal and a
   // company key: a model is identified by its provider and its id together.
-  const requestedProvider = selectedProviderOverride ?? task?.provider_name ?? settings?.orchestrator_provider ?? undefined
+  const requestedProvider = activePick?.provider ?? task?.provider_name ?? draftPick?.provider ?? settings?.orchestrator_provider ?? undefined
   const modelProvider = settings?.providers.find(p => p.id === requestedProvider && p.models.includes(modelName ?? ''))
     ?? settings?.providers.find(p => p.models.includes(modelName ?? ''))
   const modelProviderId = modelProvider?.id ?? requestedProvider
@@ -325,6 +327,14 @@ export function useAgentWorkspace() {
   // A model that declares no fast mode must not be sent the flag, or the whole
   // settings save is rejected; an unknown capability is left alone.
   const fastMode = recordedFastMode && (activeCapability === undefined || activeCapability.fast_mode)
+
+  const startNewSession = useCallback(() => {
+    // Carry the displayed model into the next draft without waiting for the settings write.
+    if (sessionModel && modelProviderId) {
+      setNewSessionModel({ model: sessionModel, provider: modelProviderId })
+    }
+    openTask(undefined)
+  }, [sessionModel, modelProviderId])
 
   const pendingSession=useRef<Promise<string>|null>(null)
   const uploadedAttachments=useRef(new Map<File,{task:string;receiptId:string}>())
@@ -396,7 +406,7 @@ export function useAgentWorkspace() {
     canContinue: ready && task !== undefined && acceptsPrompt(task),
     settingsOpen, settingsTab, setSettingsTab,
     openSettings, closeSettings, saveSettings, refreshInfoAndSettings, selectModel, setGenerationOptions,
-    openTask, submit, stop, interject,
+    openTask, startNewSession, submit, stop, interject,
   }
 }
 

@@ -1,32 +1,28 @@
 import { randomId } from '../randomId.ts'
 import { extractClipboardFiles, isPasteShortcut, readFallbackClipboardImages } from '../clipboardPaste.ts'
-import { availableEfforts, resolveEffort } from '../reasoningEffort.ts'
 import {AttachmentRail,useAttachmentDraft,type AttachmentSubmission} from './Attachments.tsx'
 import { PREFILL_EVENT, recentPrefill } from './RewindControl.tsx'
 import { draftFor, draftOf, keepDraft, type HeldDraft } from '../composerDraft.ts'
+import { composerHistory, historyDirection, isCompositionKey, stepHistoryDown, stepHistoryUp, type HistoryStep } from '../composerHistory.ts'
 import { ContextRing } from './ContextRing.tsx'
 import type { ContextUsage } from './contextUsage.ts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import {
-  IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
-  IconChevronLeftOutlineRegular,
-  IconChevronRightOutlineRegular,
   IconFolderOpenRegular,
   IconFolderCloseRegular,
   IconPlusOutlineRegular,
   RiskConfirmation,
-  Switch,
   Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Menu } from '../dsh/ui-primitives/Menu.tsx'
+import { ModelSelect } from '../dsh/model-selection/ModelSelect.tsx'
 import { IconPaperclipOutlineMedium } from '../dsh/ui-primitives/icons/index.tsx'
 import heroShellCss from '../dsh/conversation/HeroShell.module.css'
 import type { SettingsData } from '../api.ts'
 import { useAgentApi } from '../cordis/react.tsx'
-import modelCss from '../dsh/model-selection/ModelSelect.module.css'
 import { t } from '../i18n.ts'
 import type { SettingsTab } from '../useAgentWorkspace.ts'
 import { workspaceName } from './Sidebar.tsx'
@@ -148,7 +144,17 @@ export function Composer({
   onInterject?: ((text: string) => Promise<void>) | undefined
   contextUsage?: ContextUsage | undefined
 }) {
-  const [draft, setDraft] = useDraft(draftKey)
+  const [savedDraft, setDraft] = useDraft(draftKey)
+  // Recalled text is only a preview; the underlying session draft stays intact.
+  const [browsing, setBrowsing] = useState<{ key: string; step: HistoryStep } | null>(null)
+  const activeHistory = browsing?.key === draftKey ? browsing.step : undefined
+  const draft = activeHistory?.text ?? savedDraft
+  const historyCaret = useRef<{ key: string; position: number } | null>(null)
+  useLayoutEffect(() => { setBrowsing(null) }, [draftKey])
+  const recordSent = useCallback((text: string, from: string) => {
+    composerHistory.record(text)
+    setBrowsing(current => current?.key === from ? null : current)
+  }, [])
   const attachments=useAttachmentDraft(draftKey)
   const fileInput=useRef<HTMLInputElement>(null)
   const uploadAbort=useRef<AbortController|null>(null)
@@ -159,6 +165,7 @@ export function Composer({
 
   const [submitting, setSubmitting] = useState(false)
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const workspaceAnchorRef = useRef<HTMLButtonElement>(null)
   const [permMenuOpen, setPermMenuOpen] = useState(false)
   const [permMenuPos, setPermMenuPos] = useState<{ top?: number; bottom?: number; left: number }>({ left: 16 })
@@ -166,9 +173,6 @@ export function Composer({
   const permMenuRef = useRef<HTMLDivElement>(null)
   const [showRiskConfirm, setShowRiskConfirm] = useState(false)
   const [riskAcknowledged, setRiskAcknowledged] = useState(false)
-  const [modelMenuOpen, setModelMenuOpen] = useState(false)
-  const [pane, setPane] = useState<'root' | 'model' | 'effort'>('root')
-  const [menuPos, setMenuPos] = useState<{ top?: number; bottom?: number; right: number }>({ right: 24 })
   const api = useAgentApi()
   const [caret, setCaret] = useState(0)
   const [commands, setCommands] = useState<readonly { name: string; description: string }[]>([])
@@ -176,8 +180,6 @@ export function Composer({
   const [menuIndex, setMenuIndex] = useState(0)
   const [dismissedKey, setDismissedKey] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const modelTriggerRef = useRef<HTMLButtonElement>(null)
-  const modelMenuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (variant === 'hero' && !disabled) inputRef.current?.focus()
@@ -188,6 +190,7 @@ export function Composer({
     const prefill = () => {
       const text = recentPrefill()
       if (text === undefined) return
+      setBrowsing(null)
       setDraft(text)
       window.setTimeout(() => inputRef.current?.focus(), 0)
     }
@@ -205,9 +208,12 @@ export function Composer({
     if (running || disabled || submitting || queued.length === 0) return
     const [next, ...rest] = queued
     setQueued(rest)
-    void onSubmit(next!, permissionMode).then(sent => { if (!sent) setQueued(current => [next!, ...current]) })
-  }, [running, disabled, submitting, queued, onSubmit, permissionMode])
-  const token = useMemo(() => activeToken(draft, caret), [draft, caret])
+    void onSubmit(next!, permissionMode).then(sent => {
+      if (sent) recordSent(next!, draftKey)
+      else setQueued(current => [next!, ...current])
+    })
+  }, [running, disabled, submitting, queued, onSubmit, permissionMode, recordSent, draftKey])
+  const token = useMemo(() => activeHistory === undefined ? activeToken(draft, caret) : null, [activeHistory, draft, caret])
   const tokenKey = token === null ? '' : `${token.kind}:${token.start}:${token.query}`
 
   useEffect(() => {
@@ -261,6 +267,7 @@ export function Composer({
     if (token === null) return
     const next = `${draft.slice(0, token.start)}${suggestion.insert}${draft.slice(caret)}`
     const pos = token.start + suggestion.insert.length
+    setBrowsing(null)
     setDraft(next)
     setMenuIndex(0)
     window.requestAnimationFrame(() => {
@@ -277,28 +284,11 @@ export function Composer({
     input.style.height = `${input.scrollHeight}px`
   }, [draft])
 
-  useEffect(() => {
-    if (!modelMenuOpen) return
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target as Node | null
-      if (
-        target !== null
-        && !modelTriggerRef.current?.contains(target)
-        && !modelMenuRef.current?.contains(target)
-      ) {
-        setModelMenuOpen(false)
-      }
-    }
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') setModelMenuOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointerDown)
-    window.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown)
-      window.removeEventListener('keydown', onKeyDown)
-    }
-  }, [modelMenuOpen])
+  useLayoutEffect(() => {
+    const pending = historyCaret.current
+    historyCaret.current = null
+    if (pending?.key === draftKey) inputRef.current?.setSelectionRange(pending.position, pending.position)
+  }, [draft, draftKey, browsing])
 
   useEffect(() => {
     if (!permMenuOpen) return
@@ -356,32 +346,17 @@ export function Composer({
     selectPermissionMode(mode)
   }
 
-  const openModelDropdown = () => {
-    if (modelMenuOpen) {
-      setModelMenuOpen(false)
-      return
-    }
-    setPane('root')
-    const rect = modelTriggerRef.current?.getBoundingClientRect()
-    if (rect !== undefined) {
-      const right = Math.max(16, window.innerWidth - rect.right)
-      if (rect.top > 440) {
-        setMenuPos({ bottom: window.innerHeight - rect.top + 8, right })
-      } else {
-        setMenuPos({ top: rect.bottom + 8, right })
-      }
-    }
-    setModelMenuOpen(true)
-  }
 
   const submit = async (mode: 'interject' | 'queue' = 'interject') => {
     if (!canSend) return
+    const text = draft.trim()
     if (midTurn) {
-      const text = draft.trim()
+      setBrowsing(null)
       setDraft('')
       if (mode === 'queue') { setQueued(current => [...current, text]); return }
       try {
         await onInterject!(text)
+        recordSent(text, draftKey)
       } catch {
         // The turn ended (or the request failed) before delivery: send it next instead of losing it.
         setQueued(current => [...current, text])
@@ -394,7 +369,11 @@ export function Composer({
     const sentFrom = draftKey
     try {
       const controller=new AbortController();uploadAbort.current=controller
-      if (await onSubmit(draft.trim(), permissionMode,{files:attachments.items.map(x=>x.file),signal:controller.signal,requestId:requestId.current,onProgress:setUploadLabel})) {setDraft('', sentFrom);attachments.clear(sentFrom)}
+      if (await onSubmit(text, permissionMode, { files: attachments.items.map(x => x.file), signal: controller.signal, requestId: requestId.current, onProgress: setUploadLabel })) {
+        recordSent(text, sentFrom)
+        setDraft('', sentFrom)
+        attachments.clear(sentFrom)
+      }
     } finally {
       setSubmitting(false);setUploadLabel('');uploadAbort.current=null
     }
@@ -418,6 +397,7 @@ export function Composer({
         })
       }, 40)
     }
+    if (isCompositionKey(event.nativeEvent)) return
     if (menuOpen) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
@@ -434,14 +414,30 @@ export function Composer({
         setDismissedKey(tokenKey)
         return
       }
-      if ((event.key === 'Enter' || event.key === 'Tab') && !event.nativeEvent.isComposing) {
+      if (event.key === 'Enter' || event.key === 'Tab') {
         event.preventDefault()
         const suggestion = suggestions[activeIndex]
         if (suggestion !== undefined) applySuggestion(suggestion)
         return
       }
     }
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+    const input = event.currentTarget
+    const overlayOpen = menuOpen || workspaceMenuOpen || permMenuOpen || modelMenuOpen || showRiskConfirm
+    const cursor = activeHistory?.cursor ?? null
+    const direction = event.defaultPrevented ? null : historyDirection(event.nativeEvent, input, cursor !== null, overlayOpen)
+    if (direction !== null) {
+      const next = direction === 'up'
+        ? stepHistoryUp(cursor?.entries ?? composerHistory.read(), cursor, { text: draft, caret: input.selectionStart })
+        : stepHistoryDown(cursor)
+      if (next !== null) {
+        event.preventDefault()
+        historyCaret.current = { key: draftKey, position: next.caret }
+        setCaret(next.caret)
+        setBrowsing(next.cursor === null ? null : { key: draftKey, step: next })
+        return
+      }
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       void submit()
     }
@@ -449,50 +445,6 @@ export function Composer({
 
   const wsName = workspaceName(activeWorkspace || workspacePath || '')
   const placeholder = t(variant === 'hero' ? 'placeholder.hero' : 'placeholder.default')
-  const activeModelName = modelName || settings?.orchestrator_model || ''
-  const providers = settings?.providers ?? []
-
-  const activeProviderId = modelProviderId ?? settings?.orchestrator_provider ?? undefined
-  const activeProvider = providers.find(p => p.id === activeProviderId && p.models.includes(activeModelName))
-    ?? providers.find(p => p.models.includes(activeModelName))
-    ?? providers.find(p => p.id === settings?.orchestrator_provider)
-  // Group titles, with the id added when two providers share a display name.
-  const providerLabel = (provider: (typeof providers)[number]) => {
-    const label = provider.display_name || provider.id
-    return providers.some(other => other.id !== provider.id && (other.display_name || other.id) === label) ? `${label}（${provider.id}）` : label
-  }
-  // A model offered by several providers is shown with the one in use.
-  const sharedModel = providers.filter(p => p.models.includes(activeModelName)).length > 1
-  const activeModelLabel = activeModelName && sharedModel && activeProvider ? `${activeModelName} · ${providerLabel(activeProvider)}` : activeModelName
-  const displayModel = activeModelLabel || t('app.configureModel')
-  const selectedCapability = (activeProvider && activeModelName ? activeProvider.model_capabilities[activeModelName] : undefined)
-    ?? providers.find(p => p.id === settings?.orchestrator_provider)?.model_capabilities[settings?.orchestrator_model ?? '']
-
-  const supportedEfforts = selectedCapability?.reasoning_efforts ?? []
-  const currentEffort = resolveEffort(reasoningEffort, supportedEfforts, selectedCapability?.default_effort)
-
-  const EFFORT_LABELS: Record<string, string> = {
-    '': '默认',
-    none: '关闭',
-    low: '轻量',
-    medium: '中等',
-    high: '深度',
-    xhigh: '超深度',
-    max: '最大',
-  }
-
-  const formatEffort = (effort: string): string => {
-    if (!effort) return '默认'
-    const name = EFFORT_LABELS[effort]
-    return name ? `${name} (${effort})` : effort
-  }
-
-  const effortDisplay = currentEffort ? formatEffort(currentEffort) : '不可调节'
-  const triggerEffortLabel = currentEffort ? (EFFORT_LABELS[currentEffort] ?? currentEffort) : undefined
-
-  const effortOptions = useMemo<{ key: string; label: string }[]>(() => {
-    return availableEfforts(supportedEfforts).map(eff => ({ key: eff, label: formatEffort(eff) }))
-  }, [supportedEfforts])
 
   return (
     <div className={clsx(codexCss.root, local.anchor, variant === 'hero' && codexCss.hero)}>
@@ -598,6 +550,7 @@ export function Composer({
               placeholder={midTurn ? '补充或纠正方向，回车插话；也可以排队等这轮结束' : placeholder}
               aria-label={placeholder}
               onChange={(event) => {
+                setBrowsing(null)
                 setDraft(event.target.value)
                 setCaret(event.target.selectionStart)
                 setMenuIndex(0)
@@ -695,23 +648,19 @@ export function Composer({
 
             <div className={codexCss.rightControls}>
               <ContextRing usage={contextUsage} />
-              {/* Model Selector Pill */}
-              <button
-                ref={modelTriggerRef}
-                type="button"
-                className={codexCss.modelPill}
-                aria-haspopup="menu"
-                aria-expanded={modelMenuOpen}
-                title={triggerEffortLabel ? `${displayModel} · ${triggerEffortLabel}` : displayModel}
-                onClick={openModelDropdown}
-              >
-                <span>{displayModel}</span>
-                {triggerEffortLabel !== undefined && (
-                  <span className={codexCss.effortTag}>{triggerEffortLabel}</span>
-                )}
-                {fastMode && <span>⚡</span>}
-                <IconChevronDownOutlineRegular className={codexCss.chevronDown} size={11} />
-              </button>
+              {/* The same model selector as everywhere else: one pill, one card. */}
+              <ModelSelect
+                providers={settings?.providers ?? []}
+                providerId={modelProviderId ?? settings?.orchestrator_provider ?? undefined}
+                modelName={modelName || settings?.orchestrator_model || ''}
+                reasoningEffort={reasoningEffort}
+                fastMode={fastMode}
+                onSelect={onSelectModel}
+                onOpenChange={setModelMenuOpen}
+                onSetGenerationOptions={onSetGenerationOptions}
+                onOpenSettings={onOpenSettings === undefined ? undefined : () => { onOpenSettings('models') }}
+                placeholder={t('app.configureModel')}
+              />
 
               {/* Blue Action Circle: Stop / Send / Audio Wave (media_1791084397752.png) */}
               {midTurn && canSend && <>
@@ -785,166 +734,6 @@ export function Composer({
             </button>
           ))}
         </div>
-      )}
-
-      {modelMenuOpen && createPortal(
-        <div
-          ref={modelMenuRef}
-          className={modelCss.menu}
-          style={{
-            top: menuPos.top,
-            bottom: menuPos.bottom,
-            right: menuPos.right,
-          }}
-          role="menu"
-          aria-label="模型选择与推理设置"
-        >
-          {pane === 'root' && (
-            <>
-              <button
-                type="button"
-                role="menuitem"
-                className={modelCss.cell}
-                onClick={() => { setPane('model') }}
-              >
-                <span className={modelCss.cellLabel}>模型</span>
-                <span className={modelCss.cellValue}>{activeModelLabel || '未选择'}</span>
-                <IconChevronRightOutlineRegular className={modelCss.cellChevron} size={12} />
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className={modelCss.cell}
-                disabled={effortOptions.length === 0}
-                onClick={() => { setPane('effort') }}
-              >
-                <span className={modelCss.cellLabel}>思考等级</span>
-                <span className={modelCss.cellValue}>{effortDisplay}</span>
-                <IconChevronRightOutlineRegular className={modelCss.cellChevron} size={12} />
-              </button>
-              <div
-                className={modelCss.cell}
-                style={{ justifyContent: 'space-between', cursor: 'default' }}
-              >
-                <span className={modelCss.cellLabel}>⚡ 请求加速</span>
-                <Switch
-                  checked={Boolean(fastMode && selectedCapability?.fast_mode)}
-                  label="请求加速"
-                  disabled={onSetGenerationOptions === undefined || !selectedCapability?.fast_mode}
-                  onChange={(checked) => {
-                    void onSetGenerationOptions?.(currentEffort, checked)
-                  }}
-                />
-              </div>
-              <div style={{ borderTop: '0.5px solid var(--dsw-alias-border-l2)', margin: '3px 0' }} />
-              <button
-                type="button"
-                role="menuitem"
-                className={modelCss.cell}
-                onClick={() => {
-                  setModelMenuOpen(false)
-                  onOpenSettings?.('models')
-                }}
-              >
-                <span className={modelCss.cellLabel}>配置模型提供商…</span>
-                <span className={modelCss.cellValue}>{providers.length} 个提供商</span>
-                <IconChevronRightOutlineRegular className={modelCss.cellChevron} size={12} />
-              </button>
-            </>
-          )}
-
-          {pane === 'model' && (
-            <>
-              <button
-                type="button"
-                role="menuitem"
-                className={modelCss.cell}
-                style={{ marginBottom: 3 }}
-                onClick={() => { setPane('root') }}
-              >
-                <IconChevronLeftOutlineRegular className={modelCss.cellChevron} size={12} />
-                <span className={modelCss.cellLabel} style={{ fontWeight: 500 }}>所有模型</span>
-              </button>
-              <div style={{ borderTop: '0.5px solid var(--dsw-alias-border-l2)', marginBottom: 3 }} />
-              <div className={clsx(modelCss.groups, 'scrollable')}>
-                {providers.length === 0 ? (
-                  <div className={modelCss.empty}>尚未配置模型提供商</div>
-                ) : (
-                  providers.map(provider => (
-                    <section key={provider.id} className={modelCss.group}>
-                      <div className={modelCss.groupTitle}>{providerLabel(provider)}</div>
-                      {provider.models.map((m) => {
-                        const selected = provider.id === activeProvider?.id && m === activeModelName
-                        return (
-                          <button
-                            key={`${provider.id}:${m}`}
-                            type="button"
-                            role="menuitemradio"
-                            aria-checked={selected}
-                            className={clsx(modelCss.option, selected && modelCss.selected)}
-                            onClick={() => {
-                              setModelMenuOpen(false)
-                              void onSelectModel?.(provider.id, m)
-                            }}
-                          >
-                            <span className={modelCss.optionCopy}>
-                              <span className={modelCss.modelName}>{m}</span>
-                            </span>
-                            <span className={modelCss.check}>
-                              {selected ? <IconCheckOutlineRegular size={14} /> : null}
-                            </span>
-                          </button>
-                        )
-                      })}
-                    </section>
-                  ))
-                )}
-              </div>
-            </>
-          )}
-
-          {pane === 'effort' && (
-            <>
-              <button
-                type="button"
-                role="menuitem"
-                className={modelCss.cell}
-                style={{ marginBottom: 3 }}
-                onClick={() => { setPane('root') }}
-              >
-                <IconChevronLeftOutlineRegular className={modelCss.cellChevron} size={12} />
-                <span className={modelCss.cellLabel} style={{ fontWeight: 500 }}>思考等级</span>
-              </button>
-              <div style={{ borderTop: '0.5px solid var(--dsw-alias-border-l2)', marginBottom: 3 }} />
-              <div className={clsx(modelCss.groups, 'scrollable')}>
-                {effortOptions.map((opt) => {
-                  const selected = currentEffort === opt.key
-                  return (
-                    <button
-                      key={opt.key || 'default'}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={selected}
-                      className={clsx(modelCss.option, selected && modelCss.selected)}
-                      onClick={() => {
-                        void onSetGenerationOptions?.(opt.key, Boolean(fastMode))
-                        setPane('root')
-                      }}
-                    >
-                      <span className={modelCss.optionCopy}>
-                        <span className={modelCss.modelName}>{opt.label}</span>
-                      </span>
-                      <span className={modelCss.check}>
-                        {selected ? <IconCheckOutlineRegular size={14} /> : null}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            </>
-          )}
-        </div>,
-        document.body,
       )}
 
       {/* Codex-styled Permission Popover for DSH Permissions (media_1791085181305.png) */}

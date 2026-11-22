@@ -188,7 +188,7 @@
 .fileName > span:first-child { flex-shrink: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .fileName > span:last-child { font-size: 12px; }
 /* The code chat takes the right side; the commit graph keeps the room, details come back when it closes. */
-:global(body:has([data-code-chat])) .detail { display: none; }
+:global([data-code-chat-open]) .detail { display: none; }
 .treeCard { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
 .diff { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.6; overflow-x: auto; border-radius: 8px; border: 1px solid var(--codex-border-subtle); }

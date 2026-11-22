@@ -63,7 +63,7 @@ export function App({ renderSlot }: AgentSlotProps) {
   const handleNewChat = () => {
     setNewChatVersion(version => version + 1)
     setTab('chat')
-    workspace.openTask(undefined)
+    workspace.startNewSession()
   }
 
   const sidebar = renderSlot('agent.sidebar', {

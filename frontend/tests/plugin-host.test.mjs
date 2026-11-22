@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 
 test('Cordis page services isolate owners and use the same scoped methods as the iframe', async () => {
-  const server = await createServer({ configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), server: { middlewareMode: true }, optimizeDeps: { noDiscovery: true, entries: [], include: [] }, appType: 'custom' })
+  const server = await createServer({ root: fileURLToPath(new URL('../', import.meta.url)), configFile: fileURLToPath(new URL('../vite.config.ts', import.meta.url)), server: { middlewareMode: true, hmr: false }, optimizeDeps: { noDiscovery: true, entries: [], include: [] }, appType: 'custom' })
   try {
     const { Context } = await server.ssrLoadModule('/src/dsh/cordis/index.ts')
     const { createPluginHost } = await server.ssrLoadModule('/src/plugins/host.ts')

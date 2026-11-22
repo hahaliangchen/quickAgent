@@ -199,9 +199,17 @@ export function ConversationPage({
   useLayoutEffect(() => {
     const body = bodyRef.current
     if (body === null) return
-    const publish = () => body.style.setProperty('--dsh-conversation-column-width', `${body.clientWidth}px`)
-    publish()
-    const observer = new ResizeObserver(publish)
+    const scroll = scrollRef.current
+    if (scroll === null) return
+    let lastWidth: number | undefined
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry === undefined) return
+      const width = entry.contentBoxSize?.[0]?.inlineSize ?? entry.contentRect.width
+      const rounded = Math.round(width)
+      if (rounded === lastWidth) return
+      lastWidth = rounded
+      scroll.style.setProperty('--dsh-conversation-column-width', `${rounded}px`)
+    })
     observer.observe(body)
     return () => observer.disconnect()
   }, [])

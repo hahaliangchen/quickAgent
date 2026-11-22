@@ -76,9 +76,15 @@ export function CodexDock({
           onClick={() => onSelectTab?.('office')}
         >
           <svg {...STROKE} aria-hidden="true">
-            <path d="M12 3 3.5 7.5 12 12l8.5-4.5Z" />
-            <path d="M3.5 12 12 16.5l8.5-4.5" />
-            <path d="M3.5 16.5 12 21l8.5-4.5" />
+            <rect x="3" y="4" width="18" height="12.5" rx="2.2" />
+            <path d="M12 16.5V20M8.5 20h7" />
+            {/* Exact primary leaf from QuickAgent BrandMark, centered inside the monitor screen */}
+            <path
+              d="M32.4 29.0C31.5 13.5 39.5 8.5 55.5 8.5C55.5 24.5 50.5 32.5 35.0 31.6L47.2 16.8Z"
+              transform="translate(12 10.25) scale(0.32) translate(-43.9 -20.1)"
+              fill="currentColor"
+              stroke="none"
+            />
           </svg>
         </button>
       </div>

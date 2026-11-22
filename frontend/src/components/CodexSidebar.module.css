@@ -721,6 +721,20 @@
 .folderGlyph {
   display: inline-flex;
   align-items: center;
+  color: var(--codex-text-muted, #71717a);
+}
+
+/* The row that is open now reads a shade stronger, so the eye finds it first. */
+.projectHeaderRowActive .folderGlyph {
+  color: var(--codex-text-primary, #3f4653);
+}
+
+:global(body[data-ds-dark-theme]) .folderGlyph {
+  color: var(--codex-text-muted, #9ca3af);
+}
+
+:global(body[data-ds-dark-theme]) .projectHeaderRowActive .folderGlyph {
+  color: #e5e7eb;
 }
 
 .projectSelect {

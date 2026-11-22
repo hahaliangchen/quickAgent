@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.ts'
 import clsx from 'clsx'
-import { Button, Menu, Modal, IconArchiveOutlineMedium, IconFolderCloseRegular, IconFolderOpenRegular, IconPlusOutlineMedium, IconUnarchiveOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Menu, Modal, IconArchiveOutlineMedium, IconPlusOutlineMedium, IconUnarchiveOutlineMedium } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Project, Task, TaskStatus } from '../api.ts'
 import { compactRelativeTime, isChat, projectGroups, taskTitle, visibleTasks } from '../sidebarModel.ts'
 export { taskTitle, workspaceName } from '../sidebarModel.ts'
@@ -9,6 +9,7 @@ import css from './CodexSidebar.module.css'
 import { ProjectNotesDialog } from './ProjectNotesDialog.tsx'
 import { MemoryDialog } from './MemoryDialog.tsx'
 import { BrandMark } from './BrandMark.tsx'
+import { FolderGlyph } from './FolderGlyph.tsx'
 
 export function dotState(status: TaskStatus): 'done' | 'warning' | 'ongoing' | 'error' | 'idle' {
   switch (status) {
@@ -216,7 +217,7 @@ export function Sidebar({
           <div className={clsx(css.itemRow, css.projectHeaderRow, project.path === activeWorkspace && css.projectHeaderRowActive)}>
             <button type="button" className={css.folderToggle} aria-label={`${closed[project.path] ? '展开' : '折叠'}项目：${project.title}`} aria-expanded={!closed[project.path]} onClick={() => setClosed(current => ({...current,[project.path]:!current[project.path]}))}>
               <svg className={clsx(css.projectChevron, !closed[project.path] && css.projectChevronOpen)} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
-              <span className={css.folderGlyph}>{closed[project.path] ? <IconFolderCloseRegular size={14}/> : <IconFolderOpenRegular size={14}/>}</span>
+              <span className={css.folderGlyph}><FolderGlyph size={16} /></span>
             </button>
             <button type="button" className={css.projectSelect} title={project.path} onClick={() => onSelectWorkspace?.(project.path)}>
               <span className={css.projectTitle}>{project.title}</span>

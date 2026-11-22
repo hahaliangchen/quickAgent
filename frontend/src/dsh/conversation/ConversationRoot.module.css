@@ -1,3 +1,15 @@
+@property --dsh-conversation-column-width {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --dsh-chat-content-width-resolved {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+
 .root {
   position: relative; /* positioning context for slot-owned absolute chrome */
   display: flex;
@@ -378,32 +390,26 @@ button.crumb:hover {
   flex-direction: column;
   min-height: 0;
 
-  /* Shared width axis for the transcript, dock cards, composer, and takeover
-     cards. Main width controls publish the live body width and optional user
-     preference; embedded occurrences override this adaptive axis below. */
-  /* Most of the available column, between 680px and 1200px, and never wider
-     than the column minus 24px margins on each side. */
-  --dsh-chat-content-width: var(
-    --dsh-chat-user-width,
-    min(
-      calc(var(--dsh-conversation-column-width, 728px) - 48px),
-      clamp(680px, calc(var(--dsh-conversation-column-width, 0px) * 0.86), 1200px)
-    )
-  );
-  --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
   --dsh-composer-side-clearance: 16px;
   --dsh-composer-dock-inset: 8px;
 }
 
 .embeddedBody {
   overflow: hidden;
-  --dsh-chat-content-width: min(calc(100% - 32px), 920px);
-  --dsh-composer-card-max-width: min(calc(100% - 16px), 952px);
   --dsh-composer-side-clearance: 8px;
   --dsh-composer-dock-inset: 8px;
 }
 
 .scrollBody {
+  /* Only the resolved width inherits; changes that stay within a clamp do not
+     change the width seen by the messages or composer. */
+  --dsh-conversation-column-width: 728px; /* Before the first ResizeObserver entry. */
+  --dsh-chat-content-width-resolved: max(0px, min(
+    calc(var(--dsh-conversation-column-width) - 48px),
+    var(--dsh-chat-user-width, clamp(680px, calc(var(--dsh-conversation-column-width) * 0.86), 1200px))
+  ));
+  --dsh-chat-content-width: var(--dsh-chat-content-width-resolved);
+  --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -418,6 +424,11 @@ button.crumb:hover {
      gutter moves the input card sideways by the bar's width whenever the two
      differ ([decision](../../../../../../.agents/notes/archived/bug-fix/2026-08-04-composer-tab-gutter-reservation.md)). */
   scrollbar-gutter: stable;
+}
+
+.embeddedBody > .scrollBody {
+  --dsh-chat-content-width: min(calc(100% - 32px), 920px);
+  --dsh-composer-card-max-width: min(calc(100% - 16px), 952px);
 }
 
 /* The bar also stops 2px short of the scroller's ends, matching its 2px edge

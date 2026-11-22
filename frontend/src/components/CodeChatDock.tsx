@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type DragEvent } from 'react'
 import clsx from 'clsx'
-import type { CatalogModel, PermissionMode } from '../api.ts'
+import type { PermissionMode, SettingsData } from '../api.ts'
 import { resolvePermissionMode } from '../permissionMode.ts'
 import { AttachmentRail, useAttachmentDraft } from './Attachments.tsx'
 import { WORKSPACE_PATH_TYPE } from '../codeChat.ts'
@@ -11,6 +11,7 @@ import { extractClipboardFiles, isPasteShortcut, readFallbackClipboardImages } f
 import { useSession } from '../useSession.ts'
 import { Icon } from './WorkbenchIcon.tsx'
 import { ShellSetupDialog } from './ShellSetupDialog.tsx'
+import { ModelSelect } from '../dsh/model-selection/ModelSelect.tsx'
 import css from './CodeChatDock.module.css'
 
 /** One conversation per repository, remembered on this device. */
@@ -24,8 +25,16 @@ function savedWidth(): number {
   return 400
 }
 const MODEL_KEY = 'code_chat_model'
-const modelKey = (model: Pick<CatalogModel, 'provider' | 'id'>) => `${model.provider}/${model.id}`
-function savedModel(): string { try { return localStorage.getItem(MODEL_KEY) ?? '' } catch { return '' } }
+/** A model choice, kept per device: this chat's own, so the app's default is untouched. */
+interface ModelPick { readonly providerId: string; readonly modelId: string }
+function savedModel(): ModelPick | undefined {
+  try {
+    const saved = localStorage.getItem(MODEL_KEY) ?? ''
+    const cut = saved.indexOf('/')
+    if (cut <= 0 || cut === saved.length - 1) return undefined
+    return { providerId: saved.slice(0, cut), modelId: saved.slice(cut + 1) }
+  } catch { return undefined }
+}
 const mention = (path: string) => path.includes(' ') ? `@"${path}"` : `@${path}`
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1) || path
 /** The main composer's names, so both places label a level the same way. */
@@ -67,17 +76,23 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
 
   // The dock's own box: what is pasted here waits here, whatever else is open.
   const attachments = useAttachmentDraft('code-chat')
-  const [models, setModels] = useState<readonly CatalogModel[]>([])
-  /** provider/model picked here; empty follows the agent default. */
-  const [model, setModel] = useState(savedModel)
-  const [defaultModel, setDefaultModel] = useState('')
+  /** The providers to choose from: the same list the main composer offers. */
+  const [settings, setSettings] = useState<SettingsData | undefined>(undefined)
+  /** The model picked here; until then this chat follows the app default. */
+  const [model, setModel] = useState<ModelPick | undefined>(savedModel)
+  /** The thinking level and acceleration picked here; until then the chat's own. */
+  const [effort, setEffort] = useState<string | null>(null)
+  const [fast, setFast] = useState<boolean | null>(null)
   useEffect(() => {
-    if (!open || models.length) return
-    api.models().then(catalog => {
-      setModels(catalog.models.filter(m => m.enabled && m.available_for_agent))
-      const fallback = catalog.defaults.agent
-      if (fallback.provider && fallback.model) setDefaultModel(`${fallback.provider}/${fallback.model}`)
-    }, () => {})
+    if (!open || settings !== undefined) return
+    api.getSettings().then(setSettings, () => {})
+  }, [open, settings])
+  // Mark only the split view that owns this dock, not the whole document.
+  useLayoutEffect(() => {
+    const host = panel.current?.parentElement
+    if (!open || !host) return
+    host.setAttribute('data-code-chat-open', '')
+    return () => host.removeAttribute('data-code-chat-open')
   }, [open])
   // A page beside the panel can leave room for it via --code-chat-width.
   useLayoutEffect(() => {
@@ -90,6 +105,16 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
   useEffect(() => { if (open) input.current?.focus() }, [open])
 
   const running = session.task?.status === 'running' || session.task?.status === 'cancelling'
+  // The choice on screen: what was picked here, else what the app or this chat already uses.
+  const providerId = model?.providerId ?? settings?.orchestrator_provider ?? ''
+  const modelId = model?.modelId ?? settings?.orchestrator_model ?? ''
+  const shownEffort = effort ?? session.task?.reasoning_effort ?? null
+  const shownFast = fast ?? session.task?.fast_mode ?? false
+  const pickModel = async (provider: string, id: string): Promise<void> => {
+    setModel({ providerId: provider, modelId: id })
+    // Remembered for this dock on this device: the app's default stays as it is.
+    try { localStorage.setItem(MODEL_KEY, provider + '/' + id) } catch {}
+  }
   // This chat keeps its own level, the same one the main input shows and saves.
   const permissionMode = resolvePermissionMode(session.task?.permission_mode)
   const current = context.current && context.current !== skipped && !context.tags.includes(context.current) ? context.current : undefined
@@ -115,10 +140,11 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
       const prompt = tags.length ? `${tags.map(mention).join(' ')}\n\n${text}` : text
       const content = []
       for (const item of attachments.items) content.push({ type: 'file', receiptId: (await api.upload(id, item.file, new AbortController().signal, () => {})).receiptId })
-      const picked = models.find(m => modelKey(m) === model)
       await api.prompt(id, prompt, {
         permission_mode: permissionMode, requestId: randomId(), content,
-        ...(picked ? { provider: picked.provider, model: picked.id } : {}),
+        ...(modelId === '' ? {} : { provider: providerId, model: modelId }),
+        ...(shownEffort === null ? {} : { reasoning_effort: shownEffort }),
+        fast_mode: shownFast,
       })
       setDraft(''); chat.clear(); setSkipped(undefined); attachments.clear()
       if (id === taskId) session.reload(); else setTaskId(id)
@@ -156,7 +182,6 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)
   }
 
-  const shownModel = model || defaultModel
   return <section ref={panel} className={clsx(css.panel, dropping && css.dropping)} style={{ width }} aria-label="代码问答" data-code-chat="" {...dropProps}>
     <ShellSetupDialog enabled={open && !!workspace} scope={workspace} onReady={session.reload} />
     <div className={css.resizer} title="拖动调整宽度" onPointerDown={resize} />
@@ -226,13 +251,18 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
           <button type="button" className={clsx(css.toolButton, css.newChat)} title="新对话" aria-label="新对话" disabled={running} onClick={forget}><span className={css.plus}>+</span></button>
           <button type="button" className={clsx(css.toolButton, css.attach)} title="添加附件" aria-label="添加附件" disabled={sending} onClick={() => filePicker.current?.click()}><Icon name="clip" size={15} /></button>
           <input ref={filePicker} type="file" multiple hidden onChange={event => { if (event.target.files) attachments.add(event.target.files); event.target.value = '' }} />
-          {models.length > 0 && <label className={css.model} title="这个对话用的模型">
-            <Icon name="box" size={14} />
-            <select value={shownModel} onChange={event => { setModel(event.target.value); try { localStorage.setItem(MODEL_KEY, event.target.value) } catch {} }}>
-              {!models.some(m => modelKey(m) === shownModel) && <option value={shownModel}>默认模型</option>}
-              {models.map(m => <option key={modelKey(m)} value={modelKey(m)}>{m.name || m.id}</option>)}
-            </select>
-          </label>}
+          {/* The same selector the main composer uses: one pill, one card. */}
+          <ModelSelect
+            className={css.modelPill}
+            providers={settings?.providers ?? []}
+            providerId={providerId === '' ? undefined : providerId}
+            modelName={modelId}
+            reasoningEffort={shownEffort}
+            fastMode={shownFast}
+            disabled={sending || running}
+            onSelect={pickModel}
+            onSetGenerationOptions={(nextEffort, nextFast) => { setEffort(nextEffort); setFast(nextFast) }}
+          />
           <span className={css.permission} title="这个对话的权限级别，和主输入框里的是同一个；在主窗口的输入框里修改">
             <Icon name={permissionMode === 'full_access' ? 'alert' : 'ok'} size={14} />{PERMISSION_LABELS[permissionMode]}
           </span>

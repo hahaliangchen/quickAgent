@@ -40,7 +40,10 @@
   font-weight: 600; color: var(--codex-blue-primary); background: color-mix(in srgb, var(--codex-blue-primary) 10%, var(--codex-bg-main));
 }
 
-.composer { border-top: 1px solid var(--codex-border-subtle); padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.composer {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px 12px; border-top: 1px solid var(--codex-border-subtle);
+}
 .tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 4px 2px 8px; border-radius: 6px;
@@ -50,35 +53,73 @@
 .tagName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag button { border: 0; background: none; padding: 1px; display: inline-flex; color: var(--codex-text-muted); cursor: pointer; border-radius: 4px; }
 .tag button:hover { color: var(--codex-text-primary); background: var(--codex-hover-bg); }
-.inputCard { display: flex; flex-direction: column; border: 1px solid var(--codex-card-border); border-radius: 10px; background: var(--codex-card-bg); }
-.inputCard:focus-within { border-color: var(--codex-blue-primary); }
+
+/* The box: a quiet card that only comes forward when it is being written in.
+   Hover says it is clickable, focus says it is listening, and neither shifts
+   the layout by a pixel. */
+.inputCard {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--codex-card-border); border-radius: 14px;
+  background: var(--codex-card-bg);
+  box-shadow: 0 1px 2px rgb(16 24 40 / 0.04);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+.inputCard:hover { border-color: color-mix(in srgb, var(--codex-blue-primary) 28%, var(--codex-card-border)); }
+.inputCard:focus-within {
+  border-color: var(--codex-blue-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-blue-primary) 14%, transparent), 0 1px 2px rgb(16 24 40 / 0.04);
+}
 .inputCard textarea {
-  resize: none; font: inherit; padding: 8px 10px 4px; border: 0; outline: none; background: none; color: var(--codex-text-primary);
+  resize: none; font: inherit; font-size: 13px; line-height: 1.65;
+  padding: 11px 12px 4px; border: 0; outline: none; background: none;
+  color: var(--codex-text-primary); caret-color: var(--codex-blue-primary);
+  min-height: 54px; max-height: 220px; overflow-y: auto;
 }
+.inputCard textarea::placeholder { color: var(--codex-text-muted); }
 .error { margin: 0; color: var(--codex-diff-del); font-size: 12.5px; white-space: pre-wrap; }
-.actions { display: flex; align-items: center; gap: 6px; padding: 4px 6px 6px; }
+.actions { display: flex; align-items: center; gap: 4px; padding: 4px 8px 8px; }
+
+/* Bare round controls: the row reads as tools around the text, not as a form. */
 .toolButton {
-  width: 30px; height: 30px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; cursor: pointer;
-  border: 1px solid var(--codex-card-border); border-radius: 8px; background: none; color: var(--codex-text-secondary); font: inherit;
+  width: 28px; height: 28px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; padding: 0; cursor: pointer;
+  border: 1px solid transparent; border-radius: 8px; background: none; color: var(--codex-text-muted); font: inherit;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
-.toolButton:hover:not(:disabled) { background: var(--codex-hover-bg); color: var(--codex-text-primary); }
+.toolButton:hover:not(:disabled) {
+  background: var(--codex-hover-bg); border-color: var(--codex-card-border); color: var(--codex-text-primary);
+}
 .toolButton:disabled { opacity: .45; cursor: default; }
-.model {
-  display: inline-flex; align-items: center; gap: 5px; height: 30px; min-width: 0; padding: 0 6px 0 8px;
-  border: 1px solid var(--codex-card-border); border-radius: 8px; color: var(--codex-text-secondary);
+
+/* The model pill sits among the tool buttons at their height, and keeps the
+   shared selector's type. The row is narrow, so the pill is the one control
+   that gives way: it is the only one whose text can ellipsize. */
+.actions .modelPill {
+  flex: 0 1 auto; min-width: 0; max-width: 148px; height: 28px; padding: 0 4px 0 6px;
+  border-radius: 8px; background: none; font-size: 12.5px;
 }
-.model svg { flex-shrink: 0; }
-.model select { min-width: 0; max-width: 150px; font: inherit; font-size: 12.5px; border: 0; outline: none; background: none; color: var(--codex-text-primary); cursor: pointer; }
+.actions .modelPill:hover:not(:disabled) { background: var(--codex-hover-bg); }
+
 .permission {
-  display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 8px; flex-shrink: 0;
-  border: 1px solid var(--codex-card-border); border-radius: 8px; color: var(--codex-text-secondary); font-size: 12.5px;
+  display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 8px; flex-shrink: 0;
+  border: 1px solid transparent; border-radius: 999px; color: var(--codex-text-secondary); font-size: 12px;
+  white-space: nowrap;
 }
-.permission svg { flex-shrink: 0; }
+.permission svg { flex-shrink: 0; color: var(--codex-text-muted); }
+.permission:hover { background: var(--codex-hover-bg); }
+
 .send, .stop {
-  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 14px; border-radius: 8px; border: 0; cursor: pointer; font: inherit; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 30px; border-radius: 999px;
+  border: 0; cursor: pointer; font: inherit; font-weight: 600;
+  transition: background 120ms ease, transform 120ms ease, opacity 120ms ease;
 }
-.send { color: #fff; background: var(--codex-blue-primary); padding: 0 12px; }
-.send:disabled { opacity: .45; cursor: default; }
-.stop { color: var(--codex-diff-del); background: color-mix(in srgb, var(--codex-diff-del) 12%, transparent); }
+.send {
+  width: 30px; padding: 0; color: #fff; background: var(--codex-blue-primary);
+  box-shadow: 0 1px 2px rgb(16 24 40 / 0.14);
+  margin-left: 2px;
+}
+.send:hover:not(:disabled) { background: var(--codex-blue-hover); }
+.send:active:not(:disabled) { transform: scale(0.94); }
+.send:disabled { opacity: .38; cursor: default; box-shadow: none; }
+.stop { padding: 0 12px; color: var(--codex-diff-del); background: color-mix(in srgb, var(--codex-diff-del) 12%, transparent); }
 
 
