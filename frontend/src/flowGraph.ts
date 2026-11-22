@@ -1,6 +1,12 @@
 /**
- * The picture one turn makes: a node per step, the tools a step called drawn
- * under it, and the calls a program made drawn under the step that ran it.
+ * The picture one turn makes: the request, one card per step, a program's own
+ * calls drawn as their own branch, the closing reply and the ending.
+ *
+ * A step is one card, not four. The tools it called, the program runs it
+ * started and the subagents it spawned fold into the card of the step that
+ * started them, so a long turn reads as the steps it took instead of as every
+ * leaf it touched. Nothing is lost: every folded call is one click away in the
+ * drawer, which shows the arguments, the result and the failure of each.
  *
  * The graph is built from the same chat items the transcript renders, so every
  * conversation has one. The flow tab used to read the agent's frames table,
@@ -12,8 +18,29 @@ import type { AssistantItem, ChatItem } from './model.ts'
 
 export type FlowStatus = 'pending' | 'running' | 'done' | 'failed' | 'interrupted'
 
-/** What a node stands for: the request, one step, its calls, and how the turn ended. */
-export type FlowKind = 'request' | 'step' | 'tool' | 'call' | 'program' | 'delegate' | 'note' | 'reply' | 'end'
+/** What a card stands for: the request, one step of the AI, a program's call, the reply, the ending. */
+export type FlowKind = 'request' | 'step' | 'call' | 'reply' | 'end'
+
+/** The family a call belongs to: a step's card colours what it did with it. */
+export type FlowTone = 'read' | 'edit' | 'run' | 'search' | 'task' | 'agent' | 'context' | 'web' | 'neutral'
+
+/** What a step did besides thinking, counted once so the card and the drawer agree. */
+export interface FlowWork {
+  /** How many tool calls the step made. */
+  readonly tools: number
+  /** How many program events it produced. */
+  readonly programs: number
+  /** How many of those failed, so the card can say so without being opened. */
+  readonly failed: number
+  /** The work by family, in the order it happened. */
+  readonly groups: readonly { readonly tone: FlowTone; readonly count: number }[]
+  /** What the step was pointed at, deduplicated, the first few: what a card names. */
+  readonly names: readonly { readonly name: string; readonly tone: FlowTone }[]
+  /** One line for the card: "修改 ×2 · 运行". */
+  readonly label: string
+}
+
+const NO_WORK: FlowWork = { tools: 0, programs: 0, failed: 0, groups: [], names: [], label: '' }
 
 export interface FlowNode {
   readonly id: string
@@ -24,8 +51,10 @@ export interface FlowNode {
   readonly meta: string
   readonly status: FlowStatus
   readonly turn: number
-  /** The chat items behind the node: one, or several when a run of tools is one node. */
+  /** The chat items behind the node: its step, and everything that step did. */
   readonly items: readonly ChatItem[]
+  /** What the step did besides thinking; empty for a request, a reply a call or the ending. */
+  readonly work: FlowWork
 }
 
 export interface FlowEdge {
@@ -58,11 +87,11 @@ export interface FlowPlacement {
   readonly height: number
 }
 
-export const FLOW_WIDTH = 300
+export const FLOW_WIDTH = 340
 /** The gap between two nodes of the same column. */
-export const FLOW_GAP = 20
+export const FLOW_GAP = 18
 /** How far a branch sits to the right of the step that opened it. */
-export const FLOW_INDENT = 34
+export const FLOW_INDENT = 36
 /** Deeper chains stop indenting, so a long call chain stays one narrow column. */
 const DEEPEST_INDENT = 4
 
@@ -72,11 +101,31 @@ const DEEPEST_INDENT = 4
  * starts at the bottom of a box and ends on the top of the next one.
  */
 export const FLOW_HEIGHT: Readonly<Record<FlowKind, number>> = {
-  request: 88, reply: 88, step: 88, call: 88, tool: 78, program: 80, delegate: 88, note: 68, end: 62,
+  request: 108, step: 104, call: 96, reply: 104, end: 64,
+}
+
+/**
+ * The words of a message with the markup a card cannot draw removed: heading
+ * and list markers, emphasis, code ticks, and link destinations. A card has a
+ * line of room, so without this `### 已完成` would be drawn as its own source.
+ */
+function plain(value: string): string {
+  const lines = value.split(/\r?\n/u).map(line => line.trim()).filter(line => line !== '')
+  // A sentence rather than a section title, a quote or a table row: a bullet
+  // keeps its text, because the bullet is often the point of the message.
+  const body = lines.find(line => !/^(?:#{1,6}\s|>|\|)/u.test(line)) ?? lines[0] ?? ''
+  return body
+    .replace(/^#{1,6}\s+/u, '')
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/u, '')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, '$1')
+    .replace(/\*\*(.+?)\*\*/gu, '$1')
+    .replace(/__(.+?)__/gu, '$1')
+    .replace(/~~(.+?)~~/gu, '$1')
+    .replace(/`([^`]+)`/gu, '$1')
 }
 
 const heads = (value: string, max = 68): string => {
-  const line = value.replace(/\s+/g, ' ').trim()
+  const line = plain(value).replace(/\s+/g, ' ').trim()
   return line.length > max ? line.slice(0, max - 1) + '…' : line
 }
 
@@ -116,6 +165,73 @@ const PROGRAM_TITLES: Readonly<Record<string, string>> = {
 }
 
 const FAILED_PROGRAMS = new Set(['failed', 'invalid', 'result_invalid'])
+
+/** Where anything a step did stands, so one bundle has one answer. */
+function workStatus(item: ChatItem): FlowStatus {
+  if (item.kind === 'tool') return toolStatus(item)
+  if (item.kind === 'call') return callStatus(item)
+  if (item.kind === 'program') return FAILED_PROGRAMS.has(item.event) ? 'failed' : item.event === 'paused' ? 'interrupted' : 'done'
+  if (item.kind === 'subagent') return item.status === 'running' ? 'running' : item.status === 'done' ? 'done' : 'failed'
+  return 'done'
+}
+
+/**
+ * The family a tool belongs to. Longest-standing conventions sit on top: a
+ * command is a run even when it is called something that reads, and an edit is
+ * an edit even when the tool also writes down where it went.
+ */
+const TONES: readonly { readonly tone: FlowTone; readonly match: RegExp }[] = [
+  { tone: 'run', match: /^(exec_command|write_stdin|run_program|run_project_script|install_dependencies|run_readonly_command|process_)/ },
+  { tone: 'edit', match: /write|edit|replace|apply|patch|create|rename|mkdir|delete/ },
+  { tone: 'search', match: /search|grep|glob|find|list_/ },
+  { tone: 'agent', match: /agent|delegate|handoff/ },
+  { tone: 'task', match: /task|plan|step/ },
+  { tone: 'context', match: /skill|context|memory|remember|history|asset|compact/ },
+  { tone: 'web', match: /web|http|browser|fetch|url/ },
+  { tone: 'read', match: /read|cat|open|attachment|inspect/ },
+]
+
+const TONE_WORDS: Readonly<Record<FlowTone, string>> = {
+  read: '读取', edit: '修改', run: '运行', search: '搜索', task: '任务', agent: '子代理', context: '上下文', web: '网络', neutral: '工具',
+}
+
+/** What family a call belongs to, by its name. */
+export function toneOf(name: string): FlowTone {
+  const lower = name.toLowerCase()
+  return TONES.find(entry => entry.match.test(lower))?.tone ?? 'neutral'
+}
+
+/** What a step did besides thinking, counted from the items it folded in. */
+function workOf(items: readonly ChatItem[]): FlowWork {
+  const counts = new Map<FlowTone, number>()
+  const names: { name: string; tone: FlowTone }[] = []
+  let tools = 0
+  let programs = 0
+  let failed = 0
+  const note = (tone: FlowTone, name: string): void => {
+    counts.set(tone, (counts.get(tone) ?? 0) + 1)
+    if (name !== '' && names.length < 8 && !names.some(one => one.name === name)) names.push({ name, tone })
+  }
+  for (const item of items) {
+    if (item.kind === 'tool') {
+      tools += 1
+      note(toneOf(item.name), item.name)
+    } else if (item.kind === 'program') {
+      programs += 1
+      note('run', PROGRAM_TITLES[item.event] ?? '程序')
+    } else if (item.kind === 'subagent') {
+      note('agent', item.name === '' ? '子代理' : item.name)
+    } else if (item.kind === 'interjection') {
+      note('context', '插话')
+    } else continue
+    if (workStatus(item) === 'failed') failed += 1
+  }
+  const groups = [...counts.entries()].map(([tone, count]) => ({ tone, count }))
+  return {
+    tools, programs, failed, groups, names,
+    label: groups.map(group => TONE_WORDS[group.tone] + (group.count > 1 ? ' ×' + String(group.count) : '')).join(' · '),
+  }
+}
 
 /** The items of each turn, in the order the turn ran them. */
 function turnGroups(items: readonly ChatItem[]): { turn: number; items: ChatItem[] }[] {
@@ -164,9 +280,59 @@ export function formatSpan(ms: number): string {
   return String(minutes) + ' 分 ' + String(Math.round(seconds - minutes * 60)) + ' s'
 }
 
+/** One step, and everything it did: the unit the graph draws a card for. */
+interface Bundle {
+  readonly lead: AssistantItem | undefined
+  readonly items: ChatItem[]
+}
+
 /**
- * One turn as a flow: the request, every step in order, the tools each step
- * called below it, and a program's calls nested under the step that ran it.
+ * Split a branch into one bundle per step. Work that arrives before any step —
+ * a program's own call, a tool the runtime ran on its own — is a bundle too, so
+ * it still gets one card instead of a card per call.
+ */
+function bundles(list: readonly ChatItem[]): Bundle[] {
+  const out: Bundle[] = []
+  for (const item of list) {
+    if (item.kind === 'user' || item.kind === 'turn' || item.kind === 'turn-end' || item.kind === 'observer' || item.kind === 'retrospective') continue
+    if (item.kind === 'assistant') {
+      out.push({ lead: item, items: [item] })
+      continue
+    }
+    const open = out.at(-1)
+    if (open === undefined || open.lead === undefined && open.items.length === 0) out.push({ lead: undefined, items: [item] })
+    else open.items.push(item)
+  }
+  return out
+}
+
+/** Where a whole step stands: one running call is enough to keep it running. */
+function bundleStatus(bundle: Bundle): FlowStatus {
+  if (bundle.lead?.streaming === true) return 'running'
+  const work = bundle.items.filter(item => item.kind !== 'assistant')
+  const states = work.map(workStatus)
+  if (states.includes('failed')) return 'failed'
+  if (states.includes('running')) return 'running'
+  if (states.includes('interrupted')) return 'interrupted'
+  return work.length === 0 && bundle.lead === undefined ? 'pending' : 'done'
+}
+
+/** What a card calls a bundle nobody's step claims. */
+function titleOfWork(items: readonly ChatItem[]): string {
+  if (items.length > 1) return '工具调用 ×' + String(items.length)
+  const item = items[0]
+  if (item === undefined) return '步骤'
+  if (item.kind === 'tool') return item.name
+  if (item.kind === 'program') return PROGRAM_TITLES[item.event] ?? '程序'
+  if (item.kind === 'subagent') return item.name === '' ? '子代理' : item.name
+  if (item.kind === 'interjection') return heads(item.text, 60) || '插话'
+  if (item.kind === 'call') return item.name
+  return '步骤'
+}
+
+/**
+ * One turn as a flow: the request, one card per step carrying everything that
+ * step did, a program's own calls as branches off it, and the ending.
  */
 export function buildFlow(items: readonly ChatItem[], turn: number): FlowGraph {
   const group = turnGroups(items).find(entry => entry.turn === turn)
@@ -178,12 +344,12 @@ export function buildFlow(items: readonly ChatItem[], turn: number): FlowGraph {
   let counter = 0
   const nextId = (): string => String(turn) + ':' + String(counter++)
 
+  const add = (node: FlowNode): FlowNode => { nodes.push(node); return node }
+
+  /** An edge leaves one card and lands on the next; anything off the turn's chain is a branch. */
   const link = (source: FlowNode, target: FlowNode): void => {
-    // The turn's own chain hangs off the request; everything else is a branch.
     edges.push({ id: source.id + '->' + target.id, source: source.id, target: target.id, branch: target.parent !== requestId, status: target.status })
   }
-
-  const add = (node: FlowNode): FlowNode => { nodes.push(node); return node }
 
   const request = add({
     id: nextId(), parent: null, kind: 'request', turn,
@@ -192,122 +358,51 @@ export function buildFlow(items: readonly ChatItem[], turn: number): FlowGraph {
     meta: '第 ' + String(turn) + ' 轮',
     status: endStatus(answered?.kind === 'turn-end' ? answered.reason : undefined),
     items: asked === undefined ? [] : [asked],
+    work: NO_WORK,
   })
   const requestId = request.id
   /** The last node on the turn's own chain: the ending follows it. */
   let spine: FlowNode = request
 
-  /** One branch's items: its own chain, and the tools each step called below it. */
+  /**
+   * One branch of the graph. Every step becomes a single card; a call the
+   * program made keeps a card of its own, since what happened inside it is a
+   * flow of its own, drawn below it.
+   */
   const walk = (branch: readonly ChatItem[], parent: FlowNode): void => {
     let previous: FlowNode | undefined
-    let owner: { node: FlowNode; item: AssistantItem } | undefined
-    let run: { at: number; items: ChatItem[] } | undefined
-    const place = (node: FlowNode): void => {
+    for (const bundle of bundles(branch)) {
+      const lead = bundle.lead
+      const thought = lead === undefined || lead.reasoning.trim() === '' ? '' : thoughtHeadline(lead.reasoning)
+      const node = add({
+        id: nextId(), parent: parent.id, kind: 'step', turn,
+        title: lead === undefined
+          ? titleOfWork(bundle.items)
+          : thought || heads(lead.text, 60) || '第 ' + String(lead.step + 1) + ' 步',
+        summary: lead === undefined ? '' : thought === '' ? '' : heads(lead.text, 60),
+        meta: lead === undefined ? '' : '第 ' + String(lead.step + 1) + ' 步',
+        status: bundleStatus(bundle),
+        // A call gets a card of its own below: the step does not carry it twice.
+        items: bundle.items.filter(item => item.kind !== 'call'),
+        work: workOf(bundle.items),
+      })
       link(previous ?? parent, node)
       previous = node
       if (node.parent === requestId) spine = node
-    }
-    for (const item of branch) {
-      if (item.kind === 'user' || item.kind === 'turn-end' || item.kind === 'observer' || item.kind === 'retrospective') continue
-      if (item.kind === 'tool') {
-        // A tool the step's own AI called sits under that step; a program's call
-        // carries a line number and belongs to the call it was made in.
-        const owned = owner !== undefined && item.line === undefined && item.frame === owner.item.frame
-          && (item.step === undefined || item.step === owner.item.step)
-        if (owned && owner !== undefined) {
-          const node = add({
-            id: nextId(), parent: owner.node.id, kind: 'tool', turn,
-            title: item.name, summary: '', meta: '', status: toolStatus(item), items: [item],
-          })
-          // Siblings stack in one column under the step: the second call follows
-          // the first rather than crossing back over it to the step above.
-          link(previous ?? owner.node, node)
-          previous = node
-          continue
-        }
-        owner = undefined
-        if (run !== undefined) {
-          run.items.push(item)
-          const grouped = nodes[run.at]
-          if (grouped !== undefined) {
-            nodes[run.at] = {
-              ...grouped,
-              items: [...run.items],
-              title: '工具调用 ×' + String(run.items.length),
-              status: run.items.some(one => toolStatus(one) === 'running') ? 'running' : run.items.some(one => toolStatus(one) === 'failed') ? 'failed' : 'done',
-            }
-          }
-          continue
-        }
-        const node = add({
-          id: nextId(), parent: parent.id, kind: 'tool', turn,
-          title: item.name, summary: '', meta: '', status: toolStatus(item), items: [item],
-        })
-        run = { at: nodes.length - 1, items: [item] }
-        place(node)
-        continue
-      }
-      run = undefined
-      if (item.kind === 'assistant') {
-        const thought = item.reasoning.trim() === '' ? '' : thoughtHeadline(item.reasoning)
-        const node = add({
-          id: nextId(), parent: parent.id, kind: 'step', turn,
-          title: thought || heads(item.text, 60) || '第 ' + String(item.step + 1) + ' 步',
-          summary: thought === '' ? '' : heads(item.text, 60),
-          meta: '第 ' + String(item.step + 1) + ' 步',
-          status: item.streaming ? 'running' : 'done',
-          items: [item],
-        })
-        owner = { node, item }
-        place(node)
-        continue
-      }
-      owner = undefined
-      if (item.kind === 'call') {
-        const node = add({
-          id: nextId(), parent: parent.id, kind: 'call', turn,
-          // The runtime names a program's call with its brackets already: don't double them.
+      for (const item of bundle.items) {
+        if (item.kind !== 'call') continue
+        // The runtime names a program's call with its brackets already: don't double them.
+        const call = add({
+          id: nextId(), parent: node.id, kind: 'call', turn,
           title: item.name.endsWith(')') ? item.name : item.name + '()',
           summary: heads(item.description, 60),
           meta: [item.module ? '模块' : '虚函数', item.line === undefined ? '' : '第 ' + String(item.line) + ' 行'].filter(Boolean).join(' · '),
           status: callStatus(item),
           items: [item],
+          work: NO_WORK,
         })
-        place(node)
-        walk(item.steps, node)
-        continue
-      }
-      if (item.kind === 'program') {
-        const node = add({
-          id: nextId(), parent: parent.id, kind: 'program', turn,
-          title: PROGRAM_TITLES[item.event] ?? '程序',
-          summary: heads(item.text, 70),
-          meta: '',
-          status: FAILED_PROGRAMS.has(item.event) ? 'failed' : item.event === 'paused' ? 'interrupted' : 'done',
-          items: [item],
-        })
-        place(node)
-        continue
-      }
-      if (item.kind === 'subagent') {
-        const node = add({
-          id: nextId(), parent: parent.id, kind: 'delegate', turn,
-          title: item.name,
-          summary: heads(item.report, 60),
-          meta: '子代理',
-          status: item.status === 'running' ? 'running' : item.status === 'done' ? 'done' : 'failed',
-          items: [item],
-        })
-        place(node)
-        continue
-      }
-      if (item.kind === 'interjection') {
-        const node = add({
-          id: nextId(), parent: parent.id, kind: 'note', turn,
-          title: heads(item.text, 60) || '插话',
-          summary: '', meta: item.delivered ? '已送达' : '待送达', status: 'done', items: [item],
-        })
-        place(node)
+        link(node, call)
+        walk(item.steps, call)
       }
     }
   }
@@ -321,7 +416,8 @@ export function buildFlow(items: readonly ChatItem[], turn: number): FlowGraph {
     const at = nodes.findLastIndex(node => node.kind === 'step' && node.items[0] === reply)
     const node = at < 0 ? undefined : nodes[at]
     if (node !== undefined) {
-      nodes[at] = { ...node, kind: 'reply', title: '回复', summary: heads(reply.kind === 'assistant' ? reply.text : '', 74), meta: '' }
+      // The card names the answer rather than itself: its kind already says 回复.
+      nodes[at] = { ...node, kind: 'reply', title: heads(reply.kind === 'assistant' ? reply.text : '', 74), summary: '' }
       if (spine === node) spine = nodes[at]!
     }
   }
@@ -331,7 +427,7 @@ export function buildFlow(items: readonly ChatItem[], turn: number): FlowGraph {
       title: ENDINGS[answered.reason.kind] ?? answered.reason.kind,
       summary: answered.reason.kind === 'error' ? heads(answered.reason.message, 74) : '',
       meta: answered.durationMs === undefined ? '' : formatSpan(answered.durationMs),
-      status: endStatus(answered.reason), items: [answered],
+      status: endStatus(answered.reason), items: [answered], work: NO_WORK,
     })
     link(spine, node)
   }

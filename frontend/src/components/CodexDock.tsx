@@ -6,9 +6,54 @@ const STROKE = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stro
 
 export type DockTab = 'home' | 'skills' | 'git'
 
+export interface DockPluginEntry {
+  readonly key: string
+  readonly owner: string
+  readonly page: string
+  readonly title: string
+}
+
+function PluginDockIcon({ owner }: { owner: string }) {
+  const id = owner.toLowerCase()
+  if (id.includes('ppt') || id.includes('slide')) {
+    return (
+      <svg {...STROKE} aria-hidden="true">
+        <rect x="3" y="4" width="18" height="12" rx="2" />
+        <path d="M8 20h8M12 16v4" />
+        <path d="M8 9h4M8 12h8" />
+      </svg>
+    )
+  }
+  if (id.includes('excel') || id.includes('sheet')) {
+    return (
+      <svg {...STROKE} aria-hidden="true">
+        <rect x="3.5" y="4" width="17" height="16" rx="2" />
+        <path d="M3.5 9.5h17M3.5 14.5h17M9.5 4v16" />
+      </svg>
+    )
+  }
+  if (id.includes('word') || id.includes('doc')) {
+    return (
+      <svg {...STROKE} aria-hidden="true">
+        <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+        <path d="M14 3v5h5M8.5 13h7M8.5 16.5h5" />
+      </svg>
+    )
+  }
+  return (
+    <svg {...STROKE} aria-hidden="true">
+      <rect x="4" y="4" width="16" height="16" rx="3" />
+      <path d="M8 9h8M8 13h8M8 17h5" />
+    </svg>
+  )
+}
+
 interface CodexDockProps {
   activeTab?: DockTab
+  activePluginKey?: string | undefined
+  pluginPages?: readonly DockPluginEntry[] | undefined
   onSelectTab?: (tab: DockTab) => void
+  onSelectPlugin?: (entry: DockPluginEntry) => void
   onNewChat?: () => void
   onOpenSettings?: () => void
   onToggleTheme?: () => void
@@ -17,7 +62,10 @@ interface CodexDockProps {
 
 export function CodexDock({
   activeTab = 'home',
+  activePluginKey,
+  pluginPages = [],
   onSelectTab,
+  onSelectPlugin,
   onNewChat,
   onOpenSettings,
   onToggleTheme,
@@ -29,11 +77,11 @@ export function CodexDock({
         {/* 1. App Logo / Home */}
         <button
           type="button"
-          className={clsx(css.dockBtn, css.homeBtn, activeTab === 'home' && css.active)}
+          className={clsx(css.dockBtn, css.homeBtn, !activePluginKey && activeTab === 'home' && css.active)}
           title="首页 / 新会话"
           onClick={() => {
             onSelectTab?.('home')
-            if (activeTab === 'home') onNewChat?.()
+            if (!activePluginKey && activeTab === 'home') onNewChat?.()
           }}
         >
           <svg {...STROKE} aria-hidden="true">
@@ -44,7 +92,7 @@ export function CodexDock({
 
         <button
           type="button"
-          className={clsx(css.dockBtn, activeTab === 'skills' && css.active)}
+          className={clsx(css.dockBtn, !activePluginKey && activeTab === 'skills' && css.active)}
           title="技能工作台"
           aria-label="技能工作台"
           onClick={() => onSelectTab?.('skills')}
@@ -57,7 +105,7 @@ export function CodexDock({
 
         <button
           type="button"
-          className={clsx(css.dockBtn, activeTab === 'git' && css.active)}
+          className={clsx(css.dockBtn, !activePluginKey && activeTab === 'git' && css.active)}
           title="Git"
           aria-label="Git"
           onClick={() => onSelectTab?.('git')}
@@ -67,6 +115,19 @@ export function CodexDock({
             <path d="M6.5 8v8M17.5 10c0 4-5 4-9.5 6.5" />
           </svg>
         </button>
+
+        {pluginPages.map(entry => (
+          <button
+            key={entry.key}
+            type="button"
+            className={clsx(css.dockBtn, activePluginKey === entry.key && css.active)}
+            title={entry.title}
+            aria-label={entry.title}
+            onClick={() => onSelectPlugin?.(entry)}
+          >
+            <PluginDockIcon owner={entry.owner} />
+          </button>
+        ))}
       </div>
 
       <div className={css.bottomGroup}>

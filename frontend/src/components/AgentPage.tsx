@@ -122,6 +122,8 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
         <div className={welcomeCss.composerWrap}>
           {renderSlot('agent.composer', {
             variant: 'hero',
+            // The new chat's own draft: typed here, it survives a look elsewhere.
+            draftKey: NEW_CHAT_DRAFT,
             disabled: !workspace.ready,
             note: workspace.composerNote,
             running: false,
@@ -171,6 +173,9 @@ export function SkillPackagesPage({ workspace, onBack }: { workspace: AgentWorks
 }
 
 export type Tab = 'chat' | 'flow' | 'skill-pages'
+
+/** The key of the draft written before a chat exists; it becomes the task's own once it does. */
+const NEW_CHAT_DRAFT = 'new-chat'
 
 export function ConversationPage({
   workspace,
@@ -331,6 +336,8 @@ export function ConversationPage({
                 )
               : renderSlot('agent.composer', {
                   variant: 'composer',
+                  // The text follows the session, not the box: come back and it is still there.
+                  draftKey: workspace.taskId ?? NEW_CHAT_DRAFT,
                   // A running turn still takes messages: interjections or a queue.
                   disabled: !ready || (!canContinue && !running),
                   note: composerNote,

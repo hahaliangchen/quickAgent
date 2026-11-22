@@ -4,6 +4,8 @@
 /desktop/target
 /desktop/binaries
 /desktop/gen
+/bundled_plugins/*
+!/bundled_plugins/.gitkeep
 /ai_proxy_config.json
 /.codex-workspace-mcp/
 

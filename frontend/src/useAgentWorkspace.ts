@@ -239,6 +239,7 @@ export function useAgentWorkspace() {
   const selectModel = useCallback(async (providerId: string, modelId: string): Promise<void> => {
     setSelectedModelOverride(modelId)
     setSelectedProviderOverride(providerId)
+    let rowError: string | undefined
     try {
       const latest = settings ?? await api.getSettings()
       const capability = latest.providers.find(p => p.id === providerId)?.model_capabilities[modelId]
@@ -248,43 +249,54 @@ export function useAgentWorkspace() {
 
       // The open chat keeps the pick for its own next message, and that message
       // carries the model anyway, so a chat that is still turning is left alone:
-      // the server rejects a mid-turn switch, and that rejection used to skip the
-      // save below — which is what stranded every new chat on an older model.
+      // the server rejects a mid-turn switch. A refusal is reported, never fatal:
+      // the row of one chat must not cost the default that the next chat opens on.
       if (taskId !== undefined && !generationLocked(task?.status)) {
-        await api.updateTask(taskId, {
-          model: modelId,
-          provider: providerId,
-          reasoning_effort: defaultEffort || null,
-          fast_mode: false,
-        })
-        session.reload()
-        refreshTasks()
+        try {
+          await api.updateTask(taskId, {
+            model: modelId,
+            provider: providerId,
+            reasoning_effort: defaultEffort || null,
+            fast_mode: false,
+          })
+          session.reload()
+          refreshTasks()
+        } catch (cause) {
+          rowError = messageOf(cause)
+        }
       }
 
       await persistDefaults({ provider: providerId, model: modelId, reasoning_effort: defaultEffort, fast_mode: false })
-      setNotice(undefined)
+      setNotice(rowError)
     } catch (cause) {
-      setNotice(messageOf(cause))
+      // The pick is in force for this chat but the next one will not inherit it,
+      // so say so: silence here reads as "the default moved" and it did not.
+      setNotice(`已用于当前对话，但没能存成新会话的默认模型：${messageOf(cause)}`)
     }
   }, [api, persistDefaults, refreshTasks, session.reload, settings, task?.status, taskId])
 
   const setGenerationOptions = useCallback(async (reasoningEffort: string, fastMode: boolean): Promise<void> => {
     setSelectedEffortOverride(reasoningEffort || null)
     setSelectedFastModeOverride(fastMode)
+    let rowError: string | undefined
     try {
       // Same reason one level down: a running chat refuses a level change, and
       // that refusal must not cost the levels their saved default either.
       if (taskId !== undefined && !generationLocked(task?.status)) {
-        await api.updateTask(taskId, {
-          reasoning_effort: reasoningEffort || null,
-          fast_mode: fastMode,
-        })
-        session.reload()
+        try {
+          await api.updateTask(taskId, {
+            reasoning_effort: reasoningEffort || null,
+            fast_mode: fastMode,
+          })
+          session.reload()
+        } catch (cause) {
+          rowError = messageOf(cause)
+        }
       }
       await persistDefaults({ reasoning_effort: reasoningEffort, fast_mode: fastMode })
-      setNotice(undefined)
+      setNotice(rowError)
     } catch (cause) {
-      setNotice(messageOf(cause))
+      setNotice(`已用于当前对话，但没能存成新对话的默认设置：${messageOf(cause)}`)
     }
   }, [api, persistDefaults, session.reload, task?.status, taskId])
 

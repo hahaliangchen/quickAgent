@@ -1,10 +1,10 @@
 .node {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   box-sizing: border-box;
-  width: 300px;
-  padding: 8px 12px 9px;
+  width: 340px;
+  padding: 9px 12px 10px;
   overflow: hidden;
   border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
   border-radius: 12px;
@@ -69,18 +69,20 @@
   color: #16785d;
 }
 
+/* How many calls the step folded in: the card says it once, in the corner. */
 .count {
-  padding: 1px 5px;
+  padding: 1px 6px;
   border-radius: 999px;
   background: rgba(47, 111, 214, 0.12);
   color: #2f6fd6;
   font-size: 10.5px;
   font-weight: 600;
+  line-height: 1.5;
 }
 
 .meta {
   overflow: hidden;
-  color: var(--dsw-alias-label-tertiary, #9ca3af);
+  color: var(--dsw-alias-label-tertiary, #7b8494);
   font-size: 10.5px;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -91,7 +93,7 @@
 }
 
 .status {
-  color: var(--dsw-alias-label-tertiary, #9ca3af);
+  color: var(--dsw-alias-label-tertiary, #7b8494);
   font-size: 10.5px;
   white-space: nowrap;
 }
@@ -113,6 +115,15 @@
   text-overflow: ellipsis;
 }
 
+/* The request and the reply are read, not scanned: they take two lines. */
+.node[data-kind='request'] .title,
+.node[data-kind='reply'] .title {
+  display: -webkit-box;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .summary {
   display: -webkit-box;
   overflow: hidden;
@@ -120,8 +131,52 @@
   font-size: 11.5px;
   line-height: 1.4;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   word-break: break-word;
+}
+
+/* What the step was pointed at: the calls by name, coloured by family. */
+.chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin-top: auto;
+  overflow: hidden;
+}
+
+.chip {
+  max-width: 138px;
+  padding: 1px 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(107, 114, 128, 0.1);
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  font-family: var(--dsh-font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chip[data-tone='read'] { background: rgba(47, 111, 214, 0.1); color: #2f5ea8; }
+.chip[data-tone='edit'] { background: rgba(180, 119, 26, 0.13); color: #96681c; }
+.chip[data-tone='run'] { background: rgba(107, 79, 216, 0.12); color: #5b41c0; }
+.chip[data-tone='search'] { background: rgba(15, 148, 136, 0.12); color: #0d7d72; }
+.chip[data-tone='task'] { background: rgba(45, 178, 140, 0.15); color: #16785d; }
+.chip[data-tone='agent'] { background: rgba(194, 65, 12, 0.12); color: #a63d0d; }
+.chip[data-tone='context'] { background: rgba(100, 116, 139, 0.13); color: #4d5b6d; }
+.chip[data-tone='web'] { background: rgba(14, 165, 233, 0.13); color: #0b7fb3; }
+
+.more {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.05);
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.55;
 }
 
 /*

@@ -571,3 +571,89 @@
                 .is_empty()
         );
     }
+
+    /// A pick on a Responses or Messages provider must become the saved default:
+    /// that is the same route the agent already runs a chat on. Refusing the save
+    /// left the next chat on whatever model had been stored before the pick, which
+    /// is exactly the "new chat still opens on the old model" a reader complains of.
+    #[test]
+    fn the_default_route_accepts_every_protocol_the_agent_speaks() {
+        let root = std::env::temp_dir().join(crate::media::visual_artifacts::new_id());
+        let path = root.join("providers.yml");
+        write_yaml_atomic(&path, &json!([
+            {"id":"llm-pi-ai","config":{"providers":{
+                "completions":{"baseURL":"https://c.example/v1","api":"openai-completions","models":[{"id":"c-model"}]},
+                "responses":{"baseURL":"https://r.example/v1","api":"openai-responses","models":[{"id":"r-model"}]},
+                "messages":{"baseURL":"https://m.example/v1","api":"anthropic-messages","models":[{"id":"m-model"}]}
+            }}},
+            {"id":"agent-default-model","config":{"provider":"completions","model":"c-model"}}
+        ])).unwrap();
+        for (provider, model) in [("responses", "r-model"), ("messages", "m-model")] {
+            let view = settings_view(&load_config(&path).unwrap(), disk_revision(&path).unwrap());
+            let edit = json!({"revision":view["revision"],"providers":view["providers"],
+                "orchestrator_provider":provider,"orchestrator_model":model});
+            save_settings(&path, serde_json::from_value(edit).unwrap())
+                .unwrap()
+                .unwrap();
+            let saved = load_config(&path).unwrap();
+            assert_eq!(saved.orchestrator_provider.as_deref(), Some(provider));
+            assert_eq!(saved.orchestrator_model.as_deref(), Some(model));
+            assert!(
+                agent_api(&saved.providers[provider].api_type),
+                "the saved default is a route the agent can run: {provider}"
+            );
+        }
+        assert!(!agent_api("some-other-protocol"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An ordinary setup — the conversation on a Responses or Messages route, the
+    /// dedicated vision route on the Responses provider — must save, and the saved
+    /// default must be the one the next chat opens on. Both were once refused, and
+    /// every refusal silently left the next chat on the model stored before it.
+    #[test]
+    fn a_responses_conversation_with_a_responses_vision_route_saves_and_takes_effect() {
+        let root = std::env::temp_dir().join(crate::media::visual_artifacts::new_id());
+        let path = root.join("providers.yml");
+        write_yaml_atomic(&path, &json!([
+            {"id":"llm-pi-ai","config":{"providers":{
+                "c":{"baseURL":"https://c.example/v1","api":"openai-completions","models":[{"id":"c-model"}]},
+                "r":{"baseURL":"https://r.example/v1","api":"openai-responses","models":[{"id":"r-model"}]},
+                "m":{"baseURL":"https://m.example/v1","api":"anthropic-messages","models":[{"id":"m-model"}]}
+            }}},
+            {"id":"agent-default-model","config":{"provider":"c","model":"c-model"}}
+        ])).unwrap();
+        write_yaml_atomic(
+            &generation_settings_path(&path),
+            &json!({"visual_tool":{"provider":"r","model":"r-model","reasoning_effort":"medium"}}),
+        )
+        .unwrap();
+        let view = settings_view(&load_config(&path).unwrap(), disk_revision(&path).unwrap());
+        let edit = json!({"revision":view["revision"],"providers":view["providers"],
+            "orchestrator_provider":"r","orchestrator_model":"r-model"});
+        save_settings(&path, serde_json::from_value(edit).unwrap())
+            .unwrap()
+            .unwrap();
+        let saved = load_config(&path).unwrap();
+        assert_eq!(saved.orchestrator_provider.as_deref(), Some("r"));
+        assert_eq!(saved.visual_tool.provider.as_deref(), Some("r"));
+        // The pick reaches the state a new chat is built from, not just the file.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut state = crate::server::agent_service::tests::test_state(
+            &root,
+            listener.local_addr().unwrap(),
+        );
+        apply_agent_config(&mut state, &saved);
+        assert_eq!(state.default_model, "r-model");
+        assert_eq!(state.provider_name, "r");
+        assert!(state.provider_routes["r"].responses);
+        // Image generation is the one caller that needs an OpenAI image endpoint.
+        let view = settings_view(&saved, disk_revision(&path).unwrap());
+        let edit = json!({"revision":view["revision"],"providers":view["providers"],
+            "image_generation":{"provider":"m","model":"m-model"}});
+        assert!(save_settings(&path, serde_json::from_value(edit).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("image_generation provider is incompatible"));
+        let _ = std::fs::remove_dir_all(root);
+    }

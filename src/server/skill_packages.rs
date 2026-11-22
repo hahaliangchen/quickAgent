@@ -47,6 +47,7 @@ pub struct Package {
     native: Option<NativeBackend>,
     remote: Option<Arc<remote::Connection>>,
     mcp: Option<Arc<mcp_client::Connection>>,
+    local_service_port: Option<u16>,
 }
 
 impl Package {
@@ -255,6 +256,21 @@ fn load_with(root: &Path, origin: Origin, native: Option<NativeBackend>) -> Resu
                 == manifest.inject.len(),
         "invalid or duplicate service dependency"
     );
+    if let Some(service) = &manifest.local_service {
+        ensure!(
+            !service.program.is_empty()
+                && !service.program.contains('\0')
+                && service.args.len() <= 64
+                && service.args.iter().all(|arg| !arg.contains('\0')),
+            "invalid local service configuration"
+        );
+        if service.program.contains('/') || service.program.contains('\\') {
+            ensure!(
+                crate::tools::file_edit::workspace_path(&root, &service.program)?.is_file(),
+                "local service executable missing"
+            );
+        }
+    }
     Ok(Package {
         root,
         manifest,
@@ -264,6 +280,7 @@ fn load_with(root: &Path, origin: Origin, native: Option<NativeBackend>) -> Resu
         native,
         remote: None,
         mcp: None,
+        local_service_port: None,
     })
 }
 #[derive(Default, Deserialize, Serialize)]
@@ -517,6 +534,14 @@ impl Registry {
         ensure!(package.scope.is_some(), "plugin disabled");
         package.remote.clone().context("not a remote plugin")
     }
+    pub fn local_service_port(&self, id: &str) -> Result<u16> {
+        let entries = self.entries.read().unwrap();
+        let package = entries.get(id).context("plugin not found")?;
+        ensure!(package.scope.is_some(), "plugin disabled");
+        package
+            .local_service_port
+            .context("plugin has no running local service")
+    }
     pub fn remote_page(
         &self,
         id: &str,
@@ -545,6 +570,69 @@ pub(crate) fn register_builtin(ctx: &PluginContext<'_>, tools: &ToolCatalog, pac
     Ok(())
 }
 
+fn bundled_plugins_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("GROW_BUNDLED_PLUGINS_DIR") {
+        return (!dir.is_empty()).then(|| PathBuf::from(dir));
+    }
+    if let Some(resources) = std::env::var_os("GROW_RESOURCES_DIR") {
+        return (!resources.is_empty()).then(|| PathBuf::from(resources).join("bundled_plugins"));
+    }
+    #[cfg(not(test))]
+    {
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bundled_plugins"))
+    }
+    #[cfg(test)]
+    {
+        None
+    }
+}
+
+fn discover_bundled_dirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join("plugin.json").is_file())
+        .collect::<Vec<_>>();
+    dirs.sort();
+    dirs
+}
+
+fn spawn_local_service(
+    root: &Path,
+    service: &crate::server::plugin_protocol::LocalService,
+) -> Result<(u16, std::process::Child)> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .context("allocating ephemeral port for plugin local service")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    let program: PathBuf = if service.program.contains('/') || service.program.contains('\\') {
+        crate::tools::file_edit::workspace_path(root, &service.program)?
+    } else {
+        service.program.clone().into()
+    };
+    let mut command = std::process::Command::new(&program);
+    command
+        .args(&service.args)
+        .current_dir(root)
+        .env("PORT", port.to_string())
+        .env("BIND", format!("127.0.0.1:{port}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let child = command
+        .spawn()
+        .with_context(|| format!("starting plugin local service {}", program.display()))?;
+    Ok((port, child))
+}
+
 pub struct PackagesPlugin;
 impl Plugin for PackagesPlugin {
     fn id(&self) -> &str {
@@ -564,6 +652,48 @@ impl Plugin for PackagesPlugin {
             let enabled = config.enabled.get(&package.manifest.id).copied();
             register_builtin(ctx, &tools, package, enabled)?;
         }
+        let mut seen = std::collections::BTreeSet::new();
+        // Auto-discover modular bundled plugins shipped alongside the app resources;
+        // once bundled, they activate automatically unless explicitly disabled/removed.
+        if let Some(bundled_root) = bundled_plugins_dir() {
+            for path in discover_bundled_dirs(&bundled_root) {
+                let Ok(canonical) = path.canonicalize() else {
+                    continue;
+                };
+                if !seen.insert(canonical.clone()) {
+                    continue;
+                }
+                match load(&path) {
+                    Ok(package) => {
+                        let id = package.manifest.id.clone();
+                        if config.removed.contains(&id)
+                            || tools.packages.entries.read().unwrap().contains_key(&id)
+                        {
+                            continue;
+                        }
+                        let should_enable = config
+                            .enabled
+                            .get(&id)
+                            .copied()
+                            .unwrap_or(package.manifest.enabled_by_default);
+                        tools
+                            .packages
+                            .entries
+                            .write()
+                            .unwrap()
+                            .insert(id.clone(), package.clone());
+                        if should_enable {
+                            if let Err(error) = ctx.mount(PackagePlugin(package)) {
+                                tracing::warn!(plugin = %id, %error, "failed to mount bundled plugin");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(path = %path.display(), %error, "ignoring invalid bundled plugin");
+                    }
+                }
+            }
+        }
         let mut paths = config.packages;
         if let Some(path) = std::env::var_os("DSH_SKILL_PACKAGES_DIR") {
             for entry in std::fs::read_dir(path)? {
@@ -573,7 +703,6 @@ impl Plugin for PackagesPlugin {
                 }
             }
         }
-        let mut seen = std::collections::BTreeSet::new();
         for path in paths {
             let canonical = path.canonicalize()?;
             if !seen.insert(canonical.clone()) {
@@ -598,13 +727,18 @@ impl Plugin for PackagesPlugin {
                 !tools.packages.entries.read().unwrap().contains_key(&id),
                 "duplicate package ID: {id}"
             );
+            let should_enable = config
+                .enabled
+                .get(&id)
+                .copied()
+                .unwrap_or(package.manifest.enabled_by_default);
             tools
                 .packages
                 .entries
                 .write()
                 .unwrap()
                 .insert(id.clone(), package.clone());
-            if config.enabled.get(&id).copied().unwrap_or(true) {
+            if should_enable {
                 ctx.mount(PackagePlugin(package))?;
             }
         }
@@ -728,6 +862,17 @@ impl Plugin for PackagePlugin {
         });
         ctx.provide(&format!("plugin:{}", self.0.manifest.id), Arc::new(()))?;
         let mut current = self.0.clone();
+        if let Some(service) = &self.0.manifest.local_service {
+            let (port, child) = spawn_local_service(&self.0.root, service)?;
+            current.local_service_port = Some(port);
+            let child = Arc::new(Mutex::new(Some(child)));
+            ctx.effect(move || {
+                if let Some(mut process) = child.lock().unwrap().take() {
+                    let _ = process.kill();
+                    let _ = process.wait();
+                }
+            });
+        }
         current.scope = Some(ctx.scope());
         tools
             .packages
@@ -740,6 +885,7 @@ impl Plugin for PackagePlugin {
         ctx.effect(move || {
             if let Some(package) = registry.entries.write().unwrap().get_mut(&id) {
                 package.scope = None;
+                package.local_service_port = None;
             }
             crate::server::mcp::notify_tools_changed();
         });
@@ -1331,6 +1477,50 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':r['params']}))
         manifest["pages"][0]["entry"] = json!("../outside.html");
         std::fs::write(root.join("plugin.json"), manifest.to_string()).unwrap();
         assert!(load(&root).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bundled_plugins_discovery_and_local_service_manifest_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "bundled-plugins-{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        let ppt = root.join("ppt");
+        let empty = root.join("not-a-plugin");
+        std::fs::create_dir_all(ppt.join("page")).unwrap();
+        std::fs::create_dir_all(ppt.join("bin")).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(ppt.join("page/index.html"), "<p>PPT</p>").unwrap();
+        std::fs::write(ppt.join("bin/helper"), "#!/bin/sh\n").unwrap();
+        let manifest = json!({
+            "version": 1,
+            "id": "ppt",
+            "title": "PPT 编辑器",
+            "pages": [{"id": "studio", "title": "PPT 编辑器", "entry": "page/index.html", "renderer": "html"}],
+            "local_service": {"program": "bin/helper", "args": ["--quiet"]}
+        });
+        std::fs::write(ppt.join("plugin.json"), manifest.to_string()).unwrap();
+
+        let discovered = discover_bundled_dirs(&root);
+        assert_eq!(discovered, vec![ppt.clone()]);
+
+        let loaded = load(&ppt).unwrap();
+        assert!(loaded.manifest.enabled_by_default);
+        assert_eq!(
+            loaded.manifest.local_service.as_ref().unwrap().program,
+            "bin/helper"
+        );
+
+        let bad_manifest = json!({
+            "version": 1,
+            "id": "ppt",
+            "title": "PPT",
+            "local_service": {"program": "bin/missing"}
+        });
+        std::fs::write(ppt.join("plugin.json"), bad_manifest.to_string()).unwrap();
+        assert!(load(&ppt).is_err());
+
         std::fs::remove_dir_all(root).unwrap();
     }
 }

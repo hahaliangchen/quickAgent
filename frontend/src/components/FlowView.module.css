@@ -27,13 +27,172 @@
   font-size: 13px;
 }
 
-.turnPicker {
-  max-width: 340px;
-  padding: 2px 6px;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  border-radius: 6px;
-  background: transparent;
+/* Which turn is drawn: one chip, one list. */
+.picker {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.pickerTrigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 460px;
+  padding: 3px 9px 3px 8px;
+  border: 1px solid rgba(16, 24, 40, 0.1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+  color: var(--dsw-alias-label-primary, #111827);
   font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.pickerTrigger:hover {
+  background: var(--codex-hover-bg, #f5f6f7);
+  border-color: rgba(16, 24, 40, 0.16);
+}
+
+.pickerTrigger[data-open] {
+  border-color: rgba(47, 111, 214, 0.5);
+  box-shadow: 0 0 0 3px rgba(47, 111, 214, 0.1);
+}
+
+.pickerTrigger:focus-visible {
+  outline: none;
+  border-color: rgba(47, 111, 214, 0.5);
+  box-shadow: 0 0 0 3px rgba(47, 111, 214, 0.12);
+}
+
+.pickerTurn {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(47, 111, 214, 0.1);
+  color: #2f5ea8;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pickerTitle {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pickerCaret {
+  flex-shrink: 0;
+  color: #6b7280;
+  font-size: 10px;
+  line-height: 1;
+  transition: transform 140ms ease;
+}
+
+.pickerTrigger[data-open] .pickerCaret {
+  transform: rotate(180deg);
+}
+
+/* The list itself: every turn, how it ended, and how much it took. */
+.pickerMenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 440px;
+  max-width: min(78vw, 500px);
+  max-height: 322px;
+  padding: 5px;
+  overflow-y: auto;
+  border: 1px solid rgba(16, 24, 40, 0.08);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-1, #ffffff);
+  box-shadow: 0 12px 28px rgba(16, 24, 40, 0.12), 0 2px 6px rgba(16, 24, 40, 0.05);
+  scrollbar-width: thin;
+}
+
+.pickerRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pickerRow[data-active] {
+  background: rgba(47, 111, 214, 0.07);
+}
+
+.pickerRow[data-current] {
+  background: rgba(47, 111, 214, 0.1);
+}
+
+.pickerDot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #9aa7b8;
+}
+
+.pickerDot[data-status='done'] { background: #2db28c; }
+.pickerDot[data-status='running'] { background: #2f6fd6; }
+.pickerDot[data-status='failed'] { background: #d23c3c; }
+.pickerDot[data-status='interrupted'],
+.pickerDot[data-status='pending'] { background: #b4771a; }
+
+.pickerRowMain {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pickerRowTitle {
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary, #111827);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pickerRowTurn {
+  margin-right: 7px;
+  color: #2f5ea8;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pickerRowMeta {
+  overflow: hidden;
+  color: #6b7280;
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pickerCheck {
+  flex-shrink: 0;
+  width: 12px;
+  color: #2f6fd6;
+  font-size: 11px;
+  text-align: center;
 }
 
 .spacer {
@@ -71,8 +230,8 @@
 }
 
 .graph[data-narrow] {
-  /* The drawer's width plus its margin, or half the canvas on a narrow window. */
-  right: min(402px, 50%);
+  /* The drawer's width plus its margins, or half the canvas on a narrow window. */
+  right: min(464px, 50%);
 }
 
 .empty {
@@ -80,45 +239,101 @@
   color: var(--codex-text-muted, #6b7280);
 }
 
+/*
+ * The drawer: one card of the flow, opened. A soft panel that floats over the
+ * canvas, with a header that never scrolls away and a body of ordered sections.
+ */
 .drawer {
   position: absolute;
-  top: 16px;
-  right: 16px;
-  bottom: 16px;
-  width: 370px;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: 424px;
   max-width: min(92vw, 100%);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: var(--dsw-alias-bg-layer-1, #ffffff);
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
-  border-radius: 14px;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(16, 24, 40, 0.08);
+  border-radius: 16px;
+  box-shadow: 0 12px 32px rgba(16, 24, 40, 0.1), 0 2px 6px rgba(16, 24, 40, 0.04);
   z-index: 20;
 }
 
 .drawerHeader {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
+  gap: 10px;
+  padding: 14px 14px 8px 18px;
 }
 
-.drawerHeader strong {
+.headText {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.headKind {
+  align-self: flex-start;
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: rgba(17, 24, 39, 0.06);
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.headKind[data-kind='request'] {
+  background: rgba(100, 116, 139, 0.12);
+  color: #4d5b6d;
+}
+
+.headKind[data-kind='step'] {
+  background: rgba(47, 111, 214, 0.12);
+  color: #2f5ea8;
+}
+
+.headKind[data-kind='call'] {
+  background: rgba(107, 79, 216, 0.12);
+  color: #5b41c0;
+}
+
+.headKind[data-kind='reply'] {
+  background: rgba(45, 178, 140, 0.16);
+  color: #16785d;
+}
+
+.headKind[data-kind='end'] {
+  background: rgba(17, 24, 39, 0.07);
+  color: #4b5563;
+}
+
+.headTitle {
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--dsw-alias-label-primary, #111827);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
   overflow: hidden;
-  font-size: 14px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .close {
-  padding: 4px 8px;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   color: var(--dsw-alias-label-tertiary, #9ca3af);
-  font-size: 15px;
+  font-size: 14px;
+  line-height: 1;
   cursor: pointer;
 }
 
@@ -127,63 +342,306 @@
   color: var(--dsw-alias-label-primary, #111827);
 }
 
+/* The facts row: how it ended, which step it was, how much it did. */
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 18px 12px;
+  border-bottom: 1px solid rgba(16, 24, 40, 0.06);
+}
+
+.state,
+.fact,
+.factBad {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.05);
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.state {
+  font-weight: 600;
+}
+
+.state[data-status='done'] {
+  background: rgba(45, 178, 140, 0.14);
+  color: #16785d;
+}
+
+.state[data-status='running'] {
+  background: rgba(47, 111, 214, 0.12);
+  color: #2f5ea8;
+}
+
+.state[data-status='failed'] {
+  background: rgba(210, 60, 60, 0.12);
+  color: #b33636;
+}
+
+.state[data-status='interrupted'],
+.state[data-status='pending'] {
+  background: rgba(180, 119, 26, 0.14);
+  color: #96681c;
+}
+
+.factBad {
+  background: rgba(210, 60, 60, 0.1);
+  color: #b33636;
+  font-weight: 600;
+}
+
 .drawerBody {
   flex: 1;
-  overflow-y: auto;
-  padding: 12px 18px 24px;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  font-size: 13px;
+  padding: 14px 18px 26px;
+  overflow-y: auto;
+  font-size: 12.5px;
+  scrollbar-width: thin;
 }
 
-.drawerBody section {
+.group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
 }
 
-.drawerBody h4 {
+.groupTitle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   margin: 0;
-  font-size: 12px;
-  font-weight: 600;
   color: var(--dsw-alias-label-caption, #6b7280);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.groupNote {
+  color: var(--dsw-alias-label-tertiary, #8b93a1);
+  font-weight: 400;
+}
+
+.lead {
+  margin: 0;
+  color: var(--dsw-alias-label-primary, #111827);
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .meta {
   margin: 0;
   color: var(--codex-text-muted, #6b7280);
+  font-size: 11.5px;
 }
 
-.text {
+/* The thought the step took, marked by a rule rather than a box. */
+.thoughtPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 11px;
+  border-left: 2px solid rgba(47, 111, 214, 0.3);
+}
+
+.thought {
+  max-height: 240px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+/* The answer is the document the reader came for: drawn as Markdown at the
+   drawer's own width and contrast, never as the source it was written in. */
+.reply.reply > * {
+  font-size: 12.5px;
+  line-height: 1.72;
+  color: var(--dsw-alias-label-primary, #111827);
+}
+
+.reply.reply :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--dsw-alias-label-primary, #111827);
+}
+
+.reply.reply :is(h1, h2, h3, h4, h5, h6):first-child {
+  margin-top: 0;
+}
+
+.reply.reply :is(ul, ol) {
+  padding-left: 18px;
+}
+
+/* A drawer is narrower than a transcript: keep the blocks apart by their own
+   spacing instead of the 4px the compact variant uses. */
+.reply.reply :is(p, ul, ol, blockquote) {
+  margin: 7px 0;
+}
+
+.reply.reply :is(ul, ol) > li > p {
+  margin: 4px 0;
+}
+
+.reply.reply pre {
+  margin: 8px 0;
+  font-size: 11.5px;
+}
+
+/* One thing the step did: its name and its point, opening into the details. */
+.card {
+  border: 1px solid rgba(16, 24, 40, 0.07);
+  border-radius: 10px;
+  background: #fbfcfd;
+  overflow: hidden;
+  transition: border-color 120ms ease;
+}
+
+.card:hover {
+  border-color: rgba(16, 24, 40, 0.14);
+}
+
+.card[data-state='failed'] {
+  border-color: rgba(210, 60, 60, 0.28);
+  background: rgba(210, 60, 60, 0.035);
+}
+
+.cardSum {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.cardSum::-webkit-details-marker {
+  display: none;
+}
+
+.cardSum::before {
+  content: '▸';
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary, #98a1af);
+  font-size: 10px;
+}
+
+.card[open] > .cardSum::before {
+  content: '▾';
+}
+
+.dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #9aa7b8;
+}
+
+.dot[data-tone='read'] { background: #2f6fd6; }
+.dot[data-tone='edit'] { background: #b4771a; }
+.dot[data-tone='run'] { background: #6b4fd8; }
+.dot[data-tone='search'] { background: #0f9488; }
+.dot[data-tone='task'] { background: #2db28c; }
+.dot[data-tone='agent'] { background: #c2410c; }
+.dot[data-tone='context'] { background: #64748b; }
+.dot[data-tone='web'] { background: #0ea5e9; }
+
+.cardName {
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary, #111827);
+  font-family: var(--dsh-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cardNote {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary, #4b5563);
+  font-size: 11.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cardState {
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.cardState[data-status='failed'] {
+  color: #b33636;
+  font-weight: 600;
+}
+
+.cardState[data-status='running'] {
+  color: #2f5ea8;
+}
+
+/* A call shown with the transcript's own surfaces: a patch, a terminal, a read. */
+.toolRow {
+  margin: 2px 0;
+}
+
+.toolRow :where(button) {
+  font: inherit;
+}
+
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 2px 11px 11px;
+}
+
+.label {
   margin: 0;
+  color: var(--dsw-alias-label-tertiary, #7b8494);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* An argument, a program or a result, printed in place and scrollable. */
+.code {
+  max-height: 260px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 8px;
+  background: rgba(16, 24, 40, 0.035);
+  color: var(--dsw-alias-label-secondary, #374151);
+  font-family: var(--dsh-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.55;
+  scrollbar-width: thin;
+}
+
+/* A failed result keeps the code block it sits in and turns red. */
+.codeBad {
+  background: rgba(210, 60, 60, 0.06);
+  box-shadow: inset 0 0 0 1px rgba(210, 60, 60, 0.16);
+  color: #a33636;
 }
 
 .errorText {
+  margin: 0;
   color: var(--dsw-alias-state-error-primary, #d23c3c);
-}
-
-/* The drawer prints an argument, a thought or a result in place. */
-pre.value,
-.returned {
-  max-height: 320px;
-  overflow: auto;
-  margin: 4px 0 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-2, #f6f7f9);
+  line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 12px;
-  font-family: var(--dsh-font-mono, ui-monospace, monospace);
-}
-
-.failedValue {
-  border: 1px solid rgba(210, 60, 60, 0.2);
-  background: rgba(210, 60, 60, 0.06);
 }
 
 .summaryText {

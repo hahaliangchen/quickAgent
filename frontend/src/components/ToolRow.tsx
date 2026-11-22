@@ -1,4 +1,4 @@
-import { memo, useMemo } from 'react'
+import { memo, useEffect, useMemo } from 'react'
 import clsx from 'clsx'
 import {
   DiffBlock, DisclosureRow, ReadBlock, SearchBlock, TerminalBlock,
@@ -189,7 +189,7 @@ function extractReadLines(name: string, args: unknown, result: ToolResult | unde
 }
 
 /** ui-tool ToolRow with authentic DSH TerminalBlock, ReadBlock, DiffBlock, and SearchBlock surfaces. */
-export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopped, onOpenChild, line }: {
+export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopped, onOpenChild, line, startOpen }: {
   name: string
   rawArguments: string
   result: ToolResult | undefined
@@ -198,8 +198,11 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
   onOpenChild: (taskId: string) => void
   /** The program line that made the call. */
   line?: number | undefined
+  /** Open on arrival, so a lone call shows its change without a click; it still folds. */
+  startOpen?: boolean | undefined
 }) {
-  const { expanded, toggle } = useDisclosure()
+  const { expanded, setExpanded, toggle } = useDisclosure()
+  useEffect(() => { if (startOpen === true) setExpanded(true) }, [startOpen, setExpanded])
   const args = useMemo(() => parse(rawArguments), [rawArguments])
   const isShellSession = name === 'exec_command' || name === 'write_stdin' || name === 'kill_session' || name === 'run_readonly_command'
   // A shell result reports the session state even when the call is an error, so the

@@ -394,6 +394,7 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
                     .map(str::to_owned)
                     .collect()
             }),
+            local_service: None,
         },
         description,
         scope: None,
@@ -401,6 +402,7 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
         native: Some(Arc::new(native)),
         remote: Some(remote),
         mcp: None,
+        local_service_port: None,
     })
 }
 /// An administrator may register just a service address. User credentials are

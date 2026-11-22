@@ -426,6 +426,7 @@ fn package(
             command_tools: vec![],
             pages: vec![],
             attachment_extensions: None,
+            local_service: None,
         },
         description: "Standard MCP server".into(),
         scope: None,
@@ -433,6 +434,7 @@ fn package(
         native: Some(Arc::new(native)),
         remote: None,
         mcp: Some(connection),
+        local_service_port: None,
     })
 }
 

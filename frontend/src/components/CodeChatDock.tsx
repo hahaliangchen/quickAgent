@@ -65,7 +65,8 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat }: {
     if (fallbackPasteTimer.current !== null) window.clearTimeout(fallbackPasteTimer.current)
   }, [])
 
-  const attachments = useAttachmentDraft()
+  // The dock's own box: what is pasted here waits here, whatever else is open.
+  const attachments = useAttachmentDraft('code-chat')
   const [models, setModels] = useState<readonly CatalogModel[]>([])
   /** provider/model picked here; empty follows the agent default. */
   const [model, setModel] = useState(savedModel)

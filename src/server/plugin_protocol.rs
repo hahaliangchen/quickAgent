@@ -15,6 +15,14 @@ fn enabled_by_default() -> bool { true }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct LocalService {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub version: u32,
     pub id: String,
@@ -37,6 +45,9 @@ pub struct Manifest {
     pub pages: Vec<Page>,
     #[serde(default)]
     pub attachment_extensions: Option<Vec<String>>,
+    /// Optional plugin-owned local HTTP helper process (e.g. font or format engine).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_service: Option<LocalService>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

@@ -552,10 +552,13 @@ fn save_settings(
                 .providers
                 .get(provider)
                 .with_context(|| format!("configured {name} provider is unavailable"))?;
+            // A dedicated route runs on the same wire as the conversation, so it
+            // may be any protocol the agent speaks. Image generation is the one
+            // caller that needs an OpenAI image endpoint rather than the agent loop.
             let compatible = if name == "image_generation" {
                 matches!(route.api_type.as_str(), "openai-completions" | "openai-responses")
             } else {
-                route.api_type == "openai-completions"
+                agent_api(&route.api_type)
             };
             anyhow::ensure!(
                 compatible,
@@ -673,10 +676,14 @@ fn save_settings(
             );
         }
     }
+    // The agent speaks three protocols (see `agent_api`), so the saved default
+    // route may be any of them. Requiring Chat Completions here meant a pick on a
+    // Responses or Messages provider was refused by the save, which left the next
+    // chat on the model that had been stored before it.
     for name in [&config.orchestrator_provider].into_iter().flatten() {
         anyhow::ensure!(
-            config.providers[name].api_type == "openai-completions",
-            "agent route {name} requires OpenAI Chat Completions protocol"
+            agent_api(&config.providers[name].api_type),
+            "agent route {name} cannot drive the agent: pick a Chat Completions, Responses or Anthropic Messages provider"
         );
     }
     let mut patch = read_yaml(config_path, json!([]))?;

@@ -3,9 +3,10 @@ import { extractClipboardFiles, isPasteShortcut, readFallbackClipboardImages } f
 import { availableEfforts, resolveEffort } from '../reasoningEffort.ts'
 import {AttachmentRail,useAttachmentDraft,type AttachmentSubmission} from './Attachments.tsx'
 import { PREFILL_EVENT, recentPrefill } from './RewindControl.tsx'
+import { draftFor, draftOf, keepDraft, type HeldDraft } from '../composerDraft.ts'
 import { ContextRing } from './ContextRing.tsx'
 import type { ContextUsage } from './contextUsage.ts'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import {
@@ -64,6 +65,29 @@ function mentionInsert(path: string): string {
 
 export type DshPermissionMode = 'read_only' | 'workspace_write' | 'ask' | 'auto_review' | 'full_access'
 
+/**
+ * The box's text, kept per session. A reader who leaves a half-written message
+ * to go and read another conversation finds it again when they come back, and
+ * going somewhere else never carries the old text along.
+ */
+function useDraft(key: string): [string, (next: string, at?: string) => void] {
+  const [held, setHeld] = useState<HeldDraft>(() => ({ key, text: draftOf(key) }))
+  // A ref keeps the setter stable (event handlers and pending sends hold on to
+  // it) and pointed at the session that is open now.
+  const session = useRef(key)
+  session.current = key
+  /**
+   * Writes go to the session they were meant for: a send that resolves after
+   * the reader has moved to another chat clears its own box, not the one now
+   * on screen.
+   */
+  const setDraft = useCallback((next: string, at: string = session.current) => {
+    keepDraft(at, next)
+    if (at === session.current) setHeld({ key: at, text: next })
+  }, [])
+  return [draftFor(key, held).text, setDraft]
+}
+
 const FULL_ACCESS_ICON = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8l1-5.5Z" /></svg>
 // Same shield as 仅可查看, with a question mark: commands and the browser ask first.
 const ASK_ICON = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" aria-hidden="true"><path d="M6.59624 2.14853C7.50155 1.80917 8.49914 1.80919 9.40444 2.14859L13.9245 3.84317V7.11961C13.9245 11.6089 10.5565 13.5975 8.00035 14.5779C5.44423 13.5975 2.07544 11.6089 2.07544 7.11961V3.84317L6.59624 2.14853Z" strokeLinejoin="round" /><path d="M6.6 6.55a1.45 1.45 0 0 1 2.82.48c0 .96-1.42 1.2-1.42 2.08" strokeLinecap="round" strokeLinejoin="round" /><circle cx="8" cy="11.15" r="0.55" fill="currentColor" stroke="none" /></svg>
@@ -92,8 +116,11 @@ export function Composer({
   contextUsage,
   permissionMode,
   onSelectPermissionMode,
+  draftKey = 'session',
 }: {
   variant: 'hero' | 'composer'
+  /** Which session's draft this box shows: leaving and coming back keeps the text. */
+  draftKey?: string | undefined
   disabled: boolean
   note: string | undefined
   running: boolean
@@ -121,8 +148,8 @@ export function Composer({
   onInterject?: ((text: string) => Promise<void>) | undefined
   contextUsage?: ContextUsage | undefined
 }) {
-  const [draft, setDraft] = useState('')
-  const attachments=useAttachmentDraft()
+  const [draft, setDraft] = useDraft(draftKey)
+  const attachments=useAttachmentDraft(draftKey)
   const fileInput=useRef<HTMLInputElement>(null)
   const uploadAbort=useRef<AbortController|null>(null)
   const requestId=useRef(randomId())
@@ -362,9 +389,12 @@ export function Composer({
       return
     }
     setSubmitting(true)
+    // The box this text came from, which is not the box on screen if the reader
+    // has gone to look at another chat while the upload ran.
+    const sentFrom = draftKey
     try {
       const controller=new AbortController();uploadAbort.current=controller
-      if (await onSubmit(draft.trim(), permissionMode,{files:attachments.items.map(x=>x.file),signal:controller.signal,requestId:requestId.current,onProgress:setUploadLabel})) {setDraft('');attachments.clear()}
+      if (await onSubmit(draft.trim(), permissionMode,{files:attachments.items.map(x=>x.file),signal:controller.signal,requestId:requestId.current,onProgress:setUploadLabel})) {setDraft('', sentFrom);attachments.clear(sentFrom)}
     } finally {
       setSubmitting(false);setUploadLabel('');uploadAbort.current=null
     }

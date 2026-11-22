@@ -1,14 +1,21 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import clsx from 'clsx'
 import type { PluginPageProps } from './protocol.ts'
 import { createPluginHost } from './host.ts'
 import { useAgentApi } from '../cordis/react.tsx'
-import { useMemo } from 'react'
+import css from './html-page.module.css'
 
 /** HTML is one implementation adapter for the common page contribution. */
 export function HtmlPluginPage({ owner, workspaceRoot, pageId }: PluginPageProps) {
   const frame = useRef<HTMLIFrameElement>(null)
   const api = useAgentApi()
   const host = useMemo(() => createPluginHost(api, owner), [api, owner])
+  const [loaded, setLoaded] = useState(false)
+  const pageTitle = owner.pages.find(page => page.id === pageId)?.title ?? owner.title ?? pageId
+  const src = `/agent/skill-packages/${encodeURIComponent(owner.id)}/pages/${encodeURIComponent(pageId)}/index`
+  useEffect(() => {
+    setLoaded(false)
+  }, [src])
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow || event.data?.type !== 'skill-package/request') return
@@ -31,5 +38,25 @@ export function HtmlPluginPage({ owner, workspaceRoot, pageId }: PluginPageProps
     window.addEventListener('message', receive)
     return () => window.removeEventListener('message', receive)
   }, [owner, host, workspaceRoot])
-  return <iframe title={owner.pages.find(page => page.id === pageId)?.title ?? pageId} sandbox="allow-scripts" ref={frame} src={`/agent/skill-packages/${encodeURIComponent(owner.id)}/pages/${encodeURIComponent(pageId)}/index`} style={{ width: '100%', height: '100%', border: 0 }} />
+  const sandbox = owner.remote
+    ? 'allow-scripts'
+    : 'allow-scripts allow-same-origin allow-downloads allow-modals allow-popups'
+  return (
+    <div className={css.host}>
+      {!loaded && (
+        <div role="status" aria-live="polite" className={css.loader}>
+          <span aria-hidden="true" className={css.ring} />
+          <span>正在加载 {pageTitle}…</span>
+        </div>
+      )}
+      <iframe
+        title={pageTitle}
+        sandbox={sandbox}
+        ref={frame}
+        src={src}
+        onLoad={() => setLoaded(true)}
+        className={clsx(css.frame, loaded && css.frameReady)}
+      />
+    </div>
+  )
 }

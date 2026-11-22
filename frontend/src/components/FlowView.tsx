@@ -1,23 +1,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ReactFlow, Controls, MarkerType, type Edge, type Node, type NodeChange, type ReactFlowInstance } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { extractMarkdownPlainText, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 
 import type { AgentEvent, Task } from '../api.ts'
-import { chatItems } from '../model.ts'
-import { buildFlow, flowTurns, formatSpan, layoutFlow, FLOW_WIDTH, type FlowNode as FlowGraphNode } from '../flowGraph.ts'
+import { chatItems, type ChatItem, type TurnEndReason } from '../model.ts'
+import {
+  buildFlow, flowTurns, formatSpan, layoutFlow, FLOW_WIDTH,
+  type FlowKind, type FlowNode as FlowGraphNode, type FlowStatus, type FlowTurn,
+} from '../flowGraph.ts'
 import { FlowNodeView, type FlowNodeData } from './FlowNode.tsx'
+import { ToolRow } from './ToolRow.tsx'
+import { markdownLabels } from '../dsh/markdown-labels.ts'
+import { t } from '../i18n.ts'
 import styles from './FlowView.module.css'
 
 const nodeTypes = { flow: FlowNodeView }
 
-/** What each kind of node is called where the graph says it in one word. */
-const KINDS: Readonly<Record<FlowGraphNode['kind'], string>> = {
-  request: '用户请求', step: 'AI 步骤', tool: '工具调用', call: '函数调用', program: '程序',
-  delegate: '子代理', note: '插话', reply: '回复', end: '结束',
+/** What each kind of node is called where the drawer names it. */
+const KINDS: Readonly<Record<FlowKind, string>> = {
+  request: '用户请求', step: 'AI 步骤', call: '函数调用', reply: '回复', end: '结束',
 }
 
 const STATE_TEXT: Readonly<Record<string, string>> = {
   pending: '等待开始', running: '进行中', done: '完成', failed: '失败', interrupted: '已中断',
+}
+
+/** The title a program event is known by, in the drawer. */
+const PROGRAM_LABELS: Readonly<Record<string, string>> = {
+  started: '运行程序', invalid: '程序无效', failed: '程序失败', question: '程序提问', paused: '程序已暂停',
+  result_invalid: '返回值无效', module_loaded: '加载模块', module_fix: '修复模块', visual_completed: '视觉核对',
 }
 
 function pretty(value: unknown): string {
@@ -27,10 +39,26 @@ function pretty(value: unknown): string {
   return JSON.stringify(value, null, 2) ?? ''
 }
 
+/** The state word a card and the drawer both print for one call. */
+function stateOf(status: FlowStatus | string): string {
+  return STATE_TEXT[status] ?? String(status)
+}
+
 /**
- * The turn as a flow: every step the AI took, the tools it called under the
- * step that called them, and the ending. Built from the conversation's own
- * events, so it is there for every turn the transcript can show.
+ * The words of a message without the markup a card cannot draw: a reply that
+ * opens a section reads as its own sentence instead of `### 已完成`, and a link
+ * keeps its label. Cards and headers preview with this; the drawer draws the
+ * document itself.
+ */
+function preview(markdown: string): string {
+  return extractMarkdownPlainText(markdown, { mode: 'first-paragraph' }).replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * The turn as a flow: every step the AI took with the work it did folded into
+ * the same card, a program's calls as branches off it, and the ending. Built
+ * from the conversation's own events, so it is there for every turn the
+ * transcript can show.
  */
 export function FlowView({ taskId, events, task, running }: {
   taskId?: string | undefined
@@ -70,7 +98,8 @@ export function FlowView({ taskId, events, task, running }: {
       id: node.id,
       type: 'flow',
       position: { x: placements.get(node.id)?.x ?? 0, y: placements.get(node.id)?.y ?? 0 },
-      data: { node },
+      // A card draws words, not markup: show the message, never its source.
+      data: { node: { ...node, title: preview(node.title), summary: preview(node.summary) } },
       selected: node.id === selectedId,
     }))
     const edges: Edge[] = graph.edges.map(edge => ({
@@ -126,16 +155,11 @@ export function FlowView({ taskId, events, task, running }: {
       <div className={styles.topBar}>
         <strong className={styles.heading}>流程图</strong>
         {turns.length > 0 && (
-          <select
-            className={styles.turnPicker}
-            aria-label="选择要查看的轮次"
-            value={shown?.turn ?? ''}
-            onChange={event => { setChosen(Number(event.target.value)); setSelectedId(null) }}
-          >
-            {turns.map(turn => (
-              <option key={turn.turn} value={turn.turn}>第 {turn.turn} 轮 · {turn.title}</option>
-            ))}
-          </select>
+          <TurnPicker
+            turns={turns}
+            shown={shown}
+            onPick={turn => { setChosen(turn); setSelectedId(null) }}
+          />
         )}
         {shown !== undefined && (
           <span className={styles.summaryText}>
@@ -182,88 +206,317 @@ export function FlowView({ taskId, events, task, running }: {
   )
 }
 
-/** One node in full: what it was asked, what it answered, what it returned. */
-function NodeDetail({ node, onClose }: { node: FlowGraphNode; onClose: () => void }) {
+/**
+ * Which turn is on show. A list rather than a bare select: every turn is one
+ * row with the state it ended in, how much work it took and how long it ran,
+ * and the row that is drawn now is the row that reads as chosen.
+ */
+function TurnPicker({ turns, shown, onPick }: {
+  turns: readonly FlowTurn[]
+  shown: FlowTurn | undefined
+  onPick: (turn: number) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const here = Math.max(0, turns.findIndex(turn => turn.turn === shown?.turn))
+  const [active, setActive] = useState(here)
+  const box = useRef<HTMLDivElement | null>(null)
+
+  // A list that stays open while the pointer is away is a list in the way.
+  useEffect(() => {
+    if (!open) return
+    const away = (event: MouseEvent) => {
+      if (box.current !== null && event.target instanceof Element && !box.current.contains(event.target)) setOpen(false)
+    }
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    window.addEventListener('mousedown', away)
+    window.addEventListener('keydown', key)
+    return () => {
+      window.removeEventListener('mousedown', away)
+      window.removeEventListener('keydown', key)
+    }
+  }, [open])
+
+  const openAt = (index: number): void => { setActive(index); setOpen(true) }
+  const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>): void => {
+    if (event.key === 'Escape') { setOpen(false); return }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (!open) { openAt(here); return }
+      const step = event.key === 'ArrowDown' ? 1 : -1
+      setActive(current => Math.min(turns.length - 1, Math.max(0, current + step)))
+      return
+    }
+    if ((event.key === 'Enter' || event.key === ' ') && open) {
+      event.preventDefault()
+      const turn = turns[active]
+      if (turn === undefined) return
+      onPick(turn.turn)
+      setOpen(false)
+    }
+  }
+
   return (
-    <aside className={styles.drawer} aria-label="步骤详情">
-      <div className={styles.drawerHeader}>
-        <strong title={node.title}>{node.title}</strong>
-        <button type="button" className={styles.close} onClick={onClose} title="关闭">✕</button>
+    <div className={styles.picker} ref={box}>
+      <button
+        type="button"
+        className={styles.pickerTrigger}
+        data-open={open || undefined}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="选择要查看的轮次"
+        onClick={() => { if (open) setOpen(false); else openAt(here) }}
+        onKeyDown={onKeyDown}
+      >
+        <span className={styles.pickerTurn}>{shown === undefined ? '轮次' : '第 ' + String(shown.turn) + ' 轮'}</span>
+        {shown !== undefined && <span className={styles.pickerTitle}>{shown.title}</span>}
+        <span className={styles.pickerCaret} aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <div className={styles.pickerMenu} role="listbox" aria-label="轮次">
+          {turns.map((turn, index) => (
+            <button
+              key={turn.turn}
+              type="button"
+              role="option"
+              aria-selected={turn.turn === shown?.turn}
+              className={styles.pickerRow}
+              data-active={index === active || undefined}
+              data-current={turn.turn === shown?.turn || undefined}
+              onMouseEnter={() => setActive(index)}
+              onClick={() => { onPick(turn.turn); setOpen(false) }}
+            >
+              <span className={styles.pickerDot} data-status={turn.status} />
+              <span className={styles.pickerRowMain}>
+                <span className={styles.pickerRowTitle}>
+                  <span className={styles.pickerRowTurn}>第 {turn.turn} 轮</span>
+                  {turn.title}
+                </span>
+                <span className={styles.pickerRowMeta}>
+                  {[
+                    STATE_TEXT[turn.status] ?? turn.status,
+                    String(turn.steps) + ' 步',
+                    turn.tools === 0 ? '' : String(turn.tools) + ' 次工具',
+                    turn.durationMs === undefined ? '' : formatSpan(turn.durationMs),
+                  ].filter(Boolean).join(' · ')}
+                </span>
+              </span>
+              <span className={styles.pickerCheck} aria-hidden="true">{turn.turn === shown?.turn ? '✓' : ''}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** One node in full: what it was asked, what it did, what it returned. */
+function NodeDetail({ node, onClose }: { node: FlowGraphNode; onClose: () => void }) {
+  const lead = node.items.find(item => item.kind === 'assistant')
+  const asked = node.items.find(item => item.kind === 'user')
+  // The request and the answer are drawn on their own; everything else is work.
+  const work = node.items.filter(item => item.kind !== 'assistant' && item.kind !== 'user')
+  // A step that did one thing shows it open: hiding a single row helps nobody.
+  const alone = work.length <= 1
+  const head = preview(node.title)
+  return (
+    <aside className={styles.drawer} aria-label="节点详情">
+      <header className={styles.drawerHeader}>
+        <div className={styles.headText}>
+          <span className={styles.headKind} data-kind={node.kind}>{KINDS[node.kind]}</span>
+          <strong className={styles.headTitle} title={head}>{head}</strong>
+        </div>
+        <button type="button" className={styles.close} onClick={onClose} title="关闭（Esc）" aria-label="关闭">✕</button>
+      </header>
+      <div className={styles.facts}>
+        <span className={styles.state} data-status={node.status}>{stateOf(node.status)}</span>
+        {node.meta !== '' && <span className={styles.fact}>{node.meta}</span>}
+        {node.work.tools > 0 && <span className={styles.fact}>{node.work.tools} 次工具</span>}
+        {node.work.programs > 0 && <span className={styles.fact}>{node.work.programs} 次程序</span>}
+        {node.work.failed > 0 && <span className={styles.factBad}>{node.work.failed} 次失败</span>}
       </div>
-      <div className={styles.drawerBody}>
-        <p className={styles.meta}>
-          {[KINDS[node.kind], STATE_TEXT[node.status] ?? node.status, node.meta, node.items.length > 1 ? String(node.items.length) + ' 个调用' : ''].filter(Boolean).join(' · ')}
-        </p>
-        {node.summary !== '' && <p className={styles.text}>{node.summary}</p>}
-        {node.items.map((item, index) => (
-          <section key={item.key + ':' + String(index)}>
-            {item.kind === 'tool' && (
-              <ToolDetail name={item.name} arguments={item.arguments} result={item.result} />
-            )}
-            {item.kind === 'assistant' && (
-              <AssistantDetail reasoning={item.reasoning} text={item.text} />
-            )}
-            {item.kind === 'call' && (
-              <CallDetail description={item.description} result={item.result} error={item.error} steps={item.steps.length} />
-            )}
-            {item.kind === 'program' && (<><h4>程序输出</h4><pre className={styles.value}>{item.text}</pre></>)}
-            {item.kind === 'interjection' && (<><h4>插话</h4><p className={styles.text}>{item.text}</p></>)}
-            {item.kind === 'user' && (<><h4>用户的请求</h4><p className={styles.text}>{item.text}</p></>)}
-            {item.kind === 'subagent' && (<><h4>子代理的报告</h4><p className={styles.text}>{item.report || '（还没有报告）'}</p></>)}
-            {item.kind === 'turn-end' && (
-              <EndDetail reason={item.reason} durationMs={item.durationMs} />
-            )}
+      {/* The body is keyed by the node: opening another node starts at its top. */}
+      <div className={styles.drawerBody} key={node.id}>
+        {asked !== undefined && (
+          <section className={styles.group}>
+            <h4 className={styles.groupTitle}>
+              提出的要求
+              {node.summary !== '' && <span className={styles.groupNote}>{preview(node.summary)}</span>}
+            </h4>
+            <p className={styles.lead}>{asked.text.trim() === '' ? '（这条消息只有附件）' : asked.text}</p>
           </section>
-        ))}
+        )}
+        {/* A step's own words say what it did: a preview above them would only repeat it. */}
+        {lead === undefined && asked === undefined && node.summary !== '' && <p className={styles.lead}>{preview(node.summary)}</p>}
+        {lead !== undefined && <AssistantDetail reasoning={lead.reasoning} text={lead.text} />}
+        {work.length > 0 && (
+          <section className={styles.group}>
+            <h4 className={styles.groupTitle}>
+              这一步做的事
+              {node.work.label !== '' && <span className={styles.groupNote}>{node.work.label}</span>}
+            </h4>
+            {work.map((item, index) => <WorkCard key={'item-' + String(index)} item={item} open={alone} />)}
+          </section>
+        )}
+        {lead === undefined && asked === undefined && work.length === 0 && <p className={styles.meta}>这个节点没有留下记录。</p>}
       </div>
     </aside>
   )
 }
 
-function ToolDetail({ name, arguments: raw, result }: { name: string; arguments: string; result: { readonly text: string; readonly isError: boolean } | undefined }) {
-  const state = result === undefined ? '还在运行' : result.isError ? '失败' : '完成'
+/** One thing the step did, as a row that opens into its arguments and its result. */
+function WorkCard({ item, open }: { item: ChatItem; open: boolean }) {
+  if (item.kind === 'tool') return <ToolCard item={item} open={open || item.result?.isError === true} />
+  if (item.kind === 'program') return <ProgramCard item={item} open={open} />
+  if (item.kind === 'subagent') return <SubagentCard item={item} open={open} />
+  if (item.kind === 'call') return <CallCard item={item} open={open} />
+  if (item.kind === 'interjection') return <NoteCard item={item} />
+  if (item.kind === 'turn-end') return <EndDetail reason={item.reason} durationMs={item.durationMs} />
+  return null
+}
+
+function CardHead({ tone, name, note, state }: { tone?: string | undefined; name: string; note: string; state?: string | undefined }) {
   return (
-    <>
-      <h4>{name} · {state}</h4>
-      <pre className={styles.value}>{pretty(raw)}</pre>
-      {result !== undefined && <pre className={result.isError ? styles.failedValue : styles.returned}>{result.text}</pre>}
-    </>
+    <summary className={styles.cardSum}>
+      {tone !== undefined && <span className={styles.dot} data-tone={tone} />}
+      <span className={styles.cardName}>{name}</span>
+      {note !== '' && <span className={styles.cardNote} title={note}>{note}</span>}
+      {state !== undefined && <span className={styles.cardState} data-status={state}>{stateOf(state)}</span>}
+    </summary>
   )
 }
 
+function ToolCard({ item, open }: { item: Extract<ChatItem, { kind: 'tool' }>; open: boolean }) {
+  // The transcript's own row, not a copy of it: a file change opens as the
+  // patch it was, a command as its terminal, a read as the lines it read.
+  return (
+    <div className={styles.toolRow}>
+      <ToolRow
+        name={item.name}
+        rawArguments={item.arguments}
+        result={item.result}
+        stopped={false}
+        onOpenChild={() => {}}
+        startOpen={open}
+      />
+    </div>
+  )
+}
+
+function ProgramCard({ item, open }: { item: Extract<ChatItem, { kind: 'program' }>; open: boolean }) {
+  const failed = item.event === 'failed' || item.event === 'invalid' || item.event === 'result_invalid'
+  return (
+    <details className={styles.card} open={open} data-state={failed ? 'failed' : 'done'}>
+      <CardHead
+        tone="run"
+        name={PROGRAM_LABELS[item.event] ?? '程序'}
+        note={item.text.replace(/\s+/g, ' ').trim()}
+        state={failed ? 'failed' : 'done'}
+      />
+      <div className={styles.cardBody}>
+        {item.source !== undefined && item.source.trim() !== '' && (
+          <>
+            <h5 className={styles.label}>程序</h5>
+            <pre className={styles.code}>{item.source}</pre>
+          </>
+        )}
+        <h5 className={styles.label}>输出</h5>
+        <pre className={styles.code}>{item.text === '' ? '（没有输出）' : item.text}</pre>
+      </div>
+    </details>
+  )
+}
+
+function SubagentCard({ item, open }: { item: Extract<ChatItem, { kind: 'subagent' }>; open: boolean }) {
+  return (
+    <details className={styles.card} open={open} data-state={item.status === 'running' ? 'running' : 'done'}>
+      <CardHead tone="agent" name={item.name === '' ? '子代理' : item.name} note={item.review} state={item.status === 'running' ? 'running' : 'done'} />
+      <div className={styles.cardBody}>
+        <h5 className={styles.label}>报告</h5>
+        <p className={styles.lead}>{item.report === '' ? '（还没有报告）' : item.report}</p>
+      </div>
+    </details>
+  )
+}
+
+function NoteCard({ item }: { item: Extract<ChatItem, { kind: 'interjection' }> }) {
+  return (
+    <details className={styles.card} data-state="done">
+      <CardHead tone="context" name="插话" note={item.text.replace(/\s+/g, ' ').trim()} state="done" />
+      <div className={styles.cardBody}>
+        <h5 className={styles.label}>{item.delivered ? '已送达' : '待送达'}</h5>
+        <p className={styles.lead}>{item.text}</p>
+      </div>
+    </details>
+  )
+}
+
+function CallCard({ item, open }: { item: Extract<ChatItem, { kind: 'call' }>; open: boolean }) {
+  const state = item.error !== undefined ? 'failed' : ['pending', 'running', 'suspended', 'paused'].includes(item.status) ? 'running' : 'done'
+  return (
+    <details className={styles.card} open={open} data-state={state}>
+      <CardHead tone="task" name={item.name.endsWith(')') ? item.name : item.name + '()'} note={item.description} state={state} />
+      <div className={styles.cardBody}>
+        <h5 className={styles.label}>契约</h5>
+        <p className={styles.lead}>{item.description === '' ? '（没有契约注释）' : item.description}</p>
+        {item.result !== undefined && item.result !== '' && (
+          <>
+            <h5 className={styles.label}>返回</h5>
+            <pre className={styles.code}>{pretty(item.result)}</pre>
+          </>
+        )}
+        {item.error !== undefined && (
+          <>
+            <h5 className={styles.label}>错误</h5>
+            <p className={styles.errorText}>{item.error}</p>
+          </>
+        )}
+      </div>
+    </details>
+  )
+}
+
+/**
+ * The model's own words. The reasoning reads as a quiet aside and the answer
+ * as the document it is: both are Markdown, and both are drawn — a reader who
+ * opens one step should never be shown `###` or `**` as literal characters.
+ */
 function AssistantDetail({ reasoning, text }: { reasoning: string; text: string }) {
+  const labels = useMemo(() => markdownLabels(t), [])
+  const thought = reasoning.trim()
+  const said = text.trim()
+  if (thought === '' && said === '') return <p className={styles.meta}>这一步没有留下文字。</p>
   return (
     <>
-      {reasoning.trim() !== '' && <><h4>思考</h4><pre className={styles.value}>{reasoning.trim()}</pre></>}
-      {text.trim() !== '' && <><h4>回复</h4><pre className={styles.value}>{text.trim()}</pre></>}
-      {reasoning.trim() === '' && text.trim() === '' && <p className={styles.meta}>这一步没有留下文字。</p>}
+      {thought !== '' && (
+        <section className={styles.thoughtPanel}>
+          <h4 className={styles.groupTitle}>思考</h4>
+          <div className={styles.thought}>
+            <MarkdownText text={thought} labels={labels} variant="compact" />
+          </div>
+        </section>
+      )}
+      {said !== '' && (
+        <section className={styles.group}>
+          <h4 className={styles.groupTitle}>写下的话</h4>
+          <div className={styles.reply}>
+            <MarkdownText text={said} labels={labels} variant="compact" />
+          </div>
+        </section>
+      )}
     </>
   )
 }
 
-function CallDetail({ description, result, error, steps }: { description: string; result: string | undefined; error: string | undefined; steps: number }) {
+function EndDetail({ reason, durationMs }: { reason: TurnEndReason; durationMs: number | undefined }) {
+  const [title, note] = reason.kind === 'completed' ? ['目标完成', '这一轮按计划收尾。']
+    : reason.kind === 'aborted' ? ['你取消了这一轮', '已完成的步骤仍然留在图上。']
+    : reason.kind === 'interrupted' ? ['这一轮被中断', '流程停在最后一个完成的节点。']
+    : ['这一轮出错', reason.message ?? '']
   return (
-    <>
-      <h4>契约</h4>
-      <p className={styles.text}>{description || '（没有契约注释）'}</p>
-      {result !== undefined && result !== '' && <><h4>返回</h4><pre className={styles.returned}>{pretty(result)}</pre></>}
-      {error !== undefined && <><h4>错误</h4><p className={styles.text + ' ' + styles.errorText}>{error}</p></>}
-      {steps > 0 && <p className={styles.meta}>内部有 {steps} 个步骤，画在它的下方。</p>}
-    </>
-  )
-}
-
-function EndDetail({ reason, durationMs }: { reason: { readonly kind: string; readonly message?: string | undefined }; durationMs: number | undefined }) {
-  return (
-    <>
-      <h4>结局</h4>
-      <p className={styles.text}>
-        {reason.kind === 'completed' ? '目标完成'
-          : reason.kind === 'aborted' ? '你取消了这一轮'
-          : reason.kind === 'interrupted' ? '这一轮被中断'
-          : '这一轮出错：' + (reason.message ?? '')}
-      </p>
+    <section className={styles.group}>
+      <h4 className={styles.groupTitle}>结局<span className={styles.groupNote}>{title}</span></h4>
+      {note !== '' && <p className={styles.lead}>{note}</p>}
       {durationMs !== undefined && <p className={styles.meta}>耗时 {formatSpan(durationMs)}</p>}
-    </>
+    </section>
   )
 }
