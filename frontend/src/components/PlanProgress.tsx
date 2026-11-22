@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useId, useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AgentEvent } from '../api.ts'
@@ -21,6 +21,7 @@ function ProgressRing({ percent, done, blocked }: {
   readonly done: boolean
   readonly blocked: boolean
 }): ReactNode {
+  const gradId = useId()
   const clamped = Math.max(0, Math.min(100, percent))
   const offset = RING_CIRCUMFERENCE * (1 - clamped / 100)
   return (
@@ -31,12 +32,20 @@ function ProgressRing({ percent, done, blocked }: {
       aria-hidden="true"
     >
       <svg className={styles.ringSvg} viewBox="0 0 24 24" fill="none">
+        <defs>
+          <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="var(--plan-grad-start)" />
+            <stop offset="55%" stopColor="var(--plan-grad-mid)" />
+            <stop offset="100%" stopColor="var(--plan-grad-end)" />
+          </linearGradient>
+        </defs>
         <circle className={styles.ringTrack} cx="12" cy="12" r={RING_RADIUS} />
         <circle
           className={styles.ringArc}
           cx="12"
           cy="12"
           r={RING_RADIUS}
+          stroke={blocked ? undefined : `url(#${gradId})`}
           strokeDasharray={RING_CIRCUMFERENCE}
           strokeDashoffset={offset}
         />
@@ -134,8 +143,20 @@ export function PlanProgress({ events, variant = 'inline' }: { events: readonly 
           aria-valuemax={total}
         >
           {useSegments
-            ? steps.map(step => (
-                <span key={step.id} className={styles.segment} data-status={step.status} />
+            ? steps.map((step, index) => (
+                <span
+                  key={step.id}
+                  className={styles.segment}
+                  data-status={step.status}
+                  style={
+                    step.status === 'done' || step.status === 'in_progress'
+                      ? {
+                          backgroundSize: `${total * 100}% 100%`,
+                          backgroundPosition: total > 1 ? `${(index / (total - 1)) * 100}% 0` : '0% 0',
+                        }
+                      : undefined
+                  }
+                />
               ))
             : (
                 <span className={styles.continuousTrack}>

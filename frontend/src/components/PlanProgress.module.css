@@ -13,6 +13,11 @@
   --plan-chip: #f2f5f3;
   --plan-btn-hover: #f3f6f4;
   --plan-accent: #169870;
+  --plan-grad-start: #10b981;
+  --plan-grad-mid: #14b8a6;
+  --plan-grad-end: #0ea5b7;
+  --plan-progress-grad: linear-gradient(90deg, var(--plan-grad-start) 0%, var(--plan-grad-mid) 55%, var(--plan-grad-end) 100%);
+  --plan-blocked-grad: linear-gradient(90deg, #d97706 0%, #f59e0b 100%);
   --plan-accent-soft: #e6f5ef;
   --plan-accent-border: #c1e4d6;
   --plan-accent-ink: #0f6d50;
@@ -44,6 +49,11 @@
   --plan-chip: #212627;
   --plan-btn-hover: #242a2b;
   --plan-accent: #2db98b;
+  --plan-grad-start: #22c58b;
+  --plan-grad-mid: #2dd4bf;
+  --plan-grad-end: #38bdf8;
+  --plan-progress-grad: linear-gradient(90deg, var(--plan-grad-start) 0%, var(--plan-grad-mid) 55%, var(--plan-grad-end) 100%);
+  --plan-blocked-grad: linear-gradient(90deg, #d9822b 0%, #f0b35c 100%);
   --plan-accent-soft: #173028;
   --plan-accent-border: #254b3e;
   --plan-accent-ink: #86dec0;
@@ -296,17 +306,17 @@
 }
 
 .segment[data-status="done"] {
-  background: var(--plan-accent);
+  background-image: var(--plan-progress-grad);
 }
 
 .segment[data-status="in_progress"] {
-  background: var(--plan-accent);
-  opacity: 0.55;
+  background-image: var(--plan-progress-grad);
+  opacity: 0.6;
   animation: plan-breathe 1.8s ease-in-out infinite;
 }
 
 .segment[data-status="blocked"] {
-  background: var(--plan-blocked);
+  background-image: var(--plan-blocked-grad);
 }
 
 .continuousTrack {
@@ -322,7 +332,7 @@
   display: block;
   block-size: 100%;
   border-radius: 999px;
-  background: var(--plan-accent);
+  background-image: var(--plan-progress-grad);
   transition: width 260ms ease;
 }
 
