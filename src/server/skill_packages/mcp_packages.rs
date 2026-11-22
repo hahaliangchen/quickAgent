@@ -416,6 +416,7 @@ fn package(
         root: PathBuf::new(),
         manifest: Manifest {
             version: 1,
+            enabled_by_default: true,
             id: id.to_owned(),
             library: Some(library),
             title: title.to_owned(),

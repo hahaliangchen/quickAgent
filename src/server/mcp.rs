@@ -530,7 +530,7 @@ async fn dispatch_activated(
                 let active = catalog
                     .packages
                     .valid_active(&activation.active, &activation.scopes);
-                definitions.extend(catalog.packages.tools(&active).into_iter().map(|tool| json!({"name":tool["function"]["name"],"description":tool["function"]["description"],"inputSchema":tool["function"]["parameters"]})));
+                definitions.extend(catalog.packages.tools(&active).into_iter().filter(|tool| tool["function"]["name"].as_str().is_none_or(|name| crate::server::builtin_plugins::desktop::permission(name).is_none())).map(|tool| json!({"name":tool["function"]["name"],"description":tool["function"]["description"],"inputSchema":tool["function"]["parameters"]})));
             }
             // Only this code-facing, scoped catalog needs to resolve a shell.
             // Registration and stateless listings must not probe the host.
@@ -589,6 +589,7 @@ async fn dispatch_activated(
                     );
                     return Ok(mcp_value(result));
                 }
+                anyhow::ensure!(crate::server::builtin_plugins::desktop::permission(name).is_none(), "DESKTOP_TASK_REQUIRED: use an Agent task");
                 if catalog.packages.declares_tool(name) {
                     let activation = activation.as_deref().ok_or_else(|| {
                         anyhow::anyhow!("TOOL_UNAVAILABLE: load the owning skill in an MCP session")

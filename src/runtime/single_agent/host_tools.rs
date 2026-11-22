@@ -222,6 +222,22 @@ pub(super) async fn business_tool_inner(
         )
         .await;
     }
+    if let Some(permission) = crate::server::builtin_plugins::desktop::permission(name) {
+        let catalog = s.state.tool_catalog.as_ref().context("tool catalog unavailable")?;
+        let handler = catalog.handler(name)?;
+        let mode = s.state.permission_mode;
+        ensure!(permission.allows(mode, s.ban_execution), "permission_denied: {name}");
+        if crate::server::builtin_plugins::desktop::requires_confirmation(name)
+            && matches!(mode, agent_service::PermissionMode::Ask | agent_service::PermissionMode::AutoReview)
+        {
+            crate::tools::tool_approvals::wait(s.state, s.task, s.model, s.delegate_id(), call_id, name, &args, s.cancel).await?;
+        }
+        let mut visual = visual_context(s, node)?;
+        visual.source_tool_call_id = call_id.to_owned();
+        visual.source_event_id = format!("{}:tool:{call_id}", s.task);
+        return crate::server::builtin_plugins::desktop::scoped(visual, s.cancel.clone(),
+            handler(s.state.workspace.clone(), name.to_owned(), args)).await;
+    }
     if agent_program::libraries::mcp_tool_name(name) {
         // Hold the same contribution from permission check through execution. Reconnect
         // cancels the old connection instead of swapping in a handler after approval.

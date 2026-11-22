@@ -127,14 +127,12 @@ impl ToolCatalog {
         name: &str,
         args: Value,
     ) -> Result<Value> {
-        let handler = self
-            .handlers
-            .read()
-            .unwrap()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("tool {name} is not registered"))?;
-        handler(workspace, name.to_owned(), args).await
+        self.handler(name)?(workspace, name.to_owned(), args).await
+    }
+
+    pub(crate) fn handler(&self, name: &str) -> Result<ToolHandler> {
+        self.handlers.read().unwrap().get(name).cloned()
+            .ok_or_else(|| anyhow::anyhow!("tool {name} is not registered"))
     }
 }
 

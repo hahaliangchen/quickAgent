@@ -51,8 +51,7 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
                 <strong title={item.title}>{item.title}</strong>
                 <span className={styles.badges}>
                   <span className={styles.badge}>{item.origin === 'builtin' ? '内置' : item.remote ? '远程' : '外部'}</span>
-                  {/* A built-in plugin is always on; only one that can be switched shows its state. */}
-                  {item.origin !== 'builtin' && <span className={clsx(styles.state, item.enabled && styles.stateOn)}>{item.enabled ? '已启用' : '已停用'}</span>}
+                  {(item.toggleable ?? item.origin !== 'builtin') && <span className={clsx(styles.state, item.enabled && styles.stateOn)}>{item.enabled ? '已启用' : '已停用'}</span>}
                 </span>
               </div>
             </div>
@@ -66,8 +65,7 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
               })}
             </div>}
             <div className={styles.actions}>
-              {/* Built-in plugins are part of the agent and always run. */}
-              {item.origin !== 'builtin' && <button type="button" disabled={busy} onClick={() => { void change(() => api.setPackageEnabled(item.id, !item.enabled)) }}>
+              {(item.toggleable ?? item.origin !== 'builtin') && <button type="button" disabled={busy} onClick={() => { void change(() => api.setPackageEnabled(item.id, !item.enabled)) }}>
                 <Icon name="power" size={14} />{item.enabled ? '停用' : '启用'}</button>}
               <button type="button" disabled={busy} onClick={() => { void change(() => api.reloadPackage(item.id)) }}><Icon name="refresh" size={14} />重载</button>
               {item.origin === 'external' && <button type="button" className={styles.danger} disabled={busy}

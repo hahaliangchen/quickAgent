@@ -475,19 +475,76 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result
 /// `model_round\(` without regex:true matched literally, found nothing, and
 /// the AI turned to grep in a shell. A pattern that matches the empty
 /// string (`a || b` read as regex) stays literal, as does `arr[0]`.
-fn written_as_regex(query: &str) -> bool {
+fn has_regex_markers(query: &str) -> bool {
     // A separator-only query such as " | " is ordinary text, not an alternation.
     if query.trim() == "|" {
         return false;
     }
-    let marked = query.contains('|')
+    query.contains('|')
         || query.contains('\\')
         || query.contains(".*")
         || query.contains(".+")
         || query.contains("(?")
         || query.starts_with('^')
-        || (query.ends_with('$') && !query.ends_with("\\$"));
-    marked && regex::Regex::new(query).is_ok_and(|re| !re.is_match(""))
+        || (query.ends_with('$') && !query.ends_with("\\$"))
+}
+
+fn written_as_regex(query: &str) -> bool {
+    has_regex_markers(query) && regex::Regex::new(query).is_ok_and(|re| !re.is_match(""))
+}
+
+/// Escape stray unmatched `(`, `)` or `[` left behind when a JS string literal
+/// silently consumes a single backslash (e.g. `"foo|bar\("` -> `"foo|bar("`).
+/// Properly paired groups and character classes remain intact.
+fn escape_unbalanced_delimiters(pattern: &str) -> Option<String> {
+    let mut escaped = false;
+    let mut open_class: Option<usize> = None;
+    let mut open_parens: Vec<usize> = Vec::new();
+    let mut to_escape = std::collections::BTreeSet::new();
+
+    for (idx, ch) in pattern.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if open_class.is_some() {
+            if ch == ']' {
+                open_class = None;
+            }
+            continue;
+        }
+        match ch {
+            '[' => open_class = Some(idx),
+            '(' => open_parens.push(idx),
+            ')' => {
+                if open_parens.pop().is_none() {
+                    to_escape.insert(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    for idx in open_parens {
+        to_escape.insert(idx);
+    }
+    if let Some(idx) = open_class {
+        to_escape.insert(idx);
+    }
+    if to_escape.is_empty() {
+        return None;
+    }
+    let mut repaired = String::with_capacity(pattern.len() + to_escape.len());
+    for (idx, ch) in pattern.char_indices() {
+        if to_escape.contains(&idx) {
+            repaired.push('\\');
+        }
+        repaired.push(ch);
+    }
+    Some(repaired)
 }
 
 #[derive(Debug, Serialize)]

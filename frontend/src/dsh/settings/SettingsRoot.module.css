@@ -238,6 +238,33 @@
   white-space: nowrap;
 }
 
+@media (max-width: 620px) {
+  .panel {
+    flex-direction: column;
+    max-width: calc(100vw - 24px);
+    border-radius: 20px;
+  }
+
+  .nav {
+    width: 100%;
+    gap: 4px;
+    padding: 12px 12px 0;
+  }
+
+  .navList {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .content {
+    min-height: 0;
+  }
+
+  .options {
+    padding: 4px 16px 20px;
+  }
+}
+
 /* macOS: overlays covering the window drag bands must subtract themselves
    (Electron app-regions are geometry, not stacking). */
 :global([data-platform='darwin']) .overlay {

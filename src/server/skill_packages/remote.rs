@@ -367,6 +367,7 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
         root: PathBuf::new(),
         manifest: Manifest {
             version: 1,
+            enabled_by_default: true,
             id,
             library: plugin
                 .get("library")

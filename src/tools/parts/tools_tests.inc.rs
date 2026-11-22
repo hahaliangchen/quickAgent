@@ -639,6 +639,14 @@
         assert!(!either.hints.is_empty(), "the AI is told it was read as a regex");
         let call = search(serde_json::json!({"query":"model_round\\("}));
         assert_eq!((call.match_mode, call.matches.len()), ("regex", 1));
+        // JS string literals often swallow `\\` in `"alpha|model_round\\("` into `"alpha|model_round("`.
+        // Auto-escape the stray unbalanced `(` in both explicit and inferred regex modes instead of failing.
+        let repaired_explicit = search(serde_json::json!({"query":"alpha|model_round(","regex":true}));
+        assert_eq!((repaired_explicit.match_mode, repaired_explicit.matches.len()), ("regex", 4));
+        assert!(repaired_explicit.hints.iter().any(|h| h.contains("Auto-escaped unbalanced")));
+        let repaired_auto = search(serde_json::json!({"query":"alpha|model_round("}));
+        assert_eq!((repaired_auto.match_mode, repaired_auto.matches.len()), ("regex", 4));
+        assert!(repaired_auto.hints.iter().any(|h| h.contains("Auto-escaped unbalanced")));
         let forced = search(serde_json::json!({"query":"alpha|beta","regex":false}));
         assert_eq!((forced.match_mode, forced.matches.len()), ("literal", 0));
         // Code that only looks like a pattern stays literal.

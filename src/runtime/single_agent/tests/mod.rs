@@ -8,6 +8,7 @@
 //! - `live_models`: opt-in `#[ignore]` real-model integration tests
 
 mod live_models;
+mod desktop_host;
 mod mcp_host;
 mod step1_protocol;
 mod step2_virtual;

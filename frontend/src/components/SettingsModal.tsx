@@ -152,6 +152,8 @@ export function SettingsModal({
   const [packages,setPackages]=useState<SkillPackage[]>([])
   const [pluginQuery, setPluginQuery] = useState('')
   const [mcpBusy, setMcpBusy] = useState<string | null>(null)
+  const [desktopBusy, setDesktopBusy] = useState(false)
+  const desktopPlugin = packages.find(pkg => pkg.id === 'desktop' && pkg.toggleable)
   const mcpServers = pluginsData?.mcp_servers ?? []
   const visibleMcpServers = mcpServers.filter(server => [server.name, server.id, server.library].some(value => value.toLowerCase().includes(pluginQuery.toLowerCase())))
   const [expandedPlugins, setExpandedPlugins] = useState<Record<string, boolean>>({})
@@ -159,6 +161,20 @@ export function SettingsModal({
   const [detectingShell, setDetectingShell] = useState(false)
   const opening = useRef(0)
   const windowsShell = shellStatus?.platform.os === 'windows'
+
+  async function toggleDesktop(plugin: SkillPackage) {
+    setDesktopBusy(true)
+    setStatusMsg(null)
+    try {
+      const result = await api.setPackageEnabled(plugin.id, !plugin.enabled)
+      setPackages(result.packages)
+    } catch (err) {
+      setStatusMsg({ text: err instanceof Error ? err.message : String(err), error: true })
+    } finally {
+      setDesktopBusy(false)
+      loadPlugins()
+    }
+  }
 
   async function changeMcp(server: McpServerStatus, reconnect: boolean) {
     setMcpBusy(server.id)
@@ -1158,6 +1174,27 @@ export function SettingsModal({
                     onChange={(e) => { setPluginQuery(e.target.value) }}
                   />
                 </div>
+
+                {desktopPlugin && [desktopPlugin.title, desktopPlugin.id].some(value => value.toLowerCase().includes(pluginQuery.toLowerCase())) && (
+                  <div className={pluginsCss.catalog}>
+                    <div className={pluginsCss.catalogHeading}><h3>可选内置插件</h3></div>
+                    <ul className={pluginsCss.cards}>
+                      <li className={clsx(pluginsCss.card, pluginsCss.mcpCard)}>
+                        <div className={pluginsCss.mcpHeading}>
+                          <strong className={pluginsCss.cardTitle}>{desktopPlugin.title}</strong>
+                          <span className={pluginsCss.mcpPhase} role="status">
+                            <StateDot state={desktopPlugin.enabled ? 'done' : 'idle'} size={8} />{desktopPlugin.enabled ? '已启用' : '已停用'}
+                          </span>
+                        </div>
+                        <span className={pluginsCss.cardIdentity}>desktop · Linux</span>
+                        <div className={pluginsCss.mcpActions}>
+                          <Switch checked={desktopPlugin.enabled} disabled={desktopBusy} label="桌面操控"
+                            onChange={() => { void toggleDesktop(desktopPlugin) }} />
+                        </div>
+                      </li>
+                    </ul>
+                  </div>
+                )}
 
                 <div className={pluginsCss.catalog}>
                   <div className={pluginsCss.catalogHeading}>

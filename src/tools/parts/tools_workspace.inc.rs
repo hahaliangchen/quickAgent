@@ -393,19 +393,57 @@ impl Workspace {
 
     pub fn search_text(&self, request: SearchTextRequest) -> Result<SearchTextResponse> {
         let explicit = request.regex;
-        let regex = explicit.unwrap_or_else(|| written_as_regex(&request.query));
-        // Compile once, before opening the index or walking files. Escaping
-        // preserves literal defaults and gives Unicode-safe match offsets.
-        let pattern = if regex {
-            request.query.clone()
-        } else {
-            regex::escape(&request.query)
+        let compile = |pat: &str| {
+            regex::RegexBuilder::new(pat)
+                .case_insensitive(!request.case_sensitive)
+                .size_limit(2 * 1024 * 1024)
+                .build()
         };
-        let matcher = regex::RegexBuilder::new(&pattern)
-            .case_insensitive(!request.case_sensitive)
-            .size_limit(2 * 1024 * 1024)
-            .build()
-            .map_err(|error| ToolError::InvalidSearchPattern(error.to_string()))?;
+        let mut auto_repaired_regex = false;
+        let (regex, matcher) = match explicit {
+            Some(true) => match compile(&request.query) {
+                Ok(re) => (true, re),
+                Err(first_err) => {
+                    if let Some(repaired) = escape_unbalanced_delimiters(&request.query)
+                        && let Ok(re) = compile(&repaired)
+                    {
+                        auto_repaired_regex = true;
+                        (true, re)
+                    } else {
+                        return Err(ToolError::InvalidSearchPattern(format!(
+                            "{first_err} (tip: pass a JS RegExp literal like /foo\\(/ or escape parens as \\\\( in JS strings)"
+                        )));
+                    }
+                }
+            },
+            Some(false) => (
+                false,
+                compile(&regex::escape(&request.query))
+                    .map_err(|error| ToolError::InvalidSearchPattern(error.to_string()))?,
+            ),
+            None => {
+                if written_as_regex(&request.query) {
+                    (
+                        true,
+                        compile(&request.query)
+                            .map_err(|error| ToolError::InvalidSearchPattern(error.to_string()))?,
+                    )
+                } else if has_regex_markers(&request.query)
+                    && let Some(repaired) = escape_unbalanced_delimiters(&request.query)
+                    && let Ok(re) = compile(&repaired)
+                    && !re.is_match("")
+                {
+                    auto_repaired_regex = true;
+                    (true, re)
+                } else {
+                    (
+                        false,
+                        compile(&regex::escape(&request.query))
+                            .map_err(|error| ToolError::InvalidSearchPattern(error.to_string()))?,
+                    )
+                }
+            }
+        };
         let workspace = self.with_root(request.workspace_root.as_deref())?;
         let roots = workspace.resolve_search_roots(&request)?;
         let root_filters = workspace.search_root_filters(&roots)?;
@@ -550,6 +588,9 @@ impl Workspace {
         let mut hints = Vec::new();
         if truncated_by_bytes {
             hints.push("Search output capped at ~48 KiB inline budget; narrow path/query/exclude/context_lines or read specific line ranges.");
+        }
+        if auto_repaired_regex {
+            hints.push("Auto-escaped unbalanced regex delimiter(s) such as '('; pass a JS RegExp literal like /foo\\(/ or double-escape '\\\\(' in JS strings for exact regex control.");
         }
         if explicit.is_none() && regex {
             hints.push("regex was not given and the query is written as a regular expression, so it was matched as one. Pass regex:false to match the text literally.");

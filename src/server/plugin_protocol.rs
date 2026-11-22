@@ -11,12 +11,16 @@ pub enum Origin {
     External,
 }
 
+fn enabled_by_default() -> bool { true }
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub version: u32,
     pub id: String,
     pub title: String,
+    #[serde(default = "enabled_by_default")]
+    pub enabled_by_default: bool,
     /// Stable source namespace; absent on legacy manifests: derive from the ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<String>,

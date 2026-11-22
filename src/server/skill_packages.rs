@@ -348,7 +348,7 @@ impl Registry {
     pub fn catalog(&self) -> Value {
         json!(self.entries.read().unwrap().values().map(|package|json!({
             "id":package.manifest.id,"name":package.manifest.id,"title":package.manifest.title,"library":package.manifest.library,
-            "description":package.description,"enabled":package.available(),"scope":package.scope,"has_skill":!package.manifest.skill.trim().is_empty(),
+            "description":package.description,"enabled":package.available(),"toggleable":package.origin != Origin::Builtin || !package.manifest.enabled_by_default,"scope":package.scope,"has_skill":!package.manifest.skill.trim().is_empty(),
             "tools":package.manifest.tools,"mcp":package.mcp.is_some(),"pages":package.manifest.pages,"package_root":package.root,"origin":package.origin,"inject":package.manifest.inject,"remote":package.remote.is_some(),
         })).collect::<Vec<_>>())
     }
@@ -538,6 +538,13 @@ impl Registry {
     }
 }
 
+pub(crate) fn register_builtin(ctx: &PluginContext<'_>, tools: &ToolCatalog, package: Package, enabled: Option<bool>) -> Result<()> {
+    let mount = package.manifest.enabled_by_default || enabled == Some(true);
+    tools.packages.entries.write().unwrap().insert(package.manifest.id.clone(), package.clone());
+    if mount { ctx.mount(PackagePlugin(package))?; }
+    Ok(())
+}
+
 pub struct PackagesPlugin;
 impl Plugin for PackagesPlugin {
     fn id(&self) -> &str {
@@ -552,16 +559,10 @@ impl Plugin for PackagesPlugin {
         let registry = tools.packages.clone();
         ctx.effect(move || registry.entries.write().unwrap().clear());
         let config = settings()?;
-        // Built-in plugins are the agent's own periphery: active whenever it runs.
+        // Required built-ins stay mounted; opt-in built-ins remain visible in settings.
         for package in crate::server::builtin_plugins::packages()? {
-            let id = package.manifest.id.clone();
-            tools
-                .packages
-                .entries
-                .write()
-                .unwrap()
-                .insert(id.clone(), package.clone());
-            ctx.mount(PackagePlugin(package))?;
+            let enabled = config.enabled.get(&package.manifest.id).copied();
+            register_builtin(ctx, &tools, package, enabled)?;
         }
         let mut paths = config.packages;
         if let Some(path) = std::env::var_os("DSH_SKILL_PACKAGES_DIR") {
@@ -610,6 +611,11 @@ impl Plugin for PackagesPlugin {
         Ok(())
     }
 }
+tokio::task_local! { static NATIVE_MOUNT: ScopeId; }
+pub(crate) fn current_native_mount() -> Option<ScopeId> {
+    NATIVE_MOUNT.try_with(|mount| *mount).ok()
+}
+
 pub struct PackagePlugin(pub Package);
 impl Plugin for PackagePlugin {
     fn id(&self) -> &str {
@@ -689,6 +695,7 @@ impl Plugin for PackagePlugin {
             ctx.effect(move || connection.stop());
         }
         ctx.effect(move || stop.cancel());
+        let ctx_scope = ctx.scope();
         let handler: ToolHandler = Arc::new(move |workspace, name, args| {
             let root = root.clone();
             let commands = commands.clone();
@@ -704,8 +711,9 @@ impl Plugin for PackagePlugin {
                     .and_then(|backend| backend.tools.get(&name))
                     .context("native contribution unavailable")?;
                 tokio::select! {
-                    result = (tool.handler)(workspace, name, args) => result,
+                    biased;
                     _ = cancel.cancelled() => Err(anyhow::anyhow!("plugin stopped during native tool execution")),
+                    result = NATIVE_MOUNT.scope(ctx_scope, (tool.handler)(workspace, name, args)) => result,
                 }
             })
         });
@@ -874,7 +882,7 @@ pub fn set_enabled(
         .cloned()
         .context("package not found")?;
     ensure!(
-        enabled || package.origin != Origin::Builtin,
+        enabled || package.origin != Origin::Builtin || !package.manifest.enabled_by_default,
         "内置插件是 Agent 的核心部分，随 Agent 启动，不能停用：{id}"
     );
     let parent = runtime
@@ -923,6 +931,7 @@ pub async fn call_tool(
     use axum::response::IntoResponse;
     let result = async {
         let catalog = state.tool_catalog.context("tool registry unavailable")?;
+        ensure!(super::builtin_plugins::desktop::permission(&name).is_none(), "DESKTOP_TASK_REQUIRED: use an Agent task");
         ensure!(!catalog.packages.is_mcp(&id), "MCP tools must run in an Agent task with its permission policy");
         ensure!(
             catalog.packages.owns_tool(&id, &name),

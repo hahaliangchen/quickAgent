@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "id": "desktop",
+  "library": "desktop",
+  "title": "桌面操控",
+  "skill": "SKILL.md",
+  "enabled_by_default": false,
+  "tools": [
+    "desktop__list_windows",
+    "desktop__focus_window",
+    "desktop__screenshot_window",
+    "desktop__clipboard_read",
+    "desktop__clipboard_write",
+    "desktop__notify",
+    "desktop__open_app",
+    "desktop__read_tree",
+    "desktop__invoke",
+    "desktop__mouse",
+    "desktop__keyboard"
+  ]
+}

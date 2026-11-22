@@ -287,6 +287,10 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
 /// Lightweight declaration prelude for the code-only transport. It carries
 /// stable library names and typed method shapes without emitting JSON Schema
 /// tool definitions on the wire.
+pub(crate) fn lazy_contract_library(name: &str) -> bool {
+    name == "desktop" || name.starts_with("mcp_")
+}
+
 pub fn static_library_header(libraries: &Libraries) -> String {
     let mut out = String::from(
         "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n\
@@ -347,7 +351,7 @@ pub fn static_library_header(libraries: &Libraries) -> String {
         );
     }
     for (library, methods) in libraries {
-        if library.starts_with("mcp_") {
+        if lazy_contract_library(library) {
             continue;
         }
         out.push_str(&format!("declare namespace {library} {{\n"));
@@ -471,6 +475,7 @@ pub fn directory(libraries: &Libraries) -> String {
             ("process", process_purpose),
             ("http", "Probe HTTP endpoints."),
             ("browser", "Open, inspect, and interact with browser pages."),
+            ("desktop", "Inspect and operate the local desktop; discover contracts on demand."),
             ("vision", "View and analyze images."),
         ]),
         ("Conversation and saved material", &[

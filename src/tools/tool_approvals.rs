@@ -320,7 +320,8 @@ async fn wait_with(
     let base_scopes = grant_scopes(task, project.as_deref());
     let outside_kind = outside.map(|(k, _)| k);
     let outside_paths = outside.map(|(_, p)| p);
-    let scopes_to_check: Vec<String> = if outside.is_none() {
+    let desktop_once = crate::server::builtin_plugins::desktop::requires_confirmation(name);
+    let scopes_to_check: Vec<String> = if outside.is_none() && !desktop_once {
         if crate::tools::shell_process::is_tool(name) {
             base_scopes
                 .iter()
@@ -345,7 +346,7 @@ async fn wait_with(
     // "Approve for me": a clear allow or deny needs no card for in-workspace actions;
     // outside-write always requires human confirmation even if AI reviewer says Allow.
     let mut review_reason = None;
-    if matches!(state.permission_mode, PermissionMode::AutoReview) {
+    if matches!(state.permission_mode, PermissionMode::AutoReview) && !desktop_once {
         let verdict =
             crate::tools::approval_review::review(state, task, model, name, args, outside_paths, cancel)
                 .await;
@@ -386,7 +387,7 @@ async fn wait_with(
         task,
         "approval/request",
         &json!({"call_id":call_id,"tool":name,"arguments":detail,"agent_id":agent_id,
-        "project":project,
+        "project":project,"once_only":desktop_once,
         "full_arguments":crate::tools::shell_process::is_tool(name).then_some(args),
         "unsandboxed":crate::tools::shell_process::is_tool(name) && cfg!(windows),
         "shell":crate::tools::shell_process::is_tool(name).then_some(if cfg!(windows) {"PowerShell 7"} else {"Bash"}),
@@ -441,7 +442,7 @@ async fn wait_with(
         "project" => base_scopes.last(),
         _ => None,
     };
-    if let Some(base) = chosen_base {
+    if let Some(base) = chosen_base.filter(|_| !desktop_once) {
         if let Some((kind, paths)) = outside {
             let prefix = match kind {
                 OutsideKind::Read => "outside-read",

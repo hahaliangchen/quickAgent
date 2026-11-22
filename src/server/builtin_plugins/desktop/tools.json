@@ -1,0 +1,226 @@
+[
+  {
+    "name": "desktop__list_windows",
+    "description": "List desktop windows with identity, geometry and active status.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    }
+  },
+  {
+    "name": "desktop__focus_window",
+    "description": "Focus an explicitly identified visible window.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "window_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "window_id"
+      ]
+    }
+  },
+  {
+    "name": "desktop__screenshot_window",
+    "description": "Capture a window or screen as a task-owned PNG; optionally overlay pixel coordinates.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "window_id": {
+          "type": "string"
+        },
+        "grid": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "desktop__clipboard_read",
+    "description": "Read bounded plain text from the desktop clipboard.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    }
+  },
+  {
+    "name": "desktop__clipboard_write",
+    "description": "Replace the clipboard with bounded plain text.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 16384
+        }
+      },
+      "required": [
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "desktop__notify",
+    "description": "Show a bounded desktop notification.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "title",
+        "body"
+      ]
+    }
+  },
+  {
+    "name": "desktop__open_app",
+    "description": "Open an HTTP(S) URL or a registered, allowlisted desktop application ID.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "type": "string",
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "target"
+      ]
+    }
+  },
+  {
+    "name": "desktop__read_tree",
+    "description": "Read the AT-SPI tree of one identified window. Returns fallback guidance when unavailable.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "window_id": {
+          "type": "string"
+        },
+        "max_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      },
+      "required": [
+        "window_id"
+      ]
+    }
+  },
+  {
+    "name": "desktop__invoke",
+    "description": "Activate a semantic control from the latest desktop.read_tree snapshot.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "window_id": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "window_id",
+        "ref"
+      ]
+    }
+  },
+  {
+    "name": "desktop__mouse",
+    "description": "Send bounded pointer input. Coordinates are window-relative when window_id is supplied.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "click",
+            "double_click",
+            "right_click",
+            "move",
+            "drag",
+            "scroll"
+          ]
+        },
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        },
+        "to_x": {
+          "type": "integer"
+        },
+        "to_y": {
+          "type": "integer"
+        },
+        "delta_y": {
+          "type": "integer"
+        },
+        "window_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "x",
+        "y"
+      ]
+    }
+  },
+  {
+    "name": "desktop__keyboard",
+    "description": "Type bounded text or one allowed key chord into the verified foreground window.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 4
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "text"
+          ]
+        },
+        {
+          "required": [
+            "keys"
+          ]
+        }
+      ]
+    }
+  }
+]

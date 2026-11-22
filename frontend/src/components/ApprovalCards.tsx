@@ -9,6 +9,7 @@ interface PendingApproval {
   readonly tool: string
   readonly summary: string
   readonly project: boolean
+  readonly onceOnly: boolean
   readonly workdir: string
   readonly shell: string
   readonly unsandboxed: boolean
@@ -80,6 +81,7 @@ export function pendingApprovals(events: readonly AgentEvent[]): PendingApproval
         tool: String(event.data.tool),
         summary: summarize(args, fullArgs ? JSON.stringify(fullArgs, null, 2) : raw),
         project: typeof event.data.project === 'string',
+        onceOnly: event.data.once_only === true,
         workdir: text(args.workdir) || text(args.project_path) || text(args.cwd) || text(args.workspace_root),
         shell: text(event.data.shell) || text(args.shell),
         unsandboxed: event.data.unsandboxed === true || args.unsandboxed === true,
@@ -122,8 +124,8 @@ export function ApprovalCards({ taskId, events, className }: { taskId: string; e
       {error && <p className={css.error} role="alert">{error}</p>}
       <div className={css.actions}>
         <button type="button" className={css.secondary} disabled={!!chosen} onClick={() => decide(item.callId, 'deny')}>拒绝</button>
-        {item.project && <button type="button" className={css.secondary} disabled={!!chosen} onClick={() => decide(item.callId, 'project')}>这个项目以后都允许</button>}
-        <button type="button" className={css.secondary} disabled={!!chosen} onClick={() => decide(item.callId, 'session')}>本会话都允许</button>
+        {!item.onceOnly && item.project && <button type="button" className={css.secondary} disabled={!!chosen} onClick={() => decide(item.callId, 'project')}>这个项目以后都允许</button>}
+        {!item.onceOnly && <button type="button" className={css.secondary} disabled={!!chosen} onClick={() => decide(item.callId, 'session')}>本会话都允许</button>}
         <button type="button" className={css.primary} disabled={!!chosen} onClick={() => decide(item.callId, 'once')}>{chosen ? '已提交…' : '允许这一次'}</button>
       </div>
     </div>

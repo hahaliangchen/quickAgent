@@ -2,6 +2,7 @@ import type {AttachmentRef} from './components/Attachments.tsx'
 export interface SkillPackage {
   remote?: boolean
   mcp?: boolean
+  toggleable?: boolean
   origin: 'builtin' | 'external'; inject: string[]
   id: string; name: string; title: string; description: string; enabled: boolean; scope: number | null; tools: string[]
   pages: { id: string; title: string; entry: string; renderer: string }[]

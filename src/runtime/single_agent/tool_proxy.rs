@@ -288,17 +288,17 @@ fn handle_read_tool_contracts_with_defs(
     if selection.get("overview").and_then(Value::as_bool).unwrap_or(false) {
         return (json!({"overview": agent_program::declarations::overview(&selected, &definitions())}), false);
     }
-    let mcp = selected.iter().filter(|(name, _)| name.starts_with("mcp_"))
+    let lazy = selected.iter().filter(|(name, _)| agent_program::declarations::lazy_contract_library(name))
         .map(|(name, methods)| (name.clone(), methods.clone())).collect::<agent_program::libraries::Libraries>();
-    if mcp.is_empty() {
+    if lazy.is_empty() {
         return (json!({"declarations": agent_program::declarations::static_library_header(&selected)}), false);
     }
-    let regular = selected.into_iter().filter(|(name, _)| !name.starts_with("mcp_")).collect();
+    let regular = selected.into_iter().filter(|(name, _)| !agent_program::declarations::lazy_contract_library(name)).collect();
     let mut header = if agent_program::libraries::Libraries::is_empty(&regular) { String::new() }
         else { agent_program::declarations::static_library_header(&regular) };
     let defs = definitions();
-    header.push_str(&agent_program::declarations::headers(&mcp, &defs));
-    let methods = mcp.values().flat_map(|methods| methods.values()).collect::<std::collections::BTreeSet<_>>();
+    header.push_str(&agent_program::declarations::headers(&lazy, &defs));
+    let methods = lazy.values().flat_map(|methods| methods.values()).collect::<std::collections::BTreeSet<_>>();
     let schemas = defs.iter().filter_map(|definition| {
         let function = &definition["function"];
         let name = function["name"].as_str()?;
