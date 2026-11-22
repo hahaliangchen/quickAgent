@@ -2,6 +2,10 @@
   <img src="docs/assets/quickagent-cover.svg" alt="QuickAgent — Think. Code. Do." width="100%">
 </p>
 
+<p align="center">
+  <img src="frontend/src/assets/windmill-mark.svg" alt="QuickAgent Logo" width="60" height="60">
+</p>
+
 <h1 align="center">QuickAgent</h1>
 
 <p align="center">

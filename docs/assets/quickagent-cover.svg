@@ -3,7 +3,7 @@
 <rect width="1280" height="420" rx="28" fill="#f8fbf9"/>
 <circle cx="1090" cy="110" r="160" fill="#eaf5ee"/><circle cx="1020" cy="355" r="125" fill="#eff8f2"/>
 <rect x="70" y="58" width="52" height="52" rx="16" fill="#158767"/>
-<path d="M83 87h11l6-11 5 19 5-8h7" fill="none" stroke="white" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+<g transform="translate(76 64) scale(0.625)" fill="#ffffff"><path d="M32.4 29.0C31.5 13.5 39.5 8.5 55.5 8.5C55.5 24.5 50.5 32.5 35.0 31.6L47.2 16.8Z"/><path d="M32.4 29.0C31.5 13.5 39.5 8.5 55.5 8.5C55.5 24.5 50.5 32.5 35.0 31.6L47.2 16.8Z" transform="rotate(180 32 32)"/><path d="M29.8 28.4C29.2 17.5 22.0 11.2 10.5 10.5C11.2 22.0 17.5 29.2 28.4 29.8L18.4 18.4Z"/><path d="M29.8 28.4C29.2 17.5 22.0 11.2 10.5 10.5C11.2 22.0 17.5 29.2 28.4 29.8L18.4 18.4Z" transform="rotate(180 32 32)"/></g>
 <text x="138" y="93" fill="#1c6f58" font-family="Arial,sans-serif" font-size="22" font-weight="700" letter-spacing="3">QUICKAGENT</text>
 <text x="70" y="190" fill="#142a25" font-family="Arial,sans-serif" font-size="62" font-weight="700">Think. Code. Do.</text>
 <text x="72" y="241" fill="#587168" font-family="Arial,sans-serif" font-size="24">A local agent that orchestrates work with code.</text>
