@@ -8,7 +8,8 @@ import styles from './SkillPagesView.module.css'
 /** Installed skill packages with their pages, and the forms that add more. */
 export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: string; onBack: () => void }) {
   const api = useAgentApi()
-  const { packages, pages, errors } = usePluginPages()
+  const { packages: allPackages, pages, errors } = usePluginPages()
+  const packages = allPackages.filter(item => !item.mcp)
   const [selected, setSelected] = useState<{ owner: string; page: string }>()
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)

@@ -26,13 +26,18 @@ const FORMATS: [image::ImageFormat; 4] = [
 
 /// Every directory a registered image may come from, resolved so that `..` and
 /// symbolic links are judged by where they really point.
-fn allowed_roots(workspace: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![workspace.to_path_buf()];
-    for candidate in [
-        std::env::temp_dir(),
-        PathBuf::from("/tmp"),
-        PathBuf::from("/private/tmp"),
-    ] {
+fn allowed_roots(workspace: &Path, project_workspace: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for candidate in project_workspace
+        .into_iter()
+        .chain(std::iter::once(workspace))
+        .map(Path::to_path_buf)
+        .chain([
+            std::env::temp_dir(),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/private/tmp"),
+        ])
+    {
         if let Ok(resolved) = candidate.canonicalize()
             && !roots.contains(&resolved)
         {
@@ -47,11 +52,18 @@ fn within(path: &Path, roots: &[PathBuf]) -> bool {
 }
 
 /// Where a request points on disk, refusing anything outside the allowed roots.
-fn resolve(workspace: &Path, raw: &str) -> Result<PathBuf> {
+fn resolve(workspace: &Path, project_workspace: Option<&Path>, raw: &str) -> Result<PathBuf> {
     let raw = raw.trim();
     ensure!(!raw.is_empty(), "path must not be empty");
     let candidate = if Path::new(raw).is_absolute() {
         PathBuf::from(raw)
+    } else if let Some(project) = project_workspace {
+        let in_project = project.join(raw);
+        if in_project.exists() {
+            in_project
+        } else {
+            workspace.join(raw)
+        }
     } else {
         workspace.join(raw)
     };
@@ -61,7 +73,7 @@ fn resolve(workspace: &Path, raw: &str) -> Result<PathBuf> {
     // Canonical first, then compare: a symlink inside the workspace that points
     // outside it must not become a read of that outside file.
     ensure!(
-        within(&resolved, &allowed_roots(workspace)),
+        within(&resolved, &allowed_roots(workspace, project_workspace)),
         "image path must stay inside the workspace or the system temp directory: {raw}"
     );
     ensure!(
@@ -101,9 +113,13 @@ pub async fn execute(
         .filter(|value| !value.trim().is_empty())
         .context("path is required")?;
     let workspace = state.workspace.root().to_path_buf();
+    let project_workspace = (!context.task_id().is_empty())
+        .then(|| crate::context::session_browser::task_workspace(&workspace, context.task_id()).ok())
+        .flatten()
+        .filter(|path| path != &workspace);
     let request = raw.to_owned();
     let (resolved, bytes) = tokio::task::spawn_blocking(move || -> Result<(PathBuf, Vec<u8>)> {
-        let resolved = resolve(&workspace, &request)?;
+        let resolved = resolve(&workspace, project_workspace.as_deref(), &request)?;
         let size = std::fs::metadata(&resolved)?.len();
         ensure!(
             size <= visual_artifacts::MAX_ORIGINAL_BYTES as u64,
@@ -165,9 +181,27 @@ mod tests {
     fn a_relative_path_resolves_below_the_workspace_root() {
         let workspace = sandbox("register-image-relative");
         std::fs::write(workspace.join("shot.png"), png(4, 3)).unwrap();
-        let resolved = resolve(&workspace, "shot.png").unwrap();
+        let resolved = resolve(&workspace, None, "shot.png").unwrap();
         assert_eq!(resolved, workspace.join("shot.png").canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn a_desktop_project_workspace_image_is_allowed_when_distinct_from_store_root() {
+        let store_root = sandbox("register-image-store");
+        let project_root = sandbox("register-image-project");
+        std::fs::write(project_root.join("ui.png"), png(4, 3)).unwrap();
+        let rel = resolve(&store_root, Some(&project_root), "ui.png").unwrap();
+        assert_eq!(rel, project_root.join("ui.png").canonicalize().unwrap());
+        let abs = resolve(
+            &store_root,
+            Some(&project_root),
+            &project_root.join("ui.png").display().to_string(),
+        )
+        .unwrap();
+        assert_eq!(abs, project_root.join("ui.png").canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&store_root);
+        let _ = std::fs::remove_dir_all(&project_root);
     }
 
     #[test]
@@ -176,9 +210,9 @@ mod tests {
         let file = std::env::temp_dir()
             .join(format!("register-image-{}.png", crate::server::agent_service::uuid_like()));
         std::fs::write(&file, png(3, 2)).unwrap();
-        assert!(resolve(&workspace, &file.display().to_string()).is_ok());
+        assert!(resolve(&workspace, None, &file.display().to_string()).is_ok());
         assert!(
-            resolve(&workspace, "..").is_err(),
+            resolve(&workspace, None, "..").is_err(),
             "the directory itself is not an image file"
         );
         let _ = std::fs::remove_file(&file);

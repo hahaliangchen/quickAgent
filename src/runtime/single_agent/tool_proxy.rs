@@ -113,7 +113,16 @@ pub(super) async fn proxy_rust_tool(
         "list_skills" => handle_list_skills(s),
         "read_skill" => handle_read_skill(s, &args),
         "read_tool_contracts" => handle_read_tool_contracts_with_defs(libs, &args, || {
-            crate::server::agent_service::local_tools(&s.state.workspace, s.state.tool_catalog.as_deref(), s.ban_execution)
+            {
+                let mut definitions = crate::server::agent_service::local_tools(&s.state.workspace, s.state.tool_catalog.as_deref(), s.ban_execution);
+                if let Some(catalog) = &s.state.tool_catalog {
+                    let active = catalog.packages.catalog().as_array().into_iter().flatten()
+                        .filter(|p| p["enabled"] == true)
+                        .filter_map(|p| p["id"].as_str().map(str::to_owned)).collect();
+                    definitions.extend(catalog.packages.tools(&active));
+                }
+                definitions
+            }
         }),
         "read_program_guide" => (
             json!({
@@ -274,12 +283,30 @@ fn handle_read_tool_contracts_with_defs(
             Err(error) => return (json!({"code":"INVALID_CONTRACT_SELECTION","message":format!("{error:#}")}), true),
         }
     } else {
-        libs.clone()
+        libs.iter().filter(|(name, _)| !name.starts_with("mcp_")).map(|(name, methods)| (name.clone(), methods.clone())).collect()
     };
     if selection.get("overview").and_then(Value::as_bool).unwrap_or(false) {
         return (json!({"overview": agent_program::declarations::overview(&selected, &definitions())}), false);
     }
-    (json!({"declarations": agent_program::declarations::static_library_header(&selected)}), false)
+    let mcp = selected.iter().filter(|(name, _)| name.starts_with("mcp_"))
+        .map(|(name, methods)| (name.clone(), methods.clone())).collect::<agent_program::libraries::Libraries>();
+    if mcp.is_empty() {
+        return (json!({"declarations": agent_program::declarations::static_library_header(&selected)}), false);
+    }
+    let regular = selected.into_iter().filter(|(name, _)| !name.starts_with("mcp_")).collect();
+    let mut header = if agent_program::libraries::Libraries::is_empty(&regular) { String::new() }
+        else { agent_program::declarations::static_library_header(&regular) };
+    let defs = definitions();
+    header.push_str(&agent_program::declarations::headers(&mcp, &defs));
+    let methods = mcp.values().flat_map(|methods| methods.values()).collect::<std::collections::BTreeSet<_>>();
+    let schemas = defs.iter().filter_map(|definition| {
+        let function = &definition["function"];
+        let name = function["name"].as_str()?;
+        methods.iter().any(|target| target.as_str() == name).then(|| json!({
+            "tool":name,"inputSchema":function["parameters"],"structuredContentSchema":function["mcpOutputSchema"],
+        }))
+    }).collect::<Vec<_>>();
+    (json!({"declarations":header,"schemas":schemas}), false)
 }
 
 fn handle_find_library_methods(
@@ -288,8 +315,10 @@ fn handle_find_library_methods(
     args: &Value,
 ) -> (Value, bool) {
     let query = args["query"].as_str().unwrap_or("").to_ascii_lowercase();
+    let library = args["library"].as_str();
     let mut matched = Vec::new();
     for (lib, methods) in libs {
+        if library.is_some_and(|name| name != lib) { continue; }
         for (method, target) in methods {
             if query.is_empty()
                 || lib.contains(&query)
@@ -301,6 +330,7 @@ fn handle_find_library_methods(
         }
     }
     for (lib, desc) in crate::runtime::flow_libraries::list_libraries(s) {
+        if library.is_some_and(|name| name != lib) { continue; }
         for m in crate::runtime::flow_libraries::public_method_names(s, &lib).unwrap_or_default() {
             if query.is_empty()
                 || lib.to_ascii_lowercase().contains(&query)

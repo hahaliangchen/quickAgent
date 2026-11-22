@@ -942,7 +942,9 @@ async fn plugin_tree(State(state): State<AiProxyState>) -> Json<Value> {
         .service::<builtin_plugins::LifecycleLog>(plugin_runtime::ROOT, "plugin-events")
         .map(|log| log.snapshot())
         .unwrap_or_default();
-    Json(json!({"plugins":state.runtime.snapshot(),"events":events}))
+    let mcp_servers = state.runtime.service::<builtin_plugins::ToolCatalog>(plugin_runtime::ROOT, "tools")
+        .map(|catalog| catalog.packages.mcp_status()).unwrap_or_else(|_| json!([]));
+    Json(json!({"plugins":state.runtime.snapshot(),"events":events,"mcp_servers":mcp_servers}))
 }
 
 async fn skill_packages(State(state): State<AiProxyState>) -> Json<Value> {
@@ -965,6 +967,11 @@ async fn enable_skill_package(
         .runtime
         .service::<builtin_plugins::ToolCatalog>(plugin_runtime::ROOT, "tools")
         .unwrap();
+    if registry.packages.is_mcp(&id) {
+        return package_response(crate::server::skill_packages::mcp_packages::set_enabled(
+            &state.runtime, &registry.packages, &id, input.enabled, true,
+        ).await);
+    }
     if input.enabled && registry.packages.is_remote(&id) {
         if let Err(error) =
             crate::server::skill_packages::remote::reconnect(&state.runtime, &registry.packages, &id).await
@@ -1063,6 +1070,11 @@ async fn reload_skill_package(
         .runtime
         .service::<builtin_plugins::ToolCatalog>(plugin_runtime::ROOT, "tools")
         .unwrap();
+    if catalog.packages.is_mcp(&id) {
+        return package_response(crate::server::skill_packages::mcp_packages::reconnect(
+            &state.runtime, &catalog.packages, &id,
+        ).await);
+    }
     if catalog.packages.is_remote(&id) {
         return package_response(
             crate::server::skill_packages::remote::reconnect(&state.runtime, &catalog.packages, &id).await,
@@ -1082,6 +1094,9 @@ async fn remove_skill_package(
         .runtime
         .service::<builtin_plugins::ToolCatalog>(plugin_runtime::ROOT, "tools")
         .unwrap();
+    if catalog.packages.is_mcp(&id) {
+        return package_response(Err(anyhow::anyhow!("Remove the server from mcp-servers.json instead")));
+    }
     package_response(crate::server::skill_packages::remove(
         &state.runtime,
         &catalog.packages,
@@ -1216,6 +1231,13 @@ pub async fn run(
         .service::<crate::server::agent_service::AgentServiceState>(tools_scope, "agent-tasks")?)
     .clone();
     crate::server::skill_packages::bind_root(agent_state.tool_catalog.as_ref().unwrap());
+    let mcp_runtime = runtime.clone();
+    let mcp_registry = agent_state.tool_catalog.as_ref().unwrap().packages.clone();
+    tokio::spawn(async move {
+        if let Err(error) = crate::server::skill_packages::mcp_packages::restore(mcp_runtime, mcp_registry).await {
+            tracing::warn!(%error, "MCP configuration could not be restored");
+        }
+    });
     let remote_runtime = runtime.clone();
     let remote_registry = agent_state.tool_catalog.as_ref().unwrap().packages.clone();
     tokio::spawn(async move {

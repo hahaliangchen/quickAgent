@@ -10,6 +10,7 @@ import {
   IconDatabaseOutlineRegular,
   IconLightOutlineRegular,
   IconPlusOutlineRegular,
+  IconRefreshOutlineRegular,
   IconSearchOutlineRegular,
   IconSettingsOutlineRegular,
   StateDot,
@@ -19,6 +20,7 @@ import {
   api,
   REASONING_LEVELS,
   type ModelCapabilities,
+  type McpServerStatus,
   type ModelUseSettings,
   type PluginsSnapshot,
   type ProviderApiType,
@@ -149,11 +151,28 @@ export function SettingsModal({
   const [pluginsData, setPluginsData] = useState<PluginsSnapshot | null>(null)
   const [packages,setPackages]=useState<SkillPackage[]>([])
   const [pluginQuery, setPluginQuery] = useState('')
+  const [mcpBusy, setMcpBusy] = useState<string | null>(null)
+  const mcpServers = pluginsData?.mcp_servers ?? []
+  const visibleMcpServers = mcpServers.filter(server => [server.name, server.id, server.library].some(value => value.toLowerCase().includes(pluginQuery.toLowerCase())))
   const [expandedPlugins, setExpandedPlugins] = useState<Record<string, boolean>>({})
   const [shellStatus, setShellStatus] = useState<ShellStatus | null>(null)
   const [detectingShell, setDetectingShell] = useState(false)
   const opening = useRef(0)
   const windowsShell = shellStatus?.platform.os === 'windows'
+
+  async function changeMcp(server: McpServerStatus, reconnect: boolean) {
+    setMcpBusy(server.id)
+    setStatusMsg(null)
+    try {
+      if (reconnect) await api.reloadPackage(server.id)
+      else await api.setPackageEnabled(server.id, !server.enabled)
+    } catch (err) {
+      setStatusMsg({ text: err instanceof Error ? err.message : String(err), error: true })
+    } finally {
+      setMcpBusy(null)
+      loadPlugins()
+    }
+  }
 
   const loadPlugins = useCallback(() => {
     void api.skillPackages().then(data=>setPackages(data.packages)).catch(()=>{})
@@ -195,6 +214,13 @@ export function SettingsModal({
     loadPlugins()
     return () => { cancelled = true; opening.current += 1 }
   }, [open, loadPlugins])
+
+  const connectingMcp = mcpServers.some(server => server.status === 'connecting')
+  useEffect(() => {
+    if (!open || activeTab !== 'plugins' || !connectingMcp) return
+    const timer = window.setInterval(loadPlugins, 1500)
+    return () => window.clearInterval(timer)
+  }, [open, activeTab, connectingMcp, loadPlugins])
 
   useEffect(() => {
     if (!open) return
@@ -1135,11 +1161,43 @@ export function SettingsModal({
 
                 <div className={pluginsCss.catalog}>
                   <div className={pluginsCss.catalogHeading}>
+                    <h3>MCP Server</h3>
+                    <span>{mcpServers.length}</span>
+                  </div>
+                  {visibleMcpServers.length === 0 && <p className={pluginsCss.mcpEmpty}>{mcpServers.length ? '没有匹配的 MCP Server' : '未配置 MCP Server'}</p>}
+                  <ul className={pluginsCss.cards}>
+                    {visibleMcpServers.map(server => {
+                      const busy = mcpBusy === server.id || server.status === 'connecting'
+                      const connected = server.status === 'connected'
+                      const phase = !server.enabled ? '已停用' : connected ? '已连接' : busy ? '连接中' : '已断连'
+                      return <li key={server.id} className={clsx(pluginsCss.card, pluginsCss.mcpCard)}>
+                        <div className={pluginsCss.mcpHeading}>
+                          <strong className={pluginsCss.cardTitle} title={server.name}>{server.name}</strong>
+                          <span className={pluginsCss.mcpPhase} role="status">
+                            <StateDot state={!server.enabled ? 'idle' : connected ? 'done' : busy ? 'ongoing' : 'error'} size={8} />{phase}
+                          </span>
+                        </div>
+                        <span className={pluginsCss.cardIdentity}>{server.library} · {server.transport === 'streamable_http' ? 'Streamable HTTP' : server.transport === 'stdio' ? 'stdio' : '配置无效'} · {server.tool_count} 个工具</span>
+                        {server.enabled && server.last_error && <p className={pluginsCss.mcpError}>{server.last_error}</p>}
+                        <div className={pluginsCss.mcpActions}>
+                          <button type="button" className={modelsCss.secondaryButton} disabled={busy || mcpBusy !== null || !server.enabled} onClick={() => { void changeMcp(server, true) }}>
+                            <IconRefreshOutlineRegular size={14} />重连
+                          </button>
+                          <button type="button" className={modelsCss.secondaryButton} disabled={busy || mcpBusy !== null} onClick={() => { void changeMcp(server, false) }}>{server.enabled ? '停用' : '启用'}</button>
+                        </div>
+                      </li>
+                    })}
+                  </ul>
+                </div>
+
+                <div className={pluginsCss.catalog}>
+                  <div className={pluginsCss.catalogHeading}>
                     <h3>Rust Cordis 插件</h3>
-                    <span>{pluginsData?.plugins.length ?? 0}</span>
+                    <span>{pluginsData?.plugins.filter(plugin => !mcpServers.some(server => server.id === plugin.id)).length ?? 0}</span>
                   </div>
                   <ul className={pluginsCss.cards}>
                     {(pluginsData?.plugins ?? [])
+                      .filter(p => !mcpServers.some(server => server.id === p.id))
                       .filter(p =>
                         p.id.toLowerCase().includes(pluginQuery.toLowerCase())
                         || p.provides.some(s => s.toLowerCase().includes(pluginQuery.toLowerCase())))

@@ -12,6 +12,8 @@ use std::{
 };
 
 pub(crate) mod command;
+mod mcp_client;
+pub(crate) mod mcp_packages;
 pub(crate) mod remote;
 use crate::server::plugin_protocol::{Manifest, NativeBackend, Origin, ToolPermission};
 
@@ -44,6 +46,13 @@ pub struct Package {
     pub origin: Origin,
     native: Option<NativeBackend>,
     remote: Option<Arc<remote::Connection>>,
+    mcp: Option<Arc<mcp_client::Connection>>,
+}
+
+impl Package {
+    fn available(&self) -> bool {
+        self.scope.is_some() && self.mcp.as_ref().is_none_or(|c| c.connected())
+    }
 }
 fn identifier(value: &str) -> bool {
     !value.is_empty()
@@ -59,7 +68,7 @@ pub(crate) fn load_builtin(root: &Path, native: NativeBackend) -> Result<Package
     load_with(root, Origin::Builtin, Some(native))
 }
 fn reload_package(package: &Package) -> Result<Package> {
-    if package.remote.is_some() {
+    if package.remote.is_some() || package.mcp.is_some() {
         return Ok(package.clone());
     }
     load_with(&package.root, package.origin, package.native.clone())
@@ -91,6 +100,12 @@ fn optional_instructions(root: &Path, entry: &str) -> Result<Option<(PathBuf, St
 fn load_with(root: &Path, origin: Origin, native: Option<NativeBackend>) -> Result<Package> {
     let root = root.canonicalize()?;
     let manifest: Manifest = serde_json::from_slice(&std::fs::read(root.join("plugin.json"))?)?;
+    ensure!(
+        !manifest.id.starts_with("mcp-")
+            && manifest.library.as_deref().is_none_or(|lib| !lib.starts_with("mcp_"))
+            && !manifest.tools.iter().any(|name| crate::runtime::agent_program::libraries::mcp_tool_name(name)),
+        "MCP namespaces and tool names are reserved for configured servers"
+    );
     ensure!(
         manifest
             .library
@@ -248,6 +263,7 @@ fn load_with(root: &Path, origin: Origin, native: Option<NativeBackend>) -> Resu
         origin,
         native,
         remote: None,
+        mcp: None,
     })
 }
 #[derive(Default, Deserialize, Serialize)]
@@ -271,6 +287,7 @@ fn settings() -> Result<Settings> {
 #[derive(Default)]
 pub struct Registry {
     entries: RwLock<BTreeMap<String, Package>>,
+    mcp_servers: RwLock<BTreeMap<String, Arc<mcp_packages::Server>>>,
     pub transition: Mutex<()>,
 }
 impl Registry {
@@ -294,7 +311,7 @@ impl Registry {
                 .read()
                 .unwrap()
                 .values()
-                .filter(|package| package.scope.is_some())
+                .filter(|package| package.scope.is_some() && package.mcp.is_none())
                 .map(
                     |package| json!({"name":package.manifest.id,"description":package.description})
                 )
@@ -331,8 +348,8 @@ impl Registry {
     pub fn catalog(&self) -> Value {
         json!(self.entries.read().unwrap().values().map(|package|json!({
             "id":package.manifest.id,"name":package.manifest.id,"title":package.manifest.title,"library":package.manifest.library,
-            "description":package.description,"enabled":package.scope.is_some(),"scope":package.scope,"has_skill":!package.manifest.skill.trim().is_empty(),
-            "tools":package.manifest.tools,"pages":package.manifest.pages,"package_root":package.root,"origin":package.origin,"inject":package.manifest.inject,"remote":package.remote.is_some(),
+            "description":package.description,"enabled":package.available(),"scope":package.scope,"has_skill":!package.manifest.skill.trim().is_empty(),
+            "tools":package.manifest.tools,"mcp":package.mcp.is_some(),"pages":package.manifest.pages,"package_root":package.root,"origin":package.origin,"inject":package.manifest.inject,"remote":package.remote.is_some(),
         })).collect::<Vec<_>>())
     }
     pub fn read(&self, name: &str) -> Result<Value> {
@@ -343,6 +360,7 @@ impl Registry {
             .get(name)
             .cloned()
             .context("skill package not found")?;
+        ensure!(package.mcp.is_none(), "MCP tools are available only in Agent tasks");
         ensure!(package.scope.is_some(), "skill package is disabled");
         if let Some(remote) = &package.remote {
             return Ok(
@@ -387,9 +405,9 @@ impl Registry {
     }
     pub fn tools(&self, active: &std::collections::BTreeSet<String>) -> Vec<Value> {
         let installed = self.entries.read().unwrap();
-        active.iter().filter_map(|id|installed.get(id)).filter(|package|package.scope.is_some())
+        active.iter().filter_map(|id|installed.get(id)).filter(|package|package.available())
             .flat_map(Self::definitions)
-            .map(|tool|json!({"type":"function","function":{"name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"],"outputSchema":tool["outputSchema"]}})).collect()
+            .map(|tool|json!({"type":"function","function":{"name":tool["name"],"description":tool["description"],"parameters":tool["inputSchema"],"outputSchema":tool["outputSchema"],"mcpOutputSchema":tool["mcpOutputSchema"]}})).collect()
     }
     fn definitions(package: &Package) -> Vec<Value> {
         package
@@ -649,6 +667,12 @@ impl Plugin for PackagePlugin {
                     }) == library),
             "plugin library namespace already belongs to another installed plugin"
         );
+        ensure!(
+            self.0.mcp.is_some() || (!library.starts_with("mcp_")
+                && !self.0.manifest.id.starts_with("mcp-")
+                && !self.0.manifest.tools.iter().any(|name| crate::runtime::agent_program::libraries::mcp_tool_name(name))),
+            "MCP namespaces and tool names are reserved for configured servers"
+        );
         let names = self
             .0
             .manifest
@@ -661,6 +685,9 @@ impl Plugin for PackagePlugin {
         let native = self.0.native.clone();
         let cancel = tokio_util::sync::CancellationToken::new();
         let stop = cancel.clone();
+        if let Some(connection) = self.0.mcp.clone() {
+            ctx.effect(move || connection.stop());
+        }
         ctx.effect(move || stop.cancel());
         let handler: ToolHandler = Arc::new(move |workspace, name, args| {
             let root = root.clone();
@@ -896,6 +923,7 @@ pub async fn call_tool(
     use axum::response::IntoResponse;
     let result = async {
         let catalog = state.tool_catalog.context("tool registry unavailable")?;
+        ensure!(!catalog.packages.is_mcp(&id), "MCP tools must run in an Agent task with its permission policy");
         ensure!(
             catalog.packages.owns_tool(&id, &name),
             "package tool is unavailable"

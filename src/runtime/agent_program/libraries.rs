@@ -168,6 +168,10 @@ fn owned(packages: &Value) -> BTreeSet<&str> {
         .collect()
 }
 
+pub(crate) fn mcp_tool_name(name: &str) -> bool {
+    name.starts_with("mcp_") && name.contains("__")
+}
+
 /// Host-owned namespaces cannot be claimed by plugins: the host's own
 /// libraries, and `host`, the import prefix.
 pub fn valid_namespace(name: &str) -> bool {

@@ -128,13 +128,16 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(100));
             }
             let url = format!("http://127.0.0.1:{port}/agent/").parse()?;
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("Grow")
+            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+                .title("QuickAgent")
                 .inner_size(1440.0, 900.0)
-                .min_inner_size(800.0, 600.0)
-                .build()?;
+                .min_inner_size(800.0, 600.0);
+            if let Some(icon) = app.default_window_icon().cloned() {
+                builder = builder.icon(icon)?;
+            }
+            builder.build()?;
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("Grow 桌面端启动失败");
+        .expect("QuickAgent 桌面端启动失败");
 }

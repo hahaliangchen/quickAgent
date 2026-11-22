@@ -209,6 +209,29 @@
   flex: none;
 }
 
+.mcpCard {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.mcpHeading,
+.mcpActions,
+.mcpPhase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcpHeading { justify-content: space-between; }
+.mcpActions { flex-wrap: wrap; }
+.mcpPhase { flex: none; font-size: 12px; }
+.mcpEmpty,
+.mcpError { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.mcpEmpty { color: var(--dsw-alias-label-tertiary); }
+.mcpError { color: var(--dsw-alias-state-error-primary); }
+.mcpCard .cardIdentity { white-space: normal; overflow-wrap: anywhere; }
+
 .group {
   display: flex;
   flex-direction: column;

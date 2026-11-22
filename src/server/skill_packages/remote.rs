@@ -399,6 +399,7 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
         origin: Origin::External,
         native: Some(Arc::new(native)),
         remote: Some(remote),
+        mcp: None,
     })
 }
 /// An administrator may register just a service address. User credentials are

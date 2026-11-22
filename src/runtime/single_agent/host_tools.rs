@@ -5,6 +5,7 @@
 //! driver can invoke any host capability cleanly without legacy ReAct baggage.
 
 use super::{Session, managed_files};
+use crate::runtime::agent_program;
 use crate::server::agent_service::{self, AgentServiceState};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -220,6 +221,23 @@ pub(super) async fn business_tool_inner(
             Some(call_id),
         )
         .await;
+    }
+    if agent_program::libraries::mcp_tool_name(name) {
+        // Hold the same contribution from permission check through execution. Reconnect
+        // cancels the old connection instead of swapping in a handler after approval.
+        let tool = s.state.tool_catalog.as_ref().context("tool catalog unavailable")?.packages.mcp_tool(name)?;
+        let mode = s.state.permission_mode;
+        ensure!(tool.permission.allows(mode, s.ban_execution), "permission_denied: {name}");
+        if matches!(mode, agent_service::PermissionMode::Ask | agent_service::PermissionMode::AutoReview)
+            && !tool.permission.allows(agent_service::PermissionMode::WorkspaceWrite, s.ban_execution)
+        {
+            crate::tools::tool_approvals::wait(s.state, s.task, s.model, s.delegate_id(), call_id, name, &args, s.cancel).await?;
+        }
+        return tokio::select! {
+            biased;
+            _ = s.cancel.cancelled() => anyhow::bail!("MCP tool call cancelled"),
+            result = (tool.handler)(s.state.workspace.clone(), name.to_owned(), args) => result,
+        };
     }
     ensure!(
         s.state.permission_mode.allows(name)
@@ -574,7 +592,14 @@ pub(super) async fn business_tool_inner(
             let mut visual = visual_context(s, node)?;
             visual.source_tool_call_id = call_id.to_owned();
             visual.source_event_id = format!("{}:tool:{call_id}", s.task);
-            crate::tools::browser_control::execute_scoped(&tool_workspace, &visual, name, &args).await
+            crate::tools::browser_control::execute_scoped_with_project(
+                &s.state.workspace,
+                tool_workspace.root(),
+                &visual,
+                name,
+                &args,
+            )
+            .await
         } else {
             if let Some(catalog) = &s.state.tool_catalog
                 && let Some(page_name) = catalog.packages.page_tool(name)

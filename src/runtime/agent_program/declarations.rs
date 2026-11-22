@@ -3,7 +3,6 @@ use super::{
     libraries::{self, Libraries},
     *,
 };
-#[cfg(test)]
 use std::collections::BTreeSet;
 
 fn text(value: &str) -> String {
@@ -13,7 +12,6 @@ fn text(value: &str) -> String {
         .join(" ")
         .replace("*/", "* /")
 }
-#[cfg(test)]
 fn key(value: &str) -> String {
     if libraries::identifier(value) {
         value.into()
@@ -21,7 +19,6 @@ fn key(value: &str) -> String {
         json!(value).to_string()
     }
 }
-#[cfg(test)]
 fn note(schema: &Value) -> String {
     let mut parts = Vec::new();
     if let Some(description) = schema["description"].as_str() {
@@ -69,7 +66,6 @@ fn note(schema: &Value) -> String {
         format!("/** {} */ ", parts.join("; "))
     }
 }
-#[cfg(test)]
 fn ty(schema: &Value, root: &Value, seen: &mut BTreeSet<String>, depth: usize) -> String {
     if depth > 32 {
         return format!("{}unknown", note(&json!({"schema":schema})));
@@ -233,11 +229,9 @@ fn ty(schema: &Value, root: &Value, seen: &mut BTreeSet<String>, depth: usize) -
     };
     format!("{}{shape}", note(schema))
 }
-#[cfg(test)]
 pub fn schema_type(schema: &Value) -> String {
     ty(schema, schema, &mut BTreeSet::new(), 0)
 }
-#[cfg(test)]
 pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
     let definitions = definitions
         .iter()
@@ -303,6 +297,22 @@ pub fn static_library_header(libraries: &Libraries) -> String {
          // NEVER wrap a whole file or multi-line block that contains backticks (`) or `${` (such as Rust doc comments, Markdown, or TS templates) in a single String.raw`...` — unescaped backticks terminate the template literal early. Use a quoted line array `[\"line 1\", String.raw`line 2`].join(\"\\n\")` instead.\n",
     );
     out.push_str(&directory(libraries));
+    let mcp = libraries.iter().filter(|(name, _)| name.starts_with("mcp_")).collect::<Vec<_>>();
+    if !mcp.is_empty() {
+        out.push_str("\n// MCP libraries (use host.find_methods({ library }) and host.contracts for signatures): ");
+        let mut used = 0;
+        for (name, methods) in mcp {
+            let item = format!("{name} ({} tools)", methods.len());
+            if used + item.len() + 2 > 360 {
+                out.push_str("; more via host.find_methods({})");
+                break;
+            }
+            if used != 0 { out.push_str(", "); }
+            out.push_str(&item);
+            used += item.len() + 2;
+        }
+        out.push('\n');
+    }
     out.push('\n');
     if libraries.contains_key("browser") {
         out.push_str(
@@ -337,6 +347,9 @@ pub fn static_library_header(libraries: &Libraries) -> String {
         );
     }
     for (library, methods) in libraries {
+        if library.starts_with("mcp_") {
+            continue;
+        }
         out.push_str(&format!("declare namespace {library} {{\n"));
         for (method, target) in methods {
             let sig = match target.as_str() {
@@ -364,7 +377,7 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "write_stdin" => "args: { session_id: string; chars?: string; yield_time_ms?: number; max_output_tokens?: number; stream?: 'stdout' | 'stderr'; char_offset?: number }): { exit_code: number | null; running: boolean; session_id?: string; stdout: string; stderr: string; output?: string; next_char_offset?: number | null; total_chars?: number }",
                 "kill_session" => "args: { session_id: string }): { exit_code: number | null; running: boolean; session_id?: string }",
                 "read_tool_contracts" => "args?: { libraries?: string[]; library?: string; methods?: string[]; overview?: boolean }): { declarations?: string; overview?: string }",
-                "find_library_methods" => "args: { query: string }): { methods: Array<{ library: string; method: string; tool?: string; orchestration?: boolean; description?: string }> }",
+                "find_library_methods" => "args: { query?: string; library?: string }): { methods: Array<{ library: string; method: string; tool?: string; orchestration?: boolean; description?: string }> }",
                 "read_program_guide" => "args?: { section?: string }): { guide: string; builtin_contracts: string }",
                 "list_skills" => "args?: {}): Array<{ name: string; description: string }>",
                 "read_skill" => "args: { name: string }): { name: string; content: string }",

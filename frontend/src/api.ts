@@ -1,6 +1,7 @@
 import type {AttachmentRef} from './components/Attachments.tsx'
 export interface SkillPackage {
   remote?: boolean
+  mcp?: boolean
   origin: 'builtin' | 'external'; inject: string[]
   id: string; name: string; title: string; description: string; enabled: boolean; scope: number | null; tools: string[]
   pages: { id: string; title: string; entry: string; renderer: string }[]
@@ -229,7 +230,19 @@ export interface PluginEvent {
   readonly data?: { readonly id?: string }
 }
 
+export interface McpServerStatus {
+  readonly id: string
+  readonly name: string
+  readonly library: string
+  readonly enabled: boolean
+  readonly status: 'connecting' | 'connected' | 'disconnected'
+  readonly transport: 'stdio' | 'streamable_http' | 'invalid'
+  readonly tool_count: number
+  readonly last_error: string | null
+}
+
 export interface PluginsSnapshot {
+  readonly mcp_servers?: readonly McpServerStatus[]
   readonly plugins: readonly PluginNode[]
   readonly events: readonly PluginEvent[]
 }

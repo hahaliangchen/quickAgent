@@ -375,6 +375,16 @@ pub async fn execute_scoped(
     name: &str,
     args: &Value,
 ) -> Result<Value> {
+    execute_scoped_with_project(workspace, workspace.root(), context, name, args).await
+}
+
+pub async fn execute_scoped_with_project(
+    workspace: &crate::tools::Workspace,
+    project_root: &Path,
+    context: &crate::media::visual_artifacts::VisualContext,
+    name: &str,
+    args: &Value,
+) -> Result<Value> {
     if name == "view_image" {
         let mut result = crate::media::visual_artifacts::view(
             workspace.root(),
@@ -532,7 +542,7 @@ pub async fn execute_scoped(
             )
             .await?
         }
-        "browser_upload" => upload(&session.ws, workspace.root(), args).await?,
+        "browser_upload" => upload(&session.ws, project_root, args).await?,
         "browser_fill" => fill(&session.ws, args).await?,
         "browser_set_viewport" => set_viewport(session, args).await?,
         "browser_scroll" => scroll(&session.ws, args).await?,
