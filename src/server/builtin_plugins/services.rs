@@ -221,6 +221,7 @@ impl Plugin for FileToolsPlugin {
         register_tools(context, crate::tools::git_tools::TOOLS, mcp_handler())?;
         register_tools(context, &[crate::tools::batch_edits::NAME], mcp_handler())?;
         register_tools(context, crate::tools::browser_control::TOOLS, mcp_handler())?;
+        register_tools(context, &["view_image"], mcp_handler())?;
         context.provide("file-tools", Arc::new(()))
     }
 }

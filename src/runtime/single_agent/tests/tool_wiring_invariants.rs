@@ -358,11 +358,15 @@ const LEGACY_PROCESS_EXECUTION: &[&str] = &[
     "run_project_script",
     "stop_project_process",
 ];
-const LEGACY_BROWSER: &[&str] = &[
+const BROWSER_TOOLS: &[&str] = &[
     "browser_open",
     "browser_read",
     "browser_wait",
     "browser_diagnostics",
+    "browser_hover",
+    "browser_network",
+    "browser_tabs",
+    "browser_switch_tab",
     "browser_fill",
     "browser_set_viewport",
     "browser_scroll",
@@ -385,7 +389,7 @@ fn builtin_permissions_approvals_and_tracking_match_legacy_behavior() {
         let git_write = LEGACY_GIT_WRITES.contains(&name);
         let verify = LEGACY_VERIFY.contains(&name);
         let project_execution = LEGACY_PROCESS_EXECUTION.contains(&name);
-        let browser = LEGACY_BROWSER.contains(&name);
+        let browser = BROWSER_TOOLS.contains(&name);
         let batch_edit = name == "apply_edits";
         let tracked = file_write
             || git_write

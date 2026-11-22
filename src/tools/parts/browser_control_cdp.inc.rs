@@ -31,7 +31,9 @@ async fn call(ws: &str, method: &str, params: Value) -> Result<Value> {
 
 async fn connect_cdp(ws: &str) -> Result<CdpConnection> {
     Ok(CdpConnection {
-        stream: connect(ws).await?,
+        stream: timeout(Duration::from_secs(5), connect(ws))
+            .await
+            .context("browser socket connection timed out")??,
         next_id: 1,
         dialog: None,
     })
@@ -40,12 +42,20 @@ async fn connect_cdp(ws: &str) -> Result<CdpConnection> {
 async fn watch_dialogs(
     ws: &str,
     pending: Option<Value>,
+    network: NetworkLog,
+    frames: std::sync::Arc<std::sync::Mutex<TargetIds>>,
 ) -> Result<(
     std::sync::Arc<std::sync::Mutex<Option<Value>>>,
-    tokio::sync::mpsc::Sender<DialogCommand>,
+    tokio::sync::mpsc::Sender<PageCommand>,
     tokio::task::JoinHandle<()>,
 )> {
     let mut cdp = connect_cdp(ws).await?;
+    let target = reqwest::Url::parse(ws)?
+        .path()
+        .rsplit('/')
+        .next()
+        .context("no target ID")?
+        .to_owned();
     if pending.is_some() {
         // Chrome may defer Page.enable until the existing modal is handled.
         send(
@@ -55,11 +65,11 @@ async fn watch_dialogs(
         .await?;
         cdp.next_id += 1;
     } else {
-        cdp.call("Page.enable", json!({})).await?;
+        arm_diagnostics(&mut cdp).await?;
     }
     let dialog = std::sync::Arc::new(std::sync::Mutex::new(cdp.dialog.take().or(pending)));
     let observed = dialog.clone();
-    let (commands, mut incoming) = tokio::sync::mpsc::channel::<DialogCommand>(1);
+    let (commands, mut incoming) = tokio::sync::mpsc::channel::<PageCommand>(1);
     let watch = tokio::spawn(async move {
         // Keep Page events attached between model requests; a new short-lived
         // Runtime connection cannot reliably rediscover an already-open dialog.
@@ -75,20 +85,37 @@ async fn watch_dialogs(
                     message=&mut message=> {
                         let Ok(message)=message else {return;};
                         if let Ok(event)=serde_json::from_str::<Value>(&message) {
-                            if event["method"]=="Page.javascriptDialogOpening" {*observed.lock().unwrap()=Some(event["params"].clone());}
+                            if event["method"] == "Fetch.requestPaused" {
+                                let request = &event["params"];
+                                let url = request["request"]["url"].as_str().unwrap_or("");
+                                let blocked = reqwest::Url::parse(url).is_ok_and(|url| check_browser_port(&url).is_err())
+                                    || (request["resourceType"] == "Document" && check_page_url(url, true).is_err());
+                                let (method, params) = if blocked {
+                                    ("Fetch.failRequest", json!({"requestId":request["requestId"],"errorReason":"BlockedByClient"}))
+                                } else {
+                                    ("Fetch.continueRequest", json!({"requestId":request["requestId"]}))
+                                };
+                                let id = cdp.next_id;
+                                cdp.next_id += 1;
+                                if send(&mut writer, &json!({"id":id,"method":method,"params":params}).to_string()).await.is_err() { return; }
+                            }
+                            network.lock().unwrap().observe(&target, &event);
+                           if let Some(frame) = event.pointer("/params/frame/id").or_else(|| event.pointer("/params/frameId")).and_then(Value::as_str)
+                               && matches!(event["method"].as_str(), Some("Page.frameNavigated" | "Page.frameAttached")) { frames.lock().unwrap().insert(frame.to_owned()); }
+                           if event["method"]=="Page.javascriptDialogOpening" {*observed.lock().unwrap()=Some(event["params"].clone());}
                             if event["method"]=="Page.javascriptDialogClosed" {*observed.lock().unwrap()=None;}
-                            if let Some(reply)=event["id"].as_u64().and_then(|id|replies.remove(&id)) {
-                                if event.get("error").is_none() {*observed.lock().unwrap()=None;}
+                            if let Some((method, reply))=event["id"].as_u64().and_then(|id|replies.remove(&id)) {
+                                if method=="Page.handleJavaScriptDialog" && event.get("error").is_none() {*observed.lock().unwrap()=None;}
                                 let _=tokio::sync::oneshot::Sender::send(reply,Ok(event));
                             }
                         }
                         break;
                     }
                     command=incoming.recv()=> {
-                        let Some((accept,reply))=command else {return;};
+                        let Some((method,params,reply))=command else {return;};
                         let id=cdp.next_id;cdp.next_id+=1;
-                        match send(&mut writer,&json!({"id":id,"method":"Page.handleJavaScriptDialog","params":{"accept":accept}}).to_string()).await {
-                            Ok(())=>{replies.insert(id,reply);}
+                        match send(&mut writer,&json!({"id":id,"method":method,"params":params}).to_string()).await {
+                            Ok(())=>{replies.insert(id,(method,reply));}
                             Err(error)=>{let _=reply.send(Err(error));return;}
                         }
                     }
@@ -148,11 +175,16 @@ impl CdpConnection {
 
 async fn connect(ws_url: &str) -> Result<TcpStream> {
     let url = reqwest::Url::parse(ws_url)?;
+    check_browser_port(&url)?;
+    ensure!(
+        url.scheme() == "ws",
+        "Chrome debugging requires a ws:// endpoint"
+    );
     let host = url.host_str().context("browser socket has no host")?;
     let port = url
         .port_or_known_default()
         .context("browser socket has no port")?;
-    let mut stream = TcpStream::connect((host, port)).await?;
+    let mut stream = TcpStream::connect((host.trim_matches(['[', ']']), port)).await?;
     let key = "dGhlIHNhbXBsZSBub25jZQ==";
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n",
@@ -241,4 +273,3 @@ async fn recv(stream: &mut (impl tokio::io::AsyncRead + Unpin)) -> Result<String
         }
     }
 }
-

@@ -10,28 +10,26 @@ use tokio::{
     time::timeout,
 };
 
-pub const TOOLS: &[&str] = &[
-    "browser_open",
-    "browser_read",
-    "browser_wait",
-    "browser_diagnostics",
-    "browser_click",
-    "browser_fill",
-    "browser_set_viewport",
-    "browser_scroll",
-    "browser_press_key",
-    "browser_upload",
-    "browser_screenshot",
-    "browser_close",
-    "view_image",
-];
+use crate::tools::tool_registry::{CatalogKind, ToolRegistry};
+pub const TOOLS: &[&str] = &ToolRegistry::catalog_names::<{ ToolRegistry::catalog_len(CatalogKind::Browser) }>(CatalogKind::Browser);
+
 pub fn is_tool(name: &str) -> bool {
-    TOOLS.contains(&name)
+    TOOLS.contains(&name) || name == "view_image"
 }
 
 struct Session {
     ws: String,
     emulation: Option<CdpConnection>,
+    refs: ElementRefs,
+    targets: Option<BrowserTargets>,
+    lease: Option<Lease>,
+    host_launched: bool,
+    persistent: bool,
+    profile_name: Option<String>,
+    network: NetworkLog,
+    inactive_watch: std::collections::HashMap<String, InactiveWatch>,
+    frames: std::sync::Arc<std::sync::Mutex<TargetIds>>,
+    downloads: Option<DownloadCapture>,
     child: Option<tokio::process::Child>,
     profile: Option<std::path::PathBuf>,
     session_id: String,
@@ -42,10 +40,9 @@ struct Session {
     signature: Value,
     visible: bool,
     dialog: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
-    dialog_commands: tokio::sync::mpsc::Sender<DialogCommand>,
+    dialog_commands: tokio::sync::mpsc::Sender<PageCommand>,
     dialog_watch: tokio::task::JoinHandle<()>,
 }
-type DialogCommand = (bool, tokio::sync::oneshot::Sender<Result<Value>>);
 impl Drop for Session {
     fn drop(&mut self) {
         self.dialog_watch.abort();
@@ -70,7 +67,9 @@ fn session_key(root: &Path, task: &str) -> String {
 fn connection_record(session: &Session) -> Value {
     json!({"browser_session_id":session.session_id,"page_id":session.page_id,"websocket_url":session.ws,
         "display_mode":if session.visible{"visible_window"}else{"headless"},"page_epoch":session.epoch,"capture_seq":session.capture_seq,
-        "javascript_dialog":session.dialog.lock().unwrap().clone()})
+        "javascript_dialog":session.dialog.lock().unwrap().clone(),"next_element_ref":session.refs.next,
+        "attached_browser":session.targets.as_ref().filter(|targets| targets.attached).map(|targets| json!({"endpoint":targets.endpoint.as_str(),"owned":targets.owned})),
+        "persistent_profile":session.persistent,"profile_name":session.profile_name})
 }
 
 /// Read the original tool return from this conversation, not a second session registry.
@@ -139,9 +138,20 @@ async fn reconnect(record: &Value) -> Result<Session> {
             .context("recorded Chrome debugging port is invalid")?;
         format!("ws://127.0.0.1:{port}/devtools/page/{page_id}")
     };
-    let url = reqwest::Url::parse(&ws).context("invalid browser websocket URL")?;
+    let url = cdp_url(&ws).context("invalid browser websocket URL")?;
+    let attached = &record["attached_browser"];
+    let mut lease = None;
+    let mut targets = None;
+    if let Some(raw) = attached["endpoint"].as_str() {
+        let endpoint = cdp_url(raw)?;
+        lease = Some(Lease::take(format!("attach:{endpoint}"))?);
+        let owned: TargetIds = serde_json::from_value(attached["owned"].clone())?;
+        let browser = BrowserTargets { endpoint, attached:true, owned };
+        ensure!(browser.owned.contains(page_id) && browser.socket(page_id)? == ws, "not the recorded task-owned tab");
+        targets = Some(browser);
+    }
     ensure!(
-        url.scheme() == "ws" && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")),
+        url.scheme() == "ws" && (targets.is_some() || matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))),
         "browser reconnection requires a local Chrome debugging endpoint"
     );
     ensure!(
@@ -160,12 +170,23 @@ async fn reconnect(record: &Value) -> Result<Session> {
             .context("browser reconnection timed out")?
             .context("the recorded browser page is unreachable")?
     };
-    let (dialog, dialog_commands, dialog_watch) = watch_dialogs(&ws, pending).await?;
+    let network = NetworkLog::default();
+    let frames = Default::default();
+    if let Some(url) = state["url"].as_str() { check_page_url(url, true)?; }
+    let (dialog, dialog_commands, dialog_watch) = watch_dialogs(&ws, pending, network.clone(), std::sync::Arc::clone(&frames)).await?;
+    if targets.is_none() && let Ok(endpoint) = browser_endpoint(&ws).await {
+        targets = Some(BrowserTargets { endpoint, attached:false, owned:TargetIds::from([page_id.to_owned()]) });
+    }
     Ok(Session {
+        targets, lease, network, frames, inactive_watch: Default::default(), downloads: None,
+        host_launched: record["persistent_profile"] == true,
+        persistent: record["persistent_profile"] == true,
+        profile_name: record["profile_name"].as_str().map(str::to_owned),
         emulation: None,
+        refs: ElementRefs { next: record["next_element_ref"].as_u64().unwrap_or(0), ..Default::default() },
         ws,
         child: None,
-        profile,
+        profile: profile.filter(|path| path.join("DevToolsActivePort").is_file()),
         session_id: session_id.to_owned(),
         page_id: page_id.to_owned(),
         owner: Value::Null,
@@ -184,16 +205,11 @@ fn restore_connection_record(root: &Path, task: &str, record: &Value) -> Result<
         .as_object()
         .context("browser_connection must be an object")?
         .clone();
-    if let Some(saved) = saved_connection(root, task)? {
-        if saved["browser_session_id"] == record["browser_session_id"]
-            && saved["page_id"] == record["page_id"]
-        {
-            for (key, value) in saved
-                .as_object()
-                .context("saved browser connection is invalid")?
-            {
-                restored.entry(key.clone()).or_insert_with(|| value.clone());
-            }
+    let recent = saved_connection(root, task)?;
+    let matching = recent.as_ref().filter(|saved| saved["browser_session_id"] == record["browser_session_id"] && saved["page_id"] == record["page_id"]);
+    if let Some(saved) = matching {
+        for (key, value) in saved.as_object().context("saved browser connection is invalid")? {
+            restored.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }
     let conn = crate::server::agent_service::open_db(root)?;
@@ -211,8 +227,14 @@ fn restore_connection_record(root: &Path, task: &str, record: &Value) -> Result<
         ],
         |row| row.get::<_, String>(0),
     )?;
+    restored.remove("attached_browser");
+    restored.remove("persistent_profile");
+    restored.remove("profile_name");
+    restored.remove("next_element_ref");
     let mut original_mode = None;
+    let mut has_saved_tab = matching.is_some();
     for raw in rows {
+        has_saved_tab = true;
         let saved: Value = serde_json::from_str(&raw?)?;
         if original_mode.is_none()
             && matches!(
@@ -222,13 +244,14 @@ fn restore_connection_record(root: &Path, task: &str, record: &Value) -> Result<
         {
             original_mode = Some(saved["display_mode"].clone());
         }
+        for key in ["attached_browser", "persistent_profile", "profile_name"] {
+            if let Some(value) = saved.get(key) { restored.insert(key.to_owned(), value.clone()); }
+        }
         if let Some(ws) = saved.get("websocket_url") {
-            restored
-                .entry("websocket_url".to_owned())
-                .or_insert_with(|| ws.clone());
+            restored.insert("websocket_url".to_owned(), ws.clone());
         }
         // These counters survive host reconnection and never go backwards.
-        for field in ["page_epoch", "capture_seq"] {
+        for field in ["page_epoch", "capture_seq", "next_element_ref"] {
             if saved[field].as_u64().unwrap_or(0)
                 > restored.get(field).and_then(Value::as_u64).unwrap_or(0)
             {
@@ -236,6 +259,13 @@ fn restore_connection_record(root: &Path, task: &str, record: &Value) -> Result<
             }
         }
     }
+    ensure!(has_saved_tab, "browser connection does not name a recorded page ID for this task");
+    let last_ref: Option<u64> = conn.query_row(
+        "SELECT max(json_extract(data,'$.meta.result.browser_connection.next_element_ref')) FROM agent_task_events
+         WHERE task_id=?1 AND kind='tool/result' AND json_extract(data,'$.meta.result.browser_connection.browser_session_id')=?2",
+        rusqlite::params![task, record["browser_session_id"].as_str()], |row| row.get(0),
+    )?;
+    if let Some(next) = last_ref { restored.insert("next_element_ref".to_owned(), json!(next)); }
     if let Some(mode) = original_mode {
         restored.insert("display_mode".into(), mode);
     }
@@ -295,10 +325,20 @@ async fn close_session(root: &Path, task: &str) -> Value {
         let mut guard = page.lock().await;
         if let Some(session) = guard.as_mut() {
             let identity = json!({"browser_session_id":session.session_id,"page_id":session.page_id,"display_mode":if session.visible{"visible_window"}else{"headless"}});
-            if let Some(child) = session.child.as_mut() {
-                let _ = child.kill().await;
-                let _ = timeout(Duration::from_secs(2), child.wait()).await;
-            } else if let Err(error) = call(&session.ws, "Browser.close", json!({})).await {
+            let closed = if let Some(targets) = session.targets.as_mut().filter(|targets| targets.attached) {
+                let closed = targets.close_owned().await;
+                if session.downloads.is_some() { let _ = call(targets.endpoint.as_str(), "Browser.setDownloadBehavior", json!({"behavior":"default","eventsEnabled":false})).await; }
+                closed
+            } else if session.profile.is_some() || session.child.is_some() || session.host_launched {
+                let close = call(&session.ws, "Browser.close", json!({})).await;
+                if let Some(child) = session.child.as_mut() {
+                    if timeout(Duration::from_secs(3), child.wait()).await.is_err() { let _ = child.kill().await; }
+                    Ok(())
+                } else { close.map(|_| ()) }
+            } else {
+                call(&session.ws, "Page.close", json!({})).await.map(|_| ())
+            };
+            if let Err(error) = closed {
                 return json!({"ok":false,"error_code":"browser_close_failed","reason":format!("{error:#}"),"browser_connection":connection_record(session)});
             }
             let temp = std::env::temp_dir();
@@ -328,17 +368,21 @@ async fn close_session(root: &Path, task: &str) -> Value {
 pub fn definitions() -> Vec<Value> {
     let url = json!({"type":"string","description":"http(s) or file URL to open."});
     let mut definitions = vec![
-        json!({"name":"browser_open","description":"Open a URL in the task-owned browser and return its identity, display mode, location, title and visible text. Set visible=true to show the controlled Chrome/Edge window to the user. This does not by itself prove a document or slide loaded.","inputSchema":{"type":"object","required":["url"],"properties":{"url":url,"visible":{"type":"boolean","description":"Show the task-owned browser window. Choose this on the first browser call when the user should see the page; it cannot be changed after the session starts."}}}}),
-        json!({"name":"browser_read","description":"Read the existing task browser page URL, title, visible text, controls, file inputs, alerts and font state. Resumes the original connection from this conversation after a host restart; never creates or navigates a page. browser_session_missing means no connection record; browser_reconnect_failed includes the actual failure reason. Use browser_open only when you intend to open/navigate a page. Set expect_text to a phrase that proves the requested page is visible.","inputSchema":{"type":"object","properties":{"expect_text":{"type":"string"}}}}),
-        json!({"name":"browser_wait","description":"Wait up to timeout_ms for an explicit selector, visible text or font loading state. A timeout is an unmet condition and is reported as a tool failure.","inputSchema":{"type":"object","properties":{"selector":{"type":"string"},"text":{"type":"string"},"state":{"type":"string","enum":["visible","exists","hidden"]},"font_status":{"type":"string","enum":["loading","loaded"]},"timeout_ms":{"type":"integer","minimum":100,"maximum":30000}}}}),
+        json!({"name":"browser_open","description":"Open a URL in the task-owned browser and return its identity, display mode, location, title and visible text. Set visible=true to show the controlled Chrome/Edge window to the user. This does not by itself prove a document or slide loaded.","inputSchema":{"type":"object","required":["url"],"properties":{"url":url,"profile":{"enum":["ephemeral","persistent"],"default":"ephemeral"},"profile_name":{"type":"string"},"attach":{"type":"boolean","description":"Use trusted QUICKAGENT_BROWSER_CDP_URL or local debugging port 9222; own new tabs only."},"visible":{"type":"boolean","description":"Show the task-owned browser window. Choose this on the first browser call when the user should see the page; it cannot be changed after the session starts."}}}}),
+        json!({"name":"browser_read","description":"Read the existing task browser page URL, title, visible text, interactive accessibility elements with stable refs, completed downloads, controls, file inputs, alerts and font state. Resumes the original connection from this conversation after a host restart; never creates or navigates a page. browser_session_missing means no connection record; browser_reconnect_failed includes the actual failure reason. Use browser_open only when you intend to open/navigate a page. Set expect_text to a phrase that proves the requested page is visible.","inputSchema":{"type":"object","properties":{"expect_text":{"type":"string"},"max_elements":{"type":"integer","minimum":1,"maximum":500,"default":200}}}}),
+        json!({"name":"browser_wait","description":"Wait up to timeout_ms for an explicit selector, visible text or font loading state. Reports newly completed downloads. A timeout is an unmet condition and is reported as a tool failure.","inputSchema":{"type":"object","properties":{"selector":{"type":"string"},"text":{"type":"string"},"state":{"type":"string","enum":["visible","exists","hidden"]},"font_status":{"type":"string","enum":["loading","loaded"]},"timeout_ms":{"type":"integer","minimum":100,"maximum":30000}}}}),
         json!({"name":"browser_diagnostics","description":"Read bounded console errors, page exceptions, and the page's recorded requests since navigation: every fetch/XHR call (method, URL, status, time, duration, failure) plus font/resource timing entries. Filter with url_contains (e.g. /api/fonts) and category. request_coverage states what the record cannot see; an empty result means nothing matched in that scope, not that no request happened. This tool does not execute worker-provided JavaScript.","inputSchema":{"type":"object","properties":{"url_contains":{"type":"string"},"category":{"type":"string","enum":["all","fetch","xhr","font","resource"]}}}}),
-        json!({"name":"browser_click","description":"Click a visible, enabled control. text matches the same label browser_read lists under controls (exact label preferred, then containing); selector is an exact CSS selector and takes precedence. times (1-5) repeats the same click, e.g. to step through slides, before you read the result.","inputSchema":{"type":"object","properties":{"text":{"type":"string"},"selector":{"type":"string"},"times":{"type":"integer","minimum":1,"maximum":5}}}}),
-        json!({"name":"browser_fill","description":"Set or append text in an editable input or textarea; dispatch input/change and optionally submit its form.","inputSchema":{"type":"object","required":["selector","value"],"properties":{"selector":{"type":"string"},"value":{"type":"string","maxLength":65536},"clear":{"type":"boolean","default":true},"submit":{"type":"boolean","default":false}}}}),
+        json!({"name":"browser_click","description":"Click a visible, enabled control. text matches the same label browser_read lists under controls (exact label preferred, then containing); selector is an exact CSS selector and takes precedence. Use ref from browser_read instead of selector/text. times (1-5) repeats the same click, e.g. to step through slides, before you read the result.","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"text":{"type":"string"},"selector":{"type":"string"},"times":{"type":"integer","minimum":1,"maximum":5}}}}),
+        json!({"name":"browser_fill","description":"Set or append text by ref or CSS selector in an editable input or textarea; dispatch input/change and optionally submit its form.","inputSchema":{"type":"object","required":["value"],"oneOf":[{"required":["ref"]},{"required":["selector"]}],"properties":{"ref":{"type":"string"},"selector":{"type":"string"},"value":{"type":"string","maxLength":65536},"clear":{"type":"boolean","default":true},"submit":{"type":"boolean","default":false}}}}),
         json!({"name":"browser_set_viewport","description":"Override the task page viewport and prefers-color-scheme without reloading it.","inputSchema":{"type":"object","required":["width","height"],"properties":{"width":{"type":"integer","minimum":1,"maximum":4096},"height":{"type":"integer","minimum":1,"maximum":4096},"device_scale_factor":{"type":"number","minimum":0.5,"maximum":4},"color_scheme":{"enum":["light","dark","no-preference"]}}}}),
         json!({"name":"browser_scroll","description":"Scroll an element into view, or scroll to absolute document coordinates (omitted axes stay unchanged).","inputSchema":{"type":"object","properties":{"selector":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"block":{"enum":["start","center","end"]}}}}),
         json!({"name":"browser_press_key","description":"Press a supported key in this task's focused browser page, e.g. Delete after selecting a slide element. For a reported native JavaScript dialog, Enter accepts and Escape dismisses it; other keys do not dismiss it. Dialog text is preserved in the return. This is an interaction, not proof of its visible result.","inputSchema":{"type":"object","required":["key"],"properties":{"key":{"type":"string","enum":["Delete","Backspace","Enter","Escape","Tab","ArrowLeft","ArrowRight","ArrowUp","ArrowDown"]}}}}),
         json!({"name":"browser_upload","description":"Assign a workspace file to an input[type=file]. path is relative to the workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"},"selector":{"type":"string"}}}}),
-        json!({"name":"browser_screenshot","description":"Capture an immutable visual artifact of this task's page and select it for the next normal Worker image request. Capture is not a visual pass. Default viewport; choose full_page or clip to a CSS selector with optional CSS-pixel padding.","inputSchema":{"type":"object","properties":{"full_page":{"type":"boolean"},"selector":{"type":"string"},"padding":{"type":"number","minimum":0,"maximum":128}}}}),
+        json!({"name":"browser_screenshot","description":"Capture an immutable visual artifact of this task's page and select it for the next normal Worker image request. Capture is not a visual pass. Default viewport; choose full_page or clip to an element ref or CSS selector with optional CSS-pixel padding.","inputSchema":{"type":"object","properties":{"ref":{"type":"string"},"full_page":{"type":"boolean"},"selector":{"type":"string"},"padding":{"type":"number","minimum":0,"maximum":128}}}}),
+        json!({"name":"browser_hover","description":"Move the pointer over an element using its current accessibility ref or CSS selector.","inputSchema":{"type":"object","oneOf":[{"required":["ref"]},{"required":["selector"]}],"properties":{"ref":{"type":"string"},"selector":{"type":"string"}}}}),
+        json!({"name":"browser_network","description":"Read recent Document, Fetch and XHR traffic from task-owned pages; filter by URL path or status. Sensitive headers are redacted; opt in to bounded response bodies.","inputSchema":{"type":"object","properties":{"filter":{"type":"string"},"min_status":{"type":"integer"},"include_body":{"type":"boolean"},"limit":{"type":"integer","minimum":1,"maximum":100}}}}),
+        json!({"name":"browser_tabs","description":"List task-owned browser tabs and the active target.","inputSchema":{"type":"object","properties":{}}}),
+        json!({"name":"browser_switch_tab","description":"Activate an existing task-owned tab by target_id. Call browser_read for fresh element refs.","inputSchema":{"type":"object","required":["target_id"],"properties":{"target_id":{"type":"string"}}}}),
         json!({"name":"browser_close","description":"Explicitly close this task's controlled browser session. Completed visible sessions remain open until this is called or a replacement page is opened.","inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"view_image","description":"Select a host-issued visual artifact_id for the next image request; only this instance or explicitly exported upstream images are permitted. No arbitrary filesystem paths.","inputSchema":{"type":"object","required":["artifact_id"],"properties":{"artifact_id":{"type":"string"},"original":{"type":"boolean"},"checked_goal":{"type":"string"}}}}),
     ];
@@ -421,7 +465,11 @@ pub async fn execute_scoped_with_project(
                     .is_some_and(|ws| ws != &session.ws)
         })
     });
-    if guard.is_none() || different_connection {
+    if different_connection {
+        let record = explicit.unwrap();
+        return Ok(reconnection_failure(record, &anyhow::anyhow!("connection does not match the active browser tab; use browser.switch_tab()")));
+    }
+    if guard.is_none() {
         let record = if let Some(record) = explicit {
             Some(record.clone())
         } else if name != "browser_open" {
@@ -453,10 +501,31 @@ pub async fn execute_scoped_with_project(
             );
         }
         let url = args["url"].as_str().context("url is required")?;
-        crate::tools::process_sandbox::check_not_host_control_url_async(url).await?;
-        *guard = Some(launch(args["visible"] == true).await?);
+        check_page_url(url, false)?;
+        *guard = Some(start_browser(workspace.root(), args).await?);
     }
     let session = guard.as_mut().unwrap();
+    if name == "browser_open" {
+        check_page_url(args["url"].as_str().context("url is required")?, false)?;
+        let attached = session.targets.as_ref().is_some_and(|targets| targets.attached);
+        ensure!(args["attach"].as_bool().is_none_or(|attach| attach == attached), "browser attach mode is fixed for this session");
+        if let Some(profile) = args["profile"].as_str() {
+            ensure!(profile == if session.persistent { "persistent" } else { "ephemeral" }, "browser profile mode is fixed for this session");
+        }
+        if let Some(name) = args["profile_name"].as_str() {
+            ensure!(session.persistent && session.profile_name.as_deref() == Some(name), "browser profile name is fixed for this session");
+        }
+    }
+    if name == "browser_tabs" {
+        let mut result = tab_list(session).await?;
+        result["browser_connection"] = connection_record(session);
+        return Ok(result);
+    }
+    if name == "browser_switch_tab" {
+        let mut result = select_tab(session, args["target_id"].as_str().context("target_id is required")?).await?;
+        result["browser_connection"] = connection_record(session);
+        return Ok(result);
+    }
     if name == "browser_open"
         && args.get("visible").is_some_and(|value| {
             value
@@ -478,7 +547,7 @@ pub async fn execute_scoped_with_project(
             let (reply, received) = tokio::sync::oneshot::channel();
             session
                 .dialog_commands
-                .send((accept, reply))
+                .send(("Page.handleJavaScriptDialog", json!({"accept":accept}), reply))
                 .await
                 .context("browser dialog connection ended")?;
             let response = timeout(Duration::from_secs(20), received)
@@ -508,6 +577,15 @@ pub async fn execute_scoped_with_project(
             "needed":"Read the original dialog text. If appropriate, explicitly accept with browser_press_key Enter or dismiss with Escape; no dialog has been handled automatically."}),
         );
     }
+    if name == "browser_network" {
+        let mut result = browser_network(session, args).await?;
+        result["browser_connection"] = connection_record(session);
+        return Ok(result);
+    }
+    if let Ok(url) = eval(&session.ws, "location.href").await && let Some(url) = url.as_str() {
+        if name != "browser_open" || !url.starts_with("chrome-error://") { check_page_url(url, true)?; }
+    }
+    if matches!(name, "browser_open" | "browser_read" | "browser_wait") { arm_downloads(session, context.task_id()).await?; }
     if matches!(
         name,
         "browser_open" | "browser_click" | "browser_press_key" | "browser_upload"
@@ -515,7 +593,12 @@ pub async fn execute_scoped_with_project(
     ) {
         session.epoch += 1;
     }
-    let mut result = match name {
+    if !args["ref"].is_null() {
+        ensure!(args["ref"].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 24), "ref must be a nonempty element reference");
+        ensure!(args["selector"].is_null() && (name != "browser_click" || args["text"].is_null()), "choose ref or selector/text");
+    }
+    let operation = async {
+        Ok::<_, anyhow::Error>(match name {
         "browser_open" => {
             open(
                 &session.ws,
@@ -526,6 +609,8 @@ pub async fn execute_scoped_with_project(
         "browser_read" => read(&session.ws, args["expect_text"].as_str().unwrap_or("")).await?,
         "browser_wait" => wait_for(&session.ws, args).await?,
         "browser_diagnostics" => diagnostics(&session.ws, args).await?,
+        "browser_hover" => pointer_action(session, args, false).await?,
+        "browser_click" if args["ref"].is_string() => pointer_action(session, args, true).await?,
         "browser_click" => {
             click(
                 &session.ws,
@@ -543,39 +628,21 @@ pub async fn execute_scoped_with_project(
             .await?
         }
         "browser_upload" => upload(&session.ws, project_root, args).await?,
-        "browser_fill" => fill(&session.ws, args).await?,
+        "browser_fill" => fill(session, args).await?,
         "browser_set_viewport" => set_viewport(session, args).await?,
         "browser_scroll" => scroll(&session.ws, args).await?,
-        "browser_screenshot" => {
-            if let Some(url) = page_state(&session.ws)
-                .await
-                .ok()
-                .and_then(|s| s["url"].as_str().map(str::to_owned))
-                && let Err(error) =
-                    crate::tools::process_sandbox::check_not_host_control_url_async(&url).await
-            {
-                drop(guard);
-                let _ = close_session(workspace.root(), context.task_id()).await;
-                return Err(error);
-            }
-            return screenshot(
-                workspace.root(),
-                context,
-                session,
-                args,
-            )
-            .await;
-        }
+        "browser_screenshot" => screenshot(workspace.root(), context, session, args).await?,
         _ => anyhow::bail!("unknown browser tool"),
+        })
+    }.await;
+    let mut result = match operation {
+        Err(error) if error.downcast_ref::<StaleRef>().is_some() => return Ok(json!({"ok":false,
+            "error_code":"STALE_REF","ref":args["ref"],"needed":error.to_string(),"browser_connection":connection_record(session)})),
+        result => result?,
     };
+    if name == "browser_screenshot" { return Ok(result); }
     let state = page_state(&session.ws).await?;
-    if let Some(url) = state["url"].as_str()
-        && let Err(error) = crate::tools::process_sandbox::check_not_host_control_url_async(url).await
-    {
-        drop(guard);
-        let _ = close_session(workspace.root(), context.task_id()).await;
-        return Err(error);
-    }
+    if let Some(url) = state["url"].as_str() { check_page_url(url, true)?; }
     if !session.signature.is_null() && session.signature != state {
         session.epoch += 1;
     }
@@ -587,6 +654,12 @@ pub async fn execute_scoped_with_project(
     } else {
         "headless"
     });
+    if name == "browser_read" {
+        let limit = args["max_elements"].as_u64().unwrap_or(200).clamp(1, 500) as usize;
+        result["elements"] = json!(read_elements(session, limit).await?);
+        result["page_epoch"] = json!(session.epoch);
+    }
+    if matches!(name, "browser_read" | "browser_wait") { result["downloads"] = json!(report_downloads(session).await); }
     result["browser_connection"] = connection_record(session);
     Ok(result)
 }
@@ -621,18 +694,14 @@ pub(crate) async fn inspect_test_page(
 
 /* All functions below receive the already locked task page socket. */
 async fn open(ws: &str, url: &str) -> Result<Value> {
-    ensure!(
-        url.len() <= 2000
-            && (url.starts_with("http://")
-                || url.starts_with("https://")
-                || url.starts_with("file:")),
-        "url must be http(s) or file"
-    );
+    check_page_url(url, false)?;
     crate::tools::process_sandbox::check_not_host_control_url_async(url).await?;
     let mut cdp = connect_cdp(ws).await?;
-    arm_diagnostics(&mut cdp).await?;
+    let prior = ref_document(&mut cdp).await?;
     let nav = cdp.call("Page.navigate", json!({"url":url})).await?;
-    if let Some(error_text) = nav
+    let loader = nav["result"]["loaderId"].as_str();
+    if nav["result"]["isDownload"] == true { return Ok(json!({"ok":true,"status":"download_started"})); }
+    if let Some(error_text) = nav["result"]
         .get("errorText")
         .and_then(Value::as_str)
         .filter(|text| !text.trim().is_empty())
@@ -648,8 +717,11 @@ async fn open(ws: &str, url: &str) -> Result<Value> {
         for _ in 0..40 {
             let state=eval(ws,"({href:location.href,ready:document.readyState,loaded:(performance.getEntriesByType('navigation')[0]||{}).loadEventEnd>0})").await?;
             last_href = state["href"].as_str().unwrap_or("").to_owned();
+            if !last_href.starts_with("chrome-error://") { check_page_url(&last_href, true)?; }
             last_ready = state["ready"].as_str().unwrap_or("").to_owned();
-            let ready=last_ready=="complete" && state["loaded"]==true && page_url_matches(&last_href,url);
+            let current = ref_document(&mut cdp).await?;
+            let committed = loader.map_or_else(|| current != prior || page_url_matches(&last_href, url), |id| current[1] == id);
+            let ready=last_ready=="complete" && state["loaded"]==true && committed && !last_href.starts_with("chrome-error://");
             stable=if ready {stable+1}else{0};if stable>=2 {return Ok::<(),anyhow::Error>(());}
             tokio::time::sleep(Duration::from_millis(250)).await;
         }anyhow::bail!("page load did not become ready for {url} (last href={last_href:?}, readyState={last_ready:?})")
@@ -666,7 +738,7 @@ fn page_url_matches(href: &str, url: &str) -> bool {
 async fn read(ws: &str, expect: &str) -> Result<Value> {
     let mut value = eval(ws, r#"(()=>{
       const visible=el=>{const s=getComputedStyle(el);return !!(el.getClientRects().length&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity||1)>0)};
-      const controls=[...document.querySelectorAll('button,a,[role=button],input,select,textarea')].slice(0,40).map(el=>({tag:el.tagName.toLowerCase(),type:el.type||'',text:(el.getAttribute('aria-label')||el.innerText||el.value||'').trim().slice(0,120),id:el.id||'',name:el.name||'',selector:el.id?'#'+CSS.escape(el.id):'',disabled:!!el.disabled,visible:visible(el)}));
+      const controls=[...document.querySelectorAll('button,a,[role=button],input,select,textarea')].slice(0,40).map(el=>({tag:el.tagName.toLowerCase(),type:el.type||'',text:(el.getAttribute('aria-label')||el.innerText||(el.type==='password'?'':el.value)||'').trim().slice(0,120),id:el.id||'',name:el.name||'',selector:el.id?'#'+CSS.escape(el.id):'',disabled:!!el.disabled,visible:visible(el)}));
       const file_inputs=[...document.querySelectorAll('input[type=file]')].slice(0,12).map(el=>({id:el.id||'',name:el.name||'',accept:el.accept||'',multiple:!!el.multiple,disabled:!!el.disabled,visible:visible(el),files_length:el.files?.length||0,selector:el.id?'#'+CSS.escape(el.id):'input[type=file]'}));
       const alerts=[...document.querySelectorAll('[role=alert]')].filter(visible).map(el=>(el.innerText||el.textContent||'').trim()).slice(0,8);
       return{url:location.href,title:document.title,text:(document.body&&document.body.innerText||'').slice(0,4000),controls,file_inputs,alerts,ready_state:document.readyState,font_state:document.fonts?document.fonts.status:'unsupported'}
@@ -797,6 +869,8 @@ async fn diagnostics(ws: &str, args: &Value) -> Result<Value> {
 
 async fn arm_diagnostics(cdp: &mut CdpConnection) -> Result<()> {
     cdp.call("Page.enable", json!({})).await?;
+    cdp.call("Network.enable", json!({"maxTotalBufferSize":4 * 1024 * 1024,"maxResourceBufferSize":512 * 1024})).await?;
+    cdp.call("Network.setBlockedURLs", json!({"urls":blocked_browser_urls()})).await?;
     let source = r#"(()=>{
       if(window.__codexBrowserDiagnostics)return;
       const d=window.__codexBrowserDiagnostics={events:[],requests:[],requestsDropped:0,startedAt:Date.now()};
@@ -822,9 +896,13 @@ async fn arm_diagnostics(cdp: &mut CdpConnection) -> Result<()> {
     })()"#;
     cdp.call(
         "Page.addScriptToEvaluateOnNewDocument",
-        json!({"source":source}),
+        json!({"source":source,"runImmediately":true}),
     )
     .await?;
+    // Request-stage interception sees top-level redirects before Chrome sends them.
+    let mut patterns = vec![json!({"resourceType":"Document","requestStage":"Request"})];
+    patterns.extend(blocked_browser_urls().into_iter().map(|url| json!({"urlPattern":url,"requestStage":"Request"})));
+    cdp.call("Fetch.enable", json!({"patterns":patterns})).await?;
     Ok(())
 }
 
@@ -847,7 +925,7 @@ async fn click(ws: &str, text: &str, selector: &str, times: u64) -> Result<Value
       const pool=exact.length?exact:partial;const el=pool[0];
       if(!el)return{{ok:false,available:usable.slice(0,12).map(n=>label(n).slice(0,80)).filter(Boolean),hidden_or_disabled:nodes.length-usable.length}};
       el.scrollIntoView({{block:'center',inline:'center'}});const r=el.getBoundingClientRect();
-      return{{ok:r.width>0&&r.height>0,x:r.x+r.width/2,y:r.y+r.height/2,label:(label(el)||el.tagName).slice(0,160),match:selector&&!text?'selector':exact.length?'exact_label':'label_contains',candidates:pool.length}}}})()"#,
+      return{{ok:r.width>0&&r.height>0,x:r.x+r.width/2,y:r.y+r.height/2,href:el.closest('a[href]')?.href,label:(label(el)||el.tagName).slice(0,160),match:selector&&!text?'selector':exact.length?'exact_label':'label_contains',candidates:pool.length}}}})()"#,
         serde_json::to_string(text)?,
         serde_json::to_string(selector)?
     );
@@ -866,6 +944,7 @@ async fn click(ws: &str, text: &str, selector: &str, times: u64) -> Result<Value
             serde_json::to_string(&value["available"]).unwrap_or_default()
         );
     }
+    check_link_destination(&value["href"])?;
     let times = times.clamp(1, MAX_REPEATED_CLICKS);
     for index in 0..times {
         if index > 0 {
@@ -1347,17 +1426,18 @@ fn capture_observation(before: &Value, after: &Value) -> Value {
     json!({"before":snapshot(before),"after":snapshot(after)})
 }
 
-async fn fill(ws: &str, args: &Value) -> Result<Value> {
-    let selector = args["selector"].as_str().filter(|s| !s.trim().is_empty()).context("selector is required")?;
+async fn fill(session: &Session, args: &Value) -> Result<Value> {
+    let reference = args["ref"].as_str();
+    let selector = args["selector"].as_str().filter(|s| !s.trim().is_empty());
+    ensure!(reference.is_some() || selector.is_some(), "a ref or selector is required");
     let value = args["value"].as_str().filter(|s| s.len() <= 65536).context("value must be a string of at most 65536 bytes")?;
-    let mut cdp = connect_cdp(ws).await?;
-    let document = cdp.call("Runtime.evaluate", json!({"expression":"document"})).await?;
-    let object = document.pointer("/result/result/objectId").and_then(Value::as_str).context("page document is unavailable")?;
-    let reply = cdp.call("Runtime.callFunctionOn", json!({"objectId": object,"returnByValue":true,
-        "arguments":[{"value":selector},{"value":value},{"value":args["clear"] != false},{"value":args["submit"] == true}],
-        "functionDeclaration":r#"function(selector, value, clear, submit) {
-            const el = this.querySelector(selector);
+    let mut cdp = connect_cdp(&session.ws).await?;
+    let object = if let Some(reference) = reference { resolve_element(&mut cdp, &session.refs, reference).await? } else { document_object(&mut cdp).await? };
+    let mut result = element_function(&mut cdp, &object, reference, r#"function(selector, value, clear, submit) {
+            const el = selector===null ? this : this.querySelector(selector);
+            if (selector===null && !el.isConnected) return {stale:true};
             if (!el || el.disabled || el.readOnly || !el.getClientRects().length ||
+                !el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}) ||
                 !(el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement &&
                 ['text','search','email','url','tel','password','number'].includes(el.type))))
                 return {error: 'selector must match a visible, editable text input or textarea'};
@@ -1370,11 +1450,12 @@ async fn fill(ws: &str, args: &Value) -> Result<Value> {
             el.dispatchEvent(new Event('change', {bubbles:true}));
             const url = location.href;
             if (submit) el.form.requestSubmit();
-            return {selector, length, url};
-        }"#})).await?;
-    let result = reply.pointer("/result/result/value").context("fill failed; check the CSS selector and form")?;
+            return {length, url};
+        }"#, json!([{"value":selector},{"value":value},{"value":args["clear"] != false},{"value":args["submit"] == true}])).await?;
     ensure!(result["error"].is_null(), "{}", result["error"].as_str().unwrap_or("fill failed"));
-    Ok(result.clone())
+    if let Some(reference) = reference { result["ref"] = json!(reference); }
+    if let Some(selector) = selector { result["selector"] = json!(selector); }
+    Ok(result)
 }
 
 fn viewport_options(args: &Value) -> Result<(Value, Value, Value)> {
@@ -1422,10 +1503,12 @@ async fn scroll(ws: &str, args: &Value) -> Result<Value> {
     }})({params})"#)).await
 }
 
-async fn selector_clip(ws: &str, selector: &str, padding: f64) -> Result<Value> {
-    let params = json!([selector,padding]);
-    let clip = eval(ws, &format!(r#"(([selector,padding]) => {{
-        const el = document.querySelector(selector);
+async fn element_clip(session: &Session, selector: Option<&str>, reference: Option<&str>, padding: f64) -> Result<Value> {
+    let mut cdp = connect_cdp(&session.ws).await?;
+    let object = if let Some(reference) = reference { resolve_element(&mut cdp, &session.refs, reference).await? } else { document_object(&mut cdp).await? };
+    let clip = element_function(&mut cdp, &object, reference, r#"function(selector,padding) {
+        const el = selector===null ? this : this.querySelector(selector);
+        if (selector===null && !el.isConnected) return {stale:true};
         if (!el || getComputedStyle(el).visibility !== 'visible') return null;
         const r = el.getBoundingClientRect(), root = document.scrollingElement;
         if (r.width <= 0 || r.height <= 0) return null;
@@ -1433,8 +1516,8 @@ async fn selector_clip(ws: &str, selector: &str, padding: f64) -> Result<Value> 
         const y = Math.max(0, Math.floor(r.top+scrollY-padding));
         const width = Math.min(root.scrollWidth, Math.ceil(r.right+scrollX+padding))-x;
         const height = Math.min(root.scrollHeight, Math.ceil(r.bottom+scrollY+padding))-y;
-        return {{x,y,width,height,scale:1}};
-    }})({params})"#)).await?;
+        return {x,y,width,height,scale:1};
+    }"#, json!([{"value":selector},{"value":padding}])).await?;
     let width = clip["width"].as_f64().unwrap_or(0.0);
     let height = clip["height"].as_f64().unwrap_or(0.0);
     ensure!(width > 0.0 && height > 0.0 && width * height <= 8_000_000.0, "element is missing, invisible or exceeds screenshot pixel budget");
@@ -1449,13 +1532,16 @@ async fn screenshot(
 ) -> Result<Value> {
     let full_page = args["full_page"] == true;
     let selector = args["selector"].as_str();
-    ensure!(!full_page || selector.is_none(), "choose full_page or selector");
+    let reference = args["ref"].as_str();
+    let clipped = selector.is_some() || reference.is_some();
+    ensure!(!full_page || !clipped, "choose full_page or an element clip");
     let padding = if args["padding"].is_null() { 0.0 } else {
-        ensure!(selector.is_some(), "padding requires a selector");
+        ensure!(clipped, "padding requires a selector or ref");
         args["padding"].as_f64().filter(|n| (0.0..=128.0).contains(n)).context("padding must be between 0 and 128")?
     };
     let before_result = page_state(&session.ws).await;
     let before = before_result.as_ref().ok().cloned().unwrap_or(Value::Null);
+    if let Some(url) = before["url"].as_str() { check_page_url(url, true)?; }
     if !before.is_null() {
         if !session.signature.is_null() && session.signature != before {
             session.epoch += 1;
@@ -1464,8 +1550,8 @@ async fn screenshot(
     }
     let captured_page_epoch = session.epoch;
     let mut options = json!({"format":"png","captureBeyondViewport":full_page});
-    let clip = if let Some(selector) = selector {
-        let clip = selector_clip(&session.ws, selector, padding).await?;
+    let clip = if clipped {
+        let clip = element_clip(session, selector, reference, padding).await?;
         options["captureBeyondViewport"] = json!(true);
         options["clip"] = clip.clone();
         Some(clip)
@@ -1486,6 +1572,7 @@ async fn screenshot(
     let bytes = base64_decode(data)?;
     let after_result = page_state(&session.ws).await;
     let after = after_result.as_ref().ok().cloned().unwrap_or(Value::Null);
+    if let Some(url) = after["url"].as_str() { check_page_url(url, true)?; }
     let mut observation = capture_observation(&before, &after);
     observation["before_error"] = before_result
         .err()
@@ -1518,17 +1605,41 @@ async fn screenshot(
     let mut result = json!({"artifact_id":artifact["artifact_id"],"visual_artifact":artifact,"captured":true,"display_mode":display_mode,"browser_connection":connection_record(session),
         "page":{"browser_session_id":session.session_id,"page_id":session.page_id,"page_epoch":session.epoch,"url":after["url"],"viewport":after["viewport"],"display_mode":display_mode}});
     if let Some(clip) = clip {
-        result["selector"] = json!(selector);
+        if let Some(selector) = selector { result["selector"] = json!(selector); }
+        if let Some(reference) = reference { result["ref"] = json!(reference); }
         result["clip"] = clip;
     }
     Ok(result)
 }
 
-async fn launch(visible: bool) -> Result<Session> {
+async fn start_browser(root: &Path, args: &Value) -> Result<Session> {
+    let profile = args["profile"].as_str().unwrap_or("ephemeral");
+    ensure!(matches!(profile, "ephemeral" | "persistent"), "profile must be ephemeral or persistent");
+    let configured = std::env::var("QUICKAGENT_BROWSER_CDP_URL").ok().filter(|s| !s.trim().is_empty());
+    let attach = args["attach"].as_bool().unwrap_or(configured.is_some() && profile != "persistent");
+    if attach {
+        ensure!(profile == "ephemeral" && args["profile_name"].is_null(), "attach uses the existing Chrome profile; omit profile/profile_name");
+        let endpoint = browser_endpoint(configured.as_deref().unwrap_or("http://127.0.0.1:9222")).await?;
+        return attach_browser(endpoint, args["visible"].as_bool().unwrap_or(true)).await;
+    }
+    let persistent = if profile == "persistent" {
+        let home = std::env::home_dir().context("no home directory for the browser profile")?;
+        Some(profile_dir(&home, root, args["profile_name"].as_str().unwrap_or("default"))?)
+    } else {
+        ensure!(args["profile_name"].is_null(), "profile_name requires profile: persistent");
+        None
+    };
+    launch(args["visible"] == true, persistent).await
+}
+
+async fn launch(visible: bool, persistent: Option<std::path::PathBuf>) -> Result<Session> {
     let browser = browser_path().context("no executable Chrome, Edge or Chromium was found; set AGENT_BROWSER_PATH to its executable path")?;
     let session_id = crate::media::visual_artifacts::new_id();
-    let dir = std::env::temp_dir().join(format!("codex-agent-browser-{session_id}"));
-    std::fs::create_dir_all(&dir)?;
+    let lease = persistent.as_ref().map(|dir| Lease::take(format!("profile:{}", dir.display()))).transpose()?;
+    let dir = persistent.unwrap_or_else(|| std::env::temp_dir().join(format!("codex-agent-browser-{session_id}")));
+    create_private_directory(&dir)?;
+    let marker = dir.join("DevToolsActivePort");
+    let previous = tokio::fs::read_to_string(&marker).await.ok();
     let mut child = Command::new(&browser);
     if !visible {
         child.arg("--headless=new").arg("--disable-gpu");
@@ -1551,11 +1662,11 @@ async fn launch(visible: bool) -> Result<Session> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(!visible);
-    let child = child.spawn().context("could not start the browser")?;
+    let mut child = child.spawn().context("could not start the browser")?;
     let port = timeout(Duration::from_secs(8), async {
-        let marker = dir.join("DevToolsActivePort");
         for _ in 0..40 {
-            if let Ok(text) = tokio::fs::read_to_string(&marker).await {
+            ensure!(child.try_wait()?.is_none(), "Chrome exited at startup (the persistent profile may already be open)");
+            if let Ok(text) = tokio::fs::read_to_string(&marker).await && previous.as_ref() != Some(&text) {
                 if let Some(port) = text
                     .lines()
                     .next()
@@ -1576,24 +1687,18 @@ async fn launch(visible: bool) -> Result<Session> {
         json!({"width":1280,"height":800,"deviceScaleFactor":1,"mobile":false}),
     )
     .await?;
-    let (dialog, dialog_commands, dialog_watch) = watch_dialogs(&ws, None).await?;
-    let page_id = ws.rsplit('/').next().unwrap_or("").to_owned();
-    Ok(Session {
-        emulation: None,
-        ws,
-        child: Some(child),
-        profile: Some(dir),
-        session_id,
-        page_id,
-        owner: Value::Null,
-        epoch: 0,
-        capture_seq: 0,
-        signature: Value::Null,
-        visible,
-        dialog,
-        dialog_commands,
-        dialog_watch,
-    })
+    let page_id = ws.rsplit('/').next().context("Chrome did not open a page")?.to_owned();
+    let endpoint = browser_endpoint(&format!("http://127.0.0.1:{port}")).await?;
+    let mut session = session_for_tab(ws, page_id.clone(), visible).await?;
+    session.session_id = session_id;
+    session.child = Some(child);
+    session.persistent = lease.is_some();
+    session.profile_name = session.persistent.then(|| dir.file_name().unwrap().to_string_lossy().into_owned());
+    session.profile = Some(dir);
+    session.targets = Some(BrowserTargets { endpoint, attached:false, owned:TargetIds::from([page_id]) });
+    session.lease = lease;
+    session.host_launched = true;
+    Ok(session)
 }
 
 fn page_target(page: &Value) -> bool {
@@ -1738,10 +1843,14 @@ fn browser_candidates() -> Vec<std::path::PathBuf> {
 }
 
 include!("parts/browser_control_cdp.inc.rs");
+include!("parts/browser_control_refs.inc.rs");
+include!("parts/browser_control_sessions.inc.rs");
+include!("parts/browser_control_network.inc.rs");
 
 #[cfg(test)]
 mod tests {
     include!("parts/browser_control_tests.inc.rs");
+    include!("parts/browser_control_e2_tests.inc.rs");
 }
 
 fn base64_decode(text: &str) -> Result<Vec<u8>> {

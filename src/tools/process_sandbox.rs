@@ -562,6 +562,10 @@ pub fn register_control_port(port: u16) {
     }
 }
 
+pub(super) fn host_control_ports() -> Vec<u16> {
+    control_ports().lock().unwrap().iter().copied().collect()
+}
+
 pub fn is_host_control_port(port: u16) -> bool {
     control_ports().lock().unwrap().contains(&port)
 }
