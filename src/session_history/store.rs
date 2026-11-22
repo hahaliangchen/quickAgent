@@ -111,12 +111,17 @@ mod tests {
     use super::*;
     #[test]
     fn compression_has_no_private_history_query() {
-        let source = include_str!("../single_agent.rs").replace("\r\n", "\n");
-        let production = source.split("#[cfg(test)]\nmod tests").next().unwrap();
-        assert!(
-            !production.contains("FROM agent_task_events"),
-            "compression and the main loop must access original records through the history module"
-        );
+        for source in [
+            include_str!("../single_agent.rs"),
+            include_str!("../single_agent/context_engine.rs"),
+            include_str!("../single_agent/model_gateway.rs"),
+            include_str!("../single_agent/step_runner.rs"),
+        ] {
+            assert!(
+                !source.contains("FROM agent_task_events"),
+                "compression and the main loop must access original records through the history module"
+            );
+        }
     }
     #[tokio::test]
     async fn raw_pages_and_queries_preserve_history() {

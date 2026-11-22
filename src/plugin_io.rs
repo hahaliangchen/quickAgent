@@ -184,7 +184,11 @@ mod tests {
     #[test]
     fn execution_and_context_modules_do_not_import_presentation_business_rules() {
         for (name, source) in [
-            ("execution", include_str!("single_agent.rs")),
+            ("turn runner", include_str!("single_agent.rs")),
+            ("context engine", include_str!("single_agent/context_engine.rs")),
+            ("model gateway", include_str!("single_agent/model_gateway.rs")),
+            ("JS step runner", include_str!("single_agent/step_runner.rs")),
+            ("tool executor", include_str!("single_agent/tool_executor.rs")),
             ("plugin dispatch", include_str!("plugin_io.rs")),
             ("browser", include_str!("browser_control.rs")),
             ("attachments", include_str!("attachments.rs")),
@@ -193,10 +197,18 @@ mod tests {
             ("context assets", include_str!("context_assets.rs")),
             ("vision", include_str!("image_analysis.rs")),
             ("vision jobs", include_str!("visual_jobs.rs")),
-            ("database", include_str!("agent_service.rs")),
+            ("agent service", include_str!("agent_service.rs")),
+            ("database", include_str!("agent_service/db.rs")),
+            ("routes", include_str!("agent_service/routes.rs")),
+            ("streaming", include_str!("agent_service/streaming.rs")),
+            ("local tools", include_str!("agent_service/tools.rs")),
             ("prompt", include_str!("../prompts/single_agent.md")),
         ] {
-            let production = source.split("#[cfg(test)]").next().unwrap();
+            let production = if name == "turn runner" {
+                source
+            } else {
+                source.split("#[cfg(test)]").next().unwrap()
+            };
             for dependency in [
                 "ppt_sessions",
                 "ppt_plan",

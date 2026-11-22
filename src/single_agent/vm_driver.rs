@@ -1,10 +1,10 @@
 //! VM segment execution loop (`drive_vm_segment`) and `@virtual` call spec builder.
 //!
-//! Proxies host tool traps via `tool_proxy::proxy_rust_tool`, resolves `require()`
+//! Proxies host tool traps via `ToolExecutor`, resolves `require()`
 //! and `ActionKind::LibraryCall` via `flow_runtime`, and spawns truly concurrent
 //! async `@virtual` / library calls into a bounded `tokio::task::JoinSet`.
 
-use super::{Session, context_doc, flow_runtime, tool_proxy, virtual_frame};
+use super::{Session, context_doc, flow_runtime, tool_executor::ToolExecutor, virtual_frame};
 use crate::agent_program::{
     self, Runtime, State,
     runtime::{ActionKind, ConcurrentState},
@@ -19,6 +19,7 @@ const MAX_INFLIGHT_JOBS: usize = 64;
 /// Returns `(terminal_state, external_call_count, segment_context_hints)`.
 pub(super) async fn drive_vm_segment(
     s: &Session<'_>,
+    tools: &ToolExecutor<'_, '_>,
     runtime: &mut Runtime,
     libs: &agent_program::libraries::Libraries,
     node: &str,
@@ -52,8 +53,7 @@ pub(super) async fn drive_vm_segment(
                     match action.kind {
                         ActionKind::Tool { name, args } => {
                             external_tool_calls += 1;
-                            let (mut result, is_error) = tool_proxy::proxy_rust_tool(
-                                s,
+                            let (mut result, is_error) = tools.proxy_vm_tool(
                                 libs,
                                 node,
                                 step,
@@ -78,8 +78,7 @@ pub(super) async fn drive_vm_segment(
                             let futs = operations.into_iter().enumerate().map(|(idx, (name, args))| {
                                 let call_id = format!("{base_id}-p{idx}");
                                 async move {
-                                    tool_proxy::proxy_rust_tool(
-                                        s,
+                                    tools.proxy_vm_tool(
                                         libs,
                                         node,
                                         step,

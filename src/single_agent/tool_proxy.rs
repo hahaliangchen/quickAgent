@@ -3,7 +3,7 @@
 //! into Rust `host_tools` and built-in handlers, records durable `tool/call` & `tool/result`
 //! events, and automatically archives `> 24KB` material results into content-addressed assets.
 
-use super::{Session, append_event, context_doc, host_tools};
+use super::{Session, append_event, context_doc, host_tools, tool_executor::ToolExecutor};
 use crate::agent_program;
 use anyhow::{Result, ensure};
 use serde_json::{Value, json};
@@ -123,8 +123,7 @@ pub(super) async fn proxy_rust_tool(
             false,
         ),
         "find_library_methods" => handle_find_library_methods(s, libs, &args),
-        _ => match host_tools::business_tool_inner(
-            s,
+        _ => match ToolExecutor::new(s).dispatch_host_call(
             node,
             tool_name,
             args,

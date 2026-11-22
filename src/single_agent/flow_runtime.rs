@@ -11,7 +11,7 @@
 //! deterministic sibling calls as well as isolated Layer-2 `@virtual` helpers,
 //! and emits a compact factual `[library ...]` receipt into the caller's trace.
 
-use super::{Session, context_doc, tool_proxy, virtual_frame, vm_driver};
+use super::{Session, context_doc, tool_executor::ToolExecutor, virtual_frame, vm_driver};
 use crate::agent_program::{
     Runtime,
     libraries::Libraries,
@@ -260,8 +260,7 @@ fn execute_orchestration_call<'a>(
                         match action.kind {
                             ActionKind::Tool { name, args } => {
                                 record_touch(&name, &args, &mut files_read, &mut files_written);
-                                let (mut res, failed) = tool_proxy::proxy_rust_tool(
-                                    &lib_session,
+                                let (mut res, failed) = ToolExecutor::new(&lib_session).proxy_vm_tool(
                                     libs,
                                     &node,
                                     parent_step,
@@ -286,8 +285,7 @@ fn execute_orchestration_call<'a>(
                                     let lib_session = &lib_session;
                                     let node = &node;
                                     async move {
-                                        tool_proxy::proxy_rust_tool(
-                                            lib_session,
+                                        ToolExecutor::new(lib_session).proxy_vm_tool(
                                             libs,
                                             node,
                                             parent_step,

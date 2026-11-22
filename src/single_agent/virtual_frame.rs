@@ -17,6 +17,7 @@ use super::{
     Session,
     context_doc::{self, ContextDocument, INLINE_LIMIT_CHARS, SegmentContextHints},
     model_call,
+    tool_executor::ToolExecutor,
 };
 use crate::agent_program::{Runtime, State, libraries::Libraries, runtime::ActionKind};
 use anyhow::{Result, bail};
@@ -447,8 +448,7 @@ async fn drive_leaf_vm(
                             true,
                         )
                     } else {
-                        super::tool_proxy::proxy_rust_tool(
-                            s,
+                        ToolExecutor::new(s).proxy_vm_tool(
                             leaf_libs,
                             node,
                             step,
@@ -473,8 +473,7 @@ async fn drive_leaf_vm(
                     let futs = operations.into_iter().enumerate().map(|(idx, (name, args))| {
                         let call_id = format!("{base_id}-p{idx}");
                         async move {
-                            super::tool_proxy::proxy_rust_tool(
-                                s,
+                            ToolExecutor::new(s).proxy_vm_tool(
                                 leaf_libs,
                                 node,
                                 step,
