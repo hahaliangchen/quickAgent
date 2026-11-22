@@ -1,80 +1,12 @@
 #![recursion_limit = "512"]
 
-mod agent_program;
-mod agent_service;
-mod agent_web;
-mod ai_proxy;
-mod anthropic_messages;
-mod attachments;
-mod browser_control;
-mod builtin_plugins;
-mod code_map;
-mod composer_catalog;
-mod context_assets;
-mod context_window;
-mod database;
-mod db_writer;
-mod file_edit;
-mod flow_libraries;
-mod flow_skills;
-mod workflow_drafts;
-mod frame_view;
-mod go_index;
-mod http_probe;
-mod image_analysis;
-mod image_generation;
-mod index_refresh;
-mod interjections;
-mod mcp;
-mod memory;
-mod memory_panel;
-mod model_catalog;
-mod model_settings;
-mod model_stream;
-mod model_transport;
-mod page_tools;
-mod plugin_io;
-mod plugin_jobs;
-mod plugin_protocol;
-mod plugin_runtime;
-mod plugin_sessions;
-mod program_execution;
-mod process_sandbox;
-mod project_notes;
-mod project_process;
-mod proxy_log;
-mod python_index;
-mod register_image;
-mod remote_sessions;
-mod request_context;
-mod rewind;
-mod rust_index;
-mod session_browser;
-mod session_history;
-mod shell_environment;
-mod shell_process;
-mod single_agent;
-mod skill_packages;
-mod source_read;
-mod symbol_description;
-mod symbol_index_state;
-mod symbol_query;
-mod function_frames;
-mod tool_approvals;
-mod tool_registry;
-mod approval_review;
+mod index;
+mod media;
+mod model;
+mod context;
 mod tools;
-mod ts_index;
-mod visual_artifacts;
-mod visual_jobs;
-mod visual_probe;
-#[cfg(test)]
-mod visual_tests;
-mod verify_tools;
-mod plan_tools;
-mod git_tools;
-mod batch_edits;
-mod workspace_changes;
+mod runtime;
+mod server;
 
 use std::{env, fmt as std_fmt, net::SocketAddr, path::PathBuf, sync::Arc};
 
@@ -85,7 +17,9 @@ use tracing::{error, info, warn};
 use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
 
 use crate::{
-    mcp::{handle_mcp, handle_mcp_delete, handle_mcp_get},
+    server::ai_proxy,
+    tools::process_sandbox,
+    server::mcp::{handle_mcp, handle_mcp_delete, handle_mcp_get},
     tools::Workspace,
 };
 

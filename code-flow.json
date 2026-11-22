@@ -16,7 +16,7 @@
         {
           "id": "tool-route",
           "label": "主 Agent / 压缩历史查询",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "business_tool",
           "module": "",
           "role": "entry",
@@ -28,7 +28,7 @@
         {
           "id": "requirement",
           "label": "读取原始用户要求",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "read_requirement",
           "module": "",
           "role": "entry",
@@ -36,14 +36,14 @@
           "inputs": "冻结材料、事件编号、分页参数",
           "outputs": "原始要求及稳定历史引用",
           "tests": [
-            "single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
-            "single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
+            "runtime::single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
+            "runtime::single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
           ]
         },
         {
           "id": "search",
           "label": "公共历史检索",
-          "file": "src/session_history.rs",
+          "file": "src/context/session_history.rs",
           "name": "read",
           "module": "",
           "role": "shared",
@@ -55,7 +55,7 @@
         {
           "id": "projection",
           "label": "历史结果格式组装",
-          "file": "src/session_history.rs",
+          "file": "src/context/session_history.rs",
           "name": "read_saved",
           "module": "",
           "role": "unit",
@@ -63,13 +63,13 @@
           "inputs": "显式查询条件",
           "outputs": "历史页、来源及后续读取引用",
           "tests": [
-            "session_history::store::tests::raw_pages_and_queries_preserve_history"
+            "context::session_history::store::tests::raw_pages_and_queries_preserve_history"
           ]
         },
         {
           "id": "query",
           "label": "历史检索数据访问",
-          "file": "src/session_history/store.rs",
+          "file": "src/context/session_history/store.rs",
           "name": "search_events",
           "module": "",
           "role": "shared",
@@ -77,13 +77,13 @@
           "inputs": "连接、会话、显式检索条件",
           "outputs": "原始记录及分页元数据",
           "tests": [
-            "session_history::store::tests::raw_pages_and_queries_preserve_history"
+            "context::session_history::store::tests::raw_pages_and_queries_preserve_history"
           ]
         },
         {
           "id": "exact",
           "label": "公共原始事件读取",
-          "file": "src/session_history/store.rs",
+          "file": "src/context/session_history/store.rs",
           "name": "read_event",
           "module": "",
           "role": "shared",
@@ -91,13 +91,13 @@
           "inputs": "会话、编号、边界、字符范围",
           "outputs": "原文页及引用",
           "tests": [
-            "session_history::store::tests::raw_pages_and_queries_preserve_history"
+            "context::session_history::store::tests::raw_pages_and_queries_preserve_history"
           ]
         },
         {
           "id": "records",
           "label": "公共历史记录访问",
-          "file": "src/session_history/store.rs",
+          "file": "src/context/session_history/store.rs",
           "name": "load_events",
           "module": "",
           "role": "shared",
@@ -105,13 +105,13 @@
           "inputs": "数据库连接、会话、EventQuery",
           "outputs": "完整原始事件记录",
           "tests": [
-            "session_history::store::tests::raw_pages_and_queries_preserve_history"
+            "context::session_history::store::tests::raw_pages_and_queries_preserve_history"
           ]
         },
         {
           "id": "snapshot",
           "label": "历史边界和需求引用",
-          "file": "src/session_history/store.rs",
+          "file": "src/context/session_history/store.rs",
           "name": "requirement_snapshot",
           "module": "",
           "role": "unit",
@@ -119,13 +119,13 @@
           "inputs": "连接、会话",
           "outputs": "冻结上界及需求引用",
           "tests": [
-            "session_history::store::tests::raw_pages_and_queries_preserve_history"
+            "context::session_history::store::tests::raw_pages_and_queries_preserve_history"
           ]
         },
         {
           "id": "freeze",
           "label": "压缩材料冻结",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "freeze",
           "module": "",
           "role": "unit",
@@ -133,14 +133,14 @@
           "inputs": "会话、当前消息",
           "outputs": "冻结材料",
           "tests": [
-            "single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
-            "single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
+            "runtime::single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
+            "runtime::single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
           ]
         },
         {
           "id": "validation",
           "label": "压缩交付检查",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "validate_summary",
           "module": "",
           "role": "unit",
@@ -148,14 +148,14 @@
           "inputs": "压缩结果、读取范围、冻结材料",
           "outputs": "接受或明确错误",
           "tests": [
-            "single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
-            "single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
+            "runtime::single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
+            "runtime::single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
           ]
         },
         {
           "id": "events",
           "label": "聊天界面历史读取",
-          "file": "src/agent_service.rs",
+          "file": "src/server/agent_service.rs",
           "name": "get_events",
           "module": "",
           "role": "entry",
@@ -167,7 +167,7 @@
         {
           "id": "stream",
           "label": "聊天界面增量读取",
-          "file": "src/agent_service.rs",
+          "file": "src/server/agent_service.rs",
           "name": "stream_events",
           "module": "",
           "role": "entry",
@@ -179,7 +179,7 @@
         {
           "id": "storage",
           "label": "唯一历史查询执行点",
-          "file": "src/session_history/store.rs",
+          "file": "src/context/session_history/store.rs",
           "name": "query_events",
           "module": "",
           "role": "shared",
@@ -187,7 +187,7 @@
           "inputs": "内部查询、绑定参数及记录结构",
           "outputs": "原始历史记录",
           "tests": [
-            "session_history::store::tests::raw_pages_and_queries_preserve_history"
+            "context::session_history::store::tests::raw_pages_and_queries_preserve_history"
           ]
         }
       ]
@@ -201,7 +201,7 @@
         {
           "id": "run",
           "label": "主 Agent 执行入口",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "run_task",
           "module": "",
           "role": "entry",
@@ -209,13 +209,13 @@
           "inputs": "会话、用户要求、运行配置",
           "outputs": "答复及持久执行记录",
           "tests": [
-            "single_agent::tests::restart_recovers_saved_tool_result_without_reexecuting"
+            "runtime::single_agent::tests::restart_recovers_saved_tool_result_without_reexecuting"
           ]
         },
         {
           "id": "loop",
           "label": "主 Agent / 压缩公共循环",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "run_loop",
           "module": "",
           "role": "shared",
@@ -223,14 +223,14 @@
           "inputs": "Session、Window、轮次限制",
           "outputs": "答复、压缩交付或轮次结束",
           "tests": [
-            "single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
-            "single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
+            "runtime::single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
+            "runtime::single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
           ]
         },
         {
           "id": "round",
           "label": "模型请求",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "model_round",
           "module": "",
           "role": "unit",
@@ -238,14 +238,14 @@
           "inputs": "会话窗口、工具定义",
           "outputs": "原始模型消息",
           "tests": [
-            "single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
-            "single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
+            "runtime::single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
+            "runtime::single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
           ]
         },
         {
           "id": "freeze",
           "label": "冻结当前材料",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "freeze",
           "module": "",
           "role": "unit",
@@ -253,14 +253,14 @@
           "inputs": "当前消息",
           "outputs": "Material",
           "tests": [
-            "single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
-            "single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
+            "runtime::single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
+            "runtime::single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
           ]
         },
         {
           "id": "requirements",
           "label": "读取原始要求",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "read_requirement",
           "module": "",
           "role": "unit",
@@ -268,14 +268,14 @@
           "inputs": "要求引用、分页参数",
           "outputs": "原始事件页",
           "tests": [
-            "single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
-            "single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
+            "runtime::single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
+            "runtime::single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
           ]
         },
         {
           "id": "history",
           "label": "历史读取聚焦点",
-          "file": "src/session_history.rs",
+          "file": "src/context/session_history.rs",
           "name": "read",
           "module": "",
           "role": "shared",
@@ -287,7 +287,7 @@
         {
           "id": "route",
           "label": "工具路由",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "business_tool",
           "module": "",
           "role": "unit",
@@ -299,7 +299,7 @@
         {
           "id": "validate",
           "label": "检查压缩交付",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "validate_summary",
           "module": "",
           "role": "unit",
@@ -307,14 +307,14 @@
           "inputs": "压缩结果",
           "outputs": "通过或错误",
           "tests": [
-            "single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
-            "single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
+            "runtime::single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
+            "runtime::single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
           ]
         },
         {
           "id": "save",
           "label": "窗口持久化",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "save",
           "module": "",
           "role": "shared",
@@ -322,8 +322,8 @@
           "inputs": "Session、Window",
           "outputs": "保存完成",
           "tests": [
-            "single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
-            "single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
+            "runtime::single_agent::tests::multi_round_context_subagent_preserves_plan_and_records_every_request",
+            "runtime::single_agent::tests::oversized_summary_is_rejected_and_main_window_is_unchanged"
           ]
         }
       ]
@@ -337,7 +337,7 @@
         {
           "id": "register",
           "label": "登记工具产物",
-          "file": "src/context_assets.rs",
+          "file": "src/context/context_assets.rs",
           "name": "register",
           "module": "",
           "role": "entry",
@@ -349,7 +349,7 @@
         {
           "id": "reference",
           "label": "资产引用读取",
-          "file": "src/context_assets.rs",
+          "file": "src/context/context_assets.rs",
           "name": "reference",
           "module": "",
           "role": "shared",
@@ -361,7 +361,7 @@
         {
           "id": "read",
           "label": "原版本读取",
-          "file": "src/context_assets.rs",
+          "file": "src/context/context_assets.rs",
           "name": "read",
           "module": "",
           "role": "entry",
@@ -373,7 +373,7 @@
         {
           "id": "refresh",
           "label": "刷新请求解析",
-          "file": "src/context_assets.rs",
+          "file": "src/context/context_assets.rs",
           "name": "refresh_request",
           "module": "",
           "role": "unit",
@@ -385,7 +385,7 @@
         {
           "id": "retain",
           "label": "保留资产选择",
-          "file": "src/context_assets.rs",
+          "file": "src/context/context_assets.rs",
           "name": "retained",
           "module": "",
           "role": "unit",
@@ -397,7 +397,7 @@
         {
           "id": "lookup",
           "label": "公共资产索引读取",
-          "file": "src/context_assets.rs",
+          "file": "src/context/context_assets.rs",
           "name": "lookup",
           "module": "",
           "role": "shared",
@@ -417,7 +417,7 @@
         {
           "id": "route",
           "label": "主 Agent 工具循环",
-          "file": "src/single_agent.rs",
+          "file": "src/runtime/single_agent.rs",
           "name": "run_loop",
           "module": "",
           "role": "entry",
@@ -425,13 +425,13 @@
           "inputs": "问题、图像引用",
           "outputs": "视觉工具结果",
           "tests": [
-            "single_agent::tests::image_analysis_is_a_native_tool_exchange_without_context_handoff"
+            "runtime::single_agent::tests::image_analysis_is_a_native_tool_exchange_without_context_handoff"
           ]
         },
         {
           "id": "execute",
           "label": "视觉分析",
-          "file": "src/image_analysis.rs",
+          "file": "src/media/image_analysis.rs",
           "name": "execute",
           "module": "",
           "role": "shared",
@@ -439,7 +439,7 @@
           "inputs": "当前任务、原图 ID、问题",
           "outputs": "原始模型分析与请求引用",
           "tests": [
-            "single_agent::tests::image_analysis_is_a_native_tool_exchange_without_context_handoff"
+            "runtime::single_agent::tests::image_analysis_is_a_native_tool_exchange_without_context_handoff"
           ]
         }
       ]

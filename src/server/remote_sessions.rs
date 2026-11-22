@@ -1,0 +1,941 @@
+//! Authenticated remote-plugin sessions. Business identifiers, selections and
+//! lifecycle rules live in the remote plugin; the host only owns chat identity.
+use crate::{
+    server::agent_service::AgentServiceState,
+    server::plugin_runtime::PluginRuntime,
+    server::skill_packages::remote::{self, Connection},
+};
+use anyhow::{Context, Result, ensure};
+use axum::{
+    Json,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
+use rusqlite::{OptionalExtension, params};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock, RwLock},
+};
+
+type Credentials = BTreeMap<String, (String, String, Arc<Connection>)>;
+static CREDENTIALS: OnceLock<RwLock<Credentials>> = OnceLock::new();
+static ACTIVE: OnceLock<RwLock<BTreeMap<String, Arc<Connection>>>> = OnceLock::new();
+fn credentials() -> &'static RwLock<Credentials> {
+    CREDENTIALS.get_or_init(Default::default)
+}
+fn active() -> &'static RwLock<BTreeMap<String, Arc<Connection>>> {
+    ACTIVE.get_or_init(Default::default)
+}
+fn schema(root: &std::path::Path) -> Result<()> {
+    crate::server::agent_service::open_db(root)?.execute_batch(
+        "CREATE TABLE IF NOT EXISTS remote_plugin_sessions (
+        task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+        plugin_id TEXT NOT NULL, subject TEXT NOT NULL, service_url TEXT NOT NULL);",
+    )?;
+    Ok(())
+}
+// Resolve the authenticated conversation for a child execution frame too.
+fn binding(root: &std::path::Path, task: &str) -> Result<Option<(String, String, String, String)>> {
+    schema(root)?;
+    Ok(crate::server::agent_service::open_db(root)?.query_row("WITH RECURSIVE lineage(id,depth) AS (
+        SELECT ?1,0 UNION ALL SELECT t.parent_task_id,l.depth+1 FROM agent_tasks t JOIN lineage l ON t.id=l.id
+        WHERE t.parent_task_id IS NOT NULL AND l.depth<32)
+        SELECT b.task_id,b.plugin_id,b.subject,b.service_url FROM lineage l JOIN remote_plugin_sessions b ON b.task_id=l.id
+        ORDER BY l.depth LIMIT 1", [task], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?)
+}
+fn bound(root: &std::path::Path, task: &str) -> Result<Option<(String, String, Arc<Connection>)>> {
+    let Some((conversation, plugin, subject, url)) = binding(root, task)? else {
+        return Ok(None);
+    };
+    let connection = active()
+        .read()
+        .unwrap()
+        .get(&conversation)
+        .cloned()
+        .context("Plugin login expired; reconnect from its page")?;
+    ensure!(
+        connection.subject == subject && connection.url() == url,
+        "Plugin session identity changed"
+    );
+    Ok(Some((conversation, plugin, connection)))
+}
+fn context(task: &str, conversation: &str) -> Value {
+    json!({"conversation_id":conversation,"execution_id":task})
+}
+/// Vision analyses a call names by `analysis_id` / `analysis_ids` travel with it
+/// as host evidence, so the plugin reads what the vision model actually said.
+fn analysis_ids(args: &Value) -> Vec<String> {
+    let mut ids = Vec::<String>::new();
+    for id in args["analysis_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(args.get("analysis_id"))
+        .filter_map(Value::as_str)
+    {
+        if !ids.iter().any(|known| known == id) {
+            ids.push(id.to_owned());
+        }
+    }
+    ids
+}
+fn save_binding(
+    root: &std::path::Path,
+    task: &str,
+    plugin: &str,
+    c: &Arc<Connection>,
+) -> Result<()> {
+    schema(root)?;
+    crate::server::agent_service::open_db(root)?.execute(
+        "INSERT INTO remote_plugin_sessions VALUES (?1,?2,?3,?4) ON CONFLICT(task_id) DO NOTHING",
+        params![task, plugin, c.subject, c.url()],
+    )?;
+    check_binding(root, task, plugin, c)?;
+    Ok(())
+}
+
+fn check_binding(
+    root: &std::path::Path,
+    task: &str,
+    plugin: &str,
+    c: &Arc<Connection>,
+) -> Result<String> {
+    let (conversation, owner, subject, url) =
+        binding(root, task)?.context("Remote plugin conversation not found")?;
+    ensure!(
+        owner == plugin && subject == c.subject && url == c.url(),
+        "Conversation belongs to a different plugin or user"
+    );
+    crate::server::plugin_sessions::check(root, &conversation, plugin)?;
+    active()
+        .write()
+        .unwrap()
+        .insert(conversation.clone(), c.clone());
+    Ok(conversation)
+}
+/// Generic capability response. The plugin can propose a plan using the host's
+/// existing versioned confirmation UI; it cannot confirm it or change a goal.
+fn tool_value(mut response: Value) -> Result<Value> {
+    ensure!(
+        response.is_object() && response.get("value").is_some(),
+        "Plugin tool response requires value"
+    );
+    response
+        .get_mut("value")
+        .map(Value::take)
+        .context("Plugin tool response requires value")
+}
+struct Transport;
+impl crate::server::plugin_io::SessionIo for Transport {
+    #[cfg(test)]
+    fn authorize_program<'a>(&'a self, state: &'a AgentServiceState, task: &'a str,
+        resource: Option<&'a str>, module: bool) -> futures::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let Some((conversation, _, connection)) = bound(state.workspace.root(), task)? else { return Ok(()) };
+            if connection.supports("fixed_programs") {
+                let decision = connection.rpc("plugin/authorizeProgram", json!({"resource":resource,"module":module,"context":context(task,&conversation)})).await?;
+                ensure!(decision["allowed"].as_bool().context("plugin program authorization returned no decision")?,
+                    "{}: {}", decision["code"].as_str().unwrap_or("PLUGIN_PROGRAM_DENIED"), decision["message"].as_str().unwrap_or("program rejected by plugin"));
+            }
+            Ok(())
+        })
+    }
+    fn authorize_page_tool<'a>(
+        &'a self, state: &'a AgentServiceState, task: &'a str, tool: &'a str, args: &'a Value,
+    ) -> futures::future::BoxFuture<'a, Result<Option<Value>>> {
+        Box::pin(async move {
+            let Some((conversation, plugin, c)) = bound(state.workspace.root(), task)? else { return Ok(None) };
+            if !c.supports("page_authorization") { return Ok(None) }
+            let prefix = format!("{}__", plugin.replace('-', "_"));
+            let raw = tool.strip_prefix(&prefix).context("page tool owner mismatch")?;
+            let answer = c.rpc("plugin/authorizePageTool", json!({"context":context(task,&conversation),"tool":raw,"arguments":args})).await?;
+            ensure!(answer["allowed"].is_boolean(), "plugin page authorization returned no decision");
+            Ok(Some(answer))
+        })
+    }
+    fn execute<'a>(
+        &'a self,
+        state: &'a AgentServiceState,
+        task: &'a str,
+        workspace: Arc<crate::tools::Workspace>,
+        name: &'a str,
+        args: Value,
+    ) -> futures::future::BoxFuture<'a, Result<Value>> {
+        Box::pin(async move {
+            let catalog = state
+                .tool_catalog
+                .as_ref()
+                .context("Tool registry unavailable")?;
+            if let Some((conversation, plugin, c)) = bound(state.workspace.root(), task)? {
+                if catalog.packages.owns_tool(&plugin, name) {
+                    let prefix = format!("{}__", plugin.replace('-', "_"));
+                    let raw = name.strip_prefix(&prefix).context("Tool owner mismatch")?;
+                    let mut call_context = context(task, &conversation);
+                    let ids = analysis_ids(&args);
+                    if !ids.is_empty() {
+                        call_context["analyses"] = json!(crate::media::image_analysis::analyses(
+                            state.workspace.root(),
+                            &[task, conversation.as_str()],
+                            &ids,
+                        )?);
+                    }
+                    let result = c.call_in(raw, args, call_context).await?;
+                    sync(state, &conversation, &c).await?;
+                    return tool_value(result);
+                }
+            }
+            catalog.execute(workspace, name, args).await
+        })
+    }
+    #[cfg(test)]
+    fn sync_attachments<'a>(
+        &'a self,
+        state: &'a AgentServiceState,
+        task: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if let Some((conversation, _, c)) = bound(state.workspace.root(), task)? {
+                sync(state, &conversation, &c).await?
+            }
+            Ok(())
+        })
+    }
+    #[cfg(test)]
+    fn read_asset<'a>(
+        &'a self,
+        state: &'a AgentServiceState,
+        task: &'a str,
+        reference: &'a Value,
+        args: &'a Value,
+    ) -> futures::future::BoxFuture<'a, Result<Value>> {
+        Box::pin(async move {
+            use base64::Engine;
+            let (conversation, _, c) =
+                bound(state.workspace.root(), task)?.context("Remote plugin login required")?;
+            let result = c
+                .rpc(
+                    "plugin/resource",
+                    json!({"context":context(task,&conversation),"reference":reference}),
+                )
+                .await?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(result["data"].as_str().context("Resource data missing")?)?;
+            crate::context::context_assets::remote_delivery(reference, &bytes, args)
+        })
+    }
+    fn import_picture<'a>(
+        &'a self,
+        state: &'a AgentServiceState,
+        task: &'a str,
+        name: &'a str,
+        media: &'a str,
+        bytes: &'a [u8],
+    ) -> futures::future::BoxFuture<'a, Result<Option<Value>>> {
+        Box::pin(async move {
+            use base64::Engine;
+            let Some((conversation, _, c)) = bound(state.workspace.root(), task)? else {
+                return Ok(None);
+            };
+            if !c.supports("attachments") {
+                return Ok(None);
+            };
+            let result=c.rpc("plugin/importAttachment",json!({"context":context(task,&conversation),"name":name,"mediaType":media,"data":base64::engine::general_purpose::STANDARD.encode(bytes)})).await?;
+            Ok(result["path"].is_string().then_some(result))
+        })
+    }
+    fn review_brief<'a>(
+        &'a self,
+        state: &'a AgentServiceState,
+        task: &'a str,
+        tool: &'a str,
+        args: &'a Value,
+        document: &'a Value,
+        images: &'a Value,
+    ) -> futures::future::BoxFuture<'a, Result<Option<Value>>> {
+        Box::pin(async move {
+            let Some((conversation, plugin, c)) = bound(state.workspace.root(), task)? else {
+                return Ok(None);
+            };
+            if !c.supports("visual_review") {
+                return Ok(None);
+            }
+            let prefix = format!("{}__", plugin.replace('-', "_"));
+            let raw = tool.strip_prefix(&prefix).unwrap_or(tool);
+            let brief = c
+                .rpc(
+                    "plugin/reviewBrief",
+                    json!({"context":context(task,&conversation),"tool":raw,"arguments":args,"document":document,"images":images}),
+                )
+                .await?;
+            let Some(instructions) = brief["instructions"]
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+            else {
+                return Ok(None);
+            };
+            // One subject per image; a single `subject` describes every image.
+            let count = images.as_array().map_or(1, Vec::len);
+            let subjects = (0..count)
+                .map(|index| match brief["subjects"].as_array() {
+                    Some(subjects) => subjects.get(index).cloned().unwrap_or(Value::Null),
+                    None => brief["subject"].clone(),
+                })
+                .collect::<Vec<_>>();
+            Ok(Some(
+                json!({"instructions":instructions,"subjects":subjects}),
+            ))
+        })
+    }
+}
+async fn sync(state: &AgentServiceState, task: &str, c: &Connection) -> Result<()> {
+    use base64::Engine;
+    if !c.supports("attachments") {
+        return Ok(());
+    }
+    for (receipt, reference, media, bytes) in
+        crate::media::attachments::pending_imports(state, task, task)?
+    {
+        let result=c.rpc("plugin/importAttachment",json!({"context":context(task,task),"attachmentId":reference["attachmentId"],"name":reference["name"],"mediaType":media,"data":base64::engine::general_purpose::STANDARD.encode(bytes)})).await?;
+        if let Some(path) = result["path"].as_str() {
+            crate::media::attachments::imported(state, &receipt, task, path)?;
+        }
+    }
+    Ok(())
+}
+pub async fn request(
+    runtime: &PluginRuntime,
+    state: AgentServiceState,
+    plugin: &str,
+    method: &str,
+    headers: HeaderMap,
+    args: Value,
+) -> Response {
+    let task = args["task_id"].as_str().unwrap_or("").to_owned();
+    match handle(runtime, state, plugin, method, headers, args).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(plugin, method, task_id=%task, error=%format!("{error:#}"), "plugin session request failed");
+            (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":format!("{error:#}")})),
+        )
+            .into_response()
+        },
+    }
+}
+async fn handle(
+    runtime: &PluginRuntime,
+    state: AgentServiceState,
+    plugin: &str,
+    method: &str,
+    headers: HeaderMap,
+    mut args: Value,
+) -> Result<Response> {
+    ensure!(args.is_object(), "Object request required");
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|v| !v.is_empty())
+        .context("Plugin login required")?;
+    let hash = crate::media::visual_artifacts::hash(token.as_bytes());
+    let registry = &state
+        .tool_catalog
+        .as_ref()
+        .context("Tool registry unavailable")?
+        .packages;
+    if method == "connect" {
+        // URL is administrator-configured, never selected by an untrusted page.
+        let url = remote::configured_url(registry, plugin)?;
+        let package = remote::connect_user(
+            remote::Config {
+                url,
+                token: token.into(),
+            },
+            true,
+        )
+        .await?;
+        ensure!(package.manifest.id == plugin, "Plugin identity mismatch");
+        let c = remote::mount_user_package(runtime, registry, package)?;
+        crate::server::plugin_io::register(plugin, Arc::new(Transport));
+        let handle = crate::server::agent_service::uuid_like();
+        let mut cache = credentials().write().unwrap();
+        ensure!(
+            cache.len() < 4096,
+            "Too many plugin login connections; restart or disconnect unused sessions"
+        );
+        cache.insert(handle.clone(), (hash, plugin.into(), c.clone()));
+        return Ok(Json(json!({"connection_handle":handle,"subject":c.subject})).into_response());
+    }
+    let handle = args["connection_handle"]
+        .as_str()
+        .context("Plugin connection required")?;
+    let (saved, owner, c) = credentials()
+        .read()
+        .unwrap()
+        .get(handle)
+        .cloned()
+        .context("Plugin connection expired; reconnect")?;
+    ensure!(
+        saved == hash && owner == plugin,
+        "Plugin login changed; reconnect"
+    );
+    let identity = c.rpc("plugin/identity", json!({})).await?;
+    let subject = identity["subject"]
+        .as_str()
+        .context("Plugin identity missing")?;
+    ensure!(
+        c.subject == crate::media::visual_artifacts::hash(format!("{}:{subject}", c.url()).as_bytes()),
+        "Plugin identity changed"
+    );
+    if let Some(object) = args.as_object_mut() {
+        object.remove("connection_handle");
+    }
+    let scope = registry
+        .scopes(&std::collections::BTreeSet::from([plugin.into()]))
+        .get(plugin)
+        .copied()
+        .context("Plugin disabled")?;
+    args["package_scope"] = json!(scope);
+    if method == "session" && args["method"] == "models" {
+        return crate::server::plugin_sessions::handle(state, plugin, args).await;
+    }
+    if method == "session" && matches!(args["method"].as_str(), Some("open" | "create")) {
+        // The plugin resolves its own document/history IDs to a conversation.
+        let lookup = c
+            .rpc(
+                "plugin/session",
+                json!({"method":"resolve","arguments":args,"context":{}}),
+            )
+            .await?;
+        if let Some(task) = lookup["conversation_id"]
+            .as_str()
+            .or_else(|| args["task_id"].as_str())
+        {
+            let exists: bool = crate::server::agent_service::open_db(state.workspace.root())?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_tasks WHERE id=?1)", [task], |r| r.get(0),
+            )?;
+            ensure!(exists, "Session not found in this Agent database; start a new conversation");
+            let (conversation, extra) = if binding(state.workspace.root(), task)?.is_none() {
+                // An existing plugin-owned chat may predate remote bindings.
+                // Only the authenticated plugin can authorize its adoption.
+                crate::server::plugin_sessions::check(state.workspace.root(), task, plugin)?;
+                let extra = c.rpc(
+                    "plugin/session",
+                    json!({"method":"open","arguments":args,"context":context(task,task)}),
+                )
+                .await?;
+                save_binding(state.workspace.root(), task, plugin, &c)?;
+                (task.to_owned(), extra)
+            } else {
+                let conversation = check_binding(state.workspace.root(), task, plugin, &c)?;
+                let extra = c.rpc(
+                    "plugin/session",
+                    json!({"method":"open","arguments":args,"context":context(task,&conversation)}),
+                ).await?;
+                (conversation, extra)
+            };
+            return Ok(Json(json!({"task_id":conversation,"plugin_state":extra})).into_response());
+        }
+        let response = crate::server::plugin_sessions::handle(
+            state.clone(),
+            plugin,
+            json!({"method":"create","package_scope":scope}),
+        )
+        .await?;
+        let created: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 65536).await?)?;
+        let task = created["task_id"]
+            .as_str()
+            .context("Session creation failed")?;
+        let extra = c
+            .rpc(
+                "plugin/session",
+                json!({"method":"bind","arguments":args,"context":context(task,task)}),
+            )
+            .await?;
+        save_binding(state.workspace.root(), task, plugin, &c)?;
+        return Ok(Json(json!({"task_id":task,"plugin_state":extra})).into_response());
+    }
+    let task = args["task_id"]
+        .as_str()
+        .context("task_id required")?
+        .to_owned();
+    let conversation = check_binding(state.workspace.root(), &task, plugin, &c)?;
+    if method == "upload" {
+        return Ok(Json(crate::media::attachments::encoded(&state, &task, &args)?).into_response());
+    }
+    if method == "attachment" {
+        return Ok(Json(crate::media::attachments::preview(
+            &state,
+            &task,
+            args["receiptId"].as_str().context("receiptId required")?,
+        )?)
+        .into_response());
+    }
+    if method == "session" {
+        let operation = args["method"]
+            .as_str()
+            .context("Session method required")?
+            .to_owned();
+        let extra = if matches!(operation.as_str(), "prompt" | "status") {
+            c.rpc(
+                "plugin/session",
+                json!({"method":operation,"arguments":args,"context":context(&task,&conversation)}),
+            )
+            .await?
+        } else {
+            Value::Null
+        };
+        if operation == "prompt" && let Some(resource) = extra.get("required_program_resource") {
+            let resource = resource.as_str().context("plugin required program resource must be a string")?;
+            ensure!(resource.starts_with("skill:") && resource.len() <= 4096, "invalid plugin required program resource");
+            args["program_resource"] = json!(resource);
+        }
+        let response = crate::server::plugin_sessions::handle(state, plugin, args).await?;
+        if operation == "status" {
+            let status = response.status();
+            let mut value: Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024).await?,
+            )?;
+            value["plugin_state"] = extra;
+            return Ok((status, Json(value)).into_response());
+        }
+        return Ok(response);
+    }
+    ensure!(method == "service", "Unknown remote plugin operation");
+    Ok(Json(c.rpc("plugin/service",json!({"method":args["method"],"arguments":args["arguments"],"context":context(&task,&conversation)})).await?).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        Router,
+        extract::Path,
+        routing::{get, post},
+    };
+    async fn value(response: Response) -> Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+    fn headers(user: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", format!("Bearer {user}").parse().unwrap());
+        h
+    }
+    #[tokio::test]
+    async fn authenticated_generic_sessions_preserve_context_and_isolate_users() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let received = calls.clone();
+        let app=Router::new().route("/api/plugin/{method}",post(move|Path(method):Path<String>,h:HeaderMap,Json(body):Json<Value>| {
+            let received=received.clone();async move {
+                let user=h["authorization"].to_str().unwrap().strip_prefix("Bearer ").unwrap();
+                let args=&body["payload"]["args"];
+                let result=match method.as_str() {
+                    "handshake"=>json!({"version":1,"subject":user,"state":"awaiting_confirmation","connection_id":format!("c-{user}"),"plugin":{"id":"notes-test","title":"Notes","skill":"skill:SKILL.md","capabilities":["fixed_programs"],"pages":[],"tools":[{"name":"save","description":"Save note","inputSchema":{"type":"object","properties":{}}}]}}),
+                    "confirm"=>json!({"state":"ready"}),"identity"=>json!({"subject":user}),
+                    "session"=>{received.lock().unwrap().push(args.clone());json!({"document_key":"plugin-owned","project_id":"opaque-state"})},
+                    "call"=>{received.lock().unwrap().push(args.clone());json!({"value":{"saved":true}})},
+                    "authorizeProgram"=>json!({"allowed":args["module"]==true || args["resource"]=="skill:approved.bundle.json","code":"FIXED_PROGRAM_REQUIRED","message":"Use the installed bundle"}),
+                    "service"=>json!({"echo":args}),_=>panic!("unexpected {method}")
+                };
+                Json(json!({"type":"server-response","rpcId":body["rpcId"],"result":{"ok":true,"value":result}}))
+            }
+        })).route("/resource",get(||async{"---\nname: notes-test\ndescription: Write notes\n---\nUse save."}));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "remote-session-{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (runtime, catalog) = crate::server::skill_packages::test_runtime();
+        let package = remote::connect_user(
+            remote::Config {
+                url: format!("http://{address}"),
+                token: "admin".into(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        remote::mount_user_package(&runtime, &catalog.packages, package).unwrap();
+        let mut state = crate::server::agent_service::tests::test_state(&root, address);
+        state.tool_catalog = Some(catalog.clone());
+        let alice = value(
+            handle(
+                &runtime,
+                state.clone(),
+                "notes-test",
+                "connect",
+                headers("alice"),
+                json!({}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let bob = value(
+            handle(
+                &runtime,
+                state.clone(),
+                "notes-test",
+                "connect",
+                headers("bob"),
+                json!({}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let created=value(handle(&runtime,state.clone(),"notes-test","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"method":"create","document":"D1"})).await.unwrap()).await;
+        let task = created["task_id"].as_str().unwrap();
+        assert_eq!(created["plugin_state"]["project_id"], "opaque-state");
+        let denied=crate::server::plugin_io::authorize_program(&state,task,None,false).await.unwrap_err();
+        assert!(denied.to_string().contains("FIXED_PROGRAM_REQUIRED"));
+        crate::server::plugin_io::authorize_program(&state,task,Some("skill:approved.bundle.json"),false).await.unwrap();
+        crate::server::plugin_io::authorize_program(&state,task,None,true).await.unwrap();
+
+        assert!(handle(&runtime,state.clone(),"notes-test","session",headers("bob"),json!({"connection_handle":bob["connection_handle"],"task_id":task,"method":"events"})).await.is_err());
+        assert!(handle(&runtime,state.clone(),"other","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"task_id":task,"method":"events"})).await.is_err());
+        let db = crate::server::agent_service::open_db(&root).unwrap();
+        db.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at,parent_task_id) VALUES ('child','','fake','draft',0,0,?1)",[task]).unwrap();
+        let args = json!({"project_id":"business-string","text":"你好"});
+        let result = crate::server::plugin_io::execute(
+            &state,
+            "child",
+            state.workspace.clone(),
+            "notes_test__save",
+            args.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["saved"], true);
+        assert!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call["tool"] == "save"
+                    && call["arguments"] == args
+                    && call["context"] == context("child", task))
+        );
+        // A plugin that does not declare visual_review is never asked for review instructions.
+        assert!(
+            crate::server::plugin_io::review_brief(
+                &state,
+                "child",
+                "notes_test__save",
+                &json!({}),
+                &json!({}),
+                &json!([])
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        // Re-authentication restores an existing binding without accepting a different subject.
+        active().write().unwrap().remove(task);
+        let opened=value(handle(&runtime,state.clone(),"notes-test","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"task_id":task,"method":"open"})).await.unwrap()).await;
+        assert_eq!(opened["task_id"], task);
+        // A stale business link must not fabricate a replacement chat under
+        // the original ID. History remains authoritative in the Agent database.
+        let error = handle(&runtime,state.clone(),"notes-test","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"task_id":"lost-chat","method":"open"})).await.unwrap_err();
+        assert!(error.to_string().contains("Session not found"));
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM agent_tasks WHERE id='lost-chat'", [], |r|r.get::<_,i64>(0)).unwrap(), 0);
+        // Existing host chats can never be claimed using recovery, even when
+        // the remote service would otherwise accept the supplied identifier.
+        db.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('host-chat','','fake','draft',0,0)",[]).unwrap();
+        assert!(handle(&runtime,state.clone(),"notes-test","session",headers("alice"),json!({"connection_handle":alice["connection_handle"],"task_id":"host-chat","method":"open"})).await.is_err());
+        assert!(crate::server::plugin_sessions::owner(&root,"host-chat").unwrap().is_none());
+        runtime.shutdown().unwrap();
+        server.abort();
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// The real loop: a page tool renders an image, the plugin attaches its review
+    /// instructions, analyze_images sends them as the vision system message, and
+    /// the plugin's record tool receives the stored analysis as host evidence.
+    #[tokio::test]
+    async fn rendered_images_carry_plugin_review_instructions_into_vision_and_back_as_evidence() {
+        use base64::Engine;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const INSTRUCTIONS: &str = "Transcribe every visible text, then list defects, grade them against the outline, then conclude.";
+        const VISION: &str = "Transcript: Cover title; Contents.\n```json\n{\"images\":[{\"image\":1,\"conclusion\":\"pass\"},{\"image\":2,\"conclusion\":\"pass\"}]}\n```";
+        fn subject(page: &Value) -> String {
+            format!("Page {page}: outline entry {page}.")
+        }
+        let plugin_calls = Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let vision_bodies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/api/plugin/{method}", post({
+                let plugin_calls = plugin_calls.clone();
+                move |Path(method): Path<String>, Json(body): Json<Value>| {
+                    let plugin_calls = plugin_calls.clone();
+                    async move {
+                        let args = body["payload"]["args"].clone();
+                        plugin_calls.lock().unwrap().push((method.clone(), args.clone()));
+                        let result = match method.as_str() {
+                            "handshake" => json!({"version":1,"subject":"alice","state":"awaiting_confirmation","connection_id":"c-alice",
+                                "plugin":{"id":"review-lab","title":"Visual check","pages":[],"capabilities":["visual_review","page_authorization"],"tools":[
+                                    {"name":"render","description":"Render pages","executor":"page","inputSchema":{"type":"object","properties":{"slides":{"type":"array","items":{"type":"integer"}}}}},
+                                    {"name":"record","description":"Record a review","inputSchema":{"type":"object","properties":{"analysis_ids":{"type":"array"}}}}]}}),
+                            "confirm" => json!({"state":"ready"}),
+                            "identity" => json!({"subject":"alice"}),
+                            "session" => json!({}),
+                            "authorizePageTool" => if args["arguments"]["slides"] == json!([99]) {
+                                json!({"allowed":false,"code":"WAITING_FOR_USER","question":"Confirm first"})
+                            } else { json!({"allowed":true}) },
+                            "reviewBrief" => json!({"instructions":INSTRUCTIONS,
+                                "subjects":args["images"].as_array().unwrap().iter().map(|meta| subject(&meta["slide"])).collect::<Vec<_>>()}),
+                            "call" => json!({"value":{"recorded":true}}),
+                            _ => panic!("unexpected {method}"),
+                        };
+                        Json(json!({"type":"server-response","rpcId":body["rpcId"],"result":{"ok":true,"value":result}}))
+                    }
+                }
+            }))
+            .route("/v1/chat/completions", post({
+                let vision_bodies = vision_bodies.clone();
+                let rounds = rounds.clone();
+                move |Json(body): Json<Value>| {
+                    let vision_bodies = vision_bodies.clone();
+                    let rounds = rounds.clone();
+                    async move {
+                        if body["model"] == "vision-only" {
+                            vision_bodies.lock().unwrap().push(body);
+                            return Json(json!({"choices":[{"message":{"role":"assistant","content":VISION},"finish_reason":"stop"}]}));
+                        }
+                        if body["messages"].to_string().contains("WAIT_PLAN_TEST") {
+                            let source = "const lib = require(\"review_lab\");\ntry { await lib.render({slides:[99]}); } catch (e) { console.log('should not continue'); }";
+                            return Json(json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"call_wait_plan","type":"function","function":{"name":"run_js","arguments":serde_json::to_string(&json!({"code":source})).unwrap()}}]}}]}));
+                        }
+                        let n = rounds.fetch_add(1, Ordering::SeqCst);
+                        let source = match n {
+                            0 => "const rl = require(\"review_lab\");\nconst rendered = await rl.render({slides:[1,2]});\nconst ids = rendered.images.map(i => i.artifact_id);\nconst rev = await vision.analyze_images({artifact_ids: ids, question: \"I just changed the subtitle.\"});\nawait rl.record({analysis_ids: [rev.analysis_id]});",
+                            _ => "return { summary: \"Page 1 reviewed.\" };",
+                        };
+                        Json(json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":format!("call_review_{n}"),"type":"function","function":{"name":"run_js","arguments":serde_json::to_string(&json!({"code":source})).unwrap()}}]}}]}))
+                    }
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = std::env::temp_dir().join(format!(
+            "remote-review-{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (runtime, catalog) = crate::server::skill_packages::test_runtime();
+        let package = remote::connect_user(
+            remote::Config {
+                url: format!("http://{address}"),
+                token: "admin".into(),
+            },
+            true,
+        )
+        .await
+        .unwrap();
+        remote::mount_user_package(&runtime, &catalog.packages, package).unwrap();
+        let mut state = crate::server::agent_service::tests::test_state(&root, address);
+        state.tool_catalog = Some(catalog.clone());
+        state.visual_tool_settings.model = Some("vision-only".into());
+        let alice = value(
+            handle(
+                &runtime,
+                state.clone(),
+                "review-lab",
+                "connect",
+                headers("alice"),
+                json!({}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let created = value(handle(&runtime, state.clone(), "review-lab", "session", headers("alice"),
+            json!({"connection_handle":alice["connection_handle"],"method":"create","document":"D1"})).await.unwrap()).await;
+        let task = created["task_id"].as_str().unwrap().to_owned();
+        let denied = crate::server::plugin_io::authorize_page_tool(&state, &task, "review_lab__render", &json!({"slides":[99]})).await.unwrap().unwrap();
+        assert_eq!(denied["code"], "WAITING_FOR_USER");
+        crate::server::agent_service::open_db(&root)
+            .unwrap()
+            .execute(
+                "UPDATE agent_tasks SET status='running',model='fake' WHERE id=?1",
+                [&task],
+            )
+            .unwrap();
+        crate::tools::page_tools::claim(&task, "page-1").unwrap();
+        let page = {
+            let task = task.clone();
+            tokio::spawn(async move {
+                let mut png = Vec::new();
+                image::DynamicImage::new_rgb8(8, 8)
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                    .unwrap();
+                let data = base64::engine::general_purpose::STANDARD.encode(png);
+                loop {
+                    let taken =
+                        crate::tools::page_tools::poll(&task, "page-1", std::time::Duration::from_secs(2))
+                            .await
+                            .unwrap();
+                    for call in taken["calls"].as_array().into_iter().flatten() {
+                        let mut content = call["arguments"]["slides"].as_array().unwrap().iter()
+                            .map(|slide| json!({"type":"image","mimeType":"image/png","data":data,"meta":{"slide":slide}}))
+                            .collect::<Vec<_>>();
+                        content.push(json!({"type":"text","text":"rendered"}));
+                        crate::tools::page_tools::reply(&task, "page-1", call["call_id"].as_str().unwrap(),
+                            json!({"ok":true,"content":content,"document":{"revision":2,"stable":true}})).unwrap();
+                    }
+                }
+            })
+        };
+        crate::runtime::single_agent::run_task(
+            state.clone(),
+            task.clone(),
+            "fake".into(),
+            "Review page 1".into(),
+            12,
+            tokio_util::sync::CancellationToken::new(),
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+        page.abort();
+
+        let calls = plugin_calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|(method, args)| method == "authorizePageTool" && args["tool"] == "render" && args["arguments"]["slides"] == json!([1,2])), "the page tool was authorized before dispatch");
+        let (_, brief_request) = calls
+            .iter()
+            .find(|(method, _)| method == "reviewBrief")
+            .expect("plugin was asked for review instructions");
+        assert_eq!(brief_request["tool"], "render");
+        assert_eq!(brief_request["arguments"], json!({"slides":[1,2]}));
+        assert_eq!(
+            brief_request["images"],
+            json!([{"slide":1},{"slide":2}]),
+            "each image says which page it shows"
+        );
+        assert_eq!(
+            brief_request["document"],
+            json!({"revision":2,"stable":true})
+        );
+        assert_eq!(brief_request["context"], context(&task, &task));
+        assert!(brief_request.get("plan").is_none(), "there is no task-board plan to send");
+
+        let vision = vision_bodies.lock().unwrap().clone();
+        assert_eq!(vision.len(), 1);
+        let messages = vision[0]["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0],
+            json!({"role":"system","content":format!(
+            "{INSTRUCTIONS}\n\nImage 1:\n{}\n\nImage 2:\n{}", subject(&json!(1)), subject(&json!(2)))}),
+            "each image is reviewed against its own outline entry"
+        );
+        assert_eq!(
+            messages[1]["content"][0],
+            json!({"type":"text","text":"I just changed the subtitle."})
+        );
+        assert_eq!(
+            messages[1]["content"][1],
+            json!({"type":"text","text":"Image 1"})
+        );
+        assert_eq!(
+            messages[1]["content"][3],
+            json!({"type":"text","text":"Image 2"})
+        );
+
+        let (_, record) = calls
+            .iter()
+            .find(|(method, args)| method == "call" && args["tool"] == "record")
+            .expect("record call");
+        let evidence = &record["context"]["analyses"][0];
+        assert_eq!(
+            evidence["analysis"], VISION,
+            "the plugin reads the vision model's own text"
+        );
+        assert_eq!(
+            evidence["analysis_id"],
+            record["arguments"]["analysis_ids"][0]
+        );
+        assert_eq!(evidence["images"][0]["source"]["meta"], json!({"slide":1}));
+        assert_eq!(evidence["images"][1]["source"]["meta"], json!({"slide":2}));
+        assert_eq!(
+            evidence["images"][1]["source"]["arguments"],
+            json!({"slides":[1,2]})
+        );
+        assert_eq!(evidence["images"][0]["source"]["document"]["revision"], 2);
+        assert_eq!(
+            evidence["images"][0]["source"]["tool"],
+            "review_lab__render"
+        );
+
+        let forged = crate::server::plugin_io::execute(
+            &state,
+            &task,
+            state.workspace.clone(),
+            "review_lab__record",
+            json!({"analysis_ids":["analysis-forged"]}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(forged.contains("Unknown analysis_id"), "{forged}");
+        let waiting = value(handle(&runtime, state.clone(), "review-lab", "session", headers("alice"),
+            json!({"connection_handle":alice["connection_handle"],"method":"create","document":"D2"})).await.unwrap()).await;
+        let waiting_task = waiting["task_id"].as_str().unwrap().to_owned();
+        crate::server::agent_service::open_db(&root).unwrap().execute("UPDATE agent_tasks SET status='running',model='fake' WHERE id=?1", [&waiting_task]).unwrap();
+        crate::runtime::single_agent::run_task(state.clone(), waiting_task.clone(), "fake".into(), "WAIT_PLAN_TEST".into(), 8,
+            tokio_util::sync::CancellationToken::new(), 1, false).await.unwrap();
+        let conn = crate::server::agent_service::open_db(&root).unwrap();
+        let output: String = conn.query_row("SELECT json_extract(data,'$.message.content') FROM agent_task_events WHERE task_id=?1 AND kind='assistant/message' ORDER BY seq DESC LIMIT 1", [&waiting_task], |r|r.get(0)).unwrap();
+        assert!(output.contains("Confirm first"), "the user sees the wait: {output}");
+        assert!(!output.contains("should not continue"), "a confirmation boundary cannot be swallowed by the program");
+        let dispatched = crate::tools::page_tools::poll(&waiting_task, "page-1", std::time::Duration::from_millis(1)).await;
+        assert!(dispatched.as_ref().map_or(true, |value| value["calls"].as_array().is_none_or(|calls| calls.is_empty())), "the denied operation must never reach the page: {dispatched:?}");
+        crate::tools::page_tools::forget_task(&task);
+        runtime.shutdown().unwrap();
+        server.abort();
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn host_transport_contains_no_business_adapter() {
+        for source in [
+            include_str!("skill_packages/remote.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap(),
+            include_str!("remote_sessions.rs")
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap(),
+        ] {
+            for forbidden in [
+                "ppt/",
+                "ppt-master",
+                "PPT_PLUGIN_URL",
+                "project_id",
+                "template_id",
+                "commit_design_spec",
+                "init_project",
+                "X-Ppt-",
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "business coupling: {forbidden}"
+                );
+            }
+        }
+    }
+}

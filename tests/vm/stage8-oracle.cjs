@@ -3,7 +3,7 @@
 // deliberately restricted locale tests are excluded, not counted as passes.
 const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
 (async()=>{
-  const source=fs.readFileSync(path.join(__dirname,'../../src/agent_program/tests_stage8.rs'),'utf8');
+  const source=fs.readFileSync(path.join(__dirname,'../../src/runtime/agent_program/tests_stage8.rs'),'utf8');
   const pattern=/js_test!\(\s*(\w+)\s*,\s*(r#".*?"#|"(?:\\.|[^"\\])*")\s*,\s*json!\((.*?)\)\s*\);/gs;
   const excluded=new Set(['vm_stage8_regex_backtrack_error','vm_stage8_regex_backtrack_consumers','vm_stage8_locale_errors']);
   const cases=process.argv[2]?JSON.parse(fs.readFileSync(process.argv[2],'utf8')):

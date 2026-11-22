@@ -60,7 +60,7 @@ def main():
     copy_tree(source/"agent/frontend/dist", app/"agent-web")
     if (app/"agent-resources").exists(): shutil.rmtree(app/"agent-resources")
     for name in ["code_flow", "code_index", "git", "web"]:
-        copy_tree(source/"agent/src/builtin_plugins"/name, app/"agent-resources/src/builtin_plugins"/name)
+        copy_tree(source/"agent/src/server/builtin_plugins"/name, app/"agent-resources/src/server/builtin_plugins"/name)
     copy_tree(source/"view/build", app/"server/web")
     # Other modules' example documents are not customer PPT assets.
     for name in ["filing-demo"]:
@@ -111,7 +111,7 @@ def main():
                 "removed_unicom_templates":removed_templates,"removed_static_documents":removed_static_documents}
     manifest["build_recipe_sha256"] = {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(HERE.iterdir()) if p.is_file()}
     manifest["compiled_customer_source_files_sha256"] = {}
-    for relative in ["view/src/gva/router/menuAdapter.ts", "view/src/gva/router/defaultEntryPath.ts", "view/src/view/createPpt/index.tsx", "server/main.go", "server/initialize/gorm_biz.go", "server/initialize/ppt_agent_proxy.go", "server/cmd/customer-init/main.go", "server/cmd/customer-gateway/main.go", "agent/frontend/src/components/SettingsModal.tsx", "agent/src/skill_packages/remote.rs", "server/api/v1/system/ppt_plugin_agent.go", "server/api/v1/system/ppt_plugin_registration.go", "server/router/system/ppt_plugin.go", "server/router/system/sys_ppt.go"]:
+    for relative in ["view/src/gva/router/menuAdapter.ts", "view/src/gva/router/defaultEntryPath.ts", "view/src/view/createPpt/index.tsx", "server/main.go", "server/initialize/gorm_biz.go", "server/initialize/ppt_agent_proxy.go", "server/cmd/customer-init/main.go", "server/cmd/customer-gateway/main.go", "agent/frontend/src/components/SettingsModal.tsx", "agent/src/server/skill_packages/remote.rs", "server/api/v1/system/ppt_plugin_agent.go", "server/api/v1/system/ppt_plugin_registration.go", "server/router/system/ppt_plugin.go", "server/router/system/sys_ppt.go"]:
         manifest["compiled_customer_source_files_sha256"][relative] = hashlib.sha256((source/relative).read_bytes()).hexdigest()
     for image in ["quickagent-kylin-arm64-env:v1", "quickagent-ppt-browser-arm64-env:v1"]:
         record=json.loads(subprocess.check_output(["docker","image","inspect",image]))[0]

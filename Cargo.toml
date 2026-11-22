@@ -8,7 +8,7 @@ vm-measurements = []
 
 [[bin]]
 name = "vm-measurements"
-path = "src/vm_measurements.rs"
+path = "src/runtime/vm_measurements.rs"
 required-features = ["vm-measurements"]
 
 [dependencies]
