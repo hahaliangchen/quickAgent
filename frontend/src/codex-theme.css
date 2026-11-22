@@ -68,6 +68,11 @@
   --dsw-alias-label-tertiary: #6b7280;
   --dsw-alias-interactive-bg-hover: #eceff3;
   --dsw-alias-state-business-primary: #1d9e75;
+
+  /* Summary file links read as links, not as body text: the brand ramp here is
+     emerald, so a file link keeps a Codex-grade reading blue of its own. */
+  --dsh-file-link-color: #1f6feb;
+  --dsh-file-link-hover: #1550b4;
 }
 
 body[data-ds-dark-theme] {
@@ -92,6 +97,9 @@ body[data-ds-dark-theme] {
   --sprout-soft: #163329;
   --codex-amber-circle: #f59e0b;
   --codex-amber-bg: #78350f33;
+  /* Same reading blue, lifted for the dark surface: still blue, never neon. */
+  --dsh-file-link-color: #6ea8fe;
+  --dsh-file-link-hover: #9cc7ff;
   --codex-amber-border: #b45309;
   --codex-leaf-border: #0f6e56;
   --codex-leaf-bg: #0f6e5622;

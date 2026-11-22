@@ -18,14 +18,17 @@
   margin: 32px 0 16px;
 }
 
+/* Section headings of a completion summary sit closer to the text they open
+   than to the section above them: the four blocks read as one scan, and the
+   page keeps its air without four 32px gaps in a row. */
 .markdown h2 {
   font: var(--dsw-font-markdown-h2);
-  margin: 32px 0 16px;
+  margin: 26px 0 10px;
 }
 
 .markdown h3 {
   font: var(--dsw-font-markdown-h3);
-  margin: 32px 0 16px;
+  margin: 22px 0 8px;
 }
 
 .markdown h4 {
@@ -43,7 +46,7 @@
 }
 
 .markdown p {
-  margin: 16px 0;
+  margin: 12px 0;
 }
 
 /* Tighten h4–h6 against a following list (design: 8px gap). */
@@ -99,13 +102,26 @@
   margin-right: 5px;
 }
 
+/* A file link leads with a fixed 14px mark instead: the summary reads as a
+   column of equal marks, and the two-letter badges stay legible instead of
+   shrinking with the surrounding text. */
+.fileLinkIcon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  color: inherit;
+}
+
+/* A summary list is scanned, not read: 10px above and below the block and a
+   4px step between items keeps four single-line bullets in one glance. */
 .markdown :where(ul, ol) {
-  margin: 16px 0;
+  margin: 10px 0;
   padding-left: 18px;
 }
 
 .markdown li:not(:first-child) {
-  margin-top: 6px;
+  margin-top: 4px;
 }
 
 .markdown li > :where(ul, ol) {
@@ -318,14 +334,38 @@
 
 .fileLink {
   max-width: 100%;
+  /* Mark and name share one baseline box: the mark is optically centered, the
+     name keeps its own leading, and the gap stays 5px at every font size. */
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   text-align: inherit;
+  text-decoration: none;
+}
+
+/* The owner may publish a dedicated reading blue for file links; the brand
+   link colour stays the fallback for sheets that publish none. The shared
+   `a, .fileLink` rule above sets the brand colour at this specificity, so the
+   override repeats the owner selector instead of relying on source order. */
+.markdown .fileLink,
+.fileMention.fileLink {
+  color: var(--dsh-file-link-color, var(--dsw-alias-link));
+}
+
+.markdown .fileLink:hover,
+.markdown .fileLink:focus-visible,
+.fileMention.fileLink:hover {
+  color: var(--dsh-file-link-hover, var(--dsw-alias-link));
 }
 
 .fileMention:hover,
 .fileMention:focus {
   outline: none;
-  text-decoration: underline dotted var(--dsw-alias-link);
-  text-underline-offset: 3px;
+  /* A hairline underline on hover only: the resting link is plain blue text,
+     with no chip background and no decoration competing with the code font. */
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
 }
 
 .compact {

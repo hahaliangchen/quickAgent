@@ -88,8 +88,8 @@ pub enum ToolError {
     ContentTooLarge { actual: usize, limit: usize },
     #[error("invalid line range: start_line={start}, end_line={end}")]
     InvalidLineRange { start: usize, end: usize },
-    #[error("expected_old_text did not match the selected line range")]
-    ExpectedTextMismatch,
+    #[error("expected_old_text did not match the selected line range{0}")]
+    ExpectedTextMismatch(String),
     #[error("write_conflict: {0}")]
     WriteConflict(String),
     #[error("write_precondition_required: {0}")]

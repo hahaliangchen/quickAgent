@@ -235,10 +235,11 @@ pub fn line_replacement(
     let selected_text = normalize(selected);
     if let Some(expected) = expected {
         let expected = normalize(expected);
-        if expected.strip_suffix('\n').unwrap_or(&expected)
-            != selected_text.strip_suffix('\n').unwrap_or(&selected_text)
-        {
-            return Err(ToolError::ExpectedTextMismatch);
+        let expected_trimmed = expected.strip_suffix('\n').unwrap_or(&expected);
+        let selected_trimmed = selected_text.strip_suffix('\n').unwrap_or(&selected_text);
+        if expected_trimmed != selected_trimmed {
+            let detail = expected_mismatch_detail(source, start, end, expected_trimmed);
+            return Err(ToolError::ExpectedTextMismatch(detail));
         }
     }
     let ending = newline(if selected.contains('\n') {
@@ -258,6 +259,70 @@ pub fn line_replacement(
     output.push_str(&inserted);
     output.push_str(&source[finish..]);
     Ok(output)
+}
+
+/// Explain a `replace_range` `expected_old_text` mismatch with the actual lines
+/// currently at `start..=end` and (when found) the exact shifted line range.
+fn expected_mismatch_detail(
+    source: &str,
+    start: usize,
+    end: usize,
+    expected_trimmed: &str,
+) -> String {
+    let normalized = normalize(source);
+    let source_lines: Vec<&str> = normalized
+        .split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
+        .collect();
+    let expected_lines: Vec<&str> = if expected_trimmed.is_empty() {
+        vec![""]
+    } else {
+        expected_trimmed.split('\n').collect()
+    };
+    let mut matches = Vec::new();
+    let window = expected_lines.len();
+    if window > 0 && window <= source_lines.len() {
+        for idx in 0..=source_lines.len() - window {
+            if source_lines[idx..idx + window] == expected_lines[..] {
+                matches.push((idx + 1, idx + window));
+            }
+        }
+    }
+    let mut out = format!(" ({start}-{end})");
+    if matches.len() == 1 {
+        let (hit_start, hit_end) = matches[0];
+        out.push_str(&format!(
+            "; exact expected_old_text is now at lines {hit_start}-{hit_end}"
+        ));
+    } else if matches.len() > 1 {
+        let &(hit_start, hit_end) = matches
+            .iter()
+            .min_by_key(|(hit_start, _)| hit_start.abs_diff(start))
+            .unwrap();
+        out.push_str(&format!(
+            "; nearest exact match is at lines {hit_start}-{hit_end} ({} matches total)",
+            matches.len()
+        ));
+    }
+    out.push_str(". Actual lines at requested range:\n");
+    let max_lines = 12usize;
+    let preview_end = end.min(start + max_lines - 1).min(source_lines.len());
+    let mut chars = 0usize;
+    for line_no in start..=preview_end {
+        let line = source_lines[line_no - 1];
+        let rendered = format!("{line_no}|{line}");
+        if chars + rendered.len() > 800 && line_no > start {
+            out.push_str("…\n");
+            break;
+        }
+        chars += rendered.len() + 1;
+        out.push_str(&rendered);
+        out.push('\n');
+    }
+    if preview_end < end {
+        out.push_str(&format!("… ({} more lines in selected range)\n", end - preview_end));
+    }
+    out.trim_end_matches('\n').to_owned()
 }
 
 /// Render compact, line-numbered context around changed regions in the updated file.
@@ -546,5 +611,28 @@ mod tests {
         ).unwrap();
         assert_eq!(updated, "let value = 2;\nlet value = 2;\n");
         assert_eq!(ranges.len(), 2);
+    }
+
+    #[test]
+    fn line_replacement_mismatch_reports_actual_and_shifted_lines() {
+        let source = "alpha\nbeta\ngamma\ndelta\n";
+        let shifted = line_replacement(source, 3, 3, "BETA", Some("beta"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            shifted.contains("expected_old_text did not match the selected line range (3-3)"),
+            "{shifted}"
+        );
+        assert!(
+            shifted.contains("exact expected_old_text is now at lines 2-2"),
+            "{shifted}"
+        );
+        assert!(shifted.contains("3|gamma"), "{shifted}");
+
+        let missing = line_replacement(source, 2, 3, "X", Some("not here"))
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("2|beta") && missing.contains("3|gamma"), "{missing}");
+        assert!(!missing.contains("exact expected_old_text is now at"), "{missing}");
     }
 }

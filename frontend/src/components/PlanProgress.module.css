@@ -1,68 +1,285 @@
-.plan {
-  --plan-ink: #283533;
-  --plan-muted: #52635e;
-  --plan-surface: rgba(250, 250, 248, 0.96);
-  --plan-hairline: #d8e0db;
-  --plan-track: #e5eae6;
-  --plan-done: #286653;
-  --plan-active: #2e5f86;
-  --plan-blocked: #855024;
-  color: var(--plan-ink);
-  border-block-end: 1px solid var(--plan-hairline);
-  min-inline-size: 0;
-  padding: 2px 0 8px;
-  font-size: 13px;
-  line-height: 1.4;
-}
+/* Plan panel above the composer (and inline in the workbench chat).
+   The old sheet stacked a full-width 3px dark bar under the title and printed
+   the word 完成 on all six rows, so the block read as a table with an empty
+   right half. This one keeps one hairline outline, one 2px progress track, one
+   glyph per step, and lets the step text carry the eye. */
 
-.dock {
-  width: calc(100% - 2 * var(--dsh-composer-side-clearance, 20px));
-  max-width: calc(var(--dsh-chat-content-width, 760px) + 16px);
-  margin: 0 auto 6px;
-  padding: 4px 12px 8px;
-  background: var(--plan-surface);
-  border: 1px solid var(--plan-hairline);
-  border-radius: 10px;
-  backdrop-filter: blur(8px);
+.plan {
+  /* Reading inks first, then the surfaces the rows sit on. Every value has a
+     dark-theme twin below, so the component never reaches into a global token
+     that the surrounding theme may repoint. */
+  --plan-ink: #1a2421;
+  --plan-muted: #67746e;
+  --plan-surface: rgb(252 253 252 / 96%);
+  --plan-hairline: #e4e9e6;
+  --plan-track: #edf1ee;
+  --plan-chip: #f1f4f2;
+  --plan-row-hover: #f5f8f6;
+  --plan-accent: #1d9e75;
+  --plan-accent-ink: #ffffff;
+  --plan-accent-soft: #e0f3ea;
+  /* The idle ring has to survive a glance: a near-white track read as empty
+     space on white and vanished on the dark surface. */
+  --plan-idle: #8f9d96;
+  --plan-blocked: #b45309;
+  --plan-blocked-soft: #fbf0dd;
+
+  min-inline-size: 0;
+  color: var(--plan-ink);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 :global(body[data-ds-dark-theme]) .plan {
-  --plan-ink: #e2eae5;
-  --plan-muted: #aebdb6;
-  --plan-surface: rgba(26, 29, 28, 0.94);
-  --plan-hairline: #3d4844;
-  --plan-track: #313e39;
-  --plan-done: #8ac4ad;
-  --plan-active: #a2c5e4;
-  --plan-blocked: #e2b188;
+  --plan-ink: #e7ece9;
+  --plan-muted: #9aa8a1;
+  --plan-surface: rgb(23 26 25 / 94%);
+  --plan-hairline: #2c332f;
+  --plan-track: #2a312d;
+  --plan-chip: #232a26;
+  --plan-row-hover: #1f2523;
+  --plan-accent: #34d399;
+  --plan-accent-ink: #10231c;
+  --plan-accent-soft: #16332a;
+  --plan-idle: #75847c;
+  --plan-blocked: #f0b374;
+  --plan-blocked-soft: #362817;
+}
+
+/* Inline variant: no card of its own, just a softer rule under the block. */
+.plan:not(.dock) {
+  padding-block-end: 6px;
+  border-block-end: 1px solid var(--plan-hairline);
+}
+
+.dock {
+  inline-size: calc(100% - 2 * var(--dsh-composer-side-clearance, 20px));
+  max-inline-size: calc(var(--dsh-chat-content-width, 760px) + 16px);
+  margin: 0 auto 10px;
+  padding: 6px 12px 8px;
+  background: var(--plan-surface);
+  border: 1px solid var(--plan-hairline);
+  border-radius: 12px;
+  /* Barely-there lift: the card has to separate from a white canvas without
+     drawing a shadow the reference design does not have. */
+  box-shadow: 0 1px 1px rgb(16 24 20 / 3%), 0 12px 28px -22px rgb(16 24 20 / 45%);
+  backdrop-filter: blur(10px);
 }
 
 .summary {
   display: flex;
-  align-items: baseline;
-  gap: 6px 9px;
   flex-wrap: wrap;
-  padding: 6px 2px;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 5px 6px;
+  border-radius: 8px;
   cursor: pointer;
   list-style: none;
 }
+
 .summary::-webkit-details-marker { display: none; }
-.summary:focus-visible { outline: 2px solid var(--plan-active); outline-offset: 2px; }
-.chevron { box-sizing: content-box; inline-size: 12px; block-size: 12px; align-self: center; flex: none; color: var(--plan-muted); }
+.summary:hover { background: var(--plan-row-hover); }
+.summary:focus-visible { outline: 2px solid var(--plan-accent); outline-offset: 1px; }
+
+.chevron {
+  box-sizing: content-box;
+  inline-size: 14px;
+  block-size: 14px;
+  flex: none;
+  color: var(--plan-muted);
+  transition: transform 160ms ease;
+}
+
 .plan[open] .chevron { transform: rotate(90deg); }
-.label { font-weight: 600; }
-.count { color: var(--plan-muted); font-variant-numeric: tabular-nums; }
-.current { min-inline-size: 0; margin-inline-start: auto; overflow-wrap: anywhere; color: var(--plan-muted); }
-.progress { display: block; flex: 1 0 100%; appearance: none; inline-size: 100%; block-size: 3px; margin: 2px 0 0; border: none; border-radius: 2px; overflow: hidden; background: var(--plan-track); color: var(--plan-done); }
+
+.label { font-weight: 600; letter-spacing: 0.01em; }
+
+/* A count reads as one quantity, so it gets one chip instead of two loose
+   numerals floating beside a bold label. */
+.count {
+  padding: 0 6px;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--plan-chip);
+  color: var(--plan-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+}
+
+.state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-inline-size: 0;
+  margin-inline-start: auto;
+  color: var(--plan-muted);
+  font-size: 12px;
+}
+
+.state[data-status="in_progress"] { color: var(--plan-accent); }
+.state[data-status="blocked"] { color: var(--plan-blocked); }
+
+.dot {
+  inline-size: 6px;
+  block-size: 6px;
+  flex: none;
+  border-radius: 50%;
+  corner-shape: round;
+  background: currentcolor;
+}
+
+.state[data-status="in_progress"] .dot { animation: plan-pulse 1.6s ease-in-out infinite; }
+
+.stateText {
+  /* The header borrows the active step title, not its whole command line: it is
+     a pointer to the row below, which already spells the step out in full. */
+  max-inline-size: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settled {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-inline-start: auto;
+  color: var(--plan-accent);
+  font-size: 12px;
+}
+
+.settledMark { inline-size: 12px; block-size: 12px; flex: none; }
+.settledMark path { stroke: currentcolor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+.progress {
+  display: block;
+  flex: 1 0 100%;
+  appearance: none;
+  inline-size: 100%;
+  block-size: 2px;
+  margin: 3px 0 0;
+  border: none;
+  border-radius: 999px;
+  corner-shape: round;
+  overflow: hidden;
+  background: var(--plan-track);
+  color: var(--plan-accent);
+}
+
 .progress::-webkit-progress-bar { background: var(--plan-track); }
-.progress::-webkit-progress-value { background: var(--plan-done); }
-.progress::-moz-progress-bar { background: var(--plan-done); }
-.steps { padding: 5px 0 0; margin: 0; list-style: none; }
-.dock .steps { max-height: 220px; overflow-y: auto; }
-.step { display: grid; grid-template-columns: 4em minmax(0, 1fr); gap: 8px; padding: 5px 2px 2px; }
-.status, .note { color: var(--plan-muted); }
-.detail { overflow-wrap: anywhere; }
-.note { white-space: pre-wrap; }
-.plan [data-status='done'] { color: var(--plan-done); }
-.plan [data-status='in_progress'] { color: var(--plan-active); }
-.plan [data-status='blocked'] { color: var(--plan-blocked); }
+.progress::-webkit-progress-value { background: var(--plan-accent); border-radius: 999px; }
+.progress::-moz-progress-bar { background: var(--plan-accent); border-radius: 999px; }
+
+.steps { padding: 2px 0 0; margin: 0; list-style: none; }
+.dock .steps { max-block-size: 240px; overflow-y: auto; }
+
+.step {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  padding: 5px 6px;
+  border-radius: 7px;
+}
+
+/* Rows keep their own inset instead of being pulled out with negative margins.
+   Pulled-out rows were wider than the scroll box, so the themed scrollbar drew
+   a horizontal track across the bottom of the card. */
+
+.step:hover { background: var(--plan-row-hover); }
+
+/* Two glyph shapes share one 14px seat so every row starts on the same x. */
+.mark {
+  inline-size: 14px;
+  block-size: 14px;
+  flex: none;
+  margin-block-start: 2px;
+}
+
+.disc { fill: var(--plan-accent); }
+
+.tick {
+  stroke: var(--plan-accent-ink);
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.glyph {
+  box-sizing: border-box;
+  inline-size: 14px;
+  block-size: 14px;
+  flex: none;
+  margin-block-start: 2px;
+  /* 2px, not a hairline: at 14px a thinner ring anti-aliases into a soft blob. */
+  border: 2px solid var(--plan-idle);
+  border-radius: 50%;
+  /* The page theme bends every corner along superellipse(1.5), which turns a
+     ring into a rounded square; an uncapped radius has to opt back into round. */
+  corner-shape: round;
+}
+
+/* A live ring: the track stays visible and two quarters take the accent, so a
+   running step reads as motion even in a still frame. */
+.glyph[data-status="in_progress"] {
+  border-color: var(--plan-idle);
+  border-block-start-color: var(--plan-accent);
+  border-inline-end-color: var(--plan-accent);
+  animation: plan-spin 900ms linear infinite;
+}
+
+.glyph[data-status="blocked"] {
+  position: relative;
+  border-color: var(--plan-blocked);
+  background: var(--plan-blocked-soft);
+}
+
+.glyph[data-status="blocked"]::after {
+  content: "!";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--plan-blocked);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.detail { min-inline-size: 0; overflow-wrap: anywhere; }
+
+.note {
+  margin-block-start: 2px;
+  color: var(--plan-muted);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+/* Only unfinished steps wear a word: it is the exception, not the ambient noise. */
+.tag {
+  align-self: start;
+  /* A note under the title must not push the chip to the block centre: the badge
+     belongs to the first line, where the eye already is. */
+  margin-block-start: 1px;
+  padding: 0 7px;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--plan-chip);
+  color: var(--plan-muted);
+  font-size: 11px;
+  line-height: 17px;
+  white-space: nowrap;
+}
+
+.tag[data-status="in_progress"] { background: var(--plan-accent-soft); color: var(--plan-accent); }
+.tag[data-status="blocked"] { background: var(--plan-blocked-soft); color: var(--plan-blocked); }
+
+@keyframes plan-spin { to { transform: rotate(1turn); } }
+@keyframes plan-pulse { 50% { opacity: 0.35; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .glyph[data-status="in_progress"],
+  .state[data-status="in_progress"] .dot { animation: none; }
+  .chevron { transition: none; }
+}

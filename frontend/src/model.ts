@@ -923,7 +923,18 @@ export function awaitingModel(events: readonly AgentEvent[]): boolean {
 export type PlanStatus = 'pending' | 'in_progress' | 'done' | 'blocked'
 export interface PlanStep { id: string; title: string; status: PlanStatus; note?: string }
 
-/** SSE and replay include complete snapshots. Rewound event histories restore the earlier plan. */
+/**
+ * The plan of the current turn, if that turn published one.
+ *
+ * A plan row is carried forward by the backend (`turn <= current`), and the
+ * model only re-publishes one when it touches the plan again. Reading the last
+ * `plan/updated` of the whole task therefore kept the finished plan of the
+ * previous turn on screen while a fresh turn was already running. Only the
+ * events after the newest turn boundary belong to the turn on screen; a turn
+ * that never publishes a plan simply has none.
+ * SSE and replay include complete snapshots. Rewound event histories restore the
+ * earlier plan.
+ */
 export function latestPlan(events: readonly AgentEvent[]): { steps: PlanStep[]; completed: number } | undefined {
   const valid = (value: unknown): value is PlanStep => {
     if (value === null || typeof value !== 'object') return false
@@ -932,7 +943,16 @@ export function latestPlan(events: readonly AgentEvent[]): { steps: PlanStep[]; 
       && (step.status === 'pending' || step.status === 'in_progress' || step.status === 'done' || step.status === 'blocked')
       && (step.note === undefined || typeof step.note === 'string')
   }
+  // Where the turn on screen begins: the newest prompt or turn start.
+  let boundary = -1
   for (let i = events.length - 1; i >= 0; i--) {
+    const type = events[i]?.type
+    if (type === 'turn/start' || type === 'user/message') {
+      boundary = i
+      break
+    }
+  }
+  for (let i = events.length - 1; i > boundary; i--) {
     const event = events[i]
     if (event?.type !== 'plan/updated') continue
     const steps: unknown = event.data.steps

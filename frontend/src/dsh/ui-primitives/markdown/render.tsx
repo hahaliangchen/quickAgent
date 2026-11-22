@@ -32,7 +32,7 @@ import { FlowDiagram } from './FlowDiagram.tsx'
 import { parseFlowData } from './flow-data.ts'
 import { parseFileLink } from './file-link.ts'
 import { renderTexToReact } from './katex.tsx'
-import { LinkIconMedium, classifyLinkPath } from '../LinkIcon.tsx'
+import { LinkIconFile, LinkIconMedium, classifyLinkPath } from '../LinkIcon.tsx'
 import { useMarkdownDelegate } from './MarkdownDelegate.tsx'
 import { HoverCard } from '../HoverCard.tsx'
 import { ImageLightbox } from '../ImageLightbox.tsx'
@@ -408,7 +408,7 @@ function renderNode(node: Md.RootContent, key: Key, context: MarkdownRenderConte
               aria-label={mention.label}
               onClick={mention.open}
             >
-              <LinkIconMedium kind={classifyLinkPath(value)} className={css.linkIcon} />
+              <LinkIconFile path={value} className={css.fileLinkIcon} />
               {value}
             </button>
           </code>
@@ -659,6 +659,11 @@ function MarkdownAnchor({ href, glyph, children }: {
   )
 }
 
+/** Hover text naming a file destination, with the revealed line when one is pinned. */
+function fileTitle(file: { path: string; line?: number }): string {
+  return file.line === undefined ? file.path : `${file.path}:${String(file.line)}`
+}
+
 /** Local destinations use the scoped file delegate after settlement. */
 function renderAnchor(url: string, children: ReactNode[], key: Key, glyph = true, streaming = false): ReactNode {
   const file = streaming ? undefined : parseFileLink(url)
@@ -682,10 +687,10 @@ function MarkdownFileLink({ file, glyph, children }: {
     <button
       type="button"
       className={clsx(css.fileMention, css.fileLink)}
-      title={src === undefined ? file.path : undefined}
+      title={src === undefined ? fileTitle(file) : undefined}
       onClick={() => { openFile(file.path, file.line === undefined ? undefined : { line: file.line }) }}
     >
-      {glyph && <LinkIconMedium kind={classifyLinkPath(file.path)} className={css.linkIcon} />}
+      {glyph && <LinkIconFile path={file.path} className={css.fileLinkIcon} />}
       {children}
     </button>
   )

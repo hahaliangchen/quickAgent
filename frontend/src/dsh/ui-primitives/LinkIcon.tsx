@@ -116,3 +116,92 @@ export function LinkIconRegular(props: LinkIconProps): ReactNode {
 export function LinkIconMedium(props: LinkIconProps): ReactNode {
   return <LinkIconArtwork {...props} strokeWidth={ICON_MEDIUM_STROKE} />
 }
+
+/** Extensions that carry their own 14px language mark inside a file link. */
+export type FileLangMark = 'react' | 'typescript' | 'javascript' | 'css' | 'rust' | 'document'
+
+const LANG_MARKS: Readonly<Record<string, FileLangMark>> = {
+  tsx: 'react',
+  jsx: 'react',
+  ts: 'typescript',
+  mts: 'typescript',
+  cts: 'typescript',
+  js: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  css: 'css',
+  scss: 'css',
+  sass: 'css',
+  less: 'css',
+  rs: 'rust',
+  json: 'document',
+  jsonc: 'document',
+  json5: 'document',
+  md: 'document',
+  mdx: 'document',
+}
+
+/**
+ * Resolve the language mark a file link shows before its name.
+ * @param path - File path or name as the producing tool spelled it.
+ * @returns The language mark, or undefined when the generic category glyph applies.
+ */
+export function fileLangMark(path: string): FileLangMark | undefined {
+  return LANG_MARKS[fileExtension(path).toLowerCase()]
+}
+
+/** React’s orbital atom: three paths around a solid nucleus. */
+const ReactAtomGlyph = ({ size, className }: IconProps) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke="currentColor" strokeWidth={1.2}>
+    <circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none" />
+    <ellipse cx="8" cy="8" rx="6.1" ry="2.4" />
+    <ellipse cx="8" cy="8" rx="6.1" ry="2.4" transform="rotate(60 8 8)" />
+    <ellipse cx="8" cy="8" rx="6.1" ry="2.4" transform="rotate(120 8 8)" />
+  </svg>
+)
+
+/**
+ * A two-letter language monogram (TS / JS / RS). A bare bold pair survives 14px
+ * far better than a boxed badge: a rect steals the pixels the letters need, and
+ * the pair is what actually names the language at this size.
+ */
+const LetterMarkGlyph = ({ size, className, letters }: IconProps & { readonly letters: string }) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <text x="8" y="8.3" textAnchor="middle" dominantBaseline="central" fontFamily="var(--ds-font-family-code, ui-monospace, monospace)" fontSize="9.4" fontWeight="700" letterSpacing="-0.8" fill="currentColor">{letters}</text>
+  </svg>
+)
+
+/** The stylesheet selector mark: two stems through two bars. */
+const HashGlyph = ({ size, className }: IconProps) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke="currentColor" strokeWidth={1.35} strokeLinecap="round">
+    <path d="M6.4 3.4 5.15 12.6" />
+    <path d="M10.85 3.4 9.6 12.6" />
+    <path d="M3.5 6.3h9.1" />
+    <path d="M3.2 9.8h9.1" />
+  </svg>
+)
+
+/**
+ * Rust keeps its cog identity in the monogram: an outline gear drawn at 14px
+ * reads as a sun, and readable teeth cannot be won back in six pixels of
+ * stroke.
+ */
+
+/**
+ * Render the marks that lead a code-file link: a per-language 14px glyph where
+ * the extension has one, the coarser category glyph everywhere else.
+ * @param props.path - File path or name the link points at.
+ * @param props.size - Pixel size of the square mark; defaults to 14.
+ * @param props.className - Optional CSS class for the seat.
+ * @returns The decorative current-color mark for the file.
+ */
+export function LinkIconFile({ path, size = 14, className }: IconProps & { readonly path: string }): ReactNode {
+  const mark = fileLangMark(path)
+  if (mark === 'react') return <ReactAtomGlyph size={size} className={className} />
+  if (mark === 'typescript') return <LetterMarkGlyph size={size} className={className} letters="TS" />
+  if (mark === 'javascript') return <LetterMarkGlyph size={size} className={className} letters="JS" />
+  if (mark === 'css') return <HashGlyph size={size} className={className} />
+  if (mark === 'rust') return <LetterMarkGlyph size={size} className={className} letters="RS" />
+  if (mark === 'document') return <LinkIconArtwork kind="document" size={size} className={className} strokeWidth={ICON_MEDIUM_STROKE} />
+  return <LinkIconArtwork kind={classifyLinkPath(path)} size={size} className={className} strokeWidth={ICON_MEDIUM_STROKE} />
+}

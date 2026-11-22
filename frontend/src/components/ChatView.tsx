@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import {
   IconCheckOutlineRegular,
   IconChevronDownOutlineRegular,
   IconChevronRightOutlineRegular,
   IconCopyOutlineRegular,
+  MarkdownDelegateProvider,
   StateDot,
   TextShimmer,
+  Toast,
   Tooltip,
   projectUserText,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -18,6 +20,7 @@ import chatCss from '../dsh/chat/ChatView.module.css'
 import actionsCss from '../dsh/chat/MessageIconActions.module.css'
 import messageCss from '../dsh/chat/MessageItem.module.css'
 import { markdownLabels } from '../dsh/markdown-labels.ts'
+import { writeClipboard } from '../dsh/ui-primitives/clipboard.ts'
 import { useCopyFeedback } from '../dsh/ui-primitives/use-copy-feedback.ts'
 import { t } from '../i18n.ts'
 import { awaitingModel, chatItems, failedToolNames, flattenItems, formatDuration, splitTurnItems, type ChatItem, type TurnEndReason } from '../model.ts'
@@ -352,12 +355,14 @@ type ChatNode =
   | { kind: 'turn-end'; item: ChatItem & { kind: 'turn-end' } }
 
 /** Transcript column using ui-chat's ChatView frame, column width, and flow gap; the conversation scroll body scrolls it. */
-export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }: {
+export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, onRevealRightPanel }: {
   events: readonly AgentEvent[]
   task?: Task | undefined
   running: boolean
   onOpenTask: (taskId: string) => void
   onChangesUpdated?: (() => void) | undefined
+  /** Reveal the right inspector panel; a summary file link opens it before naming the path. */
+  onRevealRightPanel?: (() => void) | undefined
 }) {
   const api = useAgentApi()
   const [slashNames, setSlashNames] = useState<readonly string[]>([])
@@ -368,6 +373,23 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
     )
   }, [api])
 
+  // A settled summary links its files. With no in-app file viewer, the click
+  // still has to answer: reveal the inspector panel and put `path:line` where
+  // the user can paste it, then say so instead of leaving a dead-looking link.
+  const [fileNotice, setFileNotice] = useState<{ readonly seq: number; readonly text: string; readonly success: boolean }>()
+  const noticeSeq = useRef(0)
+  const openFile = useCallback((path: string, options?: { line?: number }) => {
+    const target = options?.line === undefined ? path : `${path}:${String(options.line)}`
+    onRevealRightPanel?.()
+    void writeClipboard(target).then((copied) => {
+      noticeSeq.current += 1
+      setFileNotice({
+        seq: noticeSeq.current,
+        text: copied ? `已复制路径 ${target}` : `路径 ${target}`,
+        success: copied,
+      })
+    })
+  }, [onRevealRightPanel])
   const items = useMemo(() => chatItems(events, task), [events, task])
   const changes = useMemo(() => changeSummaries(events), [events])
   const trackingErrors = useMemo(() => {
@@ -555,6 +577,19 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
       </div>
     </div>
   )
-  // Rows name this conversation's saved pictures without a prop chain.
-  return <ConversationTaskProvider taskId={task?.task_id ?? ''}>{frame}</ConversationTaskProvider>
+  // Rows name this conversation's saved pictures without a prop chain; the file
+  // delegate reaches every settled link inside this transcript.
+  return (
+    <ConversationTaskProvider taskId={task?.task_id ?? ''}>
+      <MarkdownDelegateProvider openFile={openFile}>{frame}</MarkdownDelegateProvider>
+      {fileNotice !== undefined && (
+        <Toast
+          key={fileNotice.seq}
+          text={fileNotice.text}
+          {...(fileNotice.success ? { tone: 'success' as const } : {})}
+          onDone={() => { setFileNotice(undefined) }}
+        />
+      )}
+    </ConversationTaskProvider>
+  )
 }

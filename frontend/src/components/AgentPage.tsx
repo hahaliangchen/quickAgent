@@ -225,6 +225,11 @@ export function ConversationPage({
   const durationInfo = useTaskDuration(session.events, task, running)
   const contextUsage = useMemo(() => latestContextUsage(session.events), [session.events])
   const currentTitle = task === undefined ? t('app.untitled') : taskTitle(task)
+  // A summary file link reveals the inspector when it is closed; the toggle is
+  // only asked to open, so a click never folds a panel the user is reading.
+  const revealRightPanel = () => {
+    if (!rightPanelOpen) onToggleRightPanel?.()
+  }
 
   return (
     <main className={root.root} data-phase="active">
@@ -305,7 +310,7 @@ export function ConversationPage({
           <div className={css.session} data-slot="conversation.session" style={tab === 'flow' ? { height: '100%', flex: 1, display: 'flex', flexDirection: 'column' } : undefined}>
             <div className={root.viewArea} style={tab === 'flow' ? { height: '100%', flex: 1, minHeight: 520, display: 'flex' } : undefined}>
               {tab === 'chat'
-                ? <>{renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: openTask, onChangesUpdated: session.reload })}</>
+                ? <>{renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: openTask, onChangesUpdated: session.reload, onRevealRightPanel: revealRightPanel })}</>
                 : <>{renderSlot('agent.flow', { taskId: workspace.taskId, running })}</>}
             </div>
           </div>

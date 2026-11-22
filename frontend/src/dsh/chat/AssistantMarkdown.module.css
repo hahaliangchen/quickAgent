@@ -35,9 +35,10 @@
   --dsh-table-lead: calc(var(--dsh-table-spare) + min(var(--dsh-chat-content-width), 100cqw) - 100%);
   box-sizing: border-box;
   width: calc(100% + var(--dsh-table-lead) + var(--dsh-table-spare));
-  /* The base .tableScroll caps at the column (max-width: 100%); the breakout
-     is exactly the case that must exceed it. */
-  max-width: none;
+  /* Cap the breakout: a six-column table stretched across a 1600px window
+     reads as scattered data. Past ~1040px it keeps its own width and the
+     surplus stays as gutter, so the eye returns to the same left edge. */
+  max-width: min(calc(100% + var(--dsh-table-lead) + var(--dsh-table-spare)), 1040px);
   margin-left: calc(-1 * var(--dsh-table-lead));
   padding-left: var(--dsh-table-lead);
 }

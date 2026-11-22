@@ -105,6 +105,15 @@ Each response MUST be **one** of the two actions below:
 - Keep information dense. Group repeated findings such as several routing gaps or several type drifts in a compact Markdown table with columns such as `问题 | 位置 | 差异/后果 | 建议`. Quote only the critical 2–5 lines of code when a snippet is needed, and do not reproduce large structs or repeat evidence already stated.
 - Concision must remove filler, stock transitions, and duplicated templates only. Preserve every verified conclusion, exact `file:line` coordinate, key evidence comparison, and measured command or test result.
 
+## FINAL REPLY LAYOUT (minimal, Codex-style, easy to scan)
+A finished turn is read by a human: keep it short, keep it airy, and let file links carry the detail.
+1. **Opening line** — one sentence stating what is now true. No preamble, no restating the request.
+2. **`### 已完成`** — an unordered list, one short line per finished result (what changed / what no longer happens). Never paste a long conditional or a multi-line code expression into the prose; name the behaviour and link the file instead.
+3. **`### 主要文件`** — one bullet per changed file, spelled as a Markdown file link with the SHORT basename plus the workspace-relative path, optionally a line range: `- [CodeBlock.tsx](frontend/src/components/CodeBlock.tsx)` or `- [ToolRow.tsx](frontend/src/components/ToolRow.tsx#L203-L214)`. Never turn a long path plus a pile of line numbers into a gray backtick inline-code token; those render as clean clickable file links, backtick paths do not.
+4. **`### 验证结果`** — 3–4 short bullets naming only the command and its outcome (`npm run typecheck` — 0 errors; `node --test tests/chat-process.test.mjs` — 29 passed; `cargo check --bin …` — 0 warnings). A command the user has to run themselves goes in ONE small fenced block, not inline.
+- **Default to NO Markdown table in a completion summary.** A wide table is allowed only when the user explicitly asked for a comparison matrix or a data table, and then it keeps its column count small.
+- One line per bullet. If a bullet needs a second paragraph of justification, it belongs in the opening prose, not in the list.
+- Do not re-paste code you already wrote to disk; the file link is the reference.
 ## Parallel Delegation (`host.delegate`) & Concurrent I/O
 - **Parallel host I/O, searches, git, and read-only checks**: pre-bound `io.*` / `git.*` / `process.*` are **synchronous** (calling them inside `Promise.all` runs sequentially!). For true concurrency, use the pre-bound **`.promises`** sub-namespace (or `require("<lib>/promises")`):
   - `const files = await Promise.all(paths.map(path => io.promises.read({ path })));`
@@ -664,5 +673,18 @@ mod tests {
             "Promise.all(confirmed.map(path => io.promises.read({ path })))"
         ));
         assert!(!V2_SYSTEM_PROMPT.contains("wrap uncertain paths in"));
+    }
+
+    #[test]
+    fn final_reply_layout_is_sectioned_and_forbids_wide_tables() {
+        assert!(V2_SYSTEM_PROMPT.contains("FINAL REPLY LAYOUT"));
+        assert!(V2_SYSTEM_PROMPT.contains("### 已完成"));
+        assert!(V2_SYSTEM_PROMPT.contains("### 主要文件"));
+        assert!(V2_SYSTEM_PROMPT.contains("### 验证结果"));
+        assert!(V2_SYSTEM_PROMPT.contains("[CodeBlock.tsx](frontend/src/components/CodeBlock.tsx)"));
+        assert!(V2_SYSTEM_PROMPT.contains("ToolRow.tsx#L203-L214"));
+        assert!(V2_SYSTEM_PROMPT.contains("Default to NO Markdown table"));
+        assert!(V2_SYSTEM_PROMPT.contains("explicitly asked for a comparison matrix"));
+        assert!(V2_SYSTEM_PROMPT.contains("gray backtick inline-code token"));
     }
 }

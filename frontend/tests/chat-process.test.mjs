@@ -413,6 +413,24 @@ test('task plans project durable snapshots and restore the earlier plan after re
   assert.equal(summaryFor('plan_update', { id: 'a', status: 'blocked' }), 'a · 受阻')
 })
 
+test('a new turn starts empty instead of re-rendering the previous turn plan', () => {
+  const turn = (n) => [{ type: 'turn/start', data: { turn: n } }, { type: 'user/message', data: { turn: n, message: { role: 'user', content: 'go' } } }]
+  const step = (status, title) => ({ type: 'plan/updated', data: { turn: 1, steps: [{ id: 'a', title, status }] } })
+  const firstTurn = [...turn(1), step('done', 'Check'), { type: 'turn/end', data: { turn: 1 } }]
+  // The finished plan stays readable while its answer is being read.
+  assert.equal(latestPlan(firstTurn).completed, 1)
+  // Sending the next prompt retires it: the panel must not show last turn’s work.
+  const nextTurn = [...firstTurn, ...turn(2)]
+  assert.equal(latestPlan(nextTurn), undefined)
+  // As soon as the new turn publishes its own plan, that one takes over.
+  const replanned = [...nextTurn, step('in_progress', 'Rework')]
+  assert.equal(latestPlan(replanned).steps[0].title, 'Rework')
+  assert.equal(latestPlan(replanned).completed, 0)
+  // An interjection is not a new turn: the running plan keeps its row.
+  const interjected = [...replanned, { type: 'user/interjection_delivered', data: { interjection_seq: 4 } }]
+  assert.equal(latestPlan(interjected).steps[0].title, 'Rework')
+})
+
 test('git and batch summaries distinguish edits, file ranges and index restore', () => {
   assert.equal(summaryFor('git_blame', { path: 'foo.rs', start_line: 2, end_line: 5 }), 'foo.rs · L2–5')
   assert.equal(summaryFor('git_commit', { paths: ['foo.rs'], message: 'Change' }), '1 个文件 · Change')
