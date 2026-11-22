@@ -132,6 +132,12 @@ pub fn rewind(root: &std::path::Path, task: &str, turn: usize) -> Result<Value> 
         .context("找不到这一轮的记录")?;
     let prompt = turn_prompt(&conn, task, turn)?;
 
+    let has_git_write: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_task_events WHERE task_id=?1 AND seq>=?2 AND kind='workspace/git_metadata')",
+        params![task,start], |row| row.get(0),
+    )?;
+    ensure!(!has_git_write, "conflict: 此范围包含无法通过回退恢复的 Git 暂存区或历史改动");
+
     // Files first, newest turn first, so each undo meets the state it produced.
     // A conflict stops here with the conversation untouched.
     let turns = conn

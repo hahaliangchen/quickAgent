@@ -3,6 +3,7 @@ use super::{
     libraries::{self, Libraries},
     *,
 };
+#[cfg(test)]
 use std::collections::BTreeSet;
 
 fn text(value: &str) -> String {
@@ -12,6 +13,7 @@ fn text(value: &str) -> String {
         .join(" ")
         .replace("*/", "* /")
 }
+#[cfg(test)]
 fn key(value: &str) -> String {
     if libraries::identifier(value) {
         value.into()
@@ -19,6 +21,7 @@ fn key(value: &str) -> String {
         json!(value).to_string()
     }
 }
+#[cfg(test)]
 fn note(schema: &Value) -> String {
     let mut parts = Vec::new();
     if let Some(description) = schema["description"].as_str() {
@@ -66,6 +69,7 @@ fn note(schema: &Value) -> String {
         format!("/** {} */ ", parts.join("; "))
     }
 }
+#[cfg(test)]
 fn ty(schema: &Value, root: &Value, seen: &mut BTreeSet<String>, depth: usize) -> String {
     if depth > 32 {
         return format!("{}unknown", note(&json!({"schema":schema})));
@@ -229,9 +233,11 @@ fn ty(schema: &Value, root: &Value, seen: &mut BTreeSet<String>, depth: usize) -
     };
     format!("{}{shape}", note(schema))
 }
+#[cfg(test)]
 pub fn schema_type(schema: &Value) -> String {
     ty(schema, schema, &mut BTreeSet::new(), 0)
 }
+#[cfg(test)]
 pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
     let definitions = definitions
         .iter()
@@ -346,6 +352,10 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "rename_path" => "args: { path: string; to: string; overwrite?: boolean; create_parent_dirs?: boolean }): { path: string; to: string; overwritten: boolean; index_refresh: unknown }",
                 "create_dir" => "args?: { path: string; recursive?: boolean }): { path: string; created: boolean }",
                 "workspace_info" => "args?: { workspace_root?: string }): { workspace_root: string; platform: string; allowed_scope: string; default_ignored_dirs: string[] }",
+                "git_blame" => "args: { path: string; start_line: number; end_line: number }): Array<{ line: number; commit: string; author: string; date: string | null; summary: string }>",
+                "git_commit" => "args: { paths: string[]; message: string }): { commit: string; files_count: number; summary: string; git_metadata_changed: boolean }",
+                "git_restore" => "args: { paths: string[]; staged?: boolean }): { paths: string[]; files_count: number; staged: boolean; git_metadata_changed: boolean }",
+                "apply_edits" => "args: { files: Array<{ path: string; expected_code_hash?: string; edits: Array<{ old_text: string; new_text: string }> }>; atomic?: boolean }): { atomic: boolean; changed: number; failed: number; files: Array<{ path: string; changed: boolean; bytes_written?: number; code_hash?: string; index_refresh?: Record<string, unknown>; error?: string }> }",
                 "git_status" => "args?: { paths?: string[]; include_untracked?: boolean; max_entries?: number }): { head: string | null; branch: string | null; clean: boolean; staged: string[]; modified: string[]; untracked: string[]; total_entries: number; truncated: boolean }",
                 "git_diff" => "args?: { rev_range?: string; staged?: boolean; paths?: string[]; stat_only?: boolean; unified?: number; max_lines?: number; max_chars?: number }): { diff: string; files: string[]; truncated: boolean; stat_only: boolean }",
                 "git_log" => "args?: { rev?: string; limit?: number; paths?: string[] }): { commits: unknown[]; truncated: boolean }",
@@ -362,6 +372,10 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "read_session_history" => "args?: { scope?: 'conversation' | 'project'; view?: 'records' | 'index'; task_id?: string; match_offset?: number; query?: string; role?: string; node_id?: string; turn?: number; include_descendants?: boolean; request_id?: number; before_seq?: number; after_seq?: number; event_seq?: number; snapshot_seq?: number; snapshot_id?: number; new_snapshot?: boolean; audit_history_reads?: boolean; limit?: number; char_offset?: number; max_chars?: number; include_event?: boolean; include_context?: boolean; programs?: boolean; directory?: string; program?: string; start_line?: number; end_line?: number; output?: boolean }): unknown",
                 "read_asset" => "args: { asset_id?: string; seq?: number; char_offset?: number; max_chars?: number }): unknown",
                 "snapshot" => "args: { asset_id: string }): unknown",
+                "verify_check" => "args?: { path?: string; ecosystem?: 'auto' | 'rust' | 'typescript' | 'go' | 'python'; target?: string; include_tests?: boolean; max_diagnostics?: number }): { ecosystem: string; command: string[]; ok: boolean; duration_ms: number; outcome: string; truncated: boolean; asset_id?: string; execution_error?: string; asset_error?: string; error_count: number; warning_count: number; diagnostics: Array<{ file: string | null; line: number | null; col: number | null; severity: string; code: string | null; message: string }> }",
+                "verify_test" => "args?: { path?: string; ecosystem?: 'auto' | 'rust' | 'node' | 'go' | 'python'; filter?: string; timeout_secs?: number; max_failures?: number }): { ecosystem: string; command: string[]; ok: boolean; duration_ms: number; outcome: string; truncated: boolean; asset_id?: string; execution_error?: string; asset_error?: string; passed: number; failed: number; skipped: number; failures: Array<{ name: string; file?: string; line?: number; message: string }> }",
+                "plan_set" => "args: { steps: Array<{ id: string; title: string; status: 'pending' | 'in_progress' | 'done' | 'blocked'; note?: string }> }): { steps: Array<{ id: string; title: string; status: 'pending' | 'in_progress' | 'done' | 'blocked'; note?: string }>; completed: number; total: number }",
+                "plan_update" => "args: { id: string; status: 'pending' | 'in_progress' | 'done' | 'blocked'; note?: string }): { step: { id: string; title: string; status: 'pending' | 'in_progress' | 'done' | 'blocked'; note?: string }; completed: number; total: number }",
                 "http_probe" => "args: { url: string; timeout_ms?: number; reason?: string }): { reachable: boolean; http_status: number | null; check_passed: boolean; elapsed_ms: number; reused?: boolean }",
                 "run_program" => "args: { program: 'cargo' | 'git' | 'node' | 'python'; args: string[]; project_path?: string; timeout_seconds?: number; max_output_bytes?: number }): unknown",
                 "install_dependencies" => "args?: { project_path?: string; mode?: 'auto' | 'install' | 'ci'; background?: boolean; timeout_seconds?: number; max_chars?: number }): unknown",
@@ -375,7 +389,10 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "browser_click" => "args?: { text?: string; selector?: string; times?: number; browser_connection?: BrowserConnection }): unknown",
                 "browser_press_key" => "args: { key: string; browser_connection?: BrowserConnection }): unknown",
                 "browser_upload" => "args: { path: string; selector?: string; browser_connection?: BrowserConnection }): unknown",
-                "browser_screenshot" => "args?: { full_page?: boolean; browser_connection?: BrowserConnection }): unknown",
+                "browser_fill" => "args: { selector: string; value: string; clear?: boolean; submit?: boolean; browser_connection?: BrowserConnection }): { selector: string; length: number; url: string; browser_connection: BrowserConnection }",
+                "browser_set_viewport" => "args: { width: number; height: number; device_scale_factor?: number; color_scheme?: 'light' | 'dark' | 'no-preference'; browser_connection?: BrowserConnection }): { width: number; height: number; color_scheme: string; browser_connection: BrowserConnection }",
+                "browser_scroll" => "args: { selector?: string; x?: number; y?: number; block?: 'start' | 'center' | 'end'; browser_connection?: BrowserConnection }): { scroll_x: number; scroll_y: number; max_x: number; max_y: number; browser_connection: BrowserConnection }",
+                "browser_screenshot" => "args?: { full_page?: boolean; selector?: string; padding?: number; browser_connection?: BrowserConnection }): { artifact_id: string; visual_artifact: Record<string, unknown>; selector?: string; clip?: { x: number; y: number; width: number; height: number; scale: number }; browser_connection: BrowserConnection }",
                 "browser_close" => "args?: { browser_connection?: BrowserConnection }): unknown",
                 "view_image" => "args: { artifact_id: string; original?: boolean; checked_goal?: string }): unknown",
                 "read_attachment" => "args: { attachment_id: string; char_offset?: number; max_chars?: number; page_index?: number; slide?: number; picture?: string }): unknown",
@@ -464,6 +481,7 @@ pub fn directory(libraries: &Libraries) -> String {
 }
 
 /// Short signatures for common source operations and shell sessions.
+#[cfg(test)]
 pub fn core_methods(libraries: &Libraries, definitions: &[Value]) -> String {
     let definitions = definitions.iter().filter_map(|d| {
         let function = &d["function"];

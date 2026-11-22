@@ -12,6 +12,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
 pub const MAX_IMAGES: usize = 2;
 pub const MAX_ORIGINAL_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -39,6 +40,7 @@ pub struct VisualRoute {
     pub api_key: String,
 }
 impl VisualSettings {
+    #[cfg(test)]
     pub fn capability(&self, provider: &str, model: &str) -> ImageCapability {
         self.capabilities
             .get(provider)
@@ -59,9 +61,11 @@ pub struct VisualContext {
     pub execution_epoch: usize,
     pub related_source_versions: Value,
     /// The page snapshot most recently recorded by the host for this work item.
+    #[cfg_attr(not(test), expect(dead_code, reason = "legacy capture metadata"))]
     pub current_page: Value,
     /// Legacy latest-capture references, retained for saved-session compatibility.
     /// They do not determine whether a model may use a screenshot.
+    #[cfg_attr(not(test), expect(dead_code, reason = "legacy capture metadata"))]
     pub original_artifact_ids: Vec<String>,
 }
 impl VisualContext {
@@ -320,6 +324,7 @@ pub fn mcp_result(root: &Path, context: &VisualContext, result: Value) -> Result
 
 /// Conversation stores file references; only the outgoing request holds bytes.
 /// Resolve exactly the references present in the current conversation window.
+#[cfg(test)]
 fn materialize_message(
     root: &Path,
     context: &VisualContext,
@@ -380,6 +385,7 @@ fn materialize_message(
 
 /// The same original message is saved and handed to subsequent role requests.
 /// No data URLs are stored in the conversation or event stream.
+#[cfg(test)]
 pub fn conversation_message(manifest: &Value) -> Value {
     let mut content = Vec::new();
     for id in manifest["selected_artifact_ids"]
@@ -402,6 +408,7 @@ pub fn conversation_message(manifest: &Value) -> Value {
 }
 
 /// Multimodal data stays a real content block. It never lives inside JSON text.
+#[cfg(test)]
 pub async fn prepare_request(
     state: &crate::agent_service::AgentServiceState,
     actor: &str,

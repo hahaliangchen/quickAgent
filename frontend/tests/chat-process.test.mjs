@@ -4,7 +4,7 @@ import test from 'node:test'
 import ts from 'typescript'
 const source = await readFile(new URL('../src/model.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
-const { awaitingModel, chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState, cleanToolError } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+const { latestPlan, awaitingModel, chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState, cleanToolError } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
 const summarySource = await readFile(new URL('../src/components/toolSummary.ts', import.meta.url), 'utf8')
 const { outputText: summaryOutput } = ts.transpileModule(summarySource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
 const { summaryFor } = await import('data:text/javascript;base64,' + Buffer.from(summaryOutput).toString('base64'))
@@ -387,4 +387,35 @@ test('v2 single_agent steps finalize streaming deltas on program/start and await
   const step1Program = items.find(item => item.kind === 'program')
   assert.equal(step1Program.event, 'started')
   assert.equal(step1Program.source, 'const f = io.read({ path: "a.ts" });')
+})
+
+test('browser acceptance summaries show targets without replaying typed values', () => {
+  assert.equal(summaryFor('browser_fill', { selector: '#filter', value: 'private' }), '#filter')
+  assert.equal(summaryFor('browser_set_viewport', { width: 390, height: 844, color_scheme: 'dark' }), '390 × 844 · dark')
+  assert.equal(summaryFor('browser_scroll', { x: 0, y: 100 }), 'x=0 · y=100')
+  assert.equal(summaryFor('browser_screenshot', { selector: '#card' }), '#card')
+})
+
+test('verification summaries retain project, ecosystem and target or filter', () => {
+  assert.equal(summaryFor('verify_check', { path: 'crates/app', ecosystem: 'rust', target: 'app' }), 'crates/app · rust · app')
+  assert.equal(summaryFor('verify_test', { ecosystem: 'go', filter: 'TestUnit' }), '. · go · TestUnit')
+})
+
+test('task plans project durable snapshots and restore the earlier plan after rewind', () => {
+  const original = { type: 'plan/updated', data: { steps: [{ id: 'a', title: 'Check', status: 'pending' }] } }
+  const later = { type: 'plan/updated', data: { steps: [{ id: 'a', title: 'Check', status: 'done', note: 'green' }] } }
+  assert.equal(latestPlan([original, later]).completed, 1)
+  assert.equal(latestPlan([original]).steps[0].status, 'pending')
+  assert.equal(latestPlan([original, { type: 'plan/updated', data: { steps: 'corrupt' } }]).completed, 0)
+  assert.deepEqual(latestPlan([original, { type: 'plan/updated', data: { steps: [] } }]).steps, [])
+  assert.equal(latestPlan([]), undefined)
+  assert.equal(summaryFor('plan_set', { steps: original.data.steps }), '1 项')
+  assert.equal(summaryFor('plan_update', { id: 'a', status: 'blocked' }), 'a · 受阻')
+})
+
+test('git and batch summaries distinguish edits, file ranges and index restore', () => {
+  assert.equal(summaryFor('git_blame', { path: 'foo.rs', start_line: 2, end_line: 5 }), 'foo.rs · L2–5')
+  assert.equal(summaryFor('git_commit', { paths: ['foo.rs'], message: 'Change' }), '1 个文件 · Change')
+  assert.equal(summaryFor('git_restore', { paths: ['foo.rs'], staged: true }), '1 个文件 · 暂存区')
+  assert.equal(summaryFor('apply_edits', { files: [{ path: 'foo.rs' }], atomic: false }), '1 个文件 · 逐文件尝试')
 })

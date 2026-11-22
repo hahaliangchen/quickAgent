@@ -1,5 +1,5 @@
 //! Git's own backend contributions; the host knows no git methods.
-mod backend;
+pub(crate) mod backend;
 mod remote;
 use crate::{
     plugin_protocol::{NativeContributions, NativeTool, ToolPermission},

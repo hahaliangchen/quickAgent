@@ -87,6 +87,10 @@ impl PermissionMode {
             | "delete_path"
             | "rename_path"
             | "create_dir" => !matches!(self, Self::ReadOnly),
+            "git_blame" => true,
+            "git_commit" | "git_restore" | "apply_edits" => !matches!(self, Self::ReadOnly),
+            "plan_set" | "plan_update" => true,
+            "verify_check" | "verify_test" => !matches!(self, Self::ReadOnly),
             "run_program"
             | "install_dependencies"
             | "run_project_script"
@@ -96,6 +100,9 @@ impl PermissionMode {
             | "browser_read"
             | "browser_wait"
             | "browser_diagnostics"
+            | "browser_fill"
+            | "browser_set_viewport"
+            | "browser_scroll"
             | "browser_click"
             | "browser_press_key"
             | "browser_upload"
@@ -448,6 +455,7 @@ pub(crate) fn open_db(root: &std::path::Path) -> anyhow::Result<rusqlite::Connec
         }
         tx.commit()?;
     }
+    crate::plan_tools::schema(&conn)?;
     crate::function_frames::schema(&conn)?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS task_events_node ON agent_task_events(task_id,node_id,seq);",
@@ -1676,6 +1684,18 @@ fn local_output_schema(name: &str) -> Option<Value> {
     };
     Some(match name {
         "exec_command" | "write_stdin" | "kill_session" => crate::shell_process::output_schema(),
+        "browser_fill" => json!({"type":"object","required":["selector","length","url"],"properties":{"selector":{"type":"string"},"length":{"type":"integer"},"url":{"type":"string"}}}),
+        "browser_set_viewport" => json!({"type":"object","required":["width","height","color_scheme"],"properties":{"width":{"type":"integer"},"height":{"type":"integer"},"color_scheme":{"type":"string"}}}),
+        "browser_scroll" => json!({"type":"object","required":["scroll_x","scroll_y","max_x","max_y"],"properties":{"scroll_x":{"type":"number"},"scroll_y":{"type":"number"},"max_x":{"type":"number"},"max_y":{"type":"number"}}}),
+        "browser_screenshot" => json!({"type":"object","required":["artifact_id","visual_artifact","captured"],"properties":{"artifact_id":{"type":"string"},"visual_artifact":{"type":"object"},"captured":{"type":"boolean"},"selector":{"type":"string"},"clip":{"type":"object"}}}),
+        "verify_check" => json!({"type":"object","required":["ecosystem","command","ok","duration_ms","outcome","truncated","error_count","warning_count","diagnostics"],"properties":{"ecosystem":{"type":"string"},"command":{"type":"array","items":{"type":"string"}},"ok":{"type":"boolean"},"duration_ms":{"type":"integer"},"outcome":{"type":"string"},"truncated":{"type":"boolean"},"asset_id":{"type":"string"},"execution_error":{"type":"string"},"asset_error":{"type":"string"},"error_count":{"type":"integer"},"warning_count":{"type":"integer"},"diagnostics":{"type":"array","items":{"properties":{"code":{"type":["string","null"]},"col":{"type":["integer","null"]},"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"message":{"type":"string"},"severity":{"type":"string"}},"required":["file","line","col","severity","code","message"],"type":"object"}}}}),
+        "verify_test" => json!({"type":"object","required":["ecosystem","command","ok","duration_ms","outcome","truncated","passed","failed","skipped","failures"],"properties":{"ecosystem":{"type":"string"},"command":{"type":"array","items":{"type":"string"}},"ok":{"type":"boolean"},"duration_ms":{"type":"integer"},"outcome":{"type":"string"},"truncated":{"type":"boolean"},"asset_id":{"type":"string"},"execution_error":{"type":"string"},"asset_error":{"type":"string"},"passed":{"type":"integer"},"failed":{"type":"integer"},"skipped":{"type":"integer"},"failures":{"type":"array","items":{"properties":{"file":{"type":"string"},"line":{"type":"integer"},"message":{"type":"string"},"name":{"type":"string"}},"required":["name","message"],"type":"object"}}}}),
+        "plan_set" => json!({"type":"object","required":["steps","completed","total"],"properties":{"steps":{"type":"array","items":crate::plan_tools::step_schema()},"completed":{"type":"integer"},"total":{"type":"integer"}}}),
+        "plan_update" => json!({"type":"object","required":["step","completed","total"],"properties":{"step":crate::plan_tools::step_schema(),"completed":{"type":"integer"},"total":{"type":"integer"}}}),
+        "git_blame" => json!({"type":"array","items":{"properties":{"author":{"type":"string"},"commit":{"type":"string"},"date":{"type":["string","null"]},"line":{"type":"integer"},"summary":{"type":"string"}},"required":["line","commit","author","date","summary"],"type":"object"}}),
+        "git_commit" => json!({"type":"object","required":["commit","files_count","summary","git_metadata_changed"],"properties":{"commit":{"type":"string"},"files_count":{"type":"integer"},"summary":{"type":"string"},"git_metadata_changed":{"type":"boolean"}}}),
+        "git_restore" => json!({"type":"object","required":["paths","files_count","staged","git_metadata_changed"],"properties":{"paths":{"type":"array","items":{"type":"string"}},"files_count":{"type":"integer"},"staged":{"type":"boolean"},"git_metadata_changed":{"type":"boolean"}}}),
+        "apply_edits" => json!({"type":"object","required":["atomic","changed","failed","files"],"properties":{"atomic":{"type":"boolean"},"changed":{"type":"integer"},"failed":{"type":"integer"},"files":{"type":"array","items":{"properties":{"bytes_written":{"type":"integer"},"changed":{"type":"boolean"},"code_hash":{"type":"string"},"error":{"type":"string"},"index_refresh":{"type":"object"},"path":{"type":"string"}},"required":["path","changed"],"type":"object"}}}}),
         "git_status" => json!({"type":"object","required":["head","branch","clean","staged","modified","untracked","total_entries","truncated"],"properties":{
             "head":{"type":["string","null"]},"branch":{"type":["string","null"]},"clean":{"type":"boolean"},
             "staged":{"type":"array","items":{"type":"string"}},"modified":{"type":"array","items":{"type":"string"}},"untracked":{"type":"array","items":{"type":"string"}},
@@ -1765,6 +1785,14 @@ pub(crate) fn local_tools(
         "install_dependencies",
         "run_project_script",
         "get_project_process",
+        "verify_check",
+        "verify_test",
+        "plan_set",
+        "plan_update",
+        "git_blame",
+        "git_commit",
+        "git_restore",
+        "apply_edits",
         "http_probe",
         "run_program",
         "stop_project_process",
@@ -1772,6 +1800,9 @@ pub(crate) fn local_tools(
         "browser_read",
         "browser_wait",
         "browser_diagnostics",
+        "browser_fill",
+        "browser_set_viewport",
+        "browser_scroll",
         "browser_click",
         "browser_press_key",
         "browser_upload",

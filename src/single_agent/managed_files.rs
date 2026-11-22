@@ -478,3 +478,22 @@ impl Prepared {
 #[cfg(test)]
 #[path = "tests/managed_files_tests.rs"]
 mod tests;
+
+pub(super) fn guard_batch(root: &Path, task: &str, workspace: &Path, args: &mut Value) -> Result<()> {
+    for item in args["files"].as_array_mut().context("batch requires files")? {
+        let raw = item["path"].as_str().context("batch requires file paths")?;
+        let (work, relative, path) = key(workspace, raw)?;
+        if !path.is_file() || std::fs::metadata(&path)?.len() > 2 * 1024 * 1024 {
+            continue; // The batch preflight reports invalid files with their paths.
+        }
+        let current = crate::file_edit::snapshot(&path)?;
+        let base = baseline(root, task, &work, &relative)?;
+        if let Some(base) = &base {
+            anyhow::ensure!(current.as_deref() == base.as_deref(), "write_conflict: {relative} changed outside this task; read it again before applying the batch");
+        }
+        if item["expected_code_hash"].is_null() && let Some(bytes) = current {
+            item["expected_code_hash"] = json!(crate::symbol_description::content_hash(&bytes));
+        }
+    }
+    Ok(())
+}

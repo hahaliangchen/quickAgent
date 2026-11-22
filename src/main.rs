@@ -69,6 +69,10 @@ mod visual_jobs;
 mod visual_probe;
 #[cfg(test)]
 mod visual_tests;
+mod verify_tools;
+mod plan_tools;
+mod git_tools;
+mod batch_edits;
 mod workspace_changes;
 
 use std::{env, fmt as std_fmt, net::SocketAddr, path::PathBuf, sync::Arc};

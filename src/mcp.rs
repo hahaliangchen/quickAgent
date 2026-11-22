@@ -811,6 +811,29 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
         );
     }
 
+    if crate::git_tools::is_tool(name) {
+        let boundary = crate::process_sandbox::current_tool_sandbox().map_or(crate::process_sandbox::ExecutionBoundary::Host,|ctx|ctx.boundary);
+        let value = crate::git_tools::execute(workspace,name,&arguments,boundary,&tokio_util::sync::CancellationToken::new()).await?;
+        return Ok(json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value}));
+    }
+    if name == crate::batch_edits::NAME {
+        let workspace = Workspace::new(workspace.root())?;
+        let value = tokio::task::spawn_blocking(move ||crate::batch_edits::apply(&workspace,&arguments)).await??;
+        return Ok(json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value}));
+    }
+
+    if crate::plan_tools::is_tool(name) {
+        let value = crate::plan_tools::execute(name, arguments).await?;
+        return Ok(json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value}));
+    }
+
+    if crate::verify_tools::is_tool(name) {
+        let boundary = crate::process_sandbox::current_tool_sandbox().map_or(crate::process_sandbox::ExecutionBoundary::Host, |ctx| ctx.boundary);
+        let mut value = crate::verify_tools::execute(workspace, name, &arguments, &tokio_util::sync::CancellationToken::new(), boundary).await?;
+        value.as_object_mut().unwrap().remove("__verify_raw");
+        return Ok(json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value}));
+    }
+
     if crate::http_probe::is_tool(name) {
         let value = crate::http_probe::execute(&arguments).await?;
         return Ok(
@@ -1591,6 +1614,10 @@ pub fn tool_definitions() -> Value {
         .as_array_mut()
         .unwrap()
         .extend(crate::browser_control::definitions());
+    definitions.as_array_mut().unwrap().extend(crate::verify_tools::definitions());
+    definitions.as_array_mut().unwrap().extend(crate::plan_tools::definitions());
+    definitions.as_array_mut().unwrap().extend(crate::git_tools::definitions());
+    definitions.as_array_mut().unwrap().extend(crate::batch_edits::definitions());
     for tool in definitions.as_array_mut().into_iter().flatten() {
         let name = tool["name"].as_str().unwrap_or("").to_owned();
         if crate::source_read::is_source_read(&name) {

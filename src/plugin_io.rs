@@ -1,7 +1,9 @@
 //! Generic session transport hooks. Business plugins register their own wire
 //! adapters; execution, context and vision never select a business workflow.
 use crate::{agent_service::AgentServiceState, tools::Workspace};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
+#[cfg(test)]
+use anyhow::ensure;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::{
@@ -12,6 +14,7 @@ use std::{
 pub trait SessionIo: Send + Sync {
     /// A plugin may require its fixed main program for a particular workflow
     /// phase. Module implementations remain governed by their normal scope.
+    #[cfg(test)]
     fn authorize_program<'a>(&'a self, _state: &'a AgentServiceState, _task: &'a str,
         _resource: Option<&'a str>, _module: bool) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
@@ -30,6 +33,7 @@ pub trait SessionIo: Send + Sync {
         name: &'a str,
         args: Value,
     ) -> BoxFuture<'a, Result<Value>>;
+    #[cfg(test)]
     fn sync_attachments<'a>(
         &'a self,
         _state: &'a AgentServiceState,
@@ -37,6 +41,7 @@ pub trait SessionIo: Send + Sync {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
+    #[cfg(test)]
     fn read_asset<'a>(
         &'a self,
         _state: &'a AgentServiceState,
@@ -109,18 +114,21 @@ pub async fn execute(
         .execute(workspace, name, args)
         .await
 }
+#[cfg(test)]
 pub async fn authorize_program(state: &AgentServiceState, task: &str, resource: Option<&str>, module: bool) -> Result<()> {
     if let Some(adapter) = adapter(state, task)? {
         adapter.authorize_program(state, task, resource, module).await?;
     }
     Ok(())
 }
+#[cfg(test)]
 pub async fn sync_attachments(state: &AgentServiceState, task: &str) -> Result<()> {
     if let Some(adapter) = adapter(state, task)? {
         adapter.sync_attachments(state, task).await?
     }
     Ok(())
 }
+#[cfg(test)]
 pub async fn read_asset(
     state: &AgentServiceState,
     task: &str,

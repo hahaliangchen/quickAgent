@@ -35,6 +35,7 @@ pub const CATALOG: &str = "_tool_catalog";
 /// The host message that records one activation of tools. It stays in the
 /// window's history as it was written there, so every later request of that
 /// window opens with the messages the earlier one sent.
+#[cfg(test)]
 pub const TOOLS_ADDED: &str = "tools_added";
 /// On that message: the tool names it activates.
 pub const ADDED_TOOLS: &str = "_tools_added";
@@ -514,6 +515,7 @@ fn tool_addition(name: &str) -> Value {
 /// The host message that records one activation, as the window's history keeps
 /// it: the names travel in a host field, and the request that carries the
 /// message projects them into `tool_addition` blocks instead of this text.
+#[cfg(test)]
 pub fn tools_added(names: Vec<String>) -> Value {
     let mut message = json!({"role":"user","name":TOOLS_ADDED,"content":format!(
         "The host activated these tools for this conversation: {}.",

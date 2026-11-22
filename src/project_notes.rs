@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 pub const FILE: &str = "AGENTS.md";
+#[cfg(test)]
 const MAX_CHARS: usize = 16_000;
 const HEADER: &str = "# 项目备注\n\n写给 AI 的长期说明，每次对话都会带上。\n\n";
 
@@ -45,12 +46,14 @@ pub fn task_project(root: &Path, task: &str) -> Result<Option<PathBuf>> {
     ))
 }
 
+#[cfg(test)]
 pub fn read(project: &Path) -> Option<String> {
     let text = std::fs::read_to_string(project.join(FILE)).ok()?;
     (!text.trim().is_empty()).then_some(text)
 }
 
 /// The system message carrying the notes, or None when the project has none.
+#[cfg(test)]
 pub fn system_message(project: &Path) -> Option<Value> {
     let text = read(project)?;
     let mut body: String = text.chars().take(MAX_CHARS).collect();

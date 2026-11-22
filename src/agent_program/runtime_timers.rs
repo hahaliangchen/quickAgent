@@ -38,6 +38,7 @@ impl Runtime {
     }
 
     /// Absolute wall-clock wake time; persists unchanged across pause/restart.
+    #[cfg(test)]
     pub fn next_timer_at(&self) -> Option<i64> {
         if self.finished {
             return None;

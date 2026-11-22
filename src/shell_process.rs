@@ -770,6 +770,7 @@ pub async fn cleanup_task(host: &Path, task: &str) {
     for s in owned { wait_finished(&s, Duration::from_secs(10)).await; }
 }
 
+#[cfg(test)]
 pub async fn cleanup_frame(host: &Path, task: &str, owner: &str) {
     let Ok(host) = host.canonicalize() else { return };
     let records = sessions().lock().await.values()

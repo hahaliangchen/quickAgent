@@ -1055,7 +1055,7 @@ fn check_write_size(size: usize) -> Result<()> {
     Ok(())
 }
 
-fn refresh_written_index(root: &Path, path: &Path, changed: bool) -> serde_json::Value {
+pub(crate) fn refresh_written_index(root: &Path, path: &Path, changed: bool) -> serde_json::Value {
     use serde_json::json;
     if !changed {
         return json!({"status":"unchanged"});

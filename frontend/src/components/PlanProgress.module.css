@@ -1,0 +1,54 @@
+.plan {
+  --plan-ink: #283533;
+  --plan-muted: #52635e;
+  --plan-hairline: #d8e0db;
+  --plan-track: #e5eae6;
+  --plan-done: #286653;
+  --plan-active: #2e5f86;
+  --plan-blocked: #855024;
+  color: var(--plan-ink);
+  border-block-end: 1px solid var(--plan-hairline);
+  min-inline-size: 0;
+  padding: 2px 0 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+:global(body[data-ds-dark-theme]) .plan {
+  --plan-ink: #e2eae5;
+  --plan-muted: #aebdb6;
+  --plan-hairline: #3d4844;
+  --plan-track: #313e39;
+  --plan-done: #8ac4ad;
+  --plan-active: #a2c5e4;
+  --plan-blocked: #e2b188;
+}
+
+.summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px 9px;
+  flex-wrap: wrap;
+  padding: 6px 2px;
+  cursor: pointer;
+  list-style: none;
+}
+.summary::-webkit-details-marker { display: none; }
+.summary:focus-visible { outline: 2px solid var(--plan-active); outline-offset: 2px; }
+.chevron { box-sizing: content-box; inline-size: 12px; block-size: 12px; align-self: center; flex: none; color: var(--plan-muted); }
+.plan[open] .chevron { transform: rotate(90deg); }
+.label { font-weight: 600; }
+.count { color: var(--plan-muted); font-variant-numeric: tabular-nums; }
+.current { min-inline-size: 0; margin-inline-start: auto; overflow-wrap: anywhere; color: var(--plan-muted); }
+.progress { display: block; flex: 1 0 100%; appearance: none; inline-size: 100%; block-size: 3px; margin: 2px 0 0; border: none; border-radius: 2px; overflow: hidden; background: var(--plan-track); color: var(--plan-done); }
+.progress::-webkit-progress-bar { background: var(--plan-track); }
+.progress::-webkit-progress-value { background: var(--plan-done); }
+.progress::-moz-progress-bar { background: var(--plan-done); }
+.steps { padding: 5px 0 0; margin: 0; list-style: none; }
+.step { display: grid; grid-template-columns: 4em minmax(0, 1fr); gap: 8px; padding: 5px 2px 2px; }
+.status, .note { color: var(--plan-muted); }
+.detail { overflow-wrap: anywhere; }
+.note { white-space: pre-wrap; }
+.plan [data-status='done'] { color: var(--plan-done); }
+.plan [data-status='in_progress'] { color: var(--plan-active); }
+.plan [data-status='blocked'] { color: var(--plan-blocked); }

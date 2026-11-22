@@ -9,6 +9,7 @@ import { chatItems } from '../model.ts'
 import { useSession } from '../useSession.ts'
 import { clock } from '../workbenchModel.ts'
 import { toolVisual } from './toolVisuals.tsx'
+import { PlanProgress } from './PlanProgress.tsx'
 import { Icon } from './WorkbenchIcon.tsx'
 import styles from './SkillWorkbench.module.css'
 
@@ -146,6 +147,7 @@ export function DraftChat({ chatId, draftLabel, draftFolder, source, hidden, exp
       <button type="button" onClick={onExpand} title={expanded ? '还原' : '放大'} aria-label={expanded ? '还原' : '放大'}><Icon name={expanded ? 'shrink' : 'expand'} size={16} /></button>
     </div>
     <div className={styles.chatBody} ref={body}>
+      <PlanProgress key={chatId} events={session.events} />
       {rows.length === 0 && <div className={styles.chatIntro}>
         <p>这是这份草稿自己的对话。AI 在草稿文件夹里工作，可以分析、修改 <code>programs/</code> 里的草稿，原始流程不会被改动。</p>
         <p>这里没有插件页面的工具，真实插件测试尚未接入；AI 说的检查结果以它实际读过、跑过的为准。</p>

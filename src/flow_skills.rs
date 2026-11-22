@@ -90,6 +90,7 @@ pub fn read(project: &FsPath, name: &str) -> Option<Result<Value>> {
 }
 
 /// Advertises the project's skills on every request so matching work loads them.
+#[cfg(test)]
 pub fn system_message(project: &FsPath) -> Option<Value> {
     let skills = list(project);
     if skills.is_empty() {
@@ -173,6 +174,7 @@ pub fn save_with_modules(
     Ok(path)
 }
 
+#[cfg(test)]
 pub fn save(
     project: &FsPath,
     name: &str,

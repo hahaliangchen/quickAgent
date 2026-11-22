@@ -296,7 +296,7 @@ pub fn may_change_files(name: &str) -> bool {
     matches!(
         name,
         "run_program" | "install_dependencies" | "run_project_script" | "exec_command" | "write_stdin"
-    )
+    ) || crate::verify_tools::is_tool(name)
 }
 pub fn check_key(name: &str, args: &Value) -> String {
     if name == "http_probe" {

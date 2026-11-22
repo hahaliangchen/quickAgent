@@ -56,6 +56,7 @@ pub fn configured_pricing_cliff(model: &str, configured: Option<usize>) -> Optio
     configured.or_else(|| pricing_cliff(model, 0))
 }
 
+#[cfg(test)]
 pub fn soft_limit(model: &str, input_budget: usize) -> usize {
     let budget_line = ((input_budget as f64) * 0.75) as usize;
     pricing_cliff(model, input_budget)

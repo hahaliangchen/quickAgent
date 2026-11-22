@@ -382,6 +382,18 @@ fn capture_path_or_tree(
 fn capture(root: &Path, name: &str, args: &Value) -> Result<Snapshot> {
     let mut snapshot = Snapshot::new();
     let mut budget = SNAPSHOT_LIMIT;
+    if name == crate::batch_edits::NAME || name == "git_restore" {
+        let root = root.canonicalize()?;
+        let paths = if name == crate::batch_edits::NAME {
+            crate::batch_edits::paths(&root,args)?
+        } else {
+            let paths = crate::git_tools::mutation_paths(&root,args)?;
+            if args["staged"] == true { return Ok(snapshot); }
+            paths.into_iter().map(|p|p.1).collect()
+        };
+        for path in paths { capture_path_or_tree(&root,&path,&mut snapshot,&mut budget)?; }
+        return Ok(snapshot);
+    }
     if name == "create_dir" {
         return Ok(snapshot);
     }
@@ -395,7 +407,7 @@ fn capture(root: &Path, name: &str, args: &Value) -> Result<Snapshot> {
         }
         return Ok(snapshot);
     }
-    if !crate::project_process::may_change_files(name) {
+    if name != "git_commit" && !crate::project_process::may_change_files(name) {
         let path = safe_path(root, args["path"].as_str().context("missing file path")?)?;
         let relative = path
             .strip_prefix(fs::canonicalize(root)?)?
@@ -883,7 +895,9 @@ pub fn summary(root: &Path, task: &str, turn: usize) -> Result<Value> {
 
 pub fn is_mutation(name: &str) -> bool {
     matches!(name, "write_file" | "replace_range" | "edit_file" | "delete_path" | "rename_path" | "create_dir")
-        || crate::project_process::may_change_files(name)
+        || name == crate::batch_edits::NAME || crate::git_tools::mutates(name)
+        // Managed shell sessions have their own boundary and change intervals.
+        || (!crate::shell_process::is_tool(name) && crate::project_process::may_change_files(name))
 }
 
 /// Run a mutating tool in `workspace` (the task's project) and record its
@@ -899,7 +913,13 @@ pub async fn execute_tracked(
 ) -> Result<Value> {
     let root = state.workspace.root().to_path_buf();
     let files = workspace.root().to_path_buf();
-    if !crate::project_process::may_change_files(&name) {
+    if name == crate::batch_edits::NAME {
+        crate::batch_edits::paths(&files,&args)?;
+        invalidate_snapshot_cache(&files);
+    } else if crate::git_tools::mutates(&name) {
+        crate::git_tools::mutation_paths(&files,&args)?;
+        invalidate_snapshot_cache(&files);
+    } else if !crate::project_process::may_change_files(&name) {
         // Boundary checks are mandatory even if optional snapshot capture fails.
         safe_path(&files, args["path"].as_str().context("missing file path")?)?;
         if name == "rename_path" {
@@ -916,6 +936,10 @@ pub async fn execute_tracked(
     let boundary = crate::process_sandbox::ExecutionBoundary::for_mode(state.permission_mode);
     let result = if crate::project_process::is_tool(&name) {
         crate::project_process::execute_with_boundary(&workspace, &name, args.clone(), &cancel, boundary).await
+    } else if crate::git_tools::is_tool(&name) {
+        crate::git_tools::execute(&workspace,&name,&args,boundary,&cancel).await
+    } else if crate::verify_tools::is_tool(&name) {
+        crate::verify_tools::execute(&workspace, &name, &args, &cancel, boundary).await
     } else if crate::program_execution::is_tool(&name) {
         crate::program_execution::execute_with_boundary(&workspace, &args, &cancel, boundary).await
     } else {
@@ -937,12 +961,18 @@ pub async fn execute_tracked(
         invalidate_snapshot_cache(&files);
     }
     let background_running = result.as_ref().is_ok_and(|value| value["running"] == true);
+    let metadata_changed = result.as_ref().is_ok_and(|v|v["git_metadata_changed"] == true)
+        || result.as_ref().is_err_and(|e| e.downcast_ref::<crate::git_tools::MetadataMayHaveChanged>().is_some());
+    if metadata_changed {
+        crate::agent_service::emit(&root, &task, "workspace/git_metadata", json!({"turn":turn,"reversible":false,"confirmed":result.is_ok()})).await?;
+    }
     let saved_root = root.clone();
     let saved_task = task.clone();
     let changes = tokio::task::spawn_blocking(move || {
         let before = before?;
         let after = capture(&files,&name,&args)?;
         record(&saved_root,&saved_task,turn,before,after)?;
+        if metadata_changed { mark_incomplete(&saved_root,&saved_task,turn)?; }
         if background_running {
             // A running script can change files after this snapshot. Do not
             // advertise an atomic undo for an incomplete execution interval.

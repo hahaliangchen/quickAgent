@@ -47,7 +47,7 @@ pub fn needs_approval(
         );
     }
     matches!(mode, PermissionMode::Ask | PermissionMode::AutoReview)
-        && (crate::project_process::is_execution(name) || !(PermissionMode::WorkspaceWrite.allows(name)
+        && (crate::project_process::is_execution(name) || crate::verify_tools::is_tool(name) || crate::git_tools::mutates(name) || !(PermissionMode::WorkspaceWrite.allows(name)
             && catalog.is_none_or(|c| {
                 c.packages
                     .allows(name, PermissionMode::WorkspaceWrite, ban_execution)

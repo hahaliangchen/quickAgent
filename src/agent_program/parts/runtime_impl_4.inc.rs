@@ -28,6 +28,7 @@ impl Runtime {
             State::Action(_) => unreachable!(),
         }
     }
+    #[cfg(test)]
     pub fn async_scope(&self, id: &str) -> Option<&BTreeMap<String, Value>> {
         self.inflight_async.get(id).map(|pending| &pending.scope)
     }

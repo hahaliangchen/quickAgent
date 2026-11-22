@@ -1003,3 +1003,53 @@
         )
         .await;
     }
+
+    #[test]
+    fn viewport_payload_and_limits() {
+        let (metrics, media, result) = viewport_options(&json!({"width":390,"height":844,"color_scheme":"dark"})).unwrap();
+        assert_eq!(metrics, json!({"width":390,"height":844,"deviceScaleFactor":1.0,"mobile":false}));
+        assert_eq!(media, json!({"features":[{"name":"prefers-color-scheme","value":"dark"}]}));
+        assert_eq!(result["width"], 390);
+        assert!(viewport_options(&json!({"width":0,"height":844})).is_err());
+        assert!(viewport_options(&json!({"width":390,"height":844,"color_scheme":"sepia"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn responsive_card_capture_and_input() {
+        if browser_path().is_none() {
+            eprintln!("Skipping browser fixture: no Chrome/Edge executable");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("browser-card-{}", crate::visual_artifacts::new_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let workspace = crate::tools::Workspace::new(&root).unwrap();
+        let path = root.join("card.html");
+        std::fs::write(&path, r#"<!doctype html><meta charset=utf-8><style>
+            body{margin:20px;min-height:2000px;background:#f6f4ee;color:#243233;font:16px system-ui}
+            article{box-sizing:border-box;width:300px;height:164px;padding:16px;background:#fff;border:1px solid #c3cbc8}
+            @media(prefers-color-scheme:dark){body{background:#111719;color:#e4eeeb}article{background:#253234;border-color:#627b75}}
+            </style><article id=card><h2>Responsive card</h2><form><input id=entry><output></output></form></article>
+            <script>entry.addEventListener('input',()=>document.querySelector('output').textContent=entry.value);</script>"#).unwrap();
+        let context = crate::visual_artifacts::VisualContext::mcp(&root);
+        execute_scoped(&workspace,&context,"browser_open",&json!({"url":reqwest::Url::from_file_path(path).unwrap().to_string()})).await.unwrap();
+        let filled = execute_scoped(&workspace,&context,"browser_fill",&json!({"selector":"#entry","value":"ready"})).await.unwrap();
+        assert_eq!(filled["length"],5);
+        let scrolled = execute_scoped(&workspace,&context,"browser_scroll",&json!({"y":100})).await.unwrap();
+        assert_eq!(scrolled["scroll_y"],100);
+        for scheme in ["light","dark"] {
+            execute_scoped(&workspace,&context,"browser_set_viewport",&json!({"width":390,"height":844,"color_scheme":scheme})).await.unwrap();
+            let info = inspect_test_page(&root,&context,"({width:innerWidth,dark:matchMedia('(prefers-color-scheme: dark)').matches,text:document.querySelector('output').textContent})").await.unwrap();
+            assert_eq!(info,json!({"width":390,"dark":scheme == "dark","text":"ready"}));
+            let shot = execute_scoped(&workspace,&context,"browser_screenshot",&json!({"selector":"#card","padding":4})).await.unwrap();
+            assert_eq!(shot["clip"],json!({"x":16,"y":16,"width":308,"height":172,"scale":1}));
+            let id = shot["artifact_id"].as_str().unwrap();
+            let (metadata, bytes) = crate::visual_artifacts::read(&root,context.task_id(),id).unwrap();
+            assert_eq!(metadata["artifact_id"], id);
+            if std::env::var_os("CODEX_BROWSER_CARD_ARTIFACTS").is_some() {
+                let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("phase1a-card-{scheme}.png"));
+                std::fs::write(path, bytes).unwrap();
+            }
+        }
+        cleanup(&root,context.task_id()).await;
+        std::fs::remove_dir_all(root).unwrap();
+    }

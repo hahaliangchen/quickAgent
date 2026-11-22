@@ -129,15 +129,18 @@ impl std::error::Error for ModelTimeout {}
 /// A model request that got no answer: the service could not be reached,
 /// failed or was busy each time it was tried. Nothing ran for it.
 #[derive(Debug)]
+#[cfg(test)]
 pub struct ModelUnavailable {
     pub reason: String,
     pub attempts: u32,
 }
+#[cfg(test)]
 impl std::fmt::Display for ModelUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "model service unavailable: {} ({} attempts)", self.reason, self.attempts)
     }
 }
+#[cfg(test)]
 impl std::error::Error for ModelUnavailable {}
 
 /// How long to wait before trying a failed model request again: 2, 4, 8
@@ -150,6 +153,7 @@ pub fn backoff(attempt: u32) -> Duration {
 /// Why a failed model request can be tried again: it failed before any of its
 /// answer arrived, so another try repeats nothing. A rejected request, bad
 /// credentials or a cancelled turn are final.
+#[cfg(test)]
 pub fn transient(error: &anyhow::Error, output_started: bool) -> Option<String> {
     if output_started {
         return None;

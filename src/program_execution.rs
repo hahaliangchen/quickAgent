@@ -88,11 +88,22 @@ pub async fn execute_with_boundary(
     cancel: &CancellationToken,
     boundary: crate::process_sandbox::ExecutionBoundary,
 ) -> Result<Value> {
+    execute_allowlisted(workspace, args, cancel, boundary, PROGRAMS, MAX_OUTPUT_LIMIT).await
+}
+
+pub(crate) async fn execute_allowlisted(
+    workspace: &crate::tools::Workspace,
+    args: &Value,
+    cancel: &CancellationToken,
+    boundary: crate::process_sandbox::ExecutionBoundary,
+    programs: &[&str],
+    output_limit: usize,
+) -> Result<Value> {
     let request: ProgramRequest = serde_json::from_value(args.clone())?;
     ensure!(
-        PROGRAMS.contains(&request.program.as_str()),
+        programs.contains(&request.program.as_str()),
         "program must be one of: {}",
-        PROGRAMS.join(", ")
+        programs.join(", ")
     );
     ensure!(
         request.args.len() <= MAX_ARGUMENTS,
@@ -113,7 +124,7 @@ pub async fn execute_with_boundary(
     );
 
     let timeout_seconds = request.timeout_seconds.clamp(1, MAX_TIMEOUT_SECONDS);
-    let max_output_bytes = request.max_output_bytes.clamp(1, MAX_OUTPUT_LIMIT);
+    let max_output_bytes = request.max_output_bytes.clamp(1, output_limit);
     let (cwd, relative_project) = resolve_project_path(workspace.root(), &request.project_path)?;
     let check_key = format!(
         "program:{}:{}:{}",
@@ -196,7 +207,13 @@ pub async fn execute_with_boundary(
     if request.program == "git" {
         command
             .env("GIT_PAGER", "cat")
-            .env("GIT_TERMINAL_PROMPT", "0");
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("LC_ALL", "C");
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy();
+            if name.starts_with("GIT_CONFIG") || matches!(name.as_ref(), "GIT_DIR" | "GIT_COMMON_DIR" | "GIT_WORK_TREE" | "GIT_INDEX_FILE" | "GIT_OBJECT_DIRECTORY" | "GIT_ALTERNATE_OBJECT_DIRECTORIES" | "GIT_NAMESPACE" | "GIT_LITERAL_PATHSPECS" | "GIT_GLOB_PATHSPECS" | "GIT_NOGLOB_PATHSPECS" | "GIT_ICASE_PATHSPECS" | "GIT_PREFIX") { command.env_remove(key); }
+        }
     }
     crate::project_process::prepare_process_group(&mut command);
 
@@ -470,8 +487,9 @@ fn resolve_program(program: &str) -> Result<PathBuf> {
     for name in std::iter::once(executable.as_str()).chain(fallback) {
         for directory in &paths {
             let candidate = directory.join(name);
-            if candidate.is_file() {
-                return Ok(candidate.canonicalize().unwrap_or(candidate));
+            if directory.is_absolute() && candidate.is_file() {
+                // Executable dispatchers such as rustup depend on argv[0].
+                return Ok(candidate);
             }
         }
     }

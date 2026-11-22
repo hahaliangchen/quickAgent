@@ -10,6 +10,7 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct Job {
     pub id: String,
     pub tool: String,
@@ -76,6 +77,7 @@ pub fn record(
 }
 
 /// The saved owner identifies the original execution step, even after a restart.
+#[cfg(test)]
 pub fn pending(root: &Path, task: &str) -> Result<Vec<Job>> {
     let conn = crate::agent_service::open_db(root)?;
     schema(&conn)?;

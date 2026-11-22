@@ -13,6 +13,7 @@ const DEFAULT_PAGE_CHARS: usize = 12_000;
 const MAX_PAGE_CHARS: usize = 24_000;
 
 /// Why search and fetch cannot run yet, when the credential is missing.
+#[cfg(test)]
 pub fn setup_needed(config_path: &Path) -> Option<String> {
     let error = crate::ai_proxy::web_search_credentials(config_path).err()?.to_string();
     Some(format!(

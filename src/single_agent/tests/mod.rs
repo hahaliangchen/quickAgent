@@ -16,6 +16,7 @@ mod step5_image_generation;
 mod step6_attachments;
 mod step7_register_image;
 mod step8_file_ops;
+mod tool_wiring_invariants;
 
 use crate::agent_service::{self, AgentServiceState};
 use axum::{Json, Router, routing::post};

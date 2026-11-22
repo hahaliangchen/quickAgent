@@ -16,6 +16,9 @@ pub const TOOLS: &[&str] = &[
     "browser_wait",
     "browser_diagnostics",
     "browser_click",
+    "browser_fill",
+    "browser_set_viewport",
+    "browser_scroll",
     "browser_press_key",
     "browser_upload",
     "browser_screenshot",
@@ -28,6 +31,7 @@ pub fn is_tool(name: &str) -> bool {
 
 struct Session {
     ws: String,
+    emulation: Option<CdpConnection>,
     child: Option<tokio::process::Child>,
     profile: Option<std::path::PathBuf>,
     session_id: String,
@@ -158,6 +162,7 @@ async fn reconnect(record: &Value) -> Result<Session> {
     };
     let (dialog, dialog_commands, dialog_watch) = watch_dialogs(&ws, pending).await?;
     Ok(Session {
+        emulation: None,
         ws,
         child: None,
         profile,
@@ -328,9 +333,12 @@ pub fn definitions() -> Vec<Value> {
         json!({"name":"browser_wait","description":"Wait up to timeout_ms for an explicit selector, visible text or font loading state. A timeout is an unmet condition and is reported as a tool failure.","inputSchema":{"type":"object","properties":{"selector":{"type":"string"},"text":{"type":"string"},"state":{"type":"string","enum":["visible","exists","hidden"]},"font_status":{"type":"string","enum":["loading","loaded"]},"timeout_ms":{"type":"integer","minimum":100,"maximum":30000}}}}),
         json!({"name":"browser_diagnostics","description":"Read bounded console errors, page exceptions, and the page's recorded requests since navigation: every fetch/XHR call (method, URL, status, time, duration, failure) plus font/resource timing entries. Filter with url_contains (e.g. /api/fonts) and category. request_coverage states what the record cannot see; an empty result means nothing matched in that scope, not that no request happened. This tool does not execute worker-provided JavaScript.","inputSchema":{"type":"object","properties":{"url_contains":{"type":"string"},"category":{"type":"string","enum":["all","fetch","xhr","font","resource"]}}}}),
         json!({"name":"browser_click","description":"Click a visible, enabled control. text matches the same label browser_read lists under controls (exact label preferred, then containing); selector is an exact CSS selector and takes precedence. times (1-5) repeats the same click, e.g. to step through slides, before you read the result.","inputSchema":{"type":"object","properties":{"text":{"type":"string"},"selector":{"type":"string"},"times":{"type":"integer","minimum":1,"maximum":5}}}}),
+        json!({"name":"browser_fill","description":"Set or append text in an editable input or textarea; dispatch input/change and optionally submit its form.","inputSchema":{"type":"object","required":["selector","value"],"properties":{"selector":{"type":"string"},"value":{"type":"string","maxLength":65536},"clear":{"type":"boolean","default":true},"submit":{"type":"boolean","default":false}}}}),
+        json!({"name":"browser_set_viewport","description":"Override the task page viewport and prefers-color-scheme without reloading it.","inputSchema":{"type":"object","required":["width","height"],"properties":{"width":{"type":"integer","minimum":1,"maximum":4096},"height":{"type":"integer","minimum":1,"maximum":4096},"device_scale_factor":{"type":"number","minimum":0.5,"maximum":4},"color_scheme":{"enum":["light","dark","no-preference"]}}}}),
+        json!({"name":"browser_scroll","description":"Scroll an element into view, or scroll to absolute document coordinates (omitted axes stay unchanged).","inputSchema":{"type":"object","properties":{"selector":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"block":{"enum":["start","center","end"]}}}}),
         json!({"name":"browser_press_key","description":"Press a supported key in this task's focused browser page, e.g. Delete after selecting a slide element. For a reported native JavaScript dialog, Enter accepts and Escape dismisses it; other keys do not dismiss it. Dialog text is preserved in the return. This is an interaction, not proof of its visible result.","inputSchema":{"type":"object","required":["key"],"properties":{"key":{"type":"string","enum":["Delete","Backspace","Enter","Escape","Tab","ArrowLeft","ArrowRight","ArrowUp","ArrowDown"]}}}}),
         json!({"name":"browser_upload","description":"Assign a workspace file to an input[type=file]. path is relative to the workspace.","inputSchema":{"type":"object","required":["path"],"properties":{"path":{"type":"string"},"selector":{"type":"string"}}}}),
-        json!({"name":"browser_screenshot","description":"Capture an immutable visual artifact of this task's page and select it for the next normal Worker image request. Capture is not a visual pass. Default viewport; full_page is explicit.","inputSchema":{"type":"object","properties":{"full_page":{"type":"boolean"}}}}),
+        json!({"name":"browser_screenshot","description":"Capture an immutable visual artifact of this task's page and select it for the next normal Worker image request. Capture is not a visual pass. Default viewport; choose full_page or clip to a CSS selector with optional CSS-pixel padding.","inputSchema":{"type":"object","properties":{"full_page":{"type":"boolean"},"selector":{"type":"string"},"padding":{"type":"number","minimum":0,"maximum":128}}}}),
         json!({"name":"browser_close","description":"Explicitly close this task's controlled browser session. Completed visible sessions remain open until this is called or a replacement page is opened.","inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"view_image","description":"Select a host-issued visual artifact_id for the next image request; only this instance or explicitly exported upstream images are permitted. No arbitrary filesystem paths.","inputSchema":{"type":"object","required":["artifact_id"],"properties":{"artifact_id":{"type":"string"},"original":{"type":"boolean"},"checked_goal":{"type":"string"}}}}),
     ];
@@ -493,6 +501,7 @@ pub async fn execute_scoped(
     if matches!(
         name,
         "browser_open" | "browser_click" | "browser_press_key" | "browser_upload"
+            | "browser_fill" | "browser_set_viewport" | "browser_scroll"
     ) {
         session.epoch += 1;
     }
@@ -524,6 +533,9 @@ pub async fn execute_scoped(
             .await?
         }
         "browser_upload" => upload(&session.ws, workspace.root(), args).await?,
+        "browser_fill" => fill(&session.ws, args).await?,
+        "browser_set_viewport" => set_viewport(session, args).await?,
+        "browser_scroll" => scroll(&session.ws, args).await?,
         "browser_screenshot" => {
             if let Some(url) = page_state(&session.ws)
                 .await
@@ -540,7 +552,7 @@ pub async fn execute_scoped(
                 workspace.root(),
                 context,
                 session,
-                args["full_page"] == true,
+                args,
             )
             .await;
         }
@@ -1312,12 +1324,113 @@ fn capture_observation(before: &Value, after: &Value) -> Value {
     json!({"before":snapshot(before),"after":snapshot(after)})
 }
 
+async fn fill(ws: &str, args: &Value) -> Result<Value> {
+    let selector = args["selector"].as_str().filter(|s| !s.trim().is_empty()).context("selector is required")?;
+    let value = args["value"].as_str().filter(|s| s.len() <= 65536).context("value must be a string of at most 65536 bytes")?;
+    let mut cdp = connect_cdp(ws).await?;
+    let document = cdp.call("Runtime.evaluate", json!({"expression":"document"})).await?;
+    let object = document.pointer("/result/result/objectId").and_then(Value::as_str).context("page document is unavailable")?;
+    let reply = cdp.call("Runtime.callFunctionOn", json!({"objectId": object,"returnByValue":true,
+        "arguments":[{"value":selector},{"value":value},{"value":args["clear"] != false},{"value":args["submit"] == true}],
+        "functionDeclaration":r#"function(selector, value, clear, submit) {
+            const el = this.querySelector(selector);
+            if (!el || el.disabled || el.readOnly || !el.getClientRects().length ||
+                !(el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement &&
+                ['text','search','email','url','tel','password','number'].includes(el.type))))
+                return {error: 'selector must match a visible, editable text input or textarea'};
+            if (submit && !el.form) return {error:'input is not in a form'};
+            el.focus();
+            const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, clear ? value : el.value + value);
+            const length = Array.from(el.value).length;
+            el.dispatchEvent(new InputEvent('input', {bubbles:true, composed:true, inputType:'insertText', data:value}));
+            el.dispatchEvent(new Event('change', {bubbles:true}));
+            const url = location.href;
+            if (submit) el.form.requestSubmit();
+            return {selector, length, url};
+        }"#})).await?;
+    let result = reply.pointer("/result/result/value").context("fill failed; check the CSS selector and form")?;
+    ensure!(result["error"].is_null(), "{}", result["error"].as_str().unwrap_or("fill failed"));
+    Ok(result.clone())
+}
+
+fn viewport_options(args: &Value) -> Result<(Value, Value, Value)> {
+    let size = |key| args[key].as_u64().filter(|n| (1..=4096).contains(n)).with_context(|| format!("{key} must be between 1 and 4096"));
+    let width = size("width")?;
+    let height = size("height")?;
+    let factor = if args["device_scale_factor"].is_null() { 1.0 } else {
+        args["device_scale_factor"].as_f64().filter(|n| (0.5..=4.0).contains(n)).context("device_scale_factor must be between 0.5 and 4")?
+    };
+    ensure!((width as f64 * height as f64 * factor * factor) <= 24_000_000.0, "viewport exceeds pixel budget");
+    let scheme = args["color_scheme"].as_str().unwrap_or("no-preference");
+    ensure!(matches!(scheme, "light" | "dark" | "no-preference"), "invalid color_scheme");
+    let features = if scheme == "no-preference" { json!([]) } else {
+        json!([{"name":"prefers-color-scheme","value":scheme}])
+    };
+    Ok((json!({"width":width,"height":height,"deviceScaleFactor":factor,"mobile":false}),
+        json!({"features":features}), json!({"width":width,"height":height,"color_scheme":scheme})))
+}
+
+async fn set_viewport(session: &mut Session, args: &Value) -> Result<Value> {
+    let (metrics, media, result) = viewport_options(args)?;
+    if session.emulation.is_none() {
+        session.emulation = Some(connect_cdp(&session.ws).await?);
+    }
+    let cdp = session.emulation.as_mut().unwrap();
+    cdp.call("Emulation.setDeviceMetricsOverride", metrics).await?;
+    cdp.call("Emulation.setEmulatedMedia", media).await?;
+    Ok(result)
+}
+
+async fn scroll(ws: &str, args: &Value) -> Result<Value> {
+    let block = args["block"].as_str().unwrap_or("start");
+    ensure!(matches!(block, "start" | "center" | "end"), "invalid scroll block");
+    ensure!(args["selector"].is_null() || (args["x"].is_null() && args["y"].is_null()), "choose selector or coordinates");
+    ensure!(args["selector"].is_string() || args["x"].is_number() || args["y"].is_number(), "selector, x or y is required");
+    let params = json!([args["selector"], args["x"], args["y"], block]);
+    eval(ws, &format!(r#"(([selector,x,y,block]) => {{
+        if (selector !== null) {{
+            const el = document.querySelector(selector);
+            if (!el || !el.getClientRects().length) throw new Error('element unavailable');
+            el.scrollIntoView({{block, behavior:'instant'}});
+        }} else window.scrollTo({{left:x ?? scrollX, top:y ?? scrollY, behavior:'instant'}});
+        const root = document.scrollingElement;
+        return {{scroll_x:scrollX,scroll_y:scrollY,max_x:Math.max(0,root.scrollWidth-root.clientWidth),max_y:Math.max(0,root.scrollHeight-root.clientHeight)}};
+    }})({params})"#)).await
+}
+
+async fn selector_clip(ws: &str, selector: &str, padding: f64) -> Result<Value> {
+    let params = json!([selector,padding]);
+    let clip = eval(ws, &format!(r#"(([selector,padding]) => {{
+        const el = document.querySelector(selector);
+        if (!el || getComputedStyle(el).visibility !== 'visible') return null;
+        const r = el.getBoundingClientRect(), root = document.scrollingElement;
+        if (r.width <= 0 || r.height <= 0) return null;
+        const x = Math.max(0, Math.floor(r.left+scrollX-padding));
+        const y = Math.max(0, Math.floor(r.top+scrollY-padding));
+        const width = Math.min(root.scrollWidth, Math.ceil(r.right+scrollX+padding))-x;
+        const height = Math.min(root.scrollHeight, Math.ceil(r.bottom+scrollY+padding))-y;
+        return {{x,y,width,height,scale:1}};
+    }})({params})"#)).await?;
+    let width = clip["width"].as_f64().unwrap_or(0.0);
+    let height = clip["height"].as_f64().unwrap_or(0.0);
+    ensure!(width > 0.0 && height > 0.0 && width * height <= 8_000_000.0, "element is missing, invisible or exceeds screenshot pixel budget");
+    Ok(clip)
+}
+
 async fn screenshot(
     root: &Path,
     context: &crate::visual_artifacts::VisualContext,
     session: &mut Session,
-    full_page: bool,
+    args: &Value,
 ) -> Result<Value> {
+    let full_page = args["full_page"] == true;
+    let selector = args["selector"].as_str();
+    ensure!(!full_page || selector.is_none(), "choose full_page or selector");
+    let padding = if args["padding"].is_null() { 0.0 } else {
+        ensure!(selector.is_some(), "padding requires a selector");
+        args["padding"].as_f64().filter(|n| (0.0..=128.0).contains(n)).context("padding must be between 0 and 128")?
+    };
     let before_result = page_state(&session.ws).await;
     let before = before_result.as_ref().ok().cloned().unwrap_or(Value::Null);
     if !before.is_null() {
@@ -1328,6 +1441,12 @@ async fn screenshot(
     }
     let captured_page_epoch = session.epoch;
     let mut options = json!({"format":"png","captureBeyondViewport":full_page});
+    let clip = if let Some(selector) = selector {
+        let clip = selector_clip(&session.ws, selector, padding).await?;
+        options["captureBeyondViewport"] = json!(true);
+        options["clip"] = clip.clone();
+        Some(clip)
+    } else { None };
     if full_page {
         let layout = call(&session.ws, "Page.getLayoutMetrics", json!({})).await?;
         let size = &layout["result"]["cssContentSize"];
@@ -1373,10 +1492,13 @@ async fn screenshot(
         "url":before["url"],"viewport":before["viewport"],"page_observations":observation,"full_page":full_page,"display_mode":display_mode}),
         &bytes,
     )?;
-    Ok(
-        json!({"artifact_id":artifact["artifact_id"],"visual_artifact":artifact,"captured":true,"display_mode":display_mode,"browser_connection":connection_record(session),
-        "page":{"browser_session_id":session.session_id,"page_id":session.page_id,"page_epoch":session.epoch,"url":after["url"],"viewport":after["viewport"],"display_mode":display_mode}}),
-    )
+    let mut result = json!({"artifact_id":artifact["artifact_id"],"visual_artifact":artifact,"captured":true,"display_mode":display_mode,"browser_connection":connection_record(session),
+        "page":{"browser_session_id":session.session_id,"page_id":session.page_id,"page_epoch":session.epoch,"url":after["url"],"viewport":after["viewport"],"display_mode":display_mode}});
+    if let Some(clip) = clip {
+        result["selector"] = json!(selector);
+        result["clip"] = clip;
+    }
+    Ok(result)
 }
 
 async fn launch(visible: bool) -> Result<Session> {
@@ -1434,6 +1556,7 @@ async fn launch(visible: bool) -> Result<Session> {
     let (dialog, dialog_commands, dialog_watch) = watch_dialogs(&ws, None).await?;
     let page_id = ws.rsplit('/').next().unwrap_or("").to_owned();
     Ok(Session {
+        emulation: None,
         ws,
         child: Some(child),
         profile: Some(dir),

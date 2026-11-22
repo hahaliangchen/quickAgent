@@ -249,6 +249,7 @@ pub async fn results(
 }
 
 
+#[cfg(test)]
 pub fn outstanding_calls(root: &Path, task: &str) -> Result<Vec<(String, Option<String>)>> {
     reap(root, task)?;
     Ok(db(root)?.prepare("SELECT call_id,owner_node_id FROM agent_visual_jobs WHERE task_id=?1 AND (status IN ('queued','running') OR delivered=0)")?

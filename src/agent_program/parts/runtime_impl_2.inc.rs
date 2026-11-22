@@ -265,9 +265,11 @@ impl Runtime {
         Ok(())
     }
     /// What the program has printed with console so far.
+    #[cfg(test)]
     pub fn logs(&self) -> &[String] {
         &self.logs
     }
+    #[cfg(test)]
     pub fn rejected_console(&self) -> Option<&str> { self.rejected_console.as_deref() }
     pub fn fail_capacity(&mut self, mut error: Value) {
         if error.get("stack").is_none() { error["stack"] = json!(self.stack()); }

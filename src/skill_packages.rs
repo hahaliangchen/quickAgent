@@ -375,6 +375,7 @@ impl Registry {
             .unwrap_or_default())
     }
     /// Packages whose tools are available: every enabled one.
+    #[cfg(test)]
     pub fn enabled(&self) -> std::collections::BTreeSet<String> {
         self.entries
             .read()

@@ -2,7 +2,9 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 pub const ROOT: &str = "n0";
 /// Guard against corrupt parent links. Real nesting is bounded by MAX_TEMP_TASKS.
@@ -130,6 +132,7 @@ fn cache(conn: &Connection, task: &str, node: &Node) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub fn emit(
     tx: &Transaction<'_>,
     task: &str,
@@ -155,6 +158,7 @@ pub fn emit(
 
 /// The conversation node. It is a container, not a task: each user request
 /// becomes a main task the agent creates under it with create_task.
+#[cfg(test)]
 pub fn ensure_root(tx: &Transaction<'_>, task: &str, turn: usize) -> Result<Node> {
     if let Ok(node) = get(tx, task, ROOT) {
         return Ok(node);
@@ -186,6 +190,7 @@ pub fn ensure_root(tx: &Transaction<'_>, task: &str, turn: usize) -> Result<Node
     Ok(node)
 }
 
+#[cfg(test)]
 fn text(args: &Value, field: &str) -> Result<String> {
     let value = args[field]
         .as_str()
@@ -201,6 +206,7 @@ fn text(args: &Value, field: &str) -> Result<String> {
 
 
 
+#[cfg(test)]
 pub fn planned(parent: &Node, args: &Value, ordinal: usize, kind: &str) -> Result<Node> {
     let executor = args["executor"].as_str().unwrap_or("inline");
     ensure!(
@@ -238,6 +244,7 @@ pub fn planned(parent: &Node, args: &Value, ordinal: usize, kind: &str) -> Resul
     })
 }
 
+#[cfg(test)]
 pub fn definition_version(conn: &Connection, task: &str) -> Result<Option<i64>> {
     Ok(conn.query_row("SELECT seq FROM agent_task_events WHERE task_id=?1 AND kind='task/definition' ORDER BY seq DESC LIMIT 1",[task],|r|r.get(0)).optional()?)
 }

@@ -27,11 +27,23 @@ export function summaryFor(name: string, args: Record<string, unknown>, result?:
   switch (name) {
     case 'web__search': return text(args.query)
     case 'web__fetch': return `${args.cursor ? '续读 · ' : ''}${text(args.url)}`
+    case 'browser_fill': return text(args.selector)
+    case 'browser_set_viewport': return [typeof args.width === 'number' && typeof args.height === 'number' ? String(args.width) + ' × ' + String(args.height) : '', text(args.color_scheme)].filter(Boolean).join(' · ')
+    case 'browser_scroll': return text(args.selector) || [args.x, args.y].map((v, i) => typeof v === 'number' ? (i === 0 ? 'x=' : 'y=') + v : '').filter(Boolean).join(' · ')
+    case 'browser_screenshot': return text(args.selector) || (args.full_page === true ? '整页' : '当前视口')
+    case 'verify_check': return [text(args.path) || '.', text(args.ecosystem), text(args.target)].filter(Boolean).join(' · ')
+    case 'verify_test': return [text(args.path) || '.', text(args.ecosystem), text(args.filter)].filter(Boolean).join(' · ')
+    case 'plan_set': return String(count(args.steps)) + ' 项'
+    case 'plan_update': return [text(args.id), ({ pending: '待开始', in_progress: '进行中', done: '完成', blocked: '受阻' } as Record<string, string>)[text(args.status)], text(args.note)].filter(Boolean).join(' · ')
     case 'exec_command': return text(args.cmd)
     case 'run_readonly_command': return text(args.cmd)
     case 'create_dir': return text(args.path)
     case 'delete_path': return [text(args.path), args.recursive === true ? '整个目录' : ''].filter(Boolean).join(' · ')
     case 'rename_path': return [text(args.path), text(args.to) && `→ ${text(args.to)}`].filter(Boolean).join(' ')
+    case 'git_blame': return [text(args.path), typeof args.start_line === 'number' && typeof args.end_line === 'number' ? 'L' + args.start_line + '–' + args.end_line : ''].filter(Boolean).join(' · ')
+    case 'git_commit': return [String(count(args.paths)) + ' 个文件', text(args.message)].filter(Boolean).join(' · ')
+    case 'git_restore': return String(count(args.paths)) + ' 个文件 · ' + (args.staged === true ? '暂存区' : '工作区')
+    case 'apply_edits': return String(count(args.files)) + ' 个文件' + (args.atomic === false ? ' · 逐文件尝试' : '')
     case 'git_status': return Array.isArray(args.paths) && args.paths.length > 0 ? `路径：${args.paths.map(value => text(value)).filter(Boolean).join('、')}` : '工作区状态'
     case 'git_diff': return args.stat_only === true ? '变更统计' : [text(args.rev_range), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '工作区变更'].filter(Boolean).join(' · ')
     case 'git_log': return [text(args.rev), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '提交历史'].filter(Boolean).join(' · ')

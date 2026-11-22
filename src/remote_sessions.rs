@@ -128,6 +128,7 @@ fn tool_value(mut response: Value) -> Result<Value> {
 }
 struct Transport;
 impl crate::plugin_io::SessionIo for Transport {
+    #[cfg(test)]
     fn authorize_program<'a>(&'a self, state: &'a AgentServiceState, task: &'a str,
         resource: Option<&'a str>, module: bool) -> futures::future::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
@@ -187,6 +188,7 @@ impl crate::plugin_io::SessionIo for Transport {
             catalog.execute(workspace, name, args).await
         })
     }
+    #[cfg(test)]
     fn sync_attachments<'a>(
         &'a self,
         state: &'a AgentServiceState,
@@ -199,6 +201,7 @@ impl crate::plugin_io::SessionIo for Transport {
             Ok(())
         })
     }
+    #[cfg(test)]
     fn read_asset<'a>(
         &'a self,
         state: &'a AgentServiceState,

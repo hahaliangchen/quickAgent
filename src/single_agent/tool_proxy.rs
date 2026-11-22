@@ -22,7 +22,7 @@ pub(super) async fn proxy_rust_tool(
     if tool_name == "edit_file" {
         normalize_edit_file_args(&mut args);
     }
-    append_event(
+    let call_seq = append_event(
         s,
         "tool/call",
         json!({
@@ -112,7 +112,9 @@ pub(super) async fn proxy_rust_tool(
         },
         "list_skills" => handle_list_skills(s),
         "read_skill" => handle_read_skill(s, &args),
-        "read_tool_contracts" => handle_read_tool_contracts(libs, &args),
+        "read_tool_contracts" => handle_read_tool_contracts_with_defs(libs, &args, || {
+            crate::agent_service::local_tools(&s.state.workspace, s.state.tool_catalog.as_deref(), s.ban_execution)
+        }),
         "read_program_guide" => (
             json!({
                 "guide": agent_program::CAPABILITIES,
@@ -144,6 +146,15 @@ pub(super) async fn proxy_rust_tool(
             Err(err) => (json!({"error": format!("{err:#}")}), true),
         },
     };
+
+    if crate::verify_tools::is_tool(tool_name)
+        && let Some(raw) = result.as_object_mut().and_then(|o| o.remove("__verify_raw"))
+    {
+        match crate::context_assets::register(s.state.workspace.root(), s.task, call_seq, tool_name, &args_snapshot, &raw) {
+            Ok(reference) => result["asset_id"] = reference["asset_id"].clone(),
+            Err(error) => result["asset_error"] = json!(format!("could not archive verification output: {error:#}")),
+        }
+    }
 
     let result_seq = append_event(
         s,
@@ -239,9 +250,15 @@ fn handle_read_skill(s: &Session<'_>, args: &Value) -> (Value, bool) {
     }
 }
 
-fn handle_read_tool_contracts(
+#[cfg(test)]
+fn handle_read_tool_contracts(libs: &agent_program::libraries::Libraries, args: &Value) -> (Value, bool) {
+    handle_read_tool_contracts_with_defs(libs, args, Vec::new)
+}
+
+fn handle_read_tool_contracts_with_defs(
     libs: &agent_program::libraries::Libraries,
     args: &Value,
+    definitions: impl FnOnce() -> Vec<Value>,
 ) -> (Value, bool) {
     let mut selection = args.clone();
     if let Some(library) = selection.get("library").and_then(Value::as_str).map(str::to_owned) {
@@ -261,7 +278,7 @@ fn handle_read_tool_contracts(
         libs.clone()
     };
     if selection.get("overview").and_then(Value::as_bool).unwrap_or(false) {
-        return (json!({"overview": agent_program::declarations::overview(&selected, &[])}), false);
+        return (json!({"overview": agent_program::declarations::overview(&selected, &definitions())}), false);
     }
     (json!({"declarations": agent_program::declarations::static_library_header(&selected)}), false)
 }

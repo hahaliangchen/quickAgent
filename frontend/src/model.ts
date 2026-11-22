@@ -914,3 +914,24 @@ export function awaitingModel(events: readonly AgentEvent[]): boolean {
   }
   return false
 }
+
+export type PlanStatus = 'pending' | 'in_progress' | 'done' | 'blocked'
+export interface PlanStep { id: string; title: string; status: PlanStatus; note?: string }
+
+/** SSE and replay include complete snapshots. Rewound event histories restore the earlier plan. */
+export function latestPlan(events: readonly AgentEvent[]): { steps: PlanStep[]; completed: number } | undefined {
+  const valid = (value: unknown): value is PlanStep => {
+    if (value === null || typeof value !== 'object') return false
+    const step = value as Record<string, unknown>
+    return typeof step.id === 'string' && typeof step.title === 'string'
+      && (step.status === 'pending' || step.status === 'in_progress' || step.status === 'done' || step.status === 'blocked')
+      && (step.note === undefined || typeof step.note === 'string')
+  }
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event?.type !== 'plan/updated') continue
+    const steps: unknown = event.data.steps
+    if (Array.isArray(steps) && steps.every(valid)) return { steps, completed: steps.filter(step => step.status === 'done').length }
+  }
+  return undefined
+}

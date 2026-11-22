@@ -1,22 +1,25 @@
 //! Composer catalogs: workspace file mentions and skill slash commands.
 
-use std::{
-    collections::HashSet,
-    fs,
-    path::{Component, Path, PathBuf},
-    sync::OnceLock,
-};
+use std::{fs, path::{Path, PathBuf}};
+#[cfg(test)]
+use std::{collections::HashSet, path::Component, sync::OnceLock};
 
 use ignore::WalkBuilder;
+#[cfg(test)]
 use regex::Regex;
 use serde::Serialize;
 
 const FILE_LIMIT: usize = 20;
 const VISIT_LIMIT: usize = 8_000;
+#[cfg(test)]
 const SKILL_BODY_LIMIT: usize = 24_000;
+#[cfg(test)]
 const MENTION_LIMIT: usize = 8;
+#[cfg(test)]
 const MENTION_FILE_BYTES: u64 = 1_000_000;
+#[cfg(test)]
 const MENTION_CONTENT_CHARS: usize = 12_000;
+#[cfg(test)]
 const MENTION_TOTAL_CHARS: usize = 48_000;
 
 #[derive(Serialize)]
@@ -34,6 +37,7 @@ pub struct SlashCommand {
 struct SkillFile {
     name: String,
     description: String,
+    #[cfg(test)]
     path: PathBuf,
 }
 
@@ -115,11 +119,13 @@ pub fn slash_commands(root: &Path) -> Vec<SlashCommand> {
 
 /// Expand a leading skill and attach snapshots of explicitly mentioned workspace files.
 /// The stored user text stays unchanged.
+#[cfg(test)]
 pub fn expand_prompt(root: &Path, prompt: &str) -> String {
     let expanded = expand_skill_prompt(root, prompt);
     append_file_context(root, prompt, expanded)
 }
 
+#[cfg(test)]
 pub(crate) fn expand_skill_prompt(root: &Path, prompt: &str) -> String {
     let trimmed = prompt.trim_start();
     let Some(name) = leading_slash_name(trimmed) else {
@@ -141,6 +147,7 @@ pub(crate) fn expand_skill_prompt(root: &Path, prompt: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn mention_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     PATTERN.get_or_init(|| {
@@ -148,6 +155,7 @@ fn mention_pattern() -> &'static Regex {
     })
 }
 
+#[cfg(test)]
 fn append_file_context(root: &Path, prompt: &str, mut expanded: String) -> String {
     let Ok(canonical_root) = fs::canonicalize(root) else {
         return expanded;
@@ -223,6 +231,7 @@ fn append_file_context(root: &Path, prompt: &str, mut expanded: String) -> Strin
     expanded
 }
 
+#[cfg(test)]
 fn leading_slash_name(text: &str) -> Option<&str> {
     let rest = text.strip_prefix('/')?;
     let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
@@ -310,6 +319,7 @@ fn skill_from_file(path: &Path) -> Option<SkillFile> {
     Some(SkillFile {
         name,
         description,
+        #[cfg(test)]
         path: path.to_path_buf(),
     })
 }
@@ -359,6 +369,7 @@ fn match_score(path: &str, query: &str) -> Option<i32> {
     }
 }
 
+#[cfg(test)]
 fn truncate(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_owned();

@@ -392,12 +392,14 @@ pub fn parse_run_submission(text: &str, finish_reason: Option<&str>) -> RunSubmi
 
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub enum RunStreamEvent {
     RunProgress(String),
     ReplyDelta(String),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg(test)]
 enum GateMode {
     #[default]
     Undecided,
@@ -411,11 +413,13 @@ enum GateMode {
 /// deltas (`ReplyDelta`). All executable JavaScript steps stay in `Code` mode
 /// (`RunProgress`) so raw execution code never leaks into chat bubbles.
 #[derive(Default)]
+#[cfg(test)]
 pub struct RunStreamGate {
     pending: String,
     mode: GateMode,
 }
 
+#[cfg(test)]
 impl RunStreamGate {
     pub fn is_code(&self) -> bool {
         self.mode == GateMode::Code
@@ -632,6 +636,7 @@ pub fn responses_request(chat: &Value) -> Value {
 
 /// Some Chat Completions templates accept system instructions only in the prefix.
 /// This changes the wire projection, never the durable conversation order.
+#[cfg(test)]
 pub fn prefix_system_messages(messages: Vec<Value>) -> Vec<Value> {
     let mut system = Vec::new();
     let mut conversation = Vec::new();
@@ -874,6 +879,7 @@ impl ChatStream {
     /// complete JS burst, returns that clean first burst so the caller can
     /// stop reading the HTTP stream early and execute it without duplicate
     /// variable-declaration compile errors.
+    #[cfg(test)]
     pub fn interrupted_code_burst(&self) -> Option<&str> {
         self.first_code_burst.as_deref()
     }
@@ -1477,6 +1483,7 @@ impl ChatStream {
 
     /// Finish early using the captured clean first JS code burst after a
     /// reasoning model resumed thinking mid-stream expecting a host output.
+    #[cfg(test)]
     pub fn finish_truncated_code_burst(mut self) -> anyhow::Result<Completed> {
         let Some(burst) = self.first_code_burst.take() else {
             return self.finish();

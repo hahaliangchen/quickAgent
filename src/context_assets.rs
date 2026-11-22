@@ -616,6 +616,7 @@ fn read_shell_snapshot(reference: &Value, path: &Path, args: &Value) -> Result<V
     }
     Ok(result)
 }
+#[cfg(test)]
 pub fn remote_delivery(reference: &Value, bytes: &[u8], args: &Value) -> Result<Value> {
     ensure!(
         crate::visual_artifacts::hash(bytes) == reference["content_hash"].as_str().unwrap_or(""),

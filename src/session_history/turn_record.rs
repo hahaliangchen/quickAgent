@@ -518,6 +518,7 @@ pub(crate) fn render(conn: &Connection, task: &str, turn: i64, before: Option<i6
 /// AI's words, then the latest of the other calls; what is left out shows
 /// as one line per gap. Cutting the middle instead dropped 23 of a turn's
 /// 24 edits and kept the reads before them (2026-11-13 review).
+#[cfg(test)]
 pub(crate) fn condense(source: &str, limit: usize) -> String {
     let lines = source.lines().collect::<Vec<_>>();
     let rank = |line: &str| {

@@ -266,6 +266,7 @@ impl Action {
     pub fn scope_variables(&self) -> Option<&BTreeMap<String, Value>> {
         self.captured_scope.as_deref().map(|s| &s.variables).filter(|v| !v.is_empty())
     }
+    #[cfg(test)]
     pub fn scope_libraries(&self) -> &[String] {
         self.captured_scope.as_deref().map(|s| s.libraries.as_slice()).unwrap_or(&[])
     }

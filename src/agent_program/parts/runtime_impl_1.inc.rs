@@ -551,11 +551,13 @@ impl Runtime {
         })
     }
     /// Virtual calls become durable AI task scopes; ordinary calls use frames.
+    #[cfg(test)]
     pub fn task_program(program: Program, entry: &str, args: Vec<Value>) -> Result<Self> {
         let mut runtime = Self::new(program, entry, args)?;
         runtime.scoped_calls = true;
         Ok(runtime)
     }
+    #[cfg(test)]
     pub fn task_program_with_scope(
         program: Program,
         entry: &str,
@@ -808,6 +810,7 @@ impl Runtime {
 
     /// Append and execute one top-level code segment in the live module
     /// environment. Host actions and suspensions use the ordinary Runtime ABI.
+    #[cfg(test)]
     pub fn append_segment(
         &mut self,
         source: &str,

@@ -245,6 +245,7 @@ impl ModelSettings {
             .map(|n| n.saturating_sub(OUTPUT_RESERVE.min(n / 4)))
             .unwrap_or(inherited)
     }
+    #[cfg(test)]
     pub fn resolved_input_budget(&self, state: &AgentServiceState, model: &str) -> usize {
         let catalog = declared_context_window(state, model);
         let capacity = match (self.context_window, catalog) {

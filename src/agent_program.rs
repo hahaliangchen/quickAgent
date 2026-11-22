@@ -25,7 +25,9 @@ mod values;
 #[cfg(test)]
 pub use compiler::{compile, compile_body, compile_entry};
 #[allow(unused_imports)]
-pub use compiler::{compile_body_with_scope, compile_segment, compile_with_libraries, probe_as_entry, required_libraries, uncalled_functions};
+pub use compiler::{compile_body_with_scope, compile_segment, uncalled_functions};
+#[cfg(test)]
+pub use compiler::compile_with_libraries;
 #[allow(unused_imports)]
 pub use runtime::{Action, Runtime, State};
 use serde::{Deserialize, Serialize};

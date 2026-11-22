@@ -159,6 +159,7 @@ impl Visit for Bound {
 }
 /// The libraries a source requires, read without compiling it. A source that
 /// does not parse requires nothing.
+#[cfg(test)]
 pub fn required_libraries(source: &str) -> Vec<String> {
     let map: Lrc<SourceMap> = Default::default();
     let file = map.new_source_file(FileName::Custom("agent-program.js".into()).into(), source.to_owned());
@@ -177,6 +178,7 @@ pub fn required_libraries(source: &str) -> Vec<String> {
 /// arguments. Imports move after the function, where they still hoist; the
 /// source keeps its line numbers. None when the source defines `entry`, has
 /// no top-level statements to run, or does not parse.
+#[cfg(test)]
 pub fn probe_as_entry(source: &str, entry: &str, params: &[String]) -> Option<String> {
     let map: Lrc<SourceMap> = Default::default();
     let file = map.new_source_file(FileName::Custom("agent-program.js".into()).into(), source.to_owned());
@@ -406,6 +408,7 @@ pub(super) fn script_parse_error(source: &str) -> bool {
 pub fn compile_body(source: &str, entry: &str) -> Result<Program> {
     compile_body_with_libraries(source, entry, super::libraries::builtin())
 }
+#[cfg(test)]
 pub fn compile_with_libraries(
     source: &str,
     libraries: super::libraries::Libraries,

@@ -264,6 +264,17 @@ pub(super) async fn business_tool_inner(
         )
         .await?;
     }
+    if crate::plan_tools::is_tool(name) {
+        let work = s.state.workspace.clone();
+        return crate::plan_tools::scoped(work.root().to_path_buf(), s.task.to_owned(), s.turn, async {
+            if let Some(catalog) = s.state.tool_catalog.as_deref() {
+                catalog.execute(work.clone(), name, args).await
+            } else {
+                crate::plan_tools::execute(name,args).await
+            }
+        }).await;
+    }
+
     let tool_workspace = if name == "view_image" {
         s.state.workspace.clone()
     } else {
@@ -478,7 +489,7 @@ pub(super) async fn business_tool_inner(
         } else {
             None
         };
-        let untouched = if crate::project_process::may_change_files(name) {
+        let untouched = if crate::project_process::may_change_files(name) || crate::git_tools::mutates(name) || name == crate::batch_edits::NAME {
             Some(managed_files::untouched(
                 s.state.workspace.root(),
                 s.task,
@@ -487,7 +498,11 @@ pub(super) async fn business_tool_inner(
         } else {
             None
         };
-        let args = managed.as_ref().map(|p| p.args.clone()).unwrap_or(args);
+        let mut args = managed.as_ref().map(|p| p.args.clone()).unwrap_or(args);
+        if name == crate::batch_edits::NAME {
+            crate::batch_edits::paths(tool_workspace.root(), &args)?;
+            managed_files::guard_batch(s.state.workspace.root(),s.task,tool_workspace.root(),&mut args)?;
+        }
         let targets_external_project = is_outside_edit || !outside_exec.is_empty();
         let result = if crate::workspace_changes::is_mutation(name)
             && s.delegate_id().is_none()
@@ -516,6 +531,10 @@ pub(super) async fn business_tool_inner(
                     boundary,
                 )
                 .await
+            } else if crate::git_tools::is_tool(name) {
+                crate::git_tools::execute(&tool_workspace,name,&args,boundary,s.cancel).await
+            } else if crate::verify_tools::is_tool(name) {
+                crate::verify_tools::execute(&tool_workspace, name, &args, s.cancel, boundary).await
             } else if crate::program_execution::is_tool(name) {
                 crate::program_execution::execute_with_boundary(
                     &tool_workspace,
@@ -533,6 +552,11 @@ pub(super) async fn business_tool_inner(
                 )
                 .await
             }
+        } else if crate::git_tools::is_tool(name) {
+            let boundary = if cfg!(target_os = "linux") && s.state.permission_mode == crate::agent_service::PermissionMode::ReadOnly {
+                crate::process_sandbox::ExecutionBoundary::ReadOnly
+            } else { crate::process_sandbox::ExecutionBoundary::for_mode(s.state.permission_mode) };
+            crate::git_tools::execute(&tool_workspace,name,&args,boundary,s.cancel).await
         } else if crate::browser_control::is_tool(name) {
             let mut visual = visual_context(s, node)?;
             visual.source_tool_call_id = call_id.to_owned();
