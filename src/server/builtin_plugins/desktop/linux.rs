@@ -349,6 +349,83 @@ impl Drop for ReleaseButton {
         }
     }
 }
+async fn screenshot_to_file(
+    tool: &'static str,
+    prefix_args: &[&str],
+    output_flag: &str,
+) -> Result<Vec<u8>> {
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    let path = std::env::temp_dir().join(format!(
+        "quickagent-desktop-{}.png",
+        crate::server::agent_service::uuid_like()
+    ));
+    let _cleanup = RemoveOnDrop(path.clone());
+    let path_str = path
+        .to_str()
+        .context("temporary screenshot path is not valid UTF-8")?;
+    let mut child = command(tool)
+        .args(prefix_args)
+        .arg(output_flag)
+        .arg(path_str)
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|e| spawn_error(tool, e))?;
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .map_err(|_| fault("DESKTOP_TIMEOUT", format!("{tool} did not finish in time")))??;
+    if !status.success() {
+        return Err(fault(
+            "DESKTOP_BACKEND_FAILED",
+            format!("{tool} failed; verify that the helper can access the desktop"),
+        ));
+    }
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| fault("DESKTOP_BACKEND_FAILED", format!("{tool} did not write screenshot: {e}")))?;
+    if meta.len() > MAX_IMAGE as u64 {
+        return Err(fault(
+            "DESKTOP_OUTPUT_LIMIT",
+            format!("{tool} exceeded its output budget"),
+        ));
+    }
+    let data = tokio::fs::read(&path)
+        .await
+        .map_err(|e| fault("DESKTOP_BACKEND_FAILED", format!("could not read {tool} output: {e}")))?;
+    if data.is_empty() {
+        return Err(fault(
+            "DESKTOP_BACKEND_FAILED",
+            format!("{tool} produced an empty screenshot"),
+        ));
+    }
+    Ok(data)
+}
+
+async fn wayland_fullscreen_screenshot() -> Result<Vec<u8>> {
+    match output("grim", &["-"], MAX_IMAGE).await {
+        Ok(bytes) => return Ok(bytes),
+        Err(err) if err.to_string().contains("DEPENDENCY_MISSING") => {}
+        Err(err) => return Err(err),
+    }
+    match screenshot_to_file("spectacle", &["-b", "-n", "-f"], "-o").await {
+        Ok(bytes) => return Ok(bytes),
+        Err(err) if err.to_string().contains("DEPENDENCY_MISSING") => {}
+        Err(err) => return Err(err),
+    }
+    match screenshot_to_file("gnome-screenshot", &[], "-f").await {
+        Ok(bytes) => Ok(bytes),
+        Err(err) if err.to_string().contains("DEPENDENCY_MISSING") => {
+            Err(missing("grim, spectacle, or gnome-screenshot"))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 impl DesktopBackend for Linux {
     async fn windows(&self) -> Result<Vec<Window>> {
         match display()? {
@@ -384,7 +461,7 @@ impl DesktopBackend for Linux {
                     );
                     output("grim", &["-g", &geometry, "-"], MAX_IMAGE).await
                 } else {
-                    output("grim", &["-"], MAX_IMAGE).await
+                    wayland_fullscreen_screenshot().await
                 }
             }
         }
@@ -452,7 +529,13 @@ impl DesktopBackend for Linux {
     }
     async fn notify(&self, title: &str, body: &str, cancel: &CancellationToken) -> Result<()> {
         display()?;
-        mutate("notify-send", &["--", title, body], None, cancel).await
+        mutate(
+            "notify-send",
+            &["-a", "QuickAgent", "-i", "quickagent", "--", title, body],
+            None,
+            cancel,
+        )
+        .await
     }
     async fn open(&self, target: &guard::OpenTarget, cancel: &CancellationToken) -> Result<()> {
         display()?;
