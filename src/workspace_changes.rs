@@ -894,8 +894,7 @@ pub fn summary(root: &Path, task: &str, turn: usize) -> Result<Value> {
 }
 
 pub fn is_mutation(name: &str) -> bool {
-    matches!(name, "write_file" | "replace_range" | "edit_file" | "delete_path" | "rename_path" | "create_dir")
-        || name == crate::batch_edits::NAME || crate::git_tools::mutates(name)
+    crate::tool_registry::ToolRegistry::is_tracked_mutation(name)
         // Managed shell sessions have their own boundary and change intervals.
         || (!crate::shell_process::is_tool(name) && crate::project_process::may_change_files(name))
 }

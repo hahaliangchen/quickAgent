@@ -79,38 +79,7 @@ impl PermissionMode {
     }
 
     pub(crate) fn allows(self, name: &str) -> bool {
-        match name {
-            "exec_command" | "write_stdin" | "kill_session" => true,
-            "write_file"
-            | "replace_range"
-            | "edit_file"
-            | "delete_path"
-            | "rename_path"
-            | "create_dir" => !matches!(self, Self::ReadOnly),
-            "git_blame" => true,
-            "git_commit" | "git_restore" | "apply_edits" => !matches!(self, Self::ReadOnly),
-            "plan_set" | "plan_update" => true,
-            "verify_check" | "verify_test" => !matches!(self, Self::ReadOnly),
-            "run_program"
-            | "install_dependencies"
-            | "run_project_script"
-            | "stop_project_process" => matches!(self, Self::FullAccess | Self::Ask | Self::AutoReview)
-                || (cfg!(target_os = "linux") && matches!(self, Self::WorkspaceWrite)),
-            "browser_open"
-            | "browser_read"
-            | "browser_wait"
-            | "browser_diagnostics"
-            | "browser_fill"
-            | "browser_set_viewport"
-            | "browser_scroll"
-            | "browser_click"
-            | "browser_press_key"
-            | "browser_upload"
-            | "browser_screenshot" => matches!(self, Self::FullAccess | Self::Ask | Self::AutoReview),
-            "browser_close" => matches!(self, Self::FullAccess | Self::Ask | Self::AutoReview),
-            "generate_image" => true,
-            _ => true,
-        }
+        crate::tool_registry::ToolRegistry::allows_in_mode(name, self).unwrap_or(true)
     }
 }
 
@@ -1774,63 +1743,16 @@ pub(crate) fn local_tools(
     ban_run_command: bool,
 ) -> Vec<Value> {
     let definitions = crate::mcp::tool_definitions();
-    let allowed = [
-        "exec_command",
-        "write_stdin",
-        "kill_session",
-        "workspace_info",
-        "git_status",
-        "git_diff",
-        "git_log",
-        "install_dependencies",
-        "run_project_script",
-        "get_project_process",
-        "verify_check",
-        "verify_test",
-        "plan_set",
-        "plan_update",
-        "git_blame",
-        "git_commit",
-        "git_restore",
-        "apply_edits",
-        "http_probe",
-        "run_program",
-        "stop_project_process",
-        "browser_open",
-        "browser_read",
-        "browser_wait",
-        "browser_diagnostics",
-        "browser_fill",
-        "browser_set_viewport",
-        "browser_scroll",
-        "browser_click",
-        "browser_press_key",
-        "browser_upload",
-        "browser_screenshot",
-        "view_image",
-        "browser_close",
-        "list_dir",
-        "read_file",
-        "read_file_lines",
-        "read_file_chunk",
-        "search_text",
-        "write_file",
-        "replace_range",
-        "edit_file",
-        "delete_path",
-        "rename_path",
-        "create_dir",
-        "record_work_memory",
-        "list_work_memory",
-        "search_work_memory",
-        "record_architecture_memory",
-        "list_architecture_memory",
-        "search_architecture_memory",
-        "record_symbol_business_context",
-        "list_symbol_business_context",
-        "search_symbol_business_context",
-    ];
-    definitions.as_array().into_iter().flatten().filter(|tool| tool.get("name").and_then(Value::as_str).is_some_and(|n| (!ban_run_command || crate::shell_process::is_tool(n) || (n != "run_program" && !crate::project_process::is_execution(n))) && catalog.map_or(allowed.contains(&n), |catalog| catalog.contains(n) && !catalog.packages.declares_tool(n)))).map(|tool| {
+    definitions.as_array().into_iter().flatten().filter(|tool| {
+        tool.get("name").and_then(Value::as_str).is_some_and(|name| {
+            (!ban_run_command || crate::shell_process::is_tool(name)
+                || (name != "run_program" && !crate::project_process::is_execution(name)))
+                && match catalog {
+                    Some(catalog) => catalog.contains(name) && !catalog.packages.declares_tool(name),
+                    None => crate::tool_registry::ToolRegistry::is_in_local_fallback(name),
+                }
+        })
+    }).map(|tool| {
         let name=tool["name"].as_str().unwrap_or_default(); let mut description=tool["description"].as_str().unwrap_or_default().to_owned();
         let mut schema=tool.get("inputSchema").cloned().unwrap_or_else(||json!({"type":"object","properties":{}}));
         if let Some(props)=schema.get_mut("properties").and_then(Value::as_object_mut) {props.remove("workspace_root");}

@@ -16,6 +16,7 @@ use crate::{
     agent_service::AgentServiceState,
     ai_proxy::AiProxyConfig,
     plugin_runtime::{Plugin, PluginContext},
+    tool_registry::{CatalogKind, ToolRegistry},
     tools::Workspace,
 };
 
@@ -181,37 +182,13 @@ impl Plugin for ToolCatalogPlugin {
     }
 }
 
-pub(crate) const FILE_TOOLS: &[&str] = &[
-    "exec_command",
-    "write_stdin",
-    "kill_session",
-    "workspace_info",
-    "git_status",
-    "git_diff",
-    "git_log",
-    "list_dir",
-    "read_file",
-    "read_file_lines",
-    "read_file_chunk",
-    "search_text",
-    "write_file",
-    "replace_range",
-    "edit_file",
-    "delete_path",
-    "rename_path",
-    "create_dir",
-];
-const MEMORY_TOOLS: &[&str] = &[
-    "record_work_memory",
-    "list_work_memory",
-    "search_work_memory",
-    "record_architecture_memory",
-    "list_architecture_memory",
-    "search_architecture_memory",
-    "record_symbol_business_context",
-    "list_symbol_business_context",
-    "search_symbol_business_context",
-];
+pub(crate) const FILE_TOOLS: &[&str] = &ToolRegistry::catalog_names::<
+    { ToolRegistry::catalog_len(CatalogKind::File) },
+>(CatalogKind::File);
+const MEMORY_TOOLS: &[&str] = &ToolRegistry::catalog_names::<
+    { ToolRegistry::catalog_len(CatalogKind::Memory) },
+>(CatalogKind::Memory);
+
 fn register_tools(
     context: &PluginContext<'_>,
     names: &'static [&'static str],

@@ -104,7 +104,7 @@ fn touched(conn: &Connection, task: &str, turn: i64, before: Option<i64>) -> Res
             continue;
         };
         let list = match name.as_deref() {
-            Some("write_file" | "edit_file" | "replace_range" | "delete_path" | "rename_path" | "create_dir") => &mut changed,
+            Some(name) if crate::tool_registry::ToolRegistry::records_written_path(name) => &mut changed,
             Some("read_file" | "read_file_lines") => &mut read,
             _ => continue,
         };
@@ -308,6 +308,9 @@ fn outcome(name: &str, result: &Value, failed: bool) -> String {
     if let Some(reason) = result["termination_reason"].as_str() {
         return format!("停止：{reason}（执行未正常结束）");
     }
+    if let Some(label) = crate::tool_registry::ToolRegistry::write_summary_label(name) {
+        return label.into();
+    }
     let count = |key: &str| result[key].as_array().map(Vec::len);
     match name {
         "read_file" | "read_file_lines" => match result["content"].as_str() {
@@ -330,10 +333,6 @@ fn outcome(name: &str, result: &Value, failed: bool) -> String {
             }
         }
         "list_dir" => count("entries").map_or_else(|| "完成".into(), |entries| format!("{entries} 项")),
-        "write_file" | "edit_file" | "replace_range" => "已写入".into(),
-        "delete_path" => "已删除".into(),
-        "rename_path" => "已移动".into(),
-        "create_dir" => "已创建目录".into(),
         _ if result["exit_code"].is_number() => {
             let code = &result["exit_code"];
             let stream = if code == 0 { "stdout" } else { "stderr" };

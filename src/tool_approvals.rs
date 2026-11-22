@@ -32,26 +32,27 @@ fn open(root: &FsPath) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Tools that "ask" mode runs only after approval: exactly those that
-/// workspace-write mode would refuse, i.e. process execution and the browser.
+/// The static approval policy, plus platform rules for managed shell sessions
+/// and the dynamic workspace-write policy for package tools.
 pub fn needs_approval(
     mode: PermissionMode,
     name: &str,
     catalog: Option<&crate::builtin_plugins::ToolCatalog>,
     ban_execution: bool,
 ) -> bool {
+    let builtin_approval = crate::tool_registry::ToolRegistry::find(name)
+        .is_some_and(|spec| spec.needs_approval_in_ask);
+    let asks = matches!(mode, PermissionMode::Ask | PermissionMode::AutoReview);
     if crate::shell_process::is_tool(name) {
-        return name != "kill_session" && (
-            (cfg!(windows) && (ban_execution || !matches!(mode, PermissionMode::FullAccess)))
-            || (!cfg!(windows) && matches!(mode, PermissionMode::Ask | PermissionMode::AutoReview))
-        );
+        return builtin_approval && if cfg!(windows) {
+            ban_execution || mode != PermissionMode::FullAccess
+        } else {
+            asks
+        };
     }
-    matches!(mode, PermissionMode::Ask | PermissionMode::AutoReview)
-        && (crate::project_process::is_execution(name) || crate::verify_tools::is_tool(name) || crate::git_tools::mutates(name) || !(PermissionMode::WorkspaceWrite.allows(name)
-            && catalog.is_none_or(|c| {
-                c.packages
-                    .allows(name, PermissionMode::WorkspaceWrite, ban_execution)
-            })))
+    asks && (builtin_approval || catalog.is_some_and(|c| {
+        !c.packages.allows(name, PermissionMode::WorkspaceWrite, ban_execution)
+    }))
 }
 
 fn grant_scopes(task: &str, project: Option<&FsPath>) -> Vec<String> {

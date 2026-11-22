@@ -61,6 +61,7 @@ mod symbol_index_state;
 mod symbol_query;
 mod function_frames;
 mod tool_approvals;
+mod tool_registry;
 mod approval_review;
 mod tools;
 mod ts_index;

@@ -332,3 +332,155 @@ fn new_tool_contracts_cover_cross_layer_wiring() {
         }
     }
 }
+
+const MODES: [PermissionMode; 5] = [
+    PermissionMode::ReadOnly,
+    PermissionMode::WorkspaceWrite,
+    PermissionMode::Ask,
+    PermissionMode::AutoReview,
+    PermissionMode::FullAccess,
+];
+
+// Stage 1 baseline, independent of the registry and the production classifiers.
+const LEGACY_FILE_WRITES: &[&str] = &[
+    "write_file",
+    "replace_range",
+    "edit_file",
+    "delete_path",
+    "rename_path",
+    "create_dir",
+];
+const LEGACY_GIT_WRITES: &[&str] = &["git_commit", "git_restore"];
+const LEGACY_VERIFY: &[&str] = &["verify_check", "verify_test"];
+const LEGACY_PROCESS_EXECUTION: &[&str] = &[
+    "run_program",
+    "install_dependencies",
+    "run_project_script",
+    "stop_project_process",
+];
+const LEGACY_BROWSER: &[&str] = &[
+    "browser_open",
+    "browser_read",
+    "browser_wait",
+    "browser_diagnostics",
+    "browser_fill",
+    "browser_set_viewport",
+    "browser_scroll",
+    "browser_click",
+    "browser_press_key",
+    "browser_upload",
+    "browser_screenshot",
+    "browser_close",
+];
+
+#[test]
+fn builtin_permissions_approvals_and_tracking_match_legacy_behavior() {
+    use crate::{tool_approvals::needs_approval, tool_registry::ToolRegistry};
+    use PermissionMode::*;
+
+    let (_dir, _runtime, _workspace, catalog) = catalog();
+    for spec in ToolRegistry::all() {
+        let name = spec.name;
+        let file_write = LEGACY_FILE_WRITES.contains(&name);
+        let git_write = LEGACY_GIT_WRITES.contains(&name);
+        let verify = LEGACY_VERIFY.contains(&name);
+        let project_execution = LEGACY_PROCESS_EXECUTION.contains(&name);
+        let browser = LEGACY_BROWSER.contains(&name);
+        let batch_edit = name == "apply_edits";
+        let tracked = file_write
+            || git_write
+            || verify
+            || batch_edit
+            || (project_execution && name != "stop_project_process");
+        assert_eq!(spec.tracks_mutation, tracked, "{name}: registry tracking");
+        assert_eq!(
+            crate::workspace_changes::is_mutation(name),
+            tracked,
+            "{name}: tracking"
+        );
+
+        for mode in MODES {
+            let asks = matches!(mode, Ask | AutoReview);
+            let interactive = asks || mode == FullAccess;
+            let allowed = if file_write || git_write || verify || batch_edit {
+                mode != ReadOnly
+            } else if project_execution {
+                interactive || (cfg!(target_os = "linux") && mode == WorkspaceWrite)
+            } else if browser {
+                interactive
+            } else {
+                true
+            };
+            assert_eq!(mode.allows(name), allowed, "{name}: {mode:?} permission");
+
+            for ban_execution in [false, true] {
+                // The name-only check is used after the caller exempts empty stdin.
+                let approval = match name {
+                    "kill_session" => false,
+                    "exec_command" | "write_stdin" if cfg!(windows) => {
+                        ban_execution || mode != FullAccess
+                    }
+                    "exec_command" | "write_stdin" => asks,
+                    _ => asks && (project_execution || browser || verify || git_write),
+                };
+                for catalog in [None, Some(catalog.as_ref())] {
+                    assert_eq!(
+                        needs_approval(mode, name, catalog, ban_execution),
+                        approval,
+                        "{name}: {mode:?}, ban_execution={ban_execution}, catalog={}",
+                        catalog.is_some(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn package_tools_still_use_dynamic_approval_policy() {
+    use crate::{
+        plugin_runtime::{Plugin, PluginContext},
+        skill_packages::PackagePlugin,
+        tool_approvals::needs_approval,
+        tool_registry::ToolRegistry,
+    };
+    use PermissionMode::*;
+
+    struct PackageServices(Arc<ToolCatalog>);
+    impl Plugin for PackageServices {
+        fn id(&self) -> &str {
+            "test-package-services"
+        }
+        fn start(&self, ctx: &PluginContext<'_>) -> anyhow::Result<()> {
+            ctx.provide("tools", self.0.clone())?;
+            ctx.provide("skill-packages", self.0.packages.clone())
+        }
+    }
+
+    let runtime = PluginRuntime::new();
+    let catalog = Arc::new(ToolCatalog::default());
+    let scope = runtime
+        .mount(ROOT, PackageServices(catalog.clone()))
+        .unwrap();
+    runtime
+        .mount(
+            scope,
+            PackagePlugin(crate::builtin_plugins::git::package().unwrap()),
+        )
+        .unwrap();
+
+    for name in ["read_git", "sync_git"] {
+        assert!(ToolRegistry::find(name).is_none());
+        assert!(catalog.packages.declares_tool(name));
+        for mode in MODES {
+            assert!(mode.allows(name), "{name}: dynamic permission is separate");
+            assert!(!needs_approval(mode, name, None, false));
+            assert_eq!(
+                needs_approval(mode, name, Some(&catalog), false),
+                name == "sync_git" && matches!(mode, Ask | AutoReview),
+                "{name}: {mode:?}",
+            );
+        }
+    }
+    runtime.shutdown().unwrap();
+}
