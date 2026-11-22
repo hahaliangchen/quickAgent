@@ -5,6 +5,7 @@ import { requestNotificationPermission, useTaskNotifications } from './useTaskNo
 import type { PermissionMode } from './api'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { acceptsPrompt, type AgentInfo, type SettingsData, type Task, type Project } from './api.ts'
+import { defaultsPayload, generationLocked, type GenerationDefaults } from './generationDefaults.ts'
 import { useChatPermissionMode } from './permissionMode.ts'
 import { useAgentApi } from './cordis/react.tsx'
 import { t } from './i18n.ts'
@@ -214,6 +215,27 @@ export function useAgentWorkspace() {
     refreshInfoAndSettings()
   }, [refreshInfoAndSettings, taskId])
 
+  // A pick has to hold for the next chat as well, so every pick rewrites the saved
+  // defaults. Two writers can interleave here (the settings form, the shell path,
+  // another tab) and the server refuses a save whose revision has moved on, so a
+  // refused save rebases on the document it found and retries once instead of
+  // leaving the pick half applied.
+  const persistDefaults = useCallback(async (defaults: GenerationDefaults): Promise<void> => {
+    const write = async (base: SettingsData): Promise<SettingsData> =>
+      api.saveSettings(defaultsPayload(base, defaults))
+    let updated: SettingsData
+    try {
+      updated = await write(settings ?? await api.getSettings())
+    } catch (refused) {
+      const fresh = await api.getSettings()
+      // Only a document that actually moved on is worth a second attempt.
+      if (fresh.revision === settings?.revision) throw refused
+      updated = await write(fresh)
+    }
+    setSettings(updated)
+    setInfo(await api.info())
+  }, [api, settings])
+
   const selectModel = useCallback(async (providerId: string, modelId: string): Promise<void> => {
     setSelectedModelOverride(modelId)
     setSelectedProviderOverride(providerId)
@@ -224,7 +246,11 @@ export function useAgentWorkspace() {
       setSelectedEffortOverride(defaultEffort || null)
       setSelectedFastModeOverride(false)
 
-      if (taskId !== undefined) {
+      // The open chat keeps the pick for its own next message, and that message
+      // carries the model anyway, so a chat that is still turning is left alone:
+      // the server rejects a mid-turn switch, and that rejection used to skip the
+      // save below — which is what stranded every new chat on an older model.
+      if (taskId !== undefined && !generationLocked(task?.status)) {
         await api.updateTask(taskId, {
           model: modelId,
           provider: providerId,
@@ -235,63 +261,32 @@ export function useAgentWorkspace() {
         refreshTasks()
       }
 
-      const updated = await api.saveSettings({
-        revision: latest.revision,
-        providers: latest.providers.map(p => ({
-          id: p.id,
-          display_name: p.display_name ?? null,
-          url: p.url,
-          api_type: p.api_type,
-          models: p.models,
-          model_capabilities: p.model_capabilities,
-        })),
-        orchestrator_provider: providerId,
-        orchestrator_model: modelId,
-        reasoning_effort: defaultEffort,
-        fast_mode: false,
-      })
-      setSettings(updated)
-      const latestInfo = await api.info()
-      setInfo(latestInfo)
+      await persistDefaults({ provider: providerId, model: modelId, reasoning_effort: defaultEffort, fast_mode: false })
       setNotice(undefined)
     } catch (cause) {
       setNotice(messageOf(cause))
     }
-  }, [api, refreshTasks, session.reload, settings, taskId])
+  }, [api, persistDefaults, refreshTasks, session.reload, settings, task?.status, taskId])
 
   const setGenerationOptions = useCallback(async (reasoningEffort: string, fastMode: boolean): Promise<void> => {
     setSelectedEffortOverride(reasoningEffort || null)
     setSelectedFastModeOverride(fastMode)
     try {
-      if (taskId !== undefined) {
+      // Same reason one level down: a running chat refuses a level change, and
+      // that refusal must not cost the levels their saved default either.
+      if (taskId !== undefined && !generationLocked(task?.status)) {
         await api.updateTask(taskId, {
           reasoning_effort: reasoningEffort || null,
           fast_mode: fastMode,
         })
         session.reload()
       }
-      const latest = settings ?? await api.getSettings()
-      const updated = await api.saveSettings({
-        revision: latest.revision,
-        providers: latest.providers.map(p => ({
-          id: p.id,
-          display_name: p.display_name ?? null,
-          url: p.url,
-          api_type: p.api_type,
-          models: p.models,
-          model_capabilities: p.model_capabilities,
-        })),
-        orchestrator_provider: latest.orchestrator_provider,
-        orchestrator_model: latest.orchestrator_model,
-        reasoning_effort: reasoningEffort,
-        fast_mode: fastMode,
-      })
-      setSettings(updated)
+      await persistDefaults({ reasoning_effort: reasoningEffort, fast_mode: fastMode })
       setNotice(undefined)
     } catch (cause) {
       setNotice(messageOf(cause))
     }
-  }, [api, session.reload, settings, taskId])
+  }, [api, persistDefaults, session.reload, task?.status, taskId])
 
   const tasks = allTasks.filter(item => item.parent_task_id === null)
   const ready = info?.ready === true

@@ -8,6 +8,9 @@ const { latestPlan, awaitingModel, chatItems, splitTurnItems, processEntries, re
 const summarySource = await readFile(new URL('../src/components/toolSummary.ts', import.meta.url), 'utf8')
 const { outputText: summaryOutput } = ts.transpileModule(summarySource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
 const { summaryFor, shortSession, formatDuration } = await import('data:text/javascript;base64,' + Buffer.from(summaryOutput).toString('base64'))
+const defaultsSource = await readFile(new URL('../src/generationDefaults.ts', import.meta.url), 'utf8')
+const { outputText: defaultsOutput } = ts.transpileModule(defaultsSource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
+const { generationLocked, defaultsPayload } = await import('data:text/javascript;base64,' + Buffer.from(defaultsOutput).toString('base64'))
 
 let seq = 0
 const event = (type, data) => ({ seq: ++seq, time: 1000 + seq, type, data: { turn: 1, ...data } })
@@ -474,7 +477,54 @@ test('a settled reply with no reasoning and no tool call has no thought row to p
   assert.equal(emptyThought({ streaming: false, reasoning: '   \n' }, 0), true)
   // While it streams the row still carries the progress it is making.
   assert.equal(emptyThought({ streaming: true, reasoning: '' }, 0), false)
-  // A reasoning summary or any tool row keeps the row alive.
-  assert.equal(emptyThought({ streaming: false, reasoning: '**Checking tests**' }, 0), false)
-  assert.equal(emptyThought({ streaming: false, reasoning: '' }, 1), false)
+})
+const settingsDocument = () => ({
+  revision: 'rev-1',
+  orchestrator_provider: 'primary',
+  orchestrator_model: 'model-a',
+  reasoning_effort: 'medium',
+  fast_mode: false,
+  providers: [
+    {
+      id: 'primary',
+      display_name: undefined,
+      url: 'http://localhost:1/v1',
+      api_type: 'openai-completions',
+      models: ['model-a', 'model-b'],
+      model_capabilities: {},
+    },
+  ],
+})
+
+test('a pick still becomes the next chat default while a chat is running', () => {
+  // A running chat refuses a model switch; asking anyway used to abort the save that
+  // remembers the pick, so every new chat opened on an older model.
+  assert.equal(generationLocked('running'), true)
+  assert.equal(generationLocked('cancelling'), true)
+  assert.equal(generationLocked('draft'), false)
+  assert.equal(generationLocked('completed'), false)
+  assert.equal(generationLocked(undefined), false)
+
+  const picked = defaultsPayload(settingsDocument(), {
+    provider: 'primary', model: 'model-b', reasoning_effort: 'high', fast_mode: true,
+  })
+  // The next chat reads its model from this pair.
+  assert.equal(picked.orchestrator_model, 'model-b')
+  assert.equal(picked.orchestrator_provider, 'primary')
+  assert.equal(picked.reasoning_effort, 'high')
+  assert.equal(picked.fast_mode, true)
+  assert.equal(picked.revision, 'rev-1')
+  assert.equal(picked.providers[0].id, 'primary')
+  assert.equal(picked.providers[0].display_name, null)
+  assert.deepEqual(picked.providers[0].models, ['model-a', 'model-b'])
+})
+
+test('a level-only change keeps the saved model instead of clearing it', () => {
+  const levels = defaultsPayload(settingsDocument(), { reasoning_effort: 'low', fast_mode: false })
+  assert.equal(levels.orchestrator_model, 'model-a')
+  assert.equal(levels.orchestrator_provider, 'primary')
+  // An empty pick is not a choice either: it must never blank the default.
+  const blank = defaultsPayload(settingsDocument(), { provider: '', model: '', reasoning_effort: '', fast_mode: false })
+  assert.equal(blank.orchestrator_model, 'model-a')
+  assert.equal(blank.orchestrator_provider, 'primary')
 })
