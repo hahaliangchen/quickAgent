@@ -74,6 +74,8 @@
 .summarySuffix {
   flex: none;
   margin-left: auto;
+  /* Keep at least one gap from the exit status the row shows just before it. */
+  padding-left: 8px;
   white-space: nowrap;
   font-size: 12px;
   line-height: calc(24px + var(--dsh-content-font-delta, 0px));

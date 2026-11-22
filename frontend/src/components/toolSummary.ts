@@ -6,13 +6,26 @@ const count = (value: unknown): number => Array.isArray(value) ? value.length : 
 /** Host node IDs are long hashes; the leading characters are enough to tell them apart. */
 const shortNode = (value: unknown): string =>
   text(value) === 'n0' ? '主任务' : `子任务 ${text(value).slice(0, 7)}`
+/** A shell session ID is a 38-character `shell_<uuid>`; the collapsed row only needs its head. */
+export const shortSession = (value: unknown): string => {
+  const raw = text(value)
+  const match = /^shell_([0-9a-f]+)$/i.exec(raw)
+  return match?.[1] === undefined ? raw : `shell_${match[1].slice(0, 6)}`
+}
 
-/** A polled session that has already returned an exit code is not still waiting. */
-function settled(result: unknown): boolean {
-  if (typeof result !== 'object' || result === null) return false
+/** Durations past a second read better as seconds than as five raw digits beside the exit code. */
+export const formatDuration = (ms: number): string =>
+  ms >= 1000 ? `${Number((ms / 1000).toFixed(1))} s` : `${ms} ms`
+
+/** A polled session that reported an exit code, a stop reason, an error text or a stop is not still waiting. */
+function settled(result: unknown, stopped: boolean): boolean {
+  if (stopped) return true
+  if (result === undefined) return false
+  // A plain error string is a finished call, never a live poll.
+  if (typeof result !== 'object' || result === null) return true
   const record = result as Record<string, unknown>
-  if (record.running === true) return false
-  return record.running === false || typeof record.exit_code === 'number'
+  if (typeof record.exit_code === 'number' || typeof record.termination_reason === 'string') return true
+  return record.running === false
 }
 
 /**
@@ -21,9 +34,10 @@ function settled(result: unknown): boolean {
  * @param name - the host tool name.
  * @param args - its parsed arguments.
  * @param result - its parsed result when the call has settled.
+ * @param options.stopped - the turn ended without this call producing a result.
  * @returns the summary, or undefined when the row's generic argument summary fits.
  */
-export function summaryFor(name: string, args: Record<string, unknown>, result?: unknown): string | undefined {
+export function summaryFor(name: string, args: Record<string, unknown>, result?: unknown, options?: { stopped?: boolean }): string | undefined {
   switch (name) {
     case 'web__search': return text(args.query)
     case 'web__fetch': return `${args.cursor ? '续读 · ' : ''}${text(args.url)}`
@@ -51,11 +65,11 @@ export function summaryFor(name: string, args: Record<string, unknown>, result?:
     // A finished session is reported by the right-hand exit status; calling it
     // "waiting for output" beside that status contradicts it.
     case 'write_stdin': {
-      const session = String(args.session_id ?? '未知')
       const typed = typeof args.chars === 'string' && args.chars.length > 0 ? JSON.stringify(args.chars) : undefined
-      return `会话 ${session} · ${typed ?? (settled(result) ? '拉取输出' : '等待输出')}`
+      const outcome = settled(result, options?.stopped === true) ? '拉取输出' : '等待输出'
+      return `会话 ${shortSession(args.session_id)} · ${typed ?? outcome}`
     }
-    case 'kill_session': return `会话 ${String(args.session_id ?? '未知')}`
+    case 'kill_session': return `会话 ${shortSession(args.session_id)}`
     case 'create_task': return [text(args.goal), text(args.reason) && `原因：${text(args.reason)}`].filter(Boolean).join(' · ')
     case 'create_step': return [text(args.result) && `完成：${text(args.result)}`, text(args.next) && `下一步：${text(args.next)}`].filter(Boolean).join(' · ')
     case 'handoff_step': {

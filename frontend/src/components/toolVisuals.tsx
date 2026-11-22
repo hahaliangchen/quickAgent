@@ -167,8 +167,9 @@ function fallback(name: string): Omit<ToolVisual, 'summary'> {
 
 /** Icon, colour family, Chinese action title and summary for one tool call.
  * `result` is the parsed tool output when available: a return from the root
- * node (n0) finishes the main task rather than a subtask. */
-export function toolVisual(name: string, args: unknown, result?: unknown): ToolVisual {
+ * node (n0) finishes the main task rather than a subtask. `options.stopped` marks
+ * a call whose turn ended without ever producing a result. */
+export function toolVisual(name: string, args: unknown, result?: unknown, options?: { stopped?: boolean }): ToolVisual {
   const record = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {}
   let base = name === 'return_task'
     ? RETURNS[text(record.status)] ?? { tone: 'task', icon: <ReturnIcon />, title: '返回了结果' }
@@ -180,5 +181,5 @@ export function toolVisual(name: string, args: unknown, result?: unknown): ToolV
   if (name === 'write_stdin' && (typeof record.chars !== 'string' || record.chars.length === 0)) {
     base = { ...base, title: '读取了命令输出' }
   }
-  return { ...base, summary: summaryFor(name, record, result) }
+  return { ...base, summary: summaryFor(name, record, result, options) }
 }

@@ -8,7 +8,7 @@ import toolCss from '../dsh/tool/ToolRow.module.css'
 import { markdownLabels } from '../dsh/markdown-labels.ts'
 import { t } from '../i18n.ts'
 import {
-  PROGRAM_FENCE, contractSummary, processEntries, reasoningHeadline, runningCallState,
+  PROGRAM_FENCE, contractSummary, emptyThought, processEntries, reasoningHeadline, runningCallState,
   type AssistantItem, type CallItem, type ChatItem, type ExecutionPlan, type ProgramItem, type ToolItem,
 } from '../model.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
@@ -150,6 +150,9 @@ const Thought = memo(function Thought({ reply, tools, closed, onOpenTask }: {
 }) {
   const { expanded, toggle } = useDisclosure()
   const labels = useMemo(() => markdownLabels(t), [])
+  // The model can answer with a bare run_js call and no reasoning summary at all;
+  // a settled reply like that would otherwise paint an empty "思考" row.
+  if (emptyThought(reply, tools.length)) return null
   const running = reply.streaming || (!closed && tools.some(tool => tool.result === undefined))
   const failed = tools.some(tool => tool.result?.isError === true)
   const headline = reasoningHeadline(reply.reasoning)

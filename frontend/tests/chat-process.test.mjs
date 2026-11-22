@@ -4,10 +4,10 @@ import test from 'node:test'
 import ts from 'typescript'
 const source = await readFile(new URL('../src/model.ts', import.meta.url), 'utf8')
 const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
-const { latestPlan, awaitingModel, chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState, cleanToolError } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
+const { latestPlan, awaitingModel, chatItems, splitTurnItems, processEntries, reasoningHeadline, flattenItems, failedToolNames, runningCallState, cleanToolError, emptyThought } = await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
 const summarySource = await readFile(new URL('../src/components/toolSummary.ts', import.meta.url), 'utf8')
 const { outputText: summaryOutput } = ts.transpileModule(summarySource, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2024 } })
-const { summaryFor } = await import('data:text/javascript;base64,' + Buffer.from(summaryOutput).toString('base64'))
+const { summaryFor, shortSession, formatDuration } = await import('data:text/javascript;base64,' + Buffer.from(summaryOutput).toString('base64'))
 
 let seq = 0
 const event = (type, data) => ({ seq: ++seq, time: 1000 + seq, type, data: { turn: 1, ...data } })
@@ -418,4 +418,45 @@ test('git and batch summaries distinguish edits, file ranges and index restore',
   assert.equal(summaryFor('git_commit', { paths: ['foo.rs'], message: 'Change' }), '1 个文件 · Change')
   assert.equal(summaryFor('git_restore', { paths: ['foo.rs'], staged: true }), '1 个文件 · 暂存区')
   assert.equal(summaryFor('apply_edits', { files: [{ path: 'foo.rs' }], atomic: false }), '1 个文件 · 逐文件尝试')
+})
+
+test('a 38-character shell session id is shortened in the collapsed row', () => {
+  const id = 'shell_63eaa1bbb0dd2b4d900f6cded63b5694'
+  assert.equal(shortSession(id), 'shell_63eaa1')
+  // Anything that is not a shell session id is left exactly as the host sent it.
+  assert.equal(shortSession('s1'), 's1')
+  assert.equal(shortSession(undefined), '')
+  assert.equal(summaryFor('write_stdin', { session_id: id, chars: '' }, { session_id: id, running: false, exit_code: 0 }), '会话 shell_63eaa1 · 拉取输出')
+  assert.equal(summaryFor('kill_session', { session_id: id }), '会话 shell_63eaa1')
+})
+
+test('an ended or failed write_stdin row never falls back to 等待输出', () => {
+  const id = 'shell_63eaa1bbb0dd2b4d900f6cded63b5694'
+  const polled = result => summaryFor('write_stdin', { session_id: id, chars: '' }, result)
+  // shell/end settled the session with a stop reason but no exit code.
+  assert.equal(polled({ session_id: id, running: false, termination_reason: 'process_exit' }), '会话 shell_63eaa1 · 拉取输出')
+  // A stale running flag must not outvote the exit code shell/end wrote in.
+  assert.equal(polled({ session_id: id, running: true, exit_code: 9 }), '会话 shell_63eaa1 · 拉取输出')
+  // The call failed outright: its error text is a finished call, not a live poll.
+  assert.equal(polled('failed to write stdin: session gone'), '会话 shell_63eaa1 · 拉取输出')
+  // The turn stopped before any result arrived, so nothing is pending any more.
+  assert.equal(summaryFor('write_stdin', { session_id: id, chars: '' }, undefined, { stopped: true }), '会话 shell_63eaa1 · 拉取输出')
+  // Only a provably running session keeps the waiting label.
+  assert.equal(polled({ session_id: id, running: true }), '会话 shell_63eaa1 · 等待输出')
+})
+
+test('a long duration reads as seconds instead of a raw millisecond run', () => {
+  assert.equal(formatDuration(31_151), '31.2 s')
+  assert.equal(formatDuration(2_000), '2 s')
+  assert.equal(formatDuration(999), '999 ms')
+})
+
+test('a settled reply with no reasoning and no tool call has no thought row to paint', () => {
+  assert.equal(emptyThought({ streaming: false, reasoning: '' }, 0), true)
+  assert.equal(emptyThought({ streaming: false, reasoning: '   \n' }, 0), true)
+  // While it streams the row still carries the progress it is making.
+  assert.equal(emptyThought({ streaming: true, reasoning: '' }, 0), false)
+  // A reasoning summary or any tool row keeps the row alive.
+  assert.equal(emptyThought({ streaming: false, reasoning: '**Checking tests**' }, 0), false)
+  assert.equal(emptyThought({ streaming: false, reasoning: '' }, 1), false)
 })

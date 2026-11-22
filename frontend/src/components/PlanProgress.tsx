@@ -8,13 +8,13 @@ const labels: Record<PlanStatus, string> = {
   pending: '待开始', in_progress: '进行中', done: '完成', blocked: '受阻',
 }
 
-export function PlanProgress({ events }: { events: readonly AgentEvent[] }) {
+export function PlanProgress({ events, variant = 'inline' }: { events: readonly AgentEvent[]; variant?: 'inline' | 'dock' }) {
   const plan = useMemo(() => latestPlan(events), [events])
   if (!plan || plan.steps.length === 0) return null
   const { steps, completed } = plan
   const active = steps.find(step => step.status === 'blocked') ?? steps.find(step => step.status === 'in_progress')
   return (
-    <details className={styles.plan}>
+    <details className={variant === 'dock' ? `${styles.plan} ${styles.dock}` : styles.plan}>
       <summary className={styles.summary}>
         <IconChevronRightOutlineRegular className={styles.chevron} aria-hidden />
         <span className={styles.label}>任务计划</span>

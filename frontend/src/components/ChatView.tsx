@@ -13,7 +13,6 @@ import {
 import { useAgentApi } from '../cordis/react.tsx'
 import type { AgentEvent, Task, ChangesSummary } from '../api.ts'
 import { changeSummaries } from '../changes.ts'
-import { PlanProgress } from './PlanProgress.tsx'
 import { ChangesCard } from './ChangesCard.tsx'
 import chatCss from '../dsh/chat/ChatView.module.css'
 import actionsCss from '../dsh/chat/MessageIconActions.module.css'
@@ -480,7 +479,6 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated }
       <div className={chatCss.root}>
         <div className={chatCss.scroll}>
           <div className={chatCss.column}>
-            <PlanProgress key={task?.task_id} events={events} />
             {acceptancePhase && <div className={chatCss.hint} role="status">{acceptancePhase}</div>}
             {items.length === 0 && !thinking && <div className={chatCss.hint}>{t('app.waiting')}</div>}
 

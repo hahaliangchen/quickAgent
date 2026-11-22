@@ -1,6 +1,7 @@
 .plan {
   --plan-ink: #283533;
   --plan-muted: #52635e;
+  --plan-surface: rgba(250, 250, 248, 0.96);
   --plan-hairline: #d8e0db;
   --plan-track: #e5eae6;
   --plan-done: #286653;
@@ -14,9 +15,21 @@
   line-height: 1.4;
 }
 
+.dock {
+  width: calc(100% - 2 * var(--dsh-composer-side-clearance, 20px));
+  max-width: calc(var(--dsh-chat-content-width, 760px) + 16px);
+  margin: 0 auto 6px;
+  padding: 4px 12px 8px;
+  background: var(--plan-surface);
+  border: 1px solid var(--plan-hairline);
+  border-radius: 10px;
+  backdrop-filter: blur(8px);
+}
+
 :global(body[data-ds-dark-theme]) .plan {
   --plan-ink: #e2eae5;
   --plan-muted: #aebdb6;
+  --plan-surface: rgba(26, 29, 28, 0.94);
   --plan-hairline: #3d4844;
   --plan-track: #313e39;
   --plan-done: #8ac4ad;
@@ -45,6 +58,7 @@
 .progress::-webkit-progress-value { background: var(--plan-done); }
 .progress::-moz-progress-bar { background: var(--plan-done); }
 .steps { padding: 5px 0 0; margin: 0; list-style: none; }
+.dock .steps { max-height: 220px; overflow-y: auto; }
 .step { display: grid; grid-template-columns: 4em minmax(0, 1fr); gap: 8px; padding: 5px 2px 2px; }
 .status, .note { color: var(--plan-muted); }
 .detail { overflow-wrap: anywhere; }

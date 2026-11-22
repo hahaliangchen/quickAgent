@@ -204,6 +204,11 @@ export function reasoningHeadline(reasoning: string): string {
   return line.length > 120 ? `${line.slice(0, 119)}…` : line
 }
 
+/** A finished reply with no reasoning summary and no tool call has nothing left to show. */
+export function emptyThought(reply: { streaming: boolean; reasoning: string }, toolCount: number): boolean {
+  return !reply.streaming && reply.reasoning.trim() === '' && toolCount === 0
+}
+
 /** What a function's contract says it is for: its first line of prose, not a JSDoc tag. */
 export function contractSummary(description: string): string {
   return description.split(/\r?\n/).map(line => line.trim()).find(line => line !== '' && !line.startsWith('@')) ?? ''

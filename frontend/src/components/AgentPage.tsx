@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetSta
 import clsx from 'clsx'
 import { BrandMark } from './BrandMark.tsx'
 import { prefillComposer } from './RewindControl.tsx'
+import { PlanProgress } from './PlanProgress.tsx'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
 import { latestContextUsage } from './contextUsage.ts'
 import { SkillPagesView } from './SkillPagesView.tsx'
@@ -309,6 +310,7 @@ export function ConversationPage({
             </div>
           </div>
           <div className={root.composerSeat}>
+            {tab === 'chat' && <PlanProgress key={workspace.taskId ?? 'plan'} events={session.events} variant="dock" />}
             {isChild
               ? (
                   <div className={readonlyCss.frame}>

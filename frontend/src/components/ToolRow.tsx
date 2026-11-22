@@ -22,6 +22,7 @@ import { cleanToolError, type ToolResult } from '../model.ts'
 import { visualEvidenceOf } from '../visual.ts'
 import { useConversationTaskId } from './ConversationTask.tsx'
 import { VisualEvidenceStrip } from './VisualEvidenceStrip.tsx'
+import { formatDuration } from './toolSummary.ts'
 import { toolVisual } from './toolVisuals.tsx'
 
 const SUMMARY_FIELDS = ['path', 'file_path', 'TargetFile', 'AbsolutePath', 'query', 'pattern', 'cmd', 'command', 'CommandLine', 'program', 'symbol', 'symbol_id', 'name', 'prompt', 'area']
@@ -200,9 +201,13 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
 }) {
   const { expanded, toggle } = useDisclosure()
   const args = useMemo(() => parse(rawArguments), [rawArguments])
-  const visual = useMemo(() => toolVisual(name, args, result && !result.isError ? parse(result.text) : undefined), [name, args, result])
   const isShellSession = name === 'exec_command' || name === 'write_stdin' || name === 'kill_session' || name === 'run_readonly_command'
-  const shellParsed = isShellSession && result ? parse(result.text) : undefined
+  // A shell result reports the session state even when the call is an error, so the
+  // row can show the real exit code instead of falling back to "waiting for output".
+  const parsedResult = useMemo(() => (result === undefined ? undefined : parse(result.text)), [result])
+  const visualResult = result?.isError === true && !isShellSession ? undefined : parsedResult
+  const visual = useMemo(() => toolVisual(name, args, visualResult, { stopped }), [name, args, visualResult, stopped])
+  const shellParsed = isShellSession ? parsedResult : undefined
   const shellResult = typeof shellParsed === 'object' && shellParsed !== null && !Array.isArray(shellParsed)
     ? shellParsed as Record<string, unknown> : undefined
   const shellExitCode = typeof shellResult?.exit_code === 'number' ? shellResult.exit_code : null
@@ -246,7 +251,7 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
   const ownSummary = name === 'run_program' ? nativeSummary : errorLine !== '' ? errorLine : visual.summary ?? summaryOf(args)
   const summaryText = line === undefined ? ownSummary : [`第 ${line} 行`, ownSummary].filter(Boolean).join(' · ')
   const durationMs = result?.durationMs ?? (typeof shellResult?.duration_ms === 'number' ? shellResult.duration_ms : undefined)
-  const duration = durationMs === undefined ? null : `${durationMs} ms`
+  const duration = durationMs === undefined ? null : formatDuration(durationMs)
 
   const diffs = useMemo(() => extractDiffHunks(name, args, result), [name, args, result])
   const diffStats = useMemo(() => (diffs ? diffTotals(diffs) : undefined), [diffs])
@@ -332,7 +337,12 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
           {diffStats.removed > 0 && <span className={css.diffDel}>-{diffStats.removed}</span>}
         </span>
       )}
-      {duration !== null && state !== 'error' && <span className={css.summarySuffix}>{duration}</span>}
+      {duration !== null && state !== 'error' && (
+        <>
+          {isShellSession && <span className={css.sep} aria-hidden>·</span>}
+          <span className={css.summarySuffix}>{duration}</span>
+        </>
+      )}
     </>
   )
 
