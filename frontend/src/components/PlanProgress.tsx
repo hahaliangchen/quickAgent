@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import type { ReactNode } from 'react'
-import { IconChevronRightOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AgentEvent } from '../api.ts'
 import { latestPlan, type PlanStatus } from '../model.ts'
 import styles from './PlanProgress.module.css'
@@ -12,80 +12,162 @@ const labels: Record<PlanStatus, string> = {
   blocked: '受阻',
 }
 
-/**
- * One state glyph per step. The word 完成 repeated on six rows turned the list
- * into a column of identical text; a filled check disc says the same thing in
- * six pixels and lets the eye land on the step that is still running.
- */
+const RING_RADIUS = 10
+const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS
+
+/** Crisp circular SVG progress indicator with centered percentage or completion check. */
+function ProgressRing({ percent, done, blocked }: {
+  readonly percent: number
+  readonly done: boolean
+  readonly blocked: boolean
+}): ReactNode {
+  const clamped = Math.max(0, Math.min(100, percent))
+  const offset = RING_CIRCUMFERENCE * (1 - clamped / 100)
+  return (
+    <span
+      className={styles.ring}
+      data-done={done ? 'true' : undefined}
+      data-blocked={blocked ? 'true' : undefined}
+      aria-hidden="true"
+    >
+      <svg className={styles.ringSvg} viewBox="0 0 24 24" fill="none">
+        <circle className={styles.ringTrack} cx="12" cy="12" r={RING_RADIUS} />
+        <circle
+          className={styles.ringArc}
+          cx="12"
+          cy="12"
+          r={RING_RADIUS}
+          strokeDasharray={RING_CIRCUMFERENCE}
+          strokeDashoffset={offset}
+        />
+      </svg>
+      {done
+        ? (
+            <svg className={styles.ringCheck} viewBox="0 0 12 12" fill="none">
+              <path d="M2.6 6.2 4.9 8.5 9.4 3.6" />
+            </svg>
+          )
+        : <span className={styles.ringPct}>{clamped}%</span>}
+    </span>
+  )
+}
+
+/** Step status node sitting on the left vertical timeline rail (matte, no glow). */
 function StepGlyph({ status }: { status: PlanStatus }): ReactNode {
   if (status === 'done') {
     return (
-      <svg className={styles.mark} viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        <circle cx="8" cy="8" r="7" className={styles.disc} />
-        <path className={styles.tick} d="M4.7 8.15 6.85 10.3 11.35 5.6" />
+      <svg className={styles.doneIcon} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="7" className={styles.doneDisc} />
+        <path className={styles.doneTick} d="M4.8 8.2 6.9 10.3 11.3 5.7" />
       </svg>
     )
   }
-  return <span className={styles.glyph} data-status={status} aria-hidden="true" />
-}
-
-/** Compact summary line: the header answers "how far" and "what now" at a glance. */
-function SummaryState({ blocked, running, settled }: {
-  readonly blocked: { title: string } | undefined
-  readonly running: { title: string } | undefined
-  readonly settled: boolean
-}): ReactNode {
-  const head = blocked ?? running
-  if (head !== undefined) {
-    const status: PlanStatus = blocked === undefined ? 'in_progress' : 'blocked'
+  if (status === 'in_progress') {
     return (
-      <span className={styles.state} data-status={status}>
-        <span className={styles.dot} aria-hidden="true" />
-        <span className={styles.stateText}>{labels[status]}：{head.title}</span>
+      <svg className={styles.activeIcon} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="6" className={styles.activeTrack} />
+        <circle cx="8" cy="8" r="6" className={styles.activeArc} />
+      </svg>
+    )
+  }
+  if (status === 'blocked') {
+    return (
+      <span className={styles.blockedNode} aria-hidden="true">
+        <span className={styles.blockedCore} />
       </span>
     )
   }
-  if (!settled) return null
-  return (
-    <span className={styles.settled}>
-      <svg className={styles.settledMark} viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        <path d="M3.4 8.4 6.6 11.6 12.8 4.9" />
-      </svg>
-      已全部完成
-    </span>
-  )
+  return <span className={styles.pendingNode} aria-hidden="true" />
 }
 
 export function PlanProgress({ events, variant = 'inline' }: { events: readonly AgentEvent[]; variant?: 'inline' | 'dock' }) {
   const plan = useMemo(() => latestPlan(events), [events])
   if (!plan || plan.steps.length === 0) return null
   const { steps, completed } = plan
+  const total = steps.length
+  const percent = Math.round((completed / total) * 100)
   const blocked = steps.find(step => step.status === 'blocked')
   const running = steps.find(step => step.status === 'in_progress')
+  const head = blocked ?? running
+  const allDone = completed === total
+  const useSegments = total <= 16
+
   return (
     <details className={variant === 'dock' ? `${styles.plan} ${styles.dock}` : styles.plan}>
       <summary className={styles.summary}>
-        <IconChevronRightOutlineRegular className={styles.chevron} aria-hidden />
-        <span className={styles.label}>任务计划</span>
-        <span className={styles.count} aria-live="polite" aria-atomic="true">{completed} / {steps.length}</span>
-        <SummaryState blocked={blocked} running={running} settled={completed === steps.length} />
-        <progress className={styles.progress} aria-label="任务计划完成度" value={completed} max={steps.length} />
+        <div className={styles.headerRow}>
+          <div className={styles.headerLeft}>
+            <ProgressRing percent={percent} done={allDone} blocked={blocked !== undefined} />
+            <span className={styles.label}>任务计划</span>
+            <span className={styles.count} aria-live="polite" aria-atomic="true">
+              {completed} / {total}
+            </span>
+          </div>
+
+          <div className={styles.headerRight}>
+            {head !== undefined
+              ? (
+                  <span
+                    className={styles.collapsedStatus}
+                    data-status={blocked !== undefined ? 'blocked' : 'in_progress'}
+                  >
+                    <span className={styles.statusDot} aria-hidden="true" />
+                    <span className={styles.statusTitle}>{head.title}</span>
+                  </span>
+                )
+              : allDone
+                ? <span className={styles.collapsedDone}>已全部完成</span>
+                : null}
+            <span className={styles.expandedPct} aria-hidden="true">{percent}%</span>
+            <span className={styles.chevronBtn} aria-hidden="true">
+              <IconChevronDownOutlineRegular className={styles.chevron} />
+            </span>
+          </div>
+        </div>
+
+        <div
+          className={styles.progressBar}
+          role="progressbar"
+          aria-label="任务计划完成度"
+          aria-valuenow={completed}
+          aria-valuemin={0}
+          aria-valuemax={total}
+        >
+          {useSegments
+            ? steps.map(step => (
+                <span key={step.id} className={styles.segment} data-status={step.status} />
+              ))
+            : (
+                <span className={styles.continuousTrack}>
+                  <span className={styles.continuousFill} style={{ width: `${percent}%` }} />
+                </span>
+              )}
+        </div>
       </summary>
+
       <ol className={styles.steps}>
-        {steps.map(step => (
-          <li key={step.id} className={styles.step} data-status={step.status}>
-            <StepGlyph status={step.status} />
-            <div className={styles.detail}>
-              <div className={styles.title}>{step.title}</div>
-              {step.note && <div className={styles.note}>{step.note}</div>}
-            </div>
-            {/* Waiting steps keep the empty ring alone: a gray 待开始 chip beside
-                a gray ring was the faintest thing on the row. */}
-            {(step.status === 'in_progress' || step.status === 'blocked') && (
-              <span className={styles.tag} data-status={step.status}>{labels[step.status]}</span>
-            )}
-          </li>
-        ))}
+        {steps.map(step => {
+          const highlighted = step.status === 'in_progress' || step.status === 'blocked'
+          return (
+            <li key={step.id} className={styles.step} data-status={step.status}>
+              <div className={styles.railCell}>
+                <StepGlyph status={step.status} />
+                <span className={styles.railStem} aria-hidden="true" />
+              </div>
+              <div className={highlighted ? styles.activeCard : styles.plainRow} data-status={step.status}>
+                <div className={styles.stepMain}>
+                  <div className={styles.title}>{step.title}</div>
+                  {step.note && <div className={styles.note}>{step.note}</div>}
+                </div>
+                {highlighted && (
+                  <span className={styles.badge} data-status={step.status}>
+                    {labels[step.status]}
+                  </span>
+                )}
+              </div>
+            </li>
+          )
+        })}
       </ol>
     </details>
   )
