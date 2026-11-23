@@ -85,8 +85,27 @@ function useDraft(key: string): [string, (next: string, at?: string) => void] {
 }
 
 const FULL_ACCESS_ICON = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8l1-5.5Z" /></svg>
-// Same shield as 仅可查看, with a question mark: commands and the browser ask first.
-const ASK_ICON = <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" aria-hidden="true"><path d="M6.59624 2.14853C7.50155 1.80917 8.49914 1.80919 9.40444 2.14859L13.9245 3.84317V7.11961C13.9245 11.6089 10.5565 13.5975 8.00035 14.5779C5.44423 13.5975 2.07544 11.6089 2.07544 7.11961V3.84317L6.59624 2.14853Z" strokeLinejoin="round" /><path d="M6.6 6.55a1.45 1.45 0 0 1 2.82.48c0 .96-1.42 1.2-1.42 2.08" strokeLinecap="round" strokeLinejoin="round" /><circle cx="8" cy="11.15" r="0.55" fill="currentColor" stroke="none" /></svg>
+// One shield for the levels that gate the agent: only the mark inside changes, so the
+// picker reads "asks first", "checks first" and "never asks" at a glance.
+const PERMISSION_SHIELD =
+  'M6.59624 2.14853C7.50155 1.80917 8.49914 1.80919 9.40444 2.14859L13.9245 3.84317V7.11961C13.9245 11.6089 10.5565 13.5975 8.00035 14.5779C5.44423 13.5975 2.07544 11.6089 2.07544 7.11961V3.84317L6.59624 2.14853Z'
+
+// Ask first: a question mark, sized to stay legible at 14px.
+const ASK_ICON = (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d={PERMISSION_SHIELD} />
+    <path d="M6.5 6.2a1.5 1.5 0 1 1 2.46 1.15c-.45.42-.96.6-.96.85" strokeWidth="1.5" />
+    <circle cx="8" cy="10.35" r="0.66" fill="currentColor" stroke="none" />
+  </svg>
+)
+
+// Reviewed by the AI first: the same shield, marked with a check once it approves.
+const AUTO_REVIEW_ICON = (
+  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d={PERMISSION_SHIELD} />
+    <path d="M5.55 8.2 7.32 9.97 10.45 6.15" strokeWidth="1.7" />
+  </svg>
+)
 
 export function Composer({
   variant,
@@ -616,7 +635,7 @@ export function Composer({
                 )}
                 {permissionMode === 'auto_review' && (
                   <>
-                    {ASK_ICON}
+                    {AUTO_REVIEW_ICON}
                     <span>自动审批</span>
                   </>
                 )}
@@ -775,12 +794,18 @@ export function Composer({
             </button>
 
             <button type="button" className={codexCss.permOptionItem} onClick={() => handleSelectPermission('auto_review')}>
-              <span className={codexCss.permOptionIcon}>{ASK_ICON}</span>
+              <span className={codexCss.permOptionIcon}>{AUTO_REVIEW_ICON}</span>
               <div className={codexCss.permOptionBody}>
                 <span className={codexCss.permOptionTitle}>自动审批</span>
                 <span className={codexCss.permOptionDesc}>需要确认的操作先由 AI 对照你的要求审查：明确该做的直接放行，明确不该做的拒绝，拿不准时再问你。命令的沙箱与执行前询问相同。</span>
               </div>
-              {permissionMode === 'auto_review' && <span className={codexCss.permOptionCheck}>✓</span>}
+              {permissionMode === 'auto_review' && (
+                <span className={codexCss.permOptionCheck}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                </span>
+              )}
             </button>
 
             {/* 3. 完全权限 (Full Access) */}

@@ -447,6 +447,12 @@
   color: var(--codex-text-secondary, #4b5563);
 }
 
+/* The picker row reserves a 20px box: let the glyph fill it rather than render at pill size. */
+.permOptionIcon svg {
+  width: 17px;
+  height: 17px;
+}
+
 :global(body[data-ds-dark-theme]) .permOptionIcon {
   color: #a1a1aa;
 }

@@ -19,7 +19,7 @@ use super::{
     credentials::Secret,
     live::{self, DisplayFilter},
     sftp::Sftp,
-    store::{Action, EnvTier, Server, Store},
+    store::{Action, AuthType, EnvTier, NewServer, Server, Store},
 };
 
 const MAX_AI_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
@@ -39,6 +39,7 @@ pub(crate) fn is_tool(name: &str) -> bool {
         name,
         "ssh__list_servers"
             | "ssh__server_history"
+            | "ssh__add_server"
             | "ssh__exec"
             | "ssh__list_dir"
             | "ssh__read_file"
@@ -49,7 +50,10 @@ pub(crate) fn is_tool(name: &str) -> bool {
 }
 
 pub(crate) fn is_mutating_tool(name: &str) -> bool {
-    matches!(name, "ssh__exec" | "ssh__write_file" | "ssh__upload")
+    matches!(
+        name,
+        "ssh__add_server" | "ssh__exec" | "ssh__write_file" | "ssh__upload"
+    )
 }
 
 pub(crate) fn requires_approval(name: &str, args: &Value) -> bool {
@@ -57,6 +61,9 @@ pub(crate) fn requires_approval(name: &str, args: &Value) -> bool {
 }
 
 pub(super) fn requires_approval_in(config_dir: &Path, name: &str, args: &Value) -> bool {
+    if name == "ssh__add_server" {
+        return true;
+    }
     if !is_mutating_tool(name) {
         return false;
     }
@@ -153,6 +160,13 @@ pub(super) async fn execute_tool(
         "ssh__server_history" => {
             tokio::task::spawn_blocking(move || server_history(&config_dir, &workspace_str, args))
                 .await?
+        }
+        "ssh__add_server" => {
+            ensure!(
+                ctx.approved_protected,
+                "APPROVAL_REQUIRED: registering an SSH server profile requires explicit human approval"
+            );
+            tokio::task::spawn_blocking(move || add_server(&config_dir, args)).await?
         }
         "ssh__list_dir" => {
             let server = load_server(&config_dir, &args, false, ctx.approved_protected).await?;
@@ -649,8 +663,126 @@ fn server_history(config_dir: &Path, workspace: &str, args: Value) -> Result<Val
     }))
 }
 
+fn add_server(config_dir: &Path, args: Value) -> Result<Value> {
+    let name = required_str(&args, "name")?;
+    let host = required_str(&args, "host")?;
+    let username = required_str(&args, "username")?;
+    let port_u64 = args["port"].as_u64().unwrap_or(22);
+    ensure!(
+        (1..=65535).contains(&port_u64),
+        "SSH port must be between 1 and 65535"
+    );
+    let port = port_u64 as u16;
+    let key_path = args["key_path"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let credential = args["credential"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let auth_type = match args["auth_type"].as_str() {
+        Some("password") => AuthType::Password,
+        Some("key_file") => AuthType::KeyFile,
+        Some("agent") => AuthType::Agent,
+        Some(other) => anyhow::bail!("invalid auth_type: {other}"),
+        None => {
+            if key_path.is_some() {
+                AuthType::KeyFile
+            } else if credential.is_some() {
+                AuthType::Password
+            } else {
+                AuthType::Agent
+            }
+        }
+    };
+    let env_tier = match args["env_tier"].as_str() {
+        None | Some("dev") => EnvTier::Dev,
+        Some("staging") => EnvTier::Staging,
+        Some("prod") => EnvTier::Prod,
+        Some(other) => anyhow::bail!("invalid env_tier: {other}"),
+    };
+    let require_approval = args["require_approval"].as_bool().unwrap_or(false);
+    let default_dir = args["default_dir"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let tags = args["tags"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::trim).filter(|s| !s.is_empty()))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let notes = args["notes"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    let mut store = Store::open(config_dir)?;
+    if let Some(existing) = store
+        .list()?
+        .into_iter()
+        .find(|s| s.host == host && s.port == port && s.username == username)
+    {
+        return Ok(json!({
+            "server_id": existing.id,
+            "reused": true,
+            "name": existing.name,
+            "host": existing.host,
+            "port": existing.port,
+            "username": existing.username,
+            "env_tier": existing.env_tier,
+            "require_approval": existing.require_approval,
+            "default_dir": existing.default_dir,
+        }));
+    }
+
+    let id = store.create(NewServer {
+        name,
+        host,
+        port: Some(port),
+        username,
+        auth_type,
+        key_path,
+        env_tier,
+        require_approval,
+        default_dir,
+        tags,
+        notes,
+    })?;
+    if let Some(raw_secret) = credential
+        && auth_type != AuthType::Agent
+    {
+        if let Err(err) = store.set_credential(&id, Some(Secret::new(raw_secret)?)) {
+            let _ = store.delete(&id);
+            return Err(err);
+        }
+    }
+    let created = store
+        .get(&id)?
+        .context("created SSH server could not be reloaded")?;
+    Ok(json!({
+        "server_id": created.id,
+        "reused": false,
+        "name": created.name,
+        "host": created.host,
+        "port": created.port,
+        "username": created.username,
+        "env_tier": created.env_tier,
+        "require_approval": created.require_approval,
+        "default_dir": created.default_dir,
+    }))
+}
+
 #[test]
-fn declares_all_eight_ssh_tools_with_expected_permissions() {
+fn declares_all_nine_ssh_tools_with_expected_permissions() {
     package().expect("SSH package and tool definitions must agree");
     let tools: Vec<Value> = serde_json::from_str(include_str!("tools.json")).unwrap();
     let names: Vec<_> = tools
@@ -662,6 +794,7 @@ fn declares_all_eight_ssh_tools_with_expected_permissions() {
         [
             "ssh__list_servers",
             "ssh__server_history",
+            "ssh__add_server",
             "ssh__exec",
             "ssh__list_dir",
             "ssh__read_file",
@@ -680,7 +813,12 @@ fn declares_all_eight_ssh_tools_with_expected_permissions() {
         assert!(is_tool(read_tool));
         assert!(!is_mutating_tool(read_tool));
     }
-    for write_tool in ["ssh__exec", "ssh__write_file", "ssh__upload"] {
+    for write_tool in [
+        "ssh__add_server",
+        "ssh__exec",
+        "ssh__write_file",
+        "ssh__upload",
+    ] {
         assert!(is_tool(write_tool));
         assert!(is_mutating_tool(write_tool));
     }

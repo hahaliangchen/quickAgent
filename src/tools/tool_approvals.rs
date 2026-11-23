@@ -375,7 +375,16 @@ async fn wait_with(
             _ => review_reason = Some(reason),
         }
     }
-    let mut detail = args.to_string();
+    let display_args = if name == "ssh__add_server" && args.is_object() {
+        let mut sanitized = args.clone();
+        if sanitized.get("credential").is_some_and(|v| !v.is_null()) {
+            sanitized["credential"] = json!("[redacted]");
+        }
+        sanitized
+    } else {
+        args.clone()
+    };
+    let mut detail = display_args.to_string();
     if detail.len() > 2_000 {
         detail = format!("{}…", detail.chars().take(2_000).collect::<String>());
     }

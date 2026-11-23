@@ -1282,3 +1282,98 @@ async fn ai_stream_replays_history_streams_live_exec_and_enforces_ticket() -> Re
     })
     .await?
 }
+
+#[tokio::test]
+async fn add_server_requires_approval_deduplicates_and_connects() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let remote_root = tempfile::tempdir()?;
+        let config = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let fixture = Fixture::start(remote_root.path().to_owned()).await?;
+        let cfg = config.path().to_path_buf();
+        let ws = workspace.path().to_path_buf();
+
+        assert!(package::requires_approval_in(
+            config.path(),
+            "ssh__add_server",
+            &json!({ "name": "A100", "host": "127.0.0.1", "username": "tester" }),
+        ));
+
+        let unapproved = package::scoped(
+            "task-add".into(),
+            false,
+            package::execute_tool(
+                cfg.clone(),
+                ws.clone(),
+                "ssh__add_server",
+                json!({
+                    "name": "3 A100",
+                    "host": "127.0.0.1",
+                    "port": fixture.port,
+                    "username": "tester",
+                    "credential": PASSWORD,
+                }),
+            ),
+        )
+        .await
+        .expect_err("unapproved ssh__add_server must fail");
+        assert!(unapproved.to_string().contains("APPROVAL_REQUIRED"));
+
+        let created = package::scoped(
+            "task-add".into(),
+            true,
+            package::execute_tool(
+                cfg.clone(),
+                ws.clone(),
+                "ssh__add_server",
+                json!({
+                    "name": "3 A100",
+                    "host": "127.0.0.1",
+                    "port": fixture.port,
+                    "username": "tester",
+                    "credential": PASSWORD,
+                }),
+            ),
+        )
+        .await?;
+        assert_eq!(created["reused"], false);
+        assert!(!created.to_string().contains(PASSWORD));
+        let server_id = created["server_id"].as_str().unwrap().to_owned();
+
+        let reused = package::scoped(
+            "task-add".into(),
+            true,
+            package::execute_tool(
+                cfg.clone(),
+                ws.clone(),
+                "ssh__add_server",
+                json!({
+                    "name": "3 A100 Duplicate",
+                    "host": "127.0.0.1",
+                    "port": fixture.port,
+                    "username": "tester",
+                    "credential": PASSWORD,
+                }),
+            ),
+        )
+        .await?;
+        assert_eq!(reused["reused"], true);
+        assert_eq!(reused["server_id"], server_id);
+
+        let ran = package::scoped(
+            "task-add".into(),
+            false,
+            package::execute_tool(
+                cfg,
+                ws,
+                "ssh__exec",
+                json!({ "server_id": server_id, "command": "echo deploy-ok" }),
+            ),
+        )
+        .await?;
+        assert_eq!(ran["exit_code"], 0);
+        assert_eq!(ran["stdout"], "deploy-ok\n");
+        Ok(())
+    })
+    .await?
+}

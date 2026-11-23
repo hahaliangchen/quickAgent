@@ -35,6 +35,71 @@
     }
   },
   {
+    "name": "ssh__add_server",
+    "description": "向本地 SSH 工作台注册新的服务器档案（含凭据安全落盘至 0600 隔离文件）；若相同 host/port/username 档案已存在则直接复用返回 server_id。每次调用强制弹出单次人工确认。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "服务器显示名称（如 3 A100、staging-api）"
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "description": "主机名或 IP 地址"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 22
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "description": "SSH 登录用户名"
+        },
+        "auth_type": {
+          "type": "string",
+          "enum": ["password", "key_file", "agent"],
+          "description": "认证方式；省略时若提供 key_path 则默认 key_file，若提供 credential 则默认 password，否则 agent"
+        },
+        "credential": {
+          "type": "string",
+          "description": "可选密码（password 模式）或私钥口令（key_file 模式），仅在用户主动在当前对话提供时传入，存入本机 0600 凭据文件且绝不回显"
+        },
+        "key_path": {
+          "type": "string",
+          "description": "可选本机绝对私钥路径（仅 key_file 模式有效）"
+        },
+        "env_tier": {
+          "type": "string",
+          "enum": ["dev", "staging", "prod"],
+          "default": "dev"
+        },
+        "require_approval": {
+          "type": "boolean",
+          "default": false
+        },
+        "default_dir": {
+          "type": "string",
+          "description": "可选默认远程工作目录"
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "required": ["name", "host", "username"],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "ssh__exec",
     "description": "通过 SSH 在指定服务器上执行远程命令；prod 或需审批服务器将强制弹出人工审批。",
     "inputSchema": {
