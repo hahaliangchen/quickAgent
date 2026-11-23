@@ -18,10 +18,10 @@
 .head { display: flex; align-items: center; gap: 8px; height: 48px; box-sizing: border-box; padding: 0 10px 0 14px; border-bottom: 1px solid var(--codex-border-subtle); }
 .head strong { font-size: 14.5px; }
 .sparkle { color: #e6a817; flex-shrink: 0; }
-.repoRow { display: flex; align-items: center; padding: 10px 14px 0; }
+.repoRow { display: flex; align-items: center; padding: 10px 16px 6px; }
 .repo {
-  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; padding: 3px 8px; border-radius: 7px;
-  border: 1px solid var(--codex-card-border); color: var(--codex-text-secondary); font-size: 12.5px; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; padding: 4px 10px; border-radius: 8px;
+  border: 1px solid var(--codex-card-border); background: var(--codex-card-bg); color: var(--codex-text-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .repo svg { flex-shrink: 0; color: var(--codex-text-muted); }
 .grow { flex: 1; }
@@ -32,7 +32,7 @@
 .iconButton:hover:not(:disabled) { background: var(--codex-hover-bg); color: var(--codex-text-primary); }
 .iconButton:disabled { opacity: .4; cursor: default; }
 .plus { font-size: 20px; line-height: 1; }
-.body { flex: 1; min-height: 0; overflow: auto; position: relative; }
+.body { flex: 1; min-height: 0; overflow: auto; position: relative; padding: 10px 16px 20px; }
 .greeting { margin: 14px; padding: 14px 16px; border-radius: 12px; background: var(--codex-hover-bg); }
 .greeting strong { display: block; font-size: 14.5px; margin-bottom: 6px; }
 .greeting p { margin: 0; color: var(--codex-text-secondary); line-height: 1.7; }

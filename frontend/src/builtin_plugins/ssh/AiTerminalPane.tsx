@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { type AiActivity, message, ssh } from './api.ts'
-import { terminalThemes, type OutputStatus } from './TerminalPane.tsx'
+import { terminalFontFamily, terminalThemes, type OutputStatus } from './TerminalPane.tsx'
 import css from './style.module.css'
 
 export default function AiTerminalPane({ serverId, taskId, active, theme, onOpenHuman, onActivity, diagnose }: {
@@ -24,7 +24,7 @@ export default function AiTerminalPane({ serverId, taskId, active, theme, onOpen
   useEffect(() => {
     const element = host.current
     if (!element) return
-    const term = new Terminal({ fontSize: 13, fontFamily: 'ui-monospace, monospace', disableStdin: true, cursorBlink: false, scrollback: 3500, screenReaderMode: true })
+    const term = new Terminal({ fontSize: 13, lineHeight: 1.45, fontFamily: terminalFontFamily, disableStdin: true, cursorBlink: false, scrollback: 3500, screenReaderMode: true, theme: terminalThemes[theme] })
     const addon = new FitAddon()
     terminal.current = term; fit.current = addon
     term.loadAddon(addon)

@@ -219,7 +219,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
       <button type="button" className={css.iconButton} title="收起" onClick={() => setOpen(false)}><Icon name="close" size={17} /></button>
     </header>
     <div className={css.repoRow}>
-      <span className={css.repo} title={linkedTaskId ? (task?.title || linkedTaskId) : workspace}><Icon name="folder" size={15} />{linkedTaskId ? (task?.title || linkedTaskId) : baseName(workspace)}<Icon name="info" size={14} /></span>
+      <span className={css.repo} title={linkedTaskId ? (task?.title || linkedTaskId) : workspace}><Icon name="folder" size={14} />{linkedTaskId ? (task?.title?.trim() || '当前会话') : baseName(workspace)}</span>
     </div>
     <div className={css.body}>
       {taskId && task

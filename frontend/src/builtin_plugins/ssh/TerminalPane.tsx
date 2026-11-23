@@ -7,7 +7,11 @@ import { type Access, type Failure, type Server, message, ssh, SshError } from '
 import css from './style.module.css'
 
 export type OutputStatus = '连接中' | '已连接' | '已断开' | '连接失败'
-export const terminalThemes = { dark: { background: '#131719', foreground: '#e1e6e4', cursor: '#90d7c7', selectionBackground: '#31554c' }, light: { background: '#f7f9f8', foreground: '#18201d', cursor: '#23715d', selectionBackground: '#c0e6dc' } }
+export const terminalFontFamily = '"JetBrains Mono", "Cascadia Mono", "DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono", Menlo, Consolas, monospace'
+export const terminalThemes = {
+  dark: { background: '#121618', foreground: '#e2e8e5', cursor: '#8fd7c4', selectionBackground: '#2d5249' },
+  light: { background: '#f8faf9', foreground: '#1c2421', cursor: '#156a54', selectionBackground: '#c7e8dd' },
+}
 
 export default function TerminalPane({ server, access, active, theme, onError, diagnose, onConnection }: {
   server: Server; access: Access; active: boolean; theme: 'dark' | 'light'; onError: (error: unknown) => void; diagnose?: ((value: string) => void) | undefined; onConnection: () => void
@@ -23,7 +27,7 @@ export default function TerminalPane({ server, access, active, theme, onError, d
   useEffect(() => {
     if (!host.current) return
     const controller = new AbortController()
-    const term = new Terminal({ fontSize: 13, fontFamily: 'ui-monospace, monospace', cursorBlink: true, scrollback: 3500, screenReaderMode: true })
+    const term = new Terminal({ fontSize: 13, lineHeight: 1.45, fontFamily: terminalFontFamily, cursorBlink: true, scrollback: 3500, screenReaderMode: true, theme: terminalThemes[theme] })
     const addon = new FitAddon()
     terminal.current = term; fit.current = addon
     term.loadAddon(addon)
