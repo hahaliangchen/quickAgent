@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { type IconTheme, iconUrl, loadIconTheme } from '../git/icons.ts'
 import { type Access, type Entry, type Server, confirmAccess, joinRemote, ssh } from './api.ts'
 import css from './style.module.css'
 
@@ -6,10 +7,11 @@ type Transfer = { id: number; name: string; progress: number; status: '等待' |
 const fileSize = (bytes: number | null) => bytes === null ? '—' : bytes < 1024 ? bytes + ' B' : bytes < 1024 * 1024 ? (bytes / 1024).toFixed(1) + ' KiB' : (bytes / (1024 * 1024)).toFixed(1) + ' MiB'
 const validName = (value: string) => !!value && value !== '.' && value !== '..' && !value.includes('/') && !value.includes('\0')
 
-export default function SftpExplorer({ server, access, hidden, followTarget, refreshSignal, onError, onActivity }: {
-  server: Server; access: Access; hidden: boolean; followTarget?: { path: string; seq: number } | undefined; refreshSignal?: number | undefined
+export default function SftpExplorer({ server, access, hidden, theme = 'light', followTarget, refreshSignal, onError, onActivity }: {
+  server: Server; access: Access; hidden: boolean; theme?: 'dark' | 'light'; followTarget?: { path: string; seq: number } | undefined; refreshSignal?: number | undefined
   onError: (error: unknown) => void; onActivity: () => void
 }) {
+  const [icons, setIcons] = useState<IconTheme>()
   const [path, setPath] = useState(server.default_dir || '.')
   const [result, setResult] = useState<{ path: string; entries: Entry[] }>()
   const [busy, setBusy] = useState(false)
@@ -23,6 +25,12 @@ export default function SftpExplorer({ server, access, hidden, followTarget, ref
   const seq = useRef(0)
   const callback = useRef({ onError, onActivity })
   callback.current = { onError, onActivity }
+
+  useEffect(() => {
+    let live = true
+    void loadIconTheme().then(loaded => { if (live) setIcons(loaded) }, () => {})
+    return () => { live = false }
+  }, [])
 
   const followed = useRef<number>()
   const refreshed = useRef<number>()
@@ -115,9 +123,14 @@ export default function SftpExplorer({ server, access, hidden, followTarget, ref
     </nav>}
     {!initialized ? <div className={css.empty}><button onClick={refresh}>打开远程目录</button></div> : busy ? <p className={css.muted} role="status">读取目录中…</p> : result && <ul className={css.entries}>
       {result.entries.length === 0 && <li className={css.muted}>空目录</li>}
-      {result.entries.map(entry => <li key={entry.name}>
+      {result.entries.map(entry => {
+        const src = icons ? iconUrl(icons, entry.name, entry.kind === 'directory' ? { open: false } : false, theme === 'light') : undefined
+        return <li key={entry.name}>
         <button className={css.fileName} title={entry.name} onClick={() => entry.kind === 'directory' ? navigate(joinRemote(target, entry.name)) : entry.kind === 'file' ? void showPreview(entry.name) : undefined} disabled={entry.kind !== 'directory' && entry.kind !== 'file'}>
-          <span aria-hidden="true">{entry.kind === 'directory' ? '▸' : '·'}</span>{entry.name}
+          {src
+            ? <img className={css.entryIcon} src={src} alt="" aria-hidden="true" />
+            : <span className={css.entryFallback} aria-hidden="true">{entry.kind === 'directory' ? '▸' : '·'}</span>}
+          <span className={css.entryLabel}>{entry.name}</span>
         </button>
         {entry.kind === 'file' && <small>{fileSize(entry.size)}</small>}
         <span className={css.actions}>
@@ -125,7 +138,8 @@ export default function SftpExplorer({ server, access, hidden, followTarget, ref
           <button aria-label={'重命名 ' + entry.name} title="重命名" onClick={() => void mutate('rename', entry.name)}>✎</button>
           <button aria-label={'删除 ' + entry.name} title="删除" onClick={() => void mutate(entry.kind === 'directory' ? 'remove_dir' : 'remove_file', entry.name)}>×</button>
         </span>
-      </li>)}
+      </li>
+      })}
     </ul>}
     {transfers.length > 0 && <ul className={css.transfers} aria-label="上传任务">{transfers.map(item => <li key={item.id}>
       <span title={item.name}>{item.name}</span><progress aria-label={item.name + ' 上传进度'} value={item.progress} max={1} /><small>{item.status}</small>

@@ -167,7 +167,7 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
           onOpenHuman={() => openTerminal(serverList.current.find(profile => profile.id === item.profile.id) ?? item.profile)} onActivity={event => liveActivity(item, event)} diagnose={context.diagnose} /> : <TerminalPane key={item.id} server={item.profile} access={item.access} active={tab === item.id} theme={theme} onError={cause => report(cause, item.profile.id)} onConnection={activity} diagnose={context.diagnose} />)}
       </main>
       {servers.filter(profile => profile.id === selected || visited.has(profile.id)).map(profile => <SftpExplorer key={profile.id} server={profile} access={access}
-        hidden={profile.id !== selected} followTarget={followTarget?.serverId === profile.id ? followTarget : undefined}
+        hidden={profile.id !== selected} theme={theme} followTarget={followTarget?.serverId === profile.id ? followTarget : undefined}
         refreshSignal={refreshTarget?.serverId === profile.id ? refreshTarget.seq : undefined}
         onError={cause => { if (profile.id === selected) report(cause, profile.id) }} onActivity={activity} />)}
       {!server && <section className={css.explorer}><header className={css.panelHeader}><h2>SFTP 文件</h2></header><p className={css.muted}>未选择服务器</p></section>}
