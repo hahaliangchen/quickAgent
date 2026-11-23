@@ -929,7 +929,68 @@ export function awaitingModel(events: readonly AgentEvent[]): boolean {
 }
 
 export type PlanStatus = 'pending' | 'in_progress' | 'done' | 'blocked'
-export interface PlanStep { id: string; title: string; status: PlanStatus; note?: string }
+export interface PlanStep { id: string; title: string; status: PlanStatus; note?: string; parent_id?: string }
+
+/** A top-level step together with the sub-steps that belong to it. */
+export interface PlanGroup extends PlanStep { children: PlanStep[] }
+export interface PlanTree {
+  readonly topSteps: PlanGroup[]
+  readonly topCompleted: number
+  readonly topTotal: number
+  /** Sub-step weighted completion, 0-100. */
+  readonly percent: number
+}
+
+/**
+ * Fold a flat snapshot into the two levels the panel draws.
+ *
+ * Every top-level step weighs the same (1 / topTotal): a step without
+ * sub-steps counts as done ? 1 : 0, a step with k sub-steps counts
+ * done_children / k unless the parent is done itself. A parent_id that names a
+ * missing or already nested step is drawn as a top-level step, so an authoring
+ * mistake costs the item its indent and never its visibility.
+ */
+export function groupPlanSteps(steps: readonly PlanStep[]): PlanTree {
+  const known = new Set(steps.map(step => step.id))
+  const parents = new Map<string, string | undefined>()
+  for (const step of steps) {
+    const declared = step.parent_id
+    parents.set(step.id, declared !== undefined && declared !== step.id && known.has(declared) ? declared : undefined)
+  }
+  // Only one level of nesting is rendered: a third level degrades to a sibling
+  // of its would-be parent instead of vanishing inside it.
+  for (const step of steps) {
+    const parent = parents.get(step.id)
+    if (parent !== undefined && parents.get(parent) !== undefined) parents.set(step.id, undefined)
+  }
+  const groups = new Map<string, PlanGroup>()
+  const topSteps: PlanGroup[] = []
+  for (const step of steps) {
+    if (parents.get(step.id) !== undefined) continue
+    const group: PlanGroup = { ...step, children: [] }
+    groups.set(step.id, group)
+    topSteps.push(group)
+  }
+  for (const step of steps) {
+    const parent = parents.get(step.id)
+    if (parent === undefined) continue
+    groups.get(parent)?.children.push(step)
+  }
+  let weight = 0
+  for (const group of topSteps) {
+    if (group.status === 'done') weight += 1
+    else if (group.children.length > 0) {
+      weight += group.children.filter(child => child.status === 'done').length / group.children.length
+    }
+  }
+  const topTotal = topSteps.length
+  return {
+    topSteps,
+    topCompleted: topSteps.filter(step => step.status === 'done').length,
+    topTotal,
+    percent: topTotal === 0 ? 0 : Math.round((weight / topTotal) * 100),
+  }
+}
 
 /**
  * The plan of the current turn, if that turn published one.
@@ -950,6 +1011,7 @@ export function latestPlan(events: readonly AgentEvent[]): { steps: PlanStep[]; 
     return typeof step.id === 'string' && typeof step.title === 'string'
       && (step.status === 'pending' || step.status === 'in_progress' || step.status === 'done' || step.status === 'blocked')
       && (step.note === undefined || typeof step.note === 'string')
+      && (step.parent_id === undefined || typeof step.parent_id === 'string')
   }
   // Where the turn on screen begins: the newest prompt or turn start.
   let boundary = -1
@@ -964,7 +1026,8 @@ export function latestPlan(events: readonly AgentEvent[]): { steps: PlanStep[]; 
     const event = events[i]
     if (event?.type !== 'plan/updated') continue
     const steps: unknown = event.data.steps
-    if (Array.isArray(steps) && steps.every(valid)) return { steps, completed: steps.filter(step => step.status === 'done').length }
+    // completed keeps counting top-level steps so stored events stay comparable.
+    if (Array.isArray(steps) && steps.every(valid)) return { steps, completed: groupPlanSteps(steps).topCompleted }
   }
   return undefined
 }

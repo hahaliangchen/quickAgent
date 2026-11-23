@@ -238,6 +238,15 @@
   white-space: nowrap;
 }
 
+/* Parent phase of the reported sub-step, so a folded panel still says where. */
+.statusParent {
+  max-inline-size: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--plan-muted);
+}
+
 .collapsedDone {
   color: var(--plan-accent-ink);
   font-size: 12px;
@@ -317,6 +326,24 @@
 
 .segment[data-status="blocked"] {
   background-image: var(--plan-blocked-grad);
+}
+
+/* A running phase with sub-steps shows how far into the phase it is. */
+.segment[data-partial="true"] {
+  position: relative;
+  overflow: hidden;
+  background-image: none;
+  opacity: 1;
+  animation: none;
+}
+
+.segmentFill {
+  display: block;
+  block-size: 100%;
+  border-radius: 999px;
+  background-image: var(--plan-progress-grad);
+  opacity: 0.6;
+  transition: width 260ms ease;
 }
 
 .continuousTrack {
@@ -489,6 +516,14 @@
   flex: 1 1 auto;
 }
 
+.stepMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  min-inline-size: 0;
+}
+
 .title {
   overflow-wrap: anywhere;
   color: var(--plan-ink);
@@ -531,6 +566,148 @@
 .badge[data-status="blocked"] {
   background: var(--plan-blocked-soft);
   color: var(--plan-blocked);
+}
+
+/* --- Sub-steps: one indented hairline rail under their parent --- */
+
+.subToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding: 1px 5px 1px 7px;
+  border: 1px solid var(--plan-hairline);
+  border-radius: 999px;
+  background: var(--plan-chip);
+  color: var(--plan-muted);
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.subToggle:hover {
+  background: var(--plan-btn-hover);
+  color: var(--plan-ink);
+}
+
+.subToggle:focus-visible {
+  outline: 2px solid var(--plan-accent);
+  outline-offset: 1px;
+}
+
+.subCount {
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+}
+
+.subCount[data-status="blocked"] {
+  color: var(--plan-blocked);
+}
+
+.subCount[data-status="done"] {
+  color: var(--plan-accent-ink);
+}
+
+.subChevron,
+.subChevronOpen {
+  inline-size: 11px;
+  block-size: 11px;
+  transition: transform 160ms ease;
+}
+
+.subChevronOpen {
+  transform: rotate(180deg);
+}
+
+.subSteps {
+  grid-column: 1 / -1;
+  margin: 0 0 3px 21px;
+  padding: 0 0 0 11px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border-inline-start: 1.5px solid var(--plan-idle-rail);
+}
+
+.subStep {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-inline-size: 0;
+  padding: 2px 4px 3px;
+}
+
+.subDot {
+  flex: none;
+  inline-size: 5px;
+  block-size: 5px;
+  margin-block-start: 7px;
+  border-radius: 50%;
+  border: 1.2px solid var(--plan-idle-ring);
+}
+
+.subStep[data-status="done"] .subDot {
+  border-color: var(--plan-accent);
+  background: var(--plan-accent);
+}
+
+.subStep[data-status="in_progress"] .subDot {
+  border-color: var(--plan-accent);
+  background: var(--plan-accent);
+  box-shadow: 0 0 0 3px var(--plan-accent-soft);
+}
+
+.subStep[data-status="blocked"] .subDot {
+  border-color: var(--plan-blocked);
+  background: var(--plan-blocked);
+}
+
+.subBody {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-inline-size: 0;
+  flex: 1 1 auto;
+}
+
+.subTitle {
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--plan-muted);
+  overflow-wrap: anywhere;
+}
+
+.subStep[data-status="done"] .subTitle {
+  color: var(--plan-ink-done);
+}
+
+.subStep[data-status="in_progress"] .subTitle {
+  color: var(--plan-ink);
+  font-weight: 500;
+}
+
+.subStep[data-status="blocked"] .subTitle {
+  color: var(--plan-blocked);
+  font-weight: 500;
+}
+
+.subNote {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--plan-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subChevron,
+  .subChevronOpen,
+  .segmentFill {
+    transition: none;
+  }
 }
 
 @keyframes plan-breathe {

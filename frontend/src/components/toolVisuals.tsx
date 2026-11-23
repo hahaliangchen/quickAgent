@@ -113,6 +113,7 @@ const EXACT: Record<string, Omit<ToolVisual, 'summary'>> = {
   verify_test: { tone: 'run', icon: <TerminalIcon />, title: '运行了测试' },
   plan_set: { tone: 'run', icon: <TerminalIcon />, title: '设定了任务计划' },
   plan_update: { tone: 'run', icon: <TerminalIcon />, title: '更新了任务进度' },
+  plan_add_substeps: { tone: 'run', icon: <TerminalIcon />, title: '补充了子步骤' },
   browser_screenshot: { tone: 'media', icon: <ImageIcon />, title: '截取了页面' },
   http_probe: { tone: 'web', icon: <IconApiOutlineMedium />, title: '探测了接口' },
   web__search: { tone: 'web', icon: <IconSearchOutlineMedium />, title: '搜索了网页' },

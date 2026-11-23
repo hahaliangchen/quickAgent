@@ -1515,6 +1515,11 @@ pub async fn run(
         .layer(CorsLayer::permissive());
 
     let addr = listener.local_addr()?;
+    let app = if addr.ip().is_loopback() {
+        app.merge(crate::server::builtin_plugins::ssh::routes::router())
+    } else {
+        app
+    };
     crate::tools::process_sandbox::register_control_port(addr.port());
     let app = if std::env::args().any(|arg| arg == "--desktop-agent") {
         app.layer(axum::middleware::from_fn_with_state(

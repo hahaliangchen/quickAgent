@@ -360,8 +360,9 @@ type ChatNode =
   | { kind: 'turn-end'; item: ChatItem & { kind: 'turn-end' } }
 
 /** Transcript column using ui-chat's ChatView frame, column width, and flow gap; the conversation scroll body scrolls it. */
-export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, onRevealRightPanel, onFilePreview }: {
+export function ChatView({ events, projectedItems, task, running, onOpenTask, onChangesUpdated, onRevealRightPanel, onFilePreview }: {
   events: readonly AgentEvent[]
+  projectedItems?: readonly ChatItem[]
   task?: Task | undefined
   running: boolean
   onOpenTask: (taskId: string) => void
@@ -397,7 +398,7 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, 
       })
     })
   }, [onFilePreview, onRevealRightPanel])
-  const items = useMemo(() => chatItems(events, task), [events, task])
+  const items = useMemo(() => projectedItems ?? chatItems(events, task), [projectedItems, events, task])
   const changes = useMemo(() => changeSummaries(events), [events])
   const trackingErrors = useMemo(() => {
     const map = new Map<number, string>()
@@ -516,7 +517,7 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, 
                 const canRewind = Boolean(task && !running && task.parent_task_id === null)
                 const hasText = node.item.text.trim() !== ''
                 return (
-                  <div key={node.item.key} className={`${chatCss.flowItem} ${css.userWithRewind}`} data-chat-flow-kind="user">
+                  <div key={node.item.key} className={`${chatCss.flowItem} ${css.userWithRewind}`} data-chat-flow-kind="user" data-chat-turn-message={node.item.key} tabIndex={-1}>
                     <Item
                       item={node.item}
                       turnClosed={true}

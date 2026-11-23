@@ -365,6 +365,7 @@ export function useAgentWorkspace() {
     openTask(undefined)
   }, [sessionModel, modelProviderId])
 
+  const newTaskLaunch = useRef<{ taskId: string; at: number }>()
   const pendingSession=useRef<Promise<string>|null>(null)
   const uploadedAttachments=useRef(new Map<File,{task:string;receiptId:string}>())
   useEffect(()=>{pendingSession.current=null},[taskId,activeWorkspace,sidebarMode])
@@ -386,6 +387,7 @@ export function useAgentWorkspace() {
         content.push({type:'file',receiptId:uploaded.receiptId})
       }
       if(attachment?.signal.aborted)throw Error('上传已取消')
+      if (!taskId) newTaskLaunch.current = { taskId: id, at: Date.now() }
       await api.prompt(id, text, {
         content,requestId:attachment?.requestId??randomId(),
         permission_mode: permissionMode,
@@ -448,7 +450,7 @@ export function useAgentWorkspace() {
     canContinue: ready && task !== undefined && acceptsPrompt(task),
     settingsOpen, settingsTab, setSettingsTab,
     openSettings, closeSettings, saveSettings, refreshInfoAndSettings, selectModel, setGenerationOptions,
-    openTask, startNewSession, submit, stop, interject,
+    openTask, startNewSession, submit, stop, interject, newTaskLaunch,
   }
 }
 

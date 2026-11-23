@@ -266,6 +266,14 @@ fn new_tool_contracts_cover_cross_layer_wiring() {
             false,
             true,
         ),
+        (
+            "plan",
+            "add_substeps",
+            "plan_add_substeps",
+            PermissionMode::ReadOnly,
+            false,
+            false,
+        ),
         // New phase entries above this marker.
     ];
     for (lib, method, tool, minimum, approval, tracked) in tools {

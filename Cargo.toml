@@ -14,7 +14,9 @@ required-features = ["vm-measurements"]
 [dependencies]
 getrandom = "0.4.2"
 tower-http = { version = "0.6.11", features = ["cors", "fs", "trace"] }
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
+russh = { version = "0.61", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["raw_value"] }
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
@@ -55,6 +57,8 @@ jsonschema = { version = "0.60.2", default-features = false }
 htmd = "0.5.6"
 
 [dev-dependencies]
+rand = "0.10"
+tokio-tungstenite = "0.29"
 tokio = { version = "1.52.3", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -62,7 +66,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Globa
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+tempfile = "3"

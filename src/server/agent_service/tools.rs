@@ -64,6 +64,9 @@ fn local_output_schema(name: &str) -> Option<Value> {
         "plan_update" => {
             json!({"type":"object","required":["step","completed","total"],"properties":{"step":crate::tools::plan_tools::step_schema(),"completed":{"type":"integer"},"total":{"type":"integer"}}})
         }
+        "plan_add_substeps" => {
+            json!({"type":"object","required":["steps","added","completed","total"],"properties":{"steps":{"type":"array","items":crate::tools::plan_tools::step_schema()},"added":{"type":"integer"},"completed":{"type":"integer"},"total":{"type":"integer"}}})
+        }
         "git_blame" => {
             json!({"type":"array","items":{"properties":{"author":{"type":"string"},"commit":{"type":"string"},"date":{"type":["string","null"]},"line":{"type":"integer"},"summary":{"type":"string"}},"required":["line","commit","author","date","summary"],"type":"object"}})
         }

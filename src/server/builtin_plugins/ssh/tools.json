@@ -1,0 +1,220 @@
+[
+  {
+    "name": "ssh__list_servers",
+    "description": "列出本地已配置的 SSH 服务器档案（按当前工作区最近使用优先排序），含环境等级、默认目录、标签与近期关联会话，不含任何凭据。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ssh__server_history",
+    "description": "查看指定服务器的历史使用与部署记录（含关联会话 task_id、本地项目路径、远程目录与操作摘要）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_id": {
+          "type": "string",
+          "description": "服务器档案 ID（来自 ssh__list_servers）"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 20
+        },
+        "all_workspaces": {
+          "type": "boolean",
+          "default": false,
+          "description": "为 true 时返回全部工作区对该服务器的记录；默认优先当前工作区"
+        }
+      },
+      "required": ["server_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ssh__exec",
+    "description": "通过 SSH 在指定服务器上执行远程命令；prod 或需审批服务器将强制弹出人工审批。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_id": {
+          "type": "string",
+          "description": "服务器档案 ID"
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "要执行的远程 shell 命令"
+        },
+        "cwd": {
+          "type": "string",
+          "description": "可选远程工作目录（执行前自动 cd 进入）"
+        },
+        "timeout_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300,
+          "default": 60
+        }
+      },
+      "required": ["server_id", "command"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ssh__list_dir",
+    "description": "通过 SFTP 列举远程目录内容（支持分页上限）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "default": ".",
+          "description": "远程目录路径，默认当前登录目录或服务器 default_dir"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 100
+        }
+      },
+      "required": ["server_id"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ssh__read_file",
+    "description": "通过 SFTP 按 1-based 行号分页读取远程 UTF-8 文本文件。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "description": "远程文件路径"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 65536,
+          "default": 16384
+        }
+      },
+      "required": ["server_id", "path"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ssh__write_file",
+    "description": "通过 SFTP 原子写入远程 UTF-8 文本文件（支持自动建父目录与 .bak 备份）；prod 或需审批服务器强制人工审批。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "description": "远程目标文件路径"
+        },
+        "content": {
+          "type": "string",
+          "description": "完整 UTF-8 文本内容（上限 4 MiB）"
+        },
+        "create_parents": {
+          "type": "boolean",
+          "default": false
+        },
+        "backup": {
+          "type": "boolean",
+          "default": false,
+          "description": "目标已存在时先保存同名 .bak 备份"
+        }
+      },
+      "required": ["server_id", "path", "content"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ssh__upload",
+    "description": "将当前本地工作区内的文件流式 SFTP 上传到远程服务器（严禁上传工作区外或符号链接逃逸文件）；prod 或需审批服务器强制人工审批。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_id": {
+          "type": "string"
+        },
+        "local_path": {
+          "type": "string",
+          "description": "当前本地工作区内的相对路径（不得越出工作区或经符号链接逃逸）"
+        },
+        "remote_path": {
+          "type": "string",
+          "description": "远程目标文件完整路径"
+        },
+        "create_parents": {
+          "type": "boolean",
+          "default": false
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": ["server_id", "local_path", "remote_path"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ssh__tail_log",
+    "description": "高效抓取远程日志文件最后 N 行，可选按关键词大小写不敏感过滤。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "description": "远程日志文件路径"
+        },
+        "lines": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        },
+        "filter": {
+          "type": "string",
+          "description": "可选过滤子串（大小写不敏感）"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 65536,
+          "default": 24000
+        }
+      },
+      "required": ["server_id", "path"],
+      "additionalProperties": false
+    }
+  }
+]

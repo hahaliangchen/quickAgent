@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "ssh",
+  "library": "ssh",
+  "title": "远程终端",
+  "skill": "SKILL.md",
+  "tools": [
+    "ssh__list_servers",
+    "ssh__server_history",
+    "ssh__exec",
+    "ssh__list_dir",
+    "ssh__read_file",
+    "ssh__write_file",
+    "ssh__upload",
+    "ssh__tail_log"
+  ],
+  "pages": [
+    {
+      "id": "workbench",
+      "title": "远程终端",
+      "entry": "ssh.workbench",
+      "renderer": "react"
+    }
+  ]
+}

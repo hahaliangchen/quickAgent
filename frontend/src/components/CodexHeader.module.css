@@ -10,6 +10,7 @@
   border-bottom: 1px solid var(--codex-border-subtle, #efefef);
   user-select: none;
   z-index: 5;
+  container-type: inline-size;
 }
 
 :global(body[data-ds-dark-theme]) .header {
@@ -43,6 +44,47 @@
 
 :global(body[data-ds-dark-theme]) .titleText {
   color: #f4f4f5;
+}
+
+.turnList {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.turnButton {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 1px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font: inherit;
+  line-height: 18px;
+  cursor: pointer;
+  text-align: start;
+}
+
+.turnButton:hover {
+  background: var(--codex-hover-bg, #eef0f3);
+}
+
+.turnButton:focus-visible {
+  outline: 2px solid var(--dsw-alias-label-secondary, #52525b);
+  outline-offset: -2px;
+}
+
+.turnLabel {
+  flex: none;
+  color: var(--codex-text-muted, #71717a);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.turnButton:last-child .titleText {
+  font-weight: 600;
 }
 
 /* Center segmented tabs — crisp 1px hairline track + elevated pill */
@@ -244,4 +286,11 @@
 
 :global(body[data-ui-style='paper']) .iconBtnActive {
   box-shadow: none;
+}
+
+@container (max-width: 440px) {
+  .titleIcon,
+  :global(body[data-ui-style='paper']) .titleIcon { display: none; }
+  .tabPill { padding-inline: 5px; }
+  .durationBadge { padding-inline: 5px; }
 }

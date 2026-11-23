@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ConversationPage, HeroPage, SkillPackagesPage, type Tab } from './components/AgentPage.tsx'
 import { SkillWorkbench } from './components/SkillWorkbench.tsx'
 import { PluginPageHost } from './components/PluginPageHost.tsx'
 import { OfficeStudioView } from './components/OfficeStudioView.tsx'
 import { CodeChatDock } from './components/CodeChatDock.tsx'
+import { type AiFocus, type RemoteTool, remoteTools, SshContext } from './builtin_plugins/ssh/api.ts'
 import { CodexDock } from './components/CodexDock.tsx'
 import { CodexRightPanel } from './components/CodexRightPanel.tsx'
 import { SettingsModal } from './components/SettingsModal.tsx'
@@ -25,6 +26,15 @@ export function App({ renderSlot }: AgentSlotProps) {
   const [tab, setTab] = useState<Tab>('chat')
   const [workbench, setWorkbench] = useState(false)
   const [git, setGit] = useState(false)
+  const [ssh, setSsh] = useState(false)
+  const [sshMounted, setSshMounted] = useState(false)
+  const [followAi, setFollowAi] = useState(() => {
+    try { return localStorage.getItem('ssh_follow_ai') !== 'false' } catch { return true }
+  })
+  const [aiFocus, setAiFocus] = useState<AiFocus>()
+  const [sshChatOpenSignal, setSshChatOpenSignal] = useState(0)
+  const sshObservation = useRef<{ taskId: string; seq: number; turn: string; openedTurn: string | undefined; calls: Set<string> }>()
+  const [sshDraft, setSshDraft] = useState<{ text: string }>()
   const [office, setOffice] = useState(false)
   const [officeMounted, setOfficeMounted] = useState(false)
   const [officeResetSignal, setOfficeResetSignal] = useState(0)
@@ -44,6 +54,50 @@ export function App({ renderSlot }: AgentSlotProps) {
   const [preview, setPreview] = useState<PreviewTabs>()
   const [pendingOpen, setPendingOpen] = useState<PendingOpen>()
   const taskId = workspace.taskId
+  useEffect(() => {
+    if (sshObservation.current?.taskId !== taskId) sshObservation.current = undefined
+    if (!taskId || workspace.session.task?.task_id !== taskId) return
+    const events = workspace.session.events
+    if (!sshObservation.current) {
+      const launch = workspace.newTaskLaunch.current
+      const locallyLaunched = launch?.taskId === taskId
+      // Ignore the first history snapshot, except events from a prompt we just submitted.
+      const baseline = locallyLaunched ? events.filter(event => event.time < launch.at).at(-1) : events.at(-1)
+      sshObservation.current = { taskId, seq: baseline?.seq ?? -1, turn: '', openedTurn: undefined, calls: new Set() }
+      if (locallyLaunched) workspace.newTaskLaunch.current = undefined
+    }
+    const observation = sshObservation.current
+    let latest: AiFocus | undefined
+    let open = false
+    for (const event of events) {
+      const { data } = event
+      if (event.type === 'turn/start' || event.type === 'user/message') observation.turn = String(data.turn ?? event.seq)
+      if (event.seq <= observation.seq || event.type !== 'tool/call') continue
+      const tool = data.name as RemoteTool
+      if (!remoteTools.includes(tool)) continue
+      const turn = String(data.turn ?? observation.turn)
+      const callId = turn + ':' + String(data.callId ?? data.call_id ?? event.seq)
+      if (observation.calls.has(callId)) continue
+      observation.calls.add(callId)
+      if (!followAi) continue
+      let args: Record<string, unknown>
+      try {
+        const value: unknown = typeof data.arguments === 'string' ? JSON.parse(data.arguments) : data.arguments ?? data.args
+        if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+        args = value as Record<string, unknown>
+      } catch { continue }
+      if (typeof args.server_id !== 'string' || !args.server_id.trim()) continue
+      const remotePath = [args.cwd, args.path, args.remote_path].find((value): value is string => typeof value === 'string' && !!value.trim())?.trim()
+      latest = { seq: event.seq, taskId, serverId: args.server_id.trim(), tool, ...(remotePath ? { remotePath } : {}) }
+      if (observation.openedTurn !== turn) { observation.openedTurn = turn; open = true }
+    }
+    observation.seq = Math.max(observation.seq, events.at(-1)?.seq ?? -1)
+    if (latest) setAiFocus(latest)
+    if (open) {
+      setSsh(true); setSshMounted(true); setOffice(false); setGit(false); setWorkbench(false)
+      setSshChatOpenSignal(value => value + 1)
+    }
+  }, [taskId, workspace.session.task, workspace.session.events, workspace.newTaskLaunch, followAi])
   const taskRoot = workspace.task?.workspace ?? ''
   const tabs = preview?.taskId === taskId ? preview : undefined
   const openPreview = useCallback<OpenFilePreview>((path, options) => {
@@ -68,6 +122,8 @@ export function App({ renderSlot }: AgentSlotProps) {
   const editPreview = (slotId: string, file: PreviewFile) => {
     setPendingOpen(prev => ({ slotId, fileUrl: file.url, filename: file.name, seq: (prev?.seq ?? 0) + 1 }))
     setOffice(true)
+    setSsh(false)
+    setSshDraft(undefined)
     setOfficeMounted(true)
     setGit(false)
     setWorkbench(false)
@@ -102,6 +158,11 @@ export function App({ renderSlot }: AgentSlotProps) {
   }
 
   const handleNewChat = () => {
+    setOffice(false)
+    setWorkbench(false)
+    setGit(false)
+    setSsh(false)
+    setSshDraft(undefined)
     setNewChatVersion(version => version + 1)
     setTab('chat')
     workspace.startNewSession()
@@ -139,13 +200,17 @@ export function App({ renderSlot }: AgentSlotProps) {
 
   const gitWorkspace = workspace.task?.workspace ?? workspace.activeWorkspace ?? workspace.info?.workspace ?? ''
   const actualSidebarWidth = sidebarCollapsed ? 0 : sidebarWidth
+  const openSshChat = (id: string) => { setSsh(false); setSshDraft(undefined); setGit(false); setWorkbench(false); setTab('chat'); workspace.openTask(id) }
 
   return (
     <div className={css.appFrame} data-ds-dark-theme={dark ? '' : undefined}>
       {/* 1. Activity Dock (48px fixed on left) */}
       <CodexDock
-        activeTab={office ? 'office' : git ? 'git' : workbench || tab === 'skill-pages' ? 'skills' : 'home'}
+        activeTab={office ? 'office' : ssh ? 'ssh' : git ? 'git' : workbench || tab === 'skill-pages' ? 'skills' : 'home'}
         onSelectTab={selected => {
+          setSsh(selected === 'ssh')
+          if (selected === 'ssh') setSshMounted(true)
+          if (selected !== 'ssh') setSshDraft(undefined)
           if (selected === 'office') {
             if (office) setOfficeResetSignal(n => n + 1)
             setOffice(true)
@@ -169,14 +234,14 @@ export function App({ renderSlot }: AgentSlotProps) {
       />
 
       {/* 2. Codex Sidebar (collapsible & resizable) */}
-      {!sidebarCollapsed && !workbench && !git && !office && (
+      {!sidebarCollapsed && !workbench && !git && !ssh && !office && (
         <div className={css.sidebarCol} style={{ width: actualSidebarWidth }}>
           {sidebar}
         </div>
       )}
 
       {/* Drag handle for Sidebar */}
-      {!sidebarCollapsed && !workbench && !git && !office && (
+      {!sidebarCollapsed && !workbench && !git && !ssh && !office && (
         <div
           className={css.dragHandle}
           onPointerDown={(e) => {
@@ -215,9 +280,23 @@ export function App({ renderSlot }: AgentSlotProps) {
             />
           </div>
         )}
-        {!office && (git ? <div className={css.dockedView}>
+        {sshMounted && <div className={css.dockedView} style={{ display: ssh ? 'flex' : 'none' }}>
+          <SshContext.Provider value={{ access: { ...(taskId ? { task_id: taskId } : {}) }, openTask: openSshChat,
+            aiFocus: aiFocus?.taskId === taskId ? aiFocus : undefined, followAi,
+            onToggleFollowAi: enabled => {
+              setFollowAi(enabled)
+              if (!enabled) setAiFocus(undefined)
+              try { localStorage.setItem('ssh_follow_ai', String(enabled)) } catch {}
+            },
+            titleFor: id => (workspace.task?.task_id === id ? workspace.task : workspace.allTasks.find(task => task.task_id === id))?.title ?? undefined,
+            ...(gitWorkspace ? { diagnose: (text: string) => setSshDraft({ text }) } : {}) }}>
+            <div className={css.dockedPage}><PluginPageHost owner="ssh" page="workbench" workspaceRoot={gitWorkspace} theme={dark ? 'dark' : 'light'} /></div>
+          </SshContext.Provider>
+          {gitWorkspace && <CodeChatDock key="ssh" workspace={gitWorkspace} renderSlot={renderSlot} onOpenInChat={openSshChat} diagnostic={sshDraft} embeddedLauncher linkedTaskId={taskId} linkedSession={workspace.session} openSignal={sshChatOpenSignal} />}
+        </div>}
+        {!office && !ssh && (git ? <div className={css.dockedView}>
           <div className={css.dockedPage}><PluginPageHost owner="git" page="history" workspaceRoot={gitWorkspace} /></div>
-          {gitWorkspace && <CodeChatDock workspace={gitWorkspace} renderSlot={renderSlot} onOpenInChat={id => { setGit(false); setWorkbench(false); setTab('chat'); workspace.openTask(id) }} />}
+          {gitWorkspace && <CodeChatDock key="git" workspace={gitWorkspace} renderSlot={renderSlot} onOpenInChat={id => { setGit(false); setWorkbench(false); setTab('chat'); workspace.openTask(id) }} />}
         </div>
           : workbench ? <SkillWorkbench tasks={workspace.allTasks} projects={workspace.projects} defaultWorkspace={workspace.info?.workspace ?? ''} onOpenChat={id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) }} onPackages={() => { setWorkbench(false); setTab('skill-pages') }} /> : tab === 'skill-pages' ? <SkillPackagesPage workspace={workspace} onBack={() => setTab('chat')} /> : workspace.heroPhase ? (
           <HeroPage key={newChatVersion} workspace={workspace} renderSlot={renderSlot} />
@@ -235,7 +314,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       </div>
 
       {/* Drag handle for Right Panel */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !office && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && (
         <div
           className={css.dragHandle}
           role="separator" aria-orientation="vertical" aria-label="调整预览抽屉宽度"
@@ -259,7 +338,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       )}
 
       {/* 4. Right Inspector Panel (Changes, Sources) */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !office && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && (
         <CodexRightPanel
           width={rightPanelWidth}
           mode={tabs ? mode : 'changes'}

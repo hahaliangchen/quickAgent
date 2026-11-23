@@ -20,6 +20,7 @@
       "../src/server/builtin_plugins/web/": "src/server/builtin_plugins/web/",
       "../src/server/builtin_plugins/desktop/": "src/server/builtin_plugins/desktop/",
       "../src/server/builtin_plugins/git/": "src/server/builtin_plugins/git/",
+      "../src/server/builtin_plugins/ssh/": "src/server/builtin_plugins/ssh/",
       "../bundled_plugins/": "bundled_plugins/",
       "../third_party/DSH-LICENSE.txt": "DSH-LICENSE.txt",
       "binaries/ripgrep-COPYING": "ripgrep-COPYING",

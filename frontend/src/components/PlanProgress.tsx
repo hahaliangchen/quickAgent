@@ -1,8 +1,8 @@
-import { useId, useMemo } from 'react'
+import { useId, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AgentEvent } from '../api.ts'
-import { latestPlan, type PlanStatus } from '../model.ts'
+import { groupPlanSteps, latestPlan, type PlanStatus } from '../model.ts'
 import styles from './PlanProgress.module.css'
 
 const labels: Record<PlanStatus, string> = {
@@ -45,7 +45,7 @@ function ProgressRing({ percent, done, blocked }: {
           cx="12"
           cy="12"
           r={RING_RADIUS}
-          stroke={blocked ? undefined : `url(#${gradId})`}
+          stroke={blocked ? undefined : 'url(#' + gradId + ')'}
           strokeDasharray={RING_CIRCUMFERENCE}
           strokeDashoffset={offset}
         />
@@ -91,37 +91,52 @@ function StepGlyph({ status }: { status: PlanStatus }): ReactNode {
 
 export function PlanProgress({ events, variant = 'inline' }: { events: readonly AgentEvent[]; variant?: 'inline' | 'dock' }) {
   const plan = useMemo(() => latestPlan(events), [events])
+  const tree = useMemo(() => groupPlanSteps(plan?.steps ?? []), [plan])
+  // Running and blocked phases show their sub-steps by default; a finished or
+  // untouched phase stays folded until the user clicks. Only a click is stored,
+  // so a later status change still follows the default.
+  const [folded, setFolded] = useState<Record<string, boolean>>({})
+  // The sub-step that best explains the current state, shown without expanding.
+  const focus = useMemo(() => {
+    for (const group of tree.topSteps) {
+      const child = group.children.find(step => step.status === 'blocked')
+        ?? group.children.find(step => step.status === 'in_progress')
+      if (child !== undefined) return { group, child }
+    }
+    return undefined
+  }, [tree])
   if (!plan || plan.steps.length === 0) return null
-  const { steps, completed } = plan
-  const total = steps.length
-  const percent = Math.round((completed / total) * 100)
-  const blocked = steps.find(step => step.status === 'blocked')
-  const running = steps.find(step => step.status === 'in_progress')
-  const head = blocked ?? running
-  const allDone = completed === total
-  const useSegments = total <= 16
+
+  const { topSteps, topCompleted, topTotal, percent } = tree
+  const blockedTop = topSteps.find(step => step.status === 'blocked')
+  const runningTop = topSteps.find(step => step.status === 'in_progress')
+  const status: PlanStatus | undefined = focus !== undefined
+    ? focus.child.status
+    : blockedTop !== undefined ? 'blocked' : runningTop !== undefined ? 'in_progress' : undefined
+  const headline = focus?.child.title ?? blockedTop?.title ?? runningTop?.title
+  const parentLine = focus?.group.title
+  const allDone = topTotal > 0 && topCompleted === topTotal
+  const useSegments = topTotal <= 16
 
   return (
-    <details className={variant === 'dock' ? `${styles.plan} ${styles.dock}` : styles.plan}>
+    <details className={variant === 'dock' ? styles.plan + ' ' + styles.dock : styles.plan}>
       <summary className={styles.summary}>
         <div className={styles.headerRow}>
           <div className={styles.headerLeft}>
-            <ProgressRing percent={percent} done={allDone} blocked={blocked !== undefined} />
+            <ProgressRing percent={percent} done={allDone} blocked={blockedTop !== undefined || focus?.child.status === 'blocked'} />
             <span className={styles.label}>任务计划</span>
             <span className={styles.count} aria-live="polite" aria-atomic="true">
-              {completed} / {total}
+              {topCompleted} / {topTotal}
             </span>
           </div>
 
           <div className={styles.headerRight}>
-            {head !== undefined
+            {headline !== undefined
               ? (
-                  <span
-                    className={styles.collapsedStatus}
-                    data-status={blocked !== undefined ? 'blocked' : 'in_progress'}
-                  >
+                  <span className={styles.collapsedStatus} data-status={status}>
                     <span className={styles.statusDot} aria-hidden="true" />
-                    <span className={styles.statusTitle}>{head.title}</span>
+                    {parentLine !== undefined && <span className={styles.statusParent}>{parentLine} ›</span>}
+                    <span className={styles.statusTitle}>{headline}</span>
                   </span>
                 )
               : allDone
@@ -138,54 +153,90 @@ export function PlanProgress({ events, variant = 'inline' }: { events: readonly 
           className={styles.progressBar}
           role="progressbar"
           aria-label="任务计划完成度"
-          aria-valuenow={completed}
+          aria-valuenow={topCompleted}
           aria-valuemin={0}
-          aria-valuemax={total}
+          aria-valuemax={topTotal}
         >
           {useSegments
-            ? steps.map((step, index) => (
-                <span
-                  key={step.id}
-                  className={styles.segment}
-                  data-status={step.status}
-                  style={
-                    step.status === 'done' || step.status === 'in_progress'
-                      ? {
-                          backgroundSize: `${total * 100}% 100%`,
-                          backgroundPosition: total > 1 ? `${(index / (total - 1)) * 100}% 0` : '0% 0',
-                        }
-                      : undefined
-                  }
-                />
-              ))
+            ? topSteps.map(group => {
+                const doneChildren = group.children.filter(child => child.status === 'done').length
+                // A running phase with sub-steps fills its segment by sub-step ratio.
+                const partial = group.status === 'in_progress' && group.children.length > 0
+                return (
+                  <span
+                    key={group.id}
+                    className={styles.segment}
+                    data-status={group.status}
+                    data-partial={partial ? 'true' : undefined}
+                  >
+                    {partial && (
+                      <span
+                        className={styles.segmentFill}
+                        style={{ width: Math.round((doneChildren / group.children.length) * 100) + '%' }}
+                      />
+                    )}
+                  </span>
+                )
+              })
             : (
                 <span className={styles.continuousTrack}>
-                  <span className={styles.continuousFill} style={{ width: `${percent}%` }} />
+                  <span className={styles.continuousFill} style={{ width: percent + '%' }} />
                 </span>
               )}
         </div>
       </summary>
 
       <ol className={styles.steps}>
-        {steps.map(step => {
-          const highlighted = step.status === 'in_progress' || step.status === 'blocked'
+        {topSteps.map(group => {
+          const highlighted = group.status === 'in_progress' || group.status === 'blocked'
+          const doneChildren = group.children.filter(child => child.status === 'done').length
+          const open = group.children.length > 0 && (folded[group.id] ?? highlighted)
           return (
-            <li key={step.id} className={styles.step} data-status={step.status}>
+            <li key={group.id} className={styles.step} data-status={group.status}>
               <div className={styles.railCell}>
-                <StepGlyph status={step.status} />
+                <StepGlyph status={group.status} />
                 <span className={styles.railStem} aria-hidden="true" />
               </div>
-              <div className={highlighted ? styles.activeCard : styles.plainRow} data-status={step.status}>
+              <div className={highlighted ? styles.activeCard : styles.plainRow} data-status={group.status}>
                 <div className={styles.stepMain}>
-                  <div className={styles.title}>{step.title}</div>
-                  {step.note && <div className={styles.note}>{step.note}</div>}
+                  <div className={styles.title}>{group.title}</div>
+                  {group.note && <div className={styles.note}>{group.note}</div>}
                 </div>
-                {highlighted && (
-                  <span className={styles.badge} data-status={step.status}>
-                    {labels[step.status]}
-                  </span>
-                )}
+                <div className={styles.stepMeta}>
+                  {group.children.length > 0 && (
+                    <button
+                      type="button"
+                      className={styles.subToggle}
+                      aria-expanded={open}
+                      aria-label={(open ? '收起 ' : '展开 ') + group.title + ' 的子步骤'}
+                      onClick={() => setFolded(previous => ({ ...previous, [group.id]: !(previous[group.id] ?? highlighted) }))}
+                    >
+                      <span className={styles.subCount} data-status={group.status}>
+                        {doneChildren}/{group.children.length}
+                      </span>
+                      <IconChevronDownOutlineRegular className={open ? styles.subChevronOpen : styles.subChevron} />
+                    </button>
+                  )}
+                  {highlighted && (
+                    <span className={styles.badge} data-status={group.status}>
+                      {labels[group.status]}
+                    </span>
+                  )}
+                </div>
               </div>
+              {open && (
+                <ol className={styles.subSteps}>
+                  {group.children.map(child => (
+                    <li key={child.id} className={styles.subStep} data-status={child.status}>
+                      <span className={styles.subDot} aria-hidden="true" />
+                      <span className={styles.subBody}>
+                        <span className={styles.subTitle}>{child.title}</span>
+                        {child.note && <span className={styles.subNote}>{child.note}</span>}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              )}
             </li>
           )
         })}

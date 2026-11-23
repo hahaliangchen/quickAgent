@@ -49,6 +49,7 @@ export function summaryFor(name: string, args: Record<string, unknown>, result?:
     case 'verify_test': return [text(args.path) || '.', text(args.ecosystem), text(args.filter)].filter(Boolean).join(' · ')
     case 'plan_set': return String(count(args.steps)) + ' 项'
     case 'plan_update': return [text(args.id), ({ pending: '待开始', in_progress: '进行中', done: '完成', blocked: '受阻' } as Record<string, string>)[text(args.status)], text(args.note)].filter(Boolean).join(' · ')
+    case 'plan_add_substeps': return [text(args.parent_id), String(count(args.steps)) + ' 项子步骤'].filter(Boolean).join(' · ')
     case 'exec_command': return text(args.cmd)
     case 'run_readonly_command': return text(args.cmd)
     case 'create_dir': return text(args.path)

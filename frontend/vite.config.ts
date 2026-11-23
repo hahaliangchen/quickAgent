@@ -22,6 +22,7 @@ export default defineConfig({
     proxy: {
       '/api/session/uploadFileBinary': backend,
       '/agent/tasks': backend,
+      '/agent/ssh': { target: backend, ws: true },
       '/agent/sessions': backend,
       '/agent/info': backend,
       '/agent/settings': backend,

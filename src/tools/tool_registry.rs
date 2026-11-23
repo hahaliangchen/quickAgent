@@ -168,6 +168,7 @@ const SPECS: &[ToolSpec] = tool_specs! {
     Plan {
         plan.set => plan_set;
         plan.update => plan_update;
+        plan.add_substeps => plan_add_substeps;
     }
     Git {
         git.blame => git_blame;

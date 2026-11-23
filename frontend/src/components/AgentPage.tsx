@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetStateAction, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetStateAction, type ReactNode } from 'react'
 import clsx from 'clsx'
 import { BrandMark } from './BrandMark.tsx'
 import { prefillComposer } from './RewindControl.tsx'
@@ -7,12 +7,13 @@ import { taskTitle, workspaceName } from './Sidebar.tsx'
 import { latestContextUsage } from './contextUsage.ts'
 import { SkillPagesView } from './SkillPagesView.tsx'
 import type { OpenFilePreview } from '../filePreview.ts'
+import { NEW_CHAT_DRAFT } from '../composerDraft.ts'
 import type { AgentSlotProps } from '../cordis/slot-contract.ts'
 import root from '../dsh/conversation/ConversationRoot.module.css'
 import welcomeCss from './Welcome.module.css'
 import readonlyCss from '../dsh/subagent/SubagentReadOnlyComposer.module.css'
 import { t } from '../i18n.ts'
-import { formatDuration } from '../model.ts'
+import { chatItems, formatDuration } from '../model.ts'
 import { useTaskDuration } from '../useTaskDuration.ts'
 import type { AgentWorkspace } from '../useAgentWorkspace.ts'
 import css from '../App.module.css'
@@ -123,8 +124,7 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
         <div className={welcomeCss.composerWrap}>
           {renderSlot('agent.composer', {
             variant: 'hero',
-            // The new chat's own draft: typed here, it survives a look elsewhere.
-            draftKey: NEW_CHAT_DRAFT,
+            draftKey: workspace.taskId ?? NEW_CHAT_DRAFT,
             disabled: !workspace.ready,
             note: workspace.composerNote,
             running: false,
@@ -175,9 +175,6 @@ export function SkillPackagesPage({ workspace, onBack }: { workspace: AgentWorks
 
 export type Tab = 'chat' | 'flow' | 'skill-pages'
 
-/** The key of the draft written before a chat exists; it becomes the task's own once it does. */
-const NEW_CHAT_DRAFT = 'new-chat'
-
 export function ConversationPage({
   workspace,
   renderSlot,
@@ -196,6 +193,15 @@ export function ConversationPage({
   const scrollRef = useRef<HTMLDivElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const followTail = useRef(true)
+  const pendingJump = useRef<{ taskId: string | undefined; key: string }>()
+  const scrollToMessage = useCallback((key: string) => {
+    const scroll = scrollRef.current
+    const message = scroll?.querySelector<HTMLElement>(`[data-chat-turn-message="${CSS.escape(key)}"]`)
+    if (!scroll || !message) return
+    followTail.current = false
+    message.focus({ preventScroll: true })
+    scroll.scrollTop += message.getBoundingClientRect().top - scroll.getBoundingClientRect().top - 12
+  }, [])
   // The chat width scales with the space the conversation actually has (the
   // window minus the sidebar and any open side panel), which CSS reads from
   // --dsh-conversation-column-width.
@@ -216,11 +222,17 @@ export function ConversationPage({
     observer.observe(body)
     return () => observer.disconnect()
   }, [])
-  useEffect(() => { followTail.current = true }, [workspace.taskId, tab])
+  useLayoutEffect(() => { followTail.current = true }, [workspace.taskId, tab])
   useLayoutEffect(() => {
     const scroll = scrollRef.current
     if (scroll !== null && followTail.current && tab === 'chat') scroll.scrollTop = scroll.scrollHeight
-  }, [workspace.session.events, tab])
+  }, [workspace.session.events, workspace.taskId, tab])
+  useLayoutEffect(() => {
+    const jump = pendingJump.current
+    if (tab !== 'chat' || jump === undefined) return
+    pendingJump.current = undefined
+    if (jump.taskId === workspace.taskId) scrollToMessage(jump.key)
+  }, [tab, workspace.taskId, scrollToMessage])
   useEffect(() => {
     const scroll = scrollRef.current
     const transcript = scroll?.firstElementChild
@@ -241,6 +253,20 @@ export function ConversationPage({
   const durationInfo = useTaskDuration(session.events, task, running)
   const contextUsage = useMemo(() => latestContextUsage(session.events), [session.events])
   const currentTitle = task === undefined ? t('app.untitled') : taskTitle(task)
+  const items = useMemo(() => chatItems(session.events, task), [session.events, task])
+  const recentTurns = useMemo(() => items.filter(item => item.kind === 'user').slice(-2).map(item => ({
+    key: item.key,
+    text: item.text.trim().replace(/\s+/g, ' ') || item.attachments?.map(file => file.name).join('、') || '附件消息',
+  })), [items])
+
+  const jumpToTurn = (key: string) => {
+    if (tab === 'chat') {
+      scrollToMessage(key)
+    } else {
+      pendingJump.current = { taskId: workspace.taskId, key }
+      setTab('chat')
+    }
+  }
   // A summary file link reveals the inspector when it is closed; the toggle is
   // only asked to open, so a click never folds a panel the user is reading.
   const revealRightPanel = () => {
@@ -259,9 +285,23 @@ export function ConversationPage({
               <polyline points="14 2 14 8 20 8" />
             </svg>
           </span>
-          <span className={headerCss.titleText} title={currentTitle}>
-            {isChild && parent ? `${taskTitle(parent)} / ` : ''}{currentTitle}
-          </span>
+          {recentTurns.length === 0 ? (
+            <span className={headerCss.titleText} title={currentTitle}>
+              {isChild && parent ? `${taskTitle(parent)} / ` : ''}{currentTitle}
+            </span>
+          ) : (
+            <nav className={headerCss.turnList} aria-label="最近对话轮次">
+              {recentTurns.map(({ key, text }, index) => {
+                const label = index === recentTurns.length - 1 ? '当前轮' : '上一轮'
+                return (
+                  <button type="button" key={key} className={headerCss.turnButton} title={text} onClick={() => jumpToTurn(key)}>
+                    <span className={headerCss.turnLabel}>{label}</span>
+                    <span className={headerCss.titleText}>{text}</span>
+                  </button>
+                )
+              })}
+            </nav>
+          )}
         </div>
 
         {/* Center: Clean Segmented Pill Tabs */}
@@ -326,7 +366,7 @@ export function ConversationPage({
           <div className={css.session} data-slot="conversation.session" style={tab === 'flow' ? { height: '100%', flex: 1, display: 'flex', flexDirection: 'column' } : undefined}>
             <div className={root.viewArea} style={tab === 'flow' ? { height: '100%', flex: 1, minHeight: 520, display: 'flex' } : undefined}>
               {tab === 'chat'
-                ? <>{renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: openTask, onChangesUpdated: session.reload, onRevealRightPanel: revealRightPanel, onFilePreview })}</>
+                ? <>{renderSlot('agent.chat', { events: session.events, projectedItems: items, task, running, onOpenTask: openTask, onChangesUpdated: session.reload, onRevealRightPanel: revealRightPanel, onFilePreview })}</>
                 : <>{renderSlot('agent.flow', { taskId: workspace.taskId, events: session.events, task, running })}</>}
             </div>
           </div>

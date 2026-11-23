@@ -278,13 +278,15 @@ pub(super) async fn business_tool_inner(
             "SANDBOX_UNSUPPORTED: package command tools cannot yet run under the workspace sandbox"
         );
     }
-    if !(name == "write_stdin" && args["chars"].as_str().is_none_or(str::is_empty))
-        && crate::tools::tool_approvals::needs_approval(
-            s.state.permission_mode,
-            name,
-            s.state.tool_catalog.as_deref(),
-            s.ban_execution,
-        )
+    let ssh_protected = crate::server::builtin_plugins::ssh::requires_approval(name, &args);
+    if ssh_protected
+        || (!(name == "write_stdin" && args["chars"].as_str().is_none_or(str::is_empty))
+            && crate::tools::tool_approvals::needs_approval(
+                s.state.permission_mode,
+                name,
+                s.state.tool_catalog.as_deref(),
+                s.ban_execution,
+            ))
     {
         crate::tools::tool_approvals::wait(
             s.state,
@@ -652,7 +654,31 @@ pub(super) async fn business_tool_inner(
             {
                 let queried = args["task_id"].as_str().map(str::to_owned);
                 let mut output = tokio::select! {
-                    result = crate::server::plugin_io::execute(s.state, s.task, tool_workspace.clone(), name, args.clone()) => result?,
+                    result = async {
+                        if crate::server::builtin_plugins::ssh::is_tool(name) {
+                            crate::server::builtin_plugins::ssh::scoped(
+                                s.task.to_owned(),
+                                ssh_protected,
+                                crate::server::plugin_io::execute(
+                                    s.state,
+                                    s.task,
+                                    tool_workspace.clone(),
+                                    name,
+                                    args.clone(),
+                                ),
+                            )
+                            .await
+                        } else {
+                            crate::server::plugin_io::execute(
+                                s.state,
+                                s.task,
+                                tool_workspace.clone(),
+                                name,
+                                args.clone(),
+                            )
+                            .await
+                        }
+                    } => result?,
                     _ = s.cancel.cancelled() => anyhow::bail!("task cancelled during skill tool execution"),
                 };
                 let root = s.state.workspace.root();
