@@ -20,8 +20,10 @@ test('provider editing preserves drafts and saves the configured values', { skip
           window.reads=0; window.saved=[]; window.notifications=0;
           window.settings={revision:'initial',providers:new URLSearchParams(location.search).has('single')?[provider('first')]:[provider('first'),provider('second')],plugin_models:{},orchestrator_provider:'first',orchestrator_model:'model-a',reasoning_effort:'',fast_mode:false};
           if(new URLSearchParams(location.search).has('local'))window.settings={...window.settings,providers:[{...provider('deepseek'),url:'https://api.deepseek.com/v1',has_api_key:false}],web_search_provider:'deepseek',orchestrator_provider:'deepseek'};
+            if(new URLSearchParams(location.search).has('whitelist'))window.settings={...window.settings,providers:[provider('first'),{...provider('deepseek'),api_type:'anthropic-messages',models:['deepseek-flash']},{...provider('responses'),api_type:'openai-responses',models:['gpt-6.2-sol']}],plugin_models:{web:[]}};
           api.getSettings=async()=>{window.reads++;const result=structuredClone(window.settings);if(window.delayLoad)await new Promise(resolve=>window.resolveLoad=resolve);return result};
-          api.getPlugins=async()=>({plugins:[],events:[]}); api.skillPackages=async()=>({packages:[]});
+          api.getPlugins=async()=>({plugins:[],events:[]});
+          api.skillPackages=async()=>({packages:new URLSearchParams(location.search).has('whitelist')?[{id:'web',title:'Web'}]:[]});
           api.saveSettings=async payload=>{
             window.saved.push(structuredClone(payload));
             window.settings={...payload,revision:'saved',providers:payload.providers.map(({api_key,clear_api_key,...p})=>({...p,has_api_key:!clear_api_key}))};
@@ -139,6 +141,28 @@ test('provider editing preserves drafts and saves the configured values', { skip
     assert.equal(local.orchestrator_model, 'customer-qwen3-vl-32b')
     assert.equal(local.web_search_provider, 'deepseek', 'search configuration is independent of local model editing')
     assert.equal(Object.hasOwn(local.providers[1], 'api_key'), false)
+
+      await page.goto(url + '?whitelist')
+      const limit = page.getByRole('switch', { name: '限制 web 可用模型' })
+      const completions = page.getByRole('checkbox', { name: 'first / model-a', exact: true })
+      const messages = page.getByRole('checkbox', { name: 'deepseek / deepseek-flash', exact: true })
+      const responses = page.getByRole('checkbox', { name: 'responses / gpt-6.2-sol', exact: true })
+      await limit.click()
+      await limit.click()
+      for (const option of [completions, messages, responses]) assert.equal(await option.isChecked(), true)
+      await completions.uncheck()
+      await page.getByRole('button', { name: '保存更改', exact: true }).click()
+      await page.getByText('设置已保存并立即对新任务生效。', { exact: true }).waitFor()
+      assert.deepEqual(await page.evaluate(() => window.saved[0].plugin_models.web), [
+        { provider: 'deepseek', model: 'deepseek-flash' },
+        { provider: 'responses', model: 'gpt-6.2-sol' },
+      ])
+      await page.getByRole('button', { name: '关闭设置', exact: true }).click()
+      await page.getByRole('button', { name: '打开设置', exact: true }).click()
+      await responses.waitFor()
+      assert.equal(await completions.isChecked(), false)
+      assert.equal(await messages.isChecked(), true)
+      assert.equal(await responses.isChecked(), true)
     assert.deepEqual(errors, [])
   } finally {
     if (browser) await browser.close()

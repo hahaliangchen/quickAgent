@@ -439,6 +439,8 @@ export function SettingsModal({
   if (!open) return null
 
   const dirty = draft !== null && baseline !== null && JSON.stringify(draft) !== baseline
+  const pluginProviders = draft?.providers.map(provider => ({ provider, models: parseModels(provider.models_text) })) ?? []
+  const allPluginModels = pluginProviders.flatMap(({ provider, models }) => models.map(model => ({ provider: provider.id, model })))
 
   const navItems: readonly { id: SettingsTab; label: string; icon: JSX.Element }[] = [
     { id: 'general', label: '通用', icon: <IconSettingsOutlineRegular className={rootCss.navIcon} size={18} /> },
@@ -1038,11 +1040,11 @@ export function SettingsModal({
                           <Switch
                             checked={selected!==undefined}
                             label={`限制 ${plugin.id} 可用模型`}
-                            onChange={checked=>setModels(checked?draft.providers.filter(p=>p.api_type==='openai-completions').flatMap(p=>parseModels(p.models_text).map(model=>({provider:p.id,model}))):undefined)}
+                            onChange={checked=>setModels(checked ? allPluginModels : undefined)}
                           />
                         </div>
                         {selected!==undefined&&<div className={appearanceCss.checkGrid}>
-                          {draft.providers.filter(p=>p.api_type==='openai-completions').flatMap(p=>parseModels(p.models_text).map(model=><label key={JSON.stringify([p.id,model])} className={modelsCss.checkRow}>
+                          {pluginProviders.flatMap(({ provider: p, models }) => models.map(model=><label key={JSON.stringify([p.id,model])} className={modelsCss.checkRow}>
                             <input type="checkbox" checked={selected.some(r=>r.provider===p.id&&r.model===model)} onChange={e=>setModels(e.target.checked?[...selected,{provider:p.id,model}]:selected.filter(r=>r.provider!==p.id||r.model!==model))}/>
                             <span>{p.display_name||p.id} / {model}</span>
                           </label>))}

@@ -22,7 +22,7 @@ use tokio::{
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use crate::{server::builtin_plugins, server::plugin_runtime};
+use crate::server::{builtin_plugins, local_api_proxy, plugin_runtime};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -848,7 +848,7 @@ pub(crate) fn restricted_config(
     let mut scoped = config.clone();
     scoped.providers.retain(|id, p| {
         p.model_map.retain(|model, _| permits(id, model));
-        !p.model_map.is_empty() && p.api_type == "openai-completions"
+        !p.model_map.is_empty() && agent_api(&p.api_type)
     });
     let selected = config
         .orchestrator_provider
@@ -933,6 +933,7 @@ struct AiProxyState {
     config_path: std::path::PathBuf,
     settings_write: Arc<Mutex<()>>,
     client: Client,
+    local_api_client: Client,
     runtime: Arc<plugin_runtime::PluginRuntime>,
 }
 
@@ -1198,9 +1199,13 @@ async fn skill_page_asset(
     }
 }
 
+fn skill_local_api_route() -> axum::routing::MethodRouter<AiProxyState> {
+    axum::routing::any(skill_local_api_proxy).layer(axum::extract::DefaultBodyLimit::disable())
+}
+
 async fn skill_local_api_proxy(
     State(state): State<AiProxyState>,
-    axum::extract::Path((id, path)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((id, _)): axum::extract::Path<(String, String)>,
     request: axum::extract::Request,
 ) -> Response {
     let registry = state
@@ -1217,96 +1222,7 @@ async fn skill_local_api_proxy(
                 .into_response();
         }
     };
-    let method = match reqwest::Method::from_bytes(request.method().as_str().as_bytes()) {
-        Ok(method) => method,
-        Err(_) => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
-    };
-    let query = request
-        .uri()
-        .query()
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default();
-    let target = format!(
-        "http://127.0.0.1:{port}/{}{query}",
-        path.trim_start_matches('/')
-    );
-    let content_type = request
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let body = match axum::body::to_bytes(request.into_body(), 16 * 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": error.to_string()})),
-            )
-                .into_response();
-        }
-    };
-    let client = match reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": error.to_string()})),
-            )
-                .into_response();
-        }
-    };
-    let mut last_error = None;
-    for attempt in 0..10 {
-        let mut req = client.request(method.clone(), &target);
-        if let Some(ct) = &content_type {
-            req = req.header(header::CONTENT_TYPE, ct);
-        }
-        if !body.is_empty() {
-            req = req.body(body.clone());
-        }
-        match req.send().await {
-            Ok(upstream) => {
-                let status = StatusCode::from_u16(upstream.status().as_u16())
-                    .unwrap_or(StatusCode::BAD_GATEWAY);
-                let mut out_headers = HeaderMap::new();
-                if let Some(ct) = upstream.headers().get(header::CONTENT_TYPE) {
-                    out_headers.insert(header::CONTENT_TYPE, ct.clone());
-                }
-                if let Some(cc) = upstream.headers().get(header::CACHE_CONTROL) {
-                    out_headers.insert(header::CACHE_CONTROL, cc.clone());
-                }
-                return match upstream.bytes().await {
-                    Ok(bytes) => (status, out_headers, bytes).into_response(),
-                    Err(error) => (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({"error": error.to_string()})),
-                    )
-                        .into_response(),
-                };
-            }
-            Err(error) if error.is_connect() && attempt < 9 => {
-                last_error = Some(error);
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            }
-            Err(error) => {
-                last_error = Some(error);
-                break;
-            }
-        }
-    }
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(json!({
-            "error": last_error
-                .map(|error| error.to_string())
-                .unwrap_or_else(|| "plugin local service unavailable".into())
-        })),
-    )
-        .into_response()
+    local_api_proxy::forward(&state.local_api_client, port, request).await
 }
 
 pub async fn run(
@@ -1533,6 +1449,7 @@ pub async fn run(
         config_path: config_path.to_path_buf(),
         settings_write: Arc::new(Mutex::new(())),
         client,
+        local_api_client: local_api_proxy::client(local_api_proxy::READ_TIMEOUT)?,
         runtime: runtime.clone(),
     };
 
@@ -1590,10 +1507,7 @@ pub async fn run(
             "/agent/skill-packages/{id}/pages/{page}/{*resource}",
             get(skill_page_asset),
         )
-        .route(
-            "/agent/skill-packages/{id}/local-api/{*path}",
-            axum::routing::any(skill_local_api_proxy),
-        )
+        .route(local_api_proxy::ROUTE, skill_local_api_route())
         .merge(agent_routes)
         .with_state(state)
         .layer(CorsLayer::permissive());
@@ -1623,6 +1537,10 @@ pub async fn run(
     served?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "parts/local_api_proxy_tests.rs"]
+mod local_api_proxy_tests;
 
 #[cfg(test)]
 mod tests {

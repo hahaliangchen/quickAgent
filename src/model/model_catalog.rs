@@ -173,9 +173,11 @@ mod tests {
             "visual_tool":{"model":"vision"},
             "providers":{
                 "gpt":{"url":"http://gpt/v1","model_map":{"main":"main","vision":"vision"}},
-                "qwen":{"url":"http://qwen/v1","model_map":{"local":"local","other":"other"}}
+                "qwen":{"url":"http://qwen/v1","model_map":{"local":"local","other":"other"}},
+                "deepseek":{"url":"http://deepseek/v1","api_type":"anthropic-messages","model_map":{"deepseek-flash":"deepseek-flash"}},
+                "responses":{"url":"http://responses/v1","api_type":"openai-responses","model_map":{"gpt-6.2-sol":"gpt-6.2-sol"}}
             },
-            "plugin_models":{"code-flow":[{"provider":"qwen","model":"local"}],"denied":[]}
+            "plugin_models":{"code-flow":[{"provider":"qwen","model":"local"},{"provider":"deepseek","model":"deepseek-flash"},{"provider":"responses","model":"gpt-6.2-sol"}],"denied":[]}
         }))
         .unwrap();
         assert_eq!(
@@ -183,7 +185,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            4
+            6
         );
         assert!(
             crate::server::ai_proxy::plugin_catalog_view(&config, "denied")["models"]
@@ -192,7 +194,7 @@ mod tests {
                 .is_empty()
         );
         let directory = crate::server::ai_proxy::plugin_catalog_view(&config, "code-flow");
-        assert_eq!(directory["models"].as_array().unwrap().len(), 1);
+        assert_eq!(directory["models"].as_array().unwrap().len(), 3);
         assert_eq!(directory["defaults"]["agent"]["model"], "local");
         assert_eq!(
             directory["defaults"]["visual_tool"]["model"],
@@ -251,6 +253,21 @@ mod tests {
             .unwrap();
         assert_eq!(explicit.reasoning_effort.as_deref(), Some("medium"));
 
+        for (provider, model, responses, messages) in [
+            ("deepseek", "deepseek-flash", false, true),
+            ("responses", "gpt-6.2-sol", true, false),
+        ] {
+            let mut request = serde_json::from_value(serde_json::json!({
+                "prompt":"continue","provider":provider,"model":model
+            })).unwrap();
+            let mut scoped = state.clone();
+            prepare_turn(&mut scoped, task, &mut request).await.unwrap();
+            assert_eq!(request.provider.as_deref(), Some(provider));
+            assert_eq!(request.model.as_deref(), Some(model));
+            let route = &scoped.provider_routes[provider];
+            assert_eq!((route.responses, route.messages), (responses, messages));
+        }
+
         assert!(!scoped.provider_routes.contains_key("gpt"));
         for role in [&scoped.visual_tool_settings] {
             let resolved = role.resolve(&scoped, "local").unwrap();
@@ -281,7 +298,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            4
+            6
         );
         drop(runtime);
         let _ = std::fs::remove_dir_all(root);

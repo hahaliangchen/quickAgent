@@ -571,6 +571,55 @@
                 .is_empty()
         );
     }
+    #[test]
+    fn plugin_model_whitelist_roundtrips_all_agent_protocols() {
+        let root = std::env::temp_dir().join(crate::media::visual_artifacts::new_id());
+        let path = root.join("providers.yml");
+        let allowed = json!([
+            {"provider":"deepseek","model":"deepseek-flash"},
+            {"provider":"responses","model":"gpt-6.2-sol"},
+            {"provider":"local","model":"local-chat"}
+        ]);
+        let mut payload = json!({
+            "revision":disk_revision(&path).unwrap(),
+            "providers":[
+                {"id":"deepseek","url":"https://m.example/v1","api_type":"anthropic-messages","models":["deepseek-flash","deepseek-other"]},
+                {"id":"responses","url":"https://r.example/v1","api_type":"openai-responses","models":["gpt-6.2-sol"]},
+                {"id":"local","url":"http://localhost:1/v1","api_type":"openai-completions","models":["local-chat"]}
+            ],
+            "orchestrator_provider":"local","orchestrator_model":"local-chat",
+            "plugin_models":{"web":allowed}
+        });
+        save_settings(&path, serde_json::from_value(payload.clone()).unwrap())
+            .unwrap()
+            .unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(json!(loaded.plugin_models["web"]), allowed);
+        let catalog = plugin_catalog_view(&loaded, "web");
+        let actual = catalog["models"].as_array().unwrap().iter()
+            .map(|m| (m["provider"].as_str().unwrap(), m["id"].as_str().unwrap(), m["api_type"].as_str().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, [
+            ("deepseek", "deepseek-flash", "anthropic-messages"),
+            ("local", "local-chat", "openai-completions"),
+            ("responses", "gpt-6.2-sol", "openai-responses"),
+        ]);
+        assert_eq!(catalog["defaults"]["agent"]["model"], "local-chat");
+
+        // A default-only save must keep previously approved plugin models intact.
+        payload.as_object_mut().unwrap().remove("plugin_models");
+        payload["revision"] = json!(disk_revision(&path).unwrap());
+        payload["orchestrator_provider"] = json!("responses");
+        payload["orchestrator_model"] = json!("gpt-6.2-sol");
+        save_settings(&path, serde_json::from_value(payload).unwrap())
+            .unwrap()
+            .unwrap();
+        let loaded = load_config(&path).unwrap();
+        assert_eq!(json!(loaded.plugin_models["web"]), allowed);
+        assert_eq!(loaded.orchestrator_model.as_deref(), Some("gpt-6.2-sol"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
 
     /// A pick on a Responses or Messages provider must become the saved default:
     /// that is the same route the agent already runs a chat on. Refusing the save

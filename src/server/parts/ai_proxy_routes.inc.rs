@@ -609,13 +609,20 @@ fn save_settings(
                 unique.insert(model.clone()),
                 "duplicate plugin model reference"
             );
+            let route = config
+                .providers
+                .get(&model.provider)
+                .filter(|p| p.model_map.contains_key(&model.model))
+                .with_context(|| {
+                    format!(
+                        "插件 {plugin} 引用的模型 {}/{} 未在可用模型目录中登记",
+                        model.provider, model.model
+                    )
+                })?;
             anyhow::ensure!(
-                config
-                    .providers
-                    .get(&model.provider)
-                    .is_some_and(|p| p.api_type == "openai-completions"
-                        && p.model_map.contains_key(&model.model)),
-                "插件 {plugin} 引用的模型未在可用模型目录中登记"
+                agent_api(&route.api_type),
+                "插件 {plugin} 引用的模型 {}/{} 使用了不支持的协议 {}",
+                model.provider, model.model, route.api_type
             );
         }
     }

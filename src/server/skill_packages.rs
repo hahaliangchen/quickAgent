@@ -534,6 +534,11 @@ impl Registry {
         ensure!(package.scope.is_some(), "plugin disabled");
         package.remote.clone().context("not a remote plugin")
     }
+    #[cfg(test)]
+    pub(crate) fn set_test_local_service_port(&self, id: &str, port: u16) {
+        self.entries.write().unwrap().get_mut(id).unwrap().local_service_port = Some(port);
+    }
+
     pub fn local_service_port(&self, id: &str) -> Result<u16> {
         let entries = self.entries.read().unwrap();
         let package = entries.get(id).context("plugin not found")?;
