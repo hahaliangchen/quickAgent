@@ -16,7 +16,11 @@ pub(crate) fn now() -> i64 {
 }
 
 pub(crate) fn open_db(root: &std::path::Path) -> anyhow::Result<rusqlite::Connection> {
-    let conn = crate::context::database::init_db(root)?;
+    crate::context::database::open_initialized(root, Some(agent_schema))
+}
+
+fn agent_schema(conn: &rusqlite::Connection, root: &std::path::Path) -> anyhow::Result<()> {
+    use crate::context::database::add_column;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_tasks (
             id TEXT PRIMARY KEY, prompt TEXT NOT NULL, model TEXT NOT NULL,
@@ -39,63 +43,27 @@ pub(crate) fn open_db(root: &std::path::Path) -> anyhow::Result<rusqlite::Connec
             PRIMARY KEY(task_id,review_id), FOREIGN KEY(task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
          );",
     )?;
-    let _ = conn.execute(
-        "ALTER TABLE agent_task_events ADD COLUMN surface_op TEXT",
-        [],
-    );
-    let has_node: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_task_events') WHERE name='node_id')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !has_node {
-        let tx =
-            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
-        if !tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_task_events') WHERE name='node_id')", [], |r|r.get::<_,bool>(0))? {
-            tx.execute("ALTER TABLE agent_task_events ADD COLUMN node_id TEXT", [])?;
-        }
-        tx.commit()?;
+    for column in ["surface_op", "node_id"] {
+        add_column(conn, "agent_task_events", column, "TEXT")?;
     }
-    crate::tools::plan_tools::schema(&conn)?;
-    crate::runtime::function_frames::schema(&conn)?;
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS task_events_node ON agent_task_events(task_id,node_id,seq);",
-    )?;
-    let _ = conn.execute("ALTER TABLE agent_tasks ADD COLUMN parent_task_id TEXT", []);
-    let _ = conn.execute("ALTER TABLE agent_tasks ADD COLUMN provider_name TEXT", []);
-    let _ = conn.execute(
-        "ALTER TABLE agent_tasks ADD COLUMN reasoning_effort TEXT",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE agent_tasks ADD COLUMN fast_mode INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    // A chat's permission level is kept with its model and thinking level, so the
-    // desktop app and the browser read the same one. Older chats have none.
-    let _ = conn.execute(
-        "ALTER TABLE agent_tasks ADD COLUMN permission_mode TEXT",
-        [],
-    );
-    let has_high_water: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_tasks') WHERE name='event_high_water')",
-        [], |row| row.get(0),
-    )?;
-    if !has_high_water {
-        let tx =
-            rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
-        let migrated: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_tasks') WHERE name='event_high_water')", [], |row| row.get(0))?;
-        if !migrated {
-            tx.execute(
-                "ALTER TABLE agent_tasks ADD COLUMN event_high_water INTEGER NOT NULL DEFAULT -1",
-                [],
-            )?;
-            tx.execute("UPDATE agent_tasks SET event_high_water=COALESCE((SELECT MAX(seq) FROM agent_task_events WHERE task_id=agent_tasks.id),-1)", [])?;
-        }
-        tx.commit()?;
+    crate::tools::plan_tools::schema(conn)?;
+    crate::runtime::function_frames::schema(conn)?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS task_events_node ON agent_task_events(task_id,node_id,seq);")?;
+    for (column, definition) in [
+        ("parent_task_id", "TEXT"),
+        ("provider_name", "TEXT"),
+        ("reasoning_effort", "TEXT"),
+        ("fast_mode", "INTEGER NOT NULL DEFAULT 0"),
+        ("permission_mode", "TEXT"),
+    ] {
+        add_column(conn, "agent_tasks", column, definition)?;
     }
-    crate::context::session_browser::schema(&conn, root)?;
-    Ok(conn)
+    if add_column(conn, "agent_tasks", "event_high_water", "INTEGER NOT NULL DEFAULT -1")? {
+        conn.execute("UPDATE agent_tasks SET event_high_water=COALESCE((SELECT MAX(seq) FROM agent_task_events WHERE task_id=agent_tasks.id),-1)", [])?;
+    }
+    crate::context::session_browser::schema(conn, root)?;
+    crate::context::request_context::schema(conn)?;
+    Ok(())
 }
 
 /// The level a chat runs at: the one it stored, and otherwise asking first.

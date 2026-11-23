@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import {
   DiffBlock, DisclosureRow, ReadBlock, SearchBlock, TerminalBlock,
@@ -16,6 +16,7 @@ import {
   extractSearchMatches,
 } from './CodexToolCard.tsx'
 import { useDisclosure } from '../disclosure.ts'
+import { loadToolDetail } from '../toolDetail.ts'
 import css from '../dsh/tool/ToolRow.module.css'
 import { t } from '../i18n.ts'
 import { cleanToolError, type ToolResult } from '../model.ts'
@@ -189,7 +190,7 @@ function extractReadLines(name: string, args: unknown, result: ToolResult | unde
 }
 
 /** ui-tool ToolRow with authentic DSH TerminalBlock, ReadBlock, DiffBlock, and SearchBlock surfaces. */
-export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopped, onOpenChild, line, startOpen }: {
+export const ToolRow = memo(function ToolRow({ name, rawArguments, result: preview, stopped, onOpenChild, line, startOpen }: {
   name: string
   rawArguments: string
   result: ToolResult | undefined
@@ -201,13 +202,35 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
   /** Open on arrival, so a lone call shows its change without a click; it still folds. */
   startOpen?: boolean | undefined
 }) {
+  const taskId = useConversationTaskId()
   const { expanded, setExpanded, toggle } = useDisclosure()
+  const detailSeq = preview?.detailSeq
+  const key = detailSeq === undefined || taskId === '' ? undefined : JSON.stringify([taskId, detailSeq, preview?.fullBytes, preview?.time])
+  const [request, setRequest] = useState<{ key: string; promise: Promise<ToolResult> }>()
+  const [detail, setDetail] = useState<{ key: string; result?: ToolResult }>()
+  const result = detail?.key === key ? detail?.result ?? preview : preview
+  const loading = key !== undefined && request?.key === key && detail?.key !== key
+  const loadDetail = () => {
+    if (key === undefined || detailSeq === undefined || loading || result?.detailSeq === undefined) return
+    setDetail(undefined)
+    setRequest({ key, promise: loadToolDetail(taskId, detailSeq, key, preview?.fullBytes ?? 0) })
+  }
+  useEffect(() => {
+    if (request === undefined || request.key !== key) return
+    let active = true
+    void request.promise.then(result => {
+      if (active) setDetail({ key: request.key, result })
+    }, () => {
+      if (active) setDetail({ key: request.key })
+    })
+    return () => { active = false }
+  }, [request, key])
   useEffect(() => { if (startOpen === true) setExpanded(true) }, [startOpen, setExpanded])
   const args = useMemo(() => parse(rawArguments), [rawArguments])
   const isShellSession = name === 'exec_command' || name === 'write_stdin' || name === 'kill_session' || name === 'run_readonly_command'
   // A shell result reports the session state even when the call is an error, so the
   // row can show the real exit code instead of falling back to "waiting for output".
-  const parsedResult = useMemo(() => (result === undefined ? undefined : parse(result.text)), [result])
+  const parsedResult = useMemo(() => (result === undefined ? undefined : result.summary ?? parse(result.text)), [result])
   const visualResult = result?.isError === true && !isShellSession ? undefined : parsedResult
   const visual = useMemo(() => toolVisual(name, args, visualResult, { stopped }), [name, args, visualResult, stopped])
   const shellParsed = isShellSession ? parsedResult : undefined
@@ -224,7 +247,7 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
     : shellExitCode !== null ? `退出码 ${shellExitCode}`
     : shellTermination !== undefined ? `已停止 · ${shellTermination}`
     : state === 'error' ? '失败' : '已结束（无退出码）'
-  const nativeParsed = name === 'run_program' && result ? parse(result.text) : undefined
+  const nativeParsed = name === 'run_program' ? parsedResult : undefined
   const nativeResult = typeof nativeParsed === 'object' && nativeParsed !== null ? nativeParsed as Record<string, unknown> : undefined
   const nativeDiagnostics = nativeResult
     ? [
@@ -241,7 +264,6 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
         }),
       ].filter((message): message is string => typeof message === 'string')
     : []
-  const taskId = useConversationTaskId()
   // The pictures this very call handled, shown in the row rather than inside its
   // detail: a screenshot or an analysed image is the call's result.
   const evidence = useMemo(() => visualEvidenceOf([{ name, result }], taskId), [name, result, taskId])
@@ -399,11 +421,16 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result, stopp
         expandable
         expandOnRowClick
         keepContentWhenOpen
-        onToggle={toggle}
+        onToggle={() => { if (!expanded) loadDetail(); toggle() }}
         collapsedContent={collapsedContent}
       >
         {expanded && (
           <div className={css.bodyWrap}>
+            {key !== undefined && result?.detailSeq !== undefined && (
+              loading
+                ? <span className={css.stoppedSummary} role="status">正在加载完整结果…</span>
+                : <button type="button" onClick={loadDetail}>{detail?.key === key ? '重试加载完整结果' : '加载完整结果'}</button>
+            )}
             {isShellSession && (
               <div className={css.shellMeta}>
                 <span>{typeof shellResult?.shell === 'string' ? shellResult.shell : 'Shell'} · {shellStatus}</span>

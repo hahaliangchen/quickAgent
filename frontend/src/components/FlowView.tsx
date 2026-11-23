@@ -1,3 +1,4 @@
+import { ConversationTaskProvider } from './ConversationTask.tsx'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ReactFlow, Controls, MarkerType, type Edge, type Node, type NodeChange, type ReactFlowInstance } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
@@ -200,7 +201,11 @@ export function FlowView({ taskId, events, task, running }: {
               </ReactFlow>
             )}
         </div>
-        {selected !== undefined && <NodeDetail node={selected} onClose={() => setSelectedId(null)} />}
+        {selected !== undefined && (
+          <ConversationTaskProvider taskId={taskId}>
+            <NodeDetail node={selected} onClose={() => setSelectedId(null)} />
+          </ConversationTaskProvider>
+        )}
       </div>
     </div>
   )

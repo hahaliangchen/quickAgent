@@ -62,6 +62,21 @@ pub fn paths(root: &Path, args: &Value) -> Result<Vec<PathBuf>> {
         .collect()
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("batch preflight failed; no files changed: file_index={file_index}, path={path}, edit_index={edit_index:?}")]
+pub(crate) struct PreflightFailure {
+    pub file_index: usize,
+    pub path: String,
+    pub edit_index: Option<usize>,
+}
+
+fn edit_index(error: &anyhow::Error) -> Option<usize> {
+    match error.downcast_ref::<crate::tools::ToolError>()? {
+        crate::tools::ToolError::IndexedEdit { index, .. } => Some(*index),
+        _ => None,
+    }
+}
+
 struct Prepared {
     original: Vec<u8>,
     updated: Vec<u8>,
@@ -164,7 +179,7 @@ pub fn apply(workspace: &Workspace, args: &Value) -> Result<Value> {
     );
     let mut used = 0usize;
     let mut prepared = Vec::with_capacity(files.len());
-    for (file, path) in files.iter().zip(&targets) {
+    for (file_index, (file, path)) in files.iter().zip(&targets).enumerate() {
         let edit = serde_json::from_value::<FileEdit>(file.clone())
             .context("invalid file edit")
             .and_then(|request| {
@@ -178,10 +193,14 @@ pub fn apply(workspace: &Workspace, args: &Value) -> Result<Value> {
                 );
                 Ok(edit)
             });
-        if atomic && let Err(error) = &edit {
-            anyhow::bail!("batch preflight failed; no files changed: {error:#}");
+        if atomic {
+            prepared.push(Ok(edit.map_err(|error| {
+                let edit_index = edit_index(&error);
+                error.context(PreflightFailure { file_index, path: file["path"].as_str().unwrap_or_default().into(), edit_index })
+            })?));
+        } else {
+            prepared.push(edit);
         }
-        prepared.push(edit);
     }
     if atomic {
         for (path, edit) in targets.iter().zip(&prepared) {
@@ -197,7 +216,7 @@ pub fn apply(workspace: &Workspace, args: &Value) -> Result<Value> {
     let mut files = Vec::new();
     let mut changed = 0;
     let mut failed = 0;
-    for ((path, edit), outcome) in targets.into_iter().zip(prepared).zip(outcomes) {
+    for (file_index, ((path, edit), outcome)) in targets.into_iter().zip(prepared).zip(outcomes).enumerate() {
         let rel = path
             .strip_prefix(&root)?
             .to_string_lossy()
@@ -211,7 +230,7 @@ pub fn apply(workspace: &Workspace, args: &Value) -> Result<Value> {
             }
             Err(error) => {
                 failed += 1;
-                files.push(json!({"path":rel,"changed":false,"error":format!("{error:#}")}));
+                files.push(json!({"file_index":file_index,"path":rel,"edit_index":edit.as_ref().err().and_then(edit_index),"changed":false,"error":format!("{error:#}")}));
             }
         }
     }
@@ -220,9 +239,9 @@ pub fn apply(workspace: &Workspace, args: &Value) -> Result<Value> {
 
 pub fn definitions() -> Vec<Value> {
     vec![
-        json!({"name":NAME,"description":"Apply exact text edits across files. By default preflight every file before writing and roll back prior writes if publishing fails. atomic=false attempts valid files independently.","inputSchema":{"type":"object","required":["files"],"properties":{
+        json!({"name":NAME,"description":"Apply exact text edits across files. By default preflight every file before writing and roll back prior writes if publishing fails. For independent files, atomic=false enables per-file atomic commits without rolling back successful files.","inputSchema":{"type":"object","required":["files"],"properties":{
         "atomic":{"type":"boolean","default":true},"files":{"type":"array","minItems":1,"maxItems":MAX_FILES,"items":{
-            "type":"object","required":["path","edits"],"properties":{"path":{"type":"string"},"expected_code_hash":{"type":"string"},"edits":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","required":["old_text","new_text"],"properties":{"old_text":{"type":"string"},"new_text":{"type":"string"}}}}}}}}}}),
+            "type":"object","required":["path","edits"],"properties":{"path":{"type":"string"},"expected_code_hash":{"type":"string"},"edits":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","required":["old_text","new_text"],"properties":{"old_text":{"type":"string"},"new_text":{"type":"string"},"line_hint":{"type":"integer","minimum":1,"description":"Disambiguate nearby exact old_text matches using a 1-based start line"}}}}}}}}}}),
     ]
 }
 

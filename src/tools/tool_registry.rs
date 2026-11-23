@@ -230,6 +230,17 @@ impl ToolRegistry {
         Self::all().iter().find(|spec| spec.name == name)
     }
 
+    pub fn qualified_hint(bare: &str) -> Option<String> {
+        let mut matches = Self::all()
+            .iter()
+            .filter(|spec| !spec.library.is_empty() && (spec.name == bare || spec.method == bare))
+            .map(|spec| format!("{}.{}", spec.library, spec.method))
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.dedup();
+        (matches.len() == 1).then(|| matches.pop().unwrap())
+    }
+
     pub fn builtin_libraries() -> Libraries {
         let mut libraries = Libraries::new();
         for spec in Self::all() {
@@ -349,5 +360,22 @@ mod tests {
         for (name, _) in writes {
             assert!(ToolRegistry::is_tracked_mutation(name), "{name}");
         }
+    }
+
+    #[test]
+    fn qualified_hint_maps_bare_tool_names_to_library_namespaces() {
+        assert_eq!(
+            ToolRegistry::qualified_hint("read_asset").as_deref(),
+            Some("session.read_asset")
+        );
+        assert_eq!(
+            ToolRegistry::qualified_hint("read_session_history").as_deref(),
+            Some("session.read_session_history")
+        );
+        assert_eq!(
+            ToolRegistry::qualified_hint("apply_edits").as_deref(),
+            Some("io.apply_edits")
+        );
+        assert_eq!(ToolRegistry::qualified_hint("nonexistent_fn"), None);
     }
 }

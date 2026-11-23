@@ -1,7 +1,7 @@
 //! HTTP/SSE handlers and task lifecycle entry points.
 
 use super::{
-    ActiveTask, AgentEvent, AgentProviderRoute, AgentServiceState, ContinueTaskRequest,
+    ActiveTask, AgentProviderRoute, AgentServiceState, ContinueTaskRequest,
     CreateTaskRequest, DraftSessionInput, FileQuery, ListTasksQuery, PermissionMode,
     StreamEventsQuery, UpdateTaskRequest, db::cleanup_finished_task_data, emit, finish, now,
     open_db, save_permission_mode, uuid_like,
@@ -513,35 +513,164 @@ pub async fn continue_task(
         .into_response()
 }
 
+#[derive(serde::Serialize)]
+struct HttpEvent {
+    seq: i64,
+    time: i64,
+    #[serde(rename = "type")]
+    kind: String,
+    data: Box<serde_json::value::RawValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    surface_op: Option<String>,
+}
+
+use crate::context::session_history::{EventQuery, StoredEvent, load_events};
+
+impl TryFrom<StoredEvent> for HttpEvent {
+    type Error = serde_json::Error;
+    fn try_from(event: StoredEvent) -> Result<Self, Self::Error> {
+        Ok(Self {
+            seq: event.seq,
+            time: event.time,
+            kind: event.kind,
+            data: serde_json::value::RawValue::from_string(event.raw)?,
+            surface_op: event.surface_op,
+        })
+    }
+}
+
+const RESULT_THRESHOLD: usize = 16 * 1024;
+const PREVIEW_BYTES: usize = 4 * 1024;
+
+fn truncate_text(text: &mut String, remaining: &mut usize) {
+    text.truncate(text.floor_char_boundary(*remaining));
+    *remaining -= text.len();
+}
+
+fn tool_preview(event: &mut StoredEvent) -> anyhow::Result<()> {
+    let mut data = event.data()?;
+    let Some(object) = data.as_object_mut() else { return Ok(()); };
+    let mut remaining = PREVIEW_BYTES;
+    if let Some(content) = object.get_mut("message").and_then(|message| message.get_mut("content")) {
+        match content {
+            Value::String(text) => truncate_text(text, &mut remaining),
+            Value::Array(parts) => {
+                parts.truncate(16);
+                for part in parts {
+                    if let Some(text) = part.get_mut("text").and_then(|text| match text {
+                        Value::String(text) => Some(text),
+                        _ => None,
+                    }) {
+                        truncate_text(text, &mut remaining);
+                    } else if serde_json::to_vec(part)?.len() > 1024 {
+                        *part = json!({"type": part["type"]});
+                    }
+                }
+            }
+            _ => *content = Value::Null,
+        }
+    }
+    if let Some(result) = object.get_mut("meta").and_then(|meta| meta.get_mut("result")) {
+        if serde_json::to_vec(result)?.len() > PREVIEW_BYTES {
+            let mut summary = serde_json::Map::new();
+            for key in ["name", "status", "is_error", "child_task_id", "node_id", "asset_id",
+                "error", "message", "diff", "summary", "added", "deleted", "exit_code", "session_id"] {
+                if let Some(value) = result.get(key) {
+                    let mut value = value.clone();
+                    if let Value::String(text) = &mut value {
+                        truncate_text(text, &mut 512_usize);
+                    }
+                    if serde_json::to_vec(&value)?.len() <= 512 {
+                        summary.insert(key.to_owned(), value);
+                    }
+                }
+            }
+            if let Some(diff) = result.get("diff").and_then(Value::as_object) {
+                let stats: serde_json::Map<_, _> = ["added", "deleted", "insertions", "deletions"]
+                    .into_iter().filter_map(|key| diff.get(key).filter(|value| value.is_number())
+                        .map(|value| (key.to_owned(), value.clone()))).collect();
+                if !stats.is_empty() && !summary.contains_key("diff") {
+                    summary.insert("diff".into(), Value::Object(stats));
+                }
+            }
+            *result = Value::Object(summary);
+        }
+    }
+    object.insert("truncated".into(), json!(true));
+    object.insert("full_bytes".into(), json!(event.raw.len()));
+    object.insert("detail_seq".into(), json!(event.seq));
+    event.raw = serde_json::to_string(&data)?;
+    Ok(())
+}
+
+fn history_events(conn: &rusqlite::Connection, task_id: &str) -> anyhow::Result<Vec<HttpEvent>> {
+    use std::collections::HashSet;
+    let mut ended = HashSet::new();
+    let mut delivered = HashSet::new();
+    let mut snapshots = HashSet::new();
+    let mut output = Vec::new();
+    // Work backwards: only a later event can supersede a delta or snapshot.
+    for mut event in load_events(conn, task_id, &EventQuery::default())?.into_iter().rev() {
+        if matches!(event.kind.as_str(), "turn/end" | "assistant/message" | "assistant/delta" | "workspace/changes") {
+            #[derive(serde::Deserialize)]
+            struct Coordinates<'a> {
+                turn: Option<u64>,
+                step: Option<u64>,
+                task_node_id: Option<&'a str>,
+            }
+            let data: Coordinates<'_> = serde_json::from_str(&event.raw)?;
+            if let Some(turn) = data.turn {
+                let slot = (turn, data.step.unwrap_or(0), data.task_node_id.unwrap_or("").to_owned());
+                match event.kind.as_str() {
+                    "turn/end" => { ended.insert(turn); }
+                    "assistant/message" => { delivered.insert(slot); }
+                    "assistant/delta" if ended.contains(&turn) || delivered.contains(&slot) => continue,
+                    "workspace/changes" if !snapshots.insert(turn) => continue,
+                    _ => {}
+                }
+            }
+        }
+        if event.kind == "tool/result" && event.raw.len() > RESULT_THRESHOLD {
+            tool_preview(&mut event)?;
+        }
+        output.push(event.try_into()?);
+    }
+    output.reverse();
+    Ok(output)
+}
+
 pub async fn get_events(
     State(state): State<AgentServiceState>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
+    #[derive(serde::Serialize)]
+    struct Events { events: Vec<HttpEvent> }
     let root = state.workspace.root().to_path_buf();
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<AgentEvent>> {
-        let conn = open_db(&root)?;
-        crate::context::session_history::load_events(&conn, &task_id, &Default::default())?
-            .into_iter()
-            .map(|event| {
-                Ok(AgentEvent {
-                    seq: event.seq,
-                    time: event.time,
-                    data: event.data()?,
-                    kind: event.kind,
-                    surface_op: event.surface_op,
-                })
-            })
-            .collect()
-    })
-    .await;
+    let result = tokio::task::spawn_blocking(move || history_events(&open_db(&root)?, &task_id)).await;
     match result {
-        Ok(Ok(events)) => Json(json!({"events":events})).into_response(),
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error":"could not read task events"})),
-        )
-            .into_response(),
+        Ok(Ok(events)) => Json(Events { events }).into_response(),
+        _ => event_read_error(),
     }
+}
+
+pub async fn get_event(
+    State(state): State<AgentServiceState>,
+    Path((task_id, seq)): Path<(String, i64)>,
+) -> impl IntoResponse {
+    let root = state.workspace.root().to_path_buf();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<HttpEvent>> {
+        load_events(&open_db(&root)?, &task_id, &EventQuery { exact: Some(seq), ..Default::default() })?
+            .pop().map(HttpEvent::try_from).transpose().map_err(Into::into)
+    }).await;
+    match result {
+        Ok(Ok(Some(event))) => Json(event).into_response(),
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, Json(json!({"error":"event not found"}))).into_response(),
+        _ => event_read_error(),
+    }
+}
+
+fn event_read_error() -> axum::response::Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"could not read task events"}))).into_response()
 }
 
 pub async fn stream_events(
@@ -558,65 +687,77 @@ pub async fn stream_events(
         .unwrap_or(-1)
         .max(query.since.unwrap_or(-1));
     let events = stream::unfold(
-        (state, task_id, last_event_id),
-        |(state, task_id, mut last_seq)| async move {
+        (state, task_id, last_event_id, std::collections::VecDeque::<HttpEvent>::new()),
+        |(state, task_id, mut last_seq, mut pending)| async move {
             loop {
-                let root = state.workspace.root().to_path_buf();
-                let read_id = task_id.clone();
-                let read = tokio::task::spawn_blocking(
-                    move || -> anyhow::Result<(Vec<AgentEvent>, Option<String>)> {
-                        let conn = open_db(&root)?;
-                        let events = crate::context::session_history::load_events(
-                            &conn,
-                            &read_id,
-                            &crate::context::session_history::EventQuery {
-                                after: Some(last_seq),
-                                ..Default::default()
-                            },
-                        )?
-                        .into_iter()
-                        .map(|event| {
-                            Ok(AgentEvent {
-                                seq: event.seq,
-                                time: event.time,
-                                data: event.data()?,
-                                kind: event.kind,
-                                surface_op: event.surface_op,
-                            })
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-                        let status = conn
-                            .query_row(
-                                "SELECT status FROM agent_tasks WHERE id=?1",
-                                [read_id],
-                                |row| row.get::<_, String>(0),
-                            )
-                            .optional()?;
-                        Ok((events, status))
-                    },
-                )
-                .await;
-                let Ok(Ok((new_events, status))) = read else {
-                    return None;
-                };
-                if let Some(event) = new_events.into_iter().next() {
+                if let Some(event) = pending.pop_front() {
                     last_seq = event.seq;
                     let id = event.seq.to_string();
-                    let payload = serde_json::to_string(&event).unwrap_or_else(|_| "{}".into());
+                    let payload = serde_json::to_string(&event).ok()?;
                     let sse = Event::default().event("session/event").id(id).data(payload);
-                    return Some((
-                        Ok::<Event, std::convert::Infallible>(sse),
-                        (state, task_id, last_seq),
-                    ));
+                    return Some((Ok::<Event, std::convert::Infallible>(sse), (state, task_id, last_seq, pending)));
                 }
-                if status.as_deref().is_none_or(|s| s != "running") {
-                    return None;
+                let root = state.workspace.root().to_path_buf();
+                let read_id = task_id.clone();
+                let read = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+                    let mut conn = open_db(&root)?;
+                    // Status and events must come from the same snapshot; otherwise a
+                    // concurrent finish could close the stream before its final event.
+                    let tx = conn.transaction()?;
+                    let events = load_events(&tx, &read_id, &EventQuery {
+                        after: Some(last_seq), oldest: Some(32), ..Default::default()
+                    })?.into_iter().map(HttpEvent::try_from).collect::<Result<_, _>>()?;
+                    let status: Option<String> = tx.query_row(
+                        "SELECT status FROM agent_tasks WHERE id=?1", [read_id], |row| row.get(0),
+                    ).optional()?;
+                    Ok((events, status))
+                }).await;
+                let (events, status) = read.ok()?.ok()?;
+                pending = events;
+                if pending.is_empty() {
+                    if status.as_deref() != Some("running") { return None; }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(250)).await;
             }
         },
     );
     Sse::new(events).keep_alive(KeepAlive::default())
+}
+
+#[derive(serde::Deserialize)]
+pub struct WorkspaceFileQuery {
+    path: String,
+}
+
+pub async fn workspace_file(
+    State(state): State<AgentServiceState>,
+    Path(task_id): Path<String>,
+    Query(query): Query<WorkspaceFileQuery>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use crate::server::file_stream;
+    let store = state.workspace.root().to_path_buf();
+    let found = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let db = open_db(&store)?;
+        let workspace = db.query_row(
+            "SELECT m.workspace FROM agent_tasks t LEFT JOIN agent_session_meta m ON m.task_id=t.id WHERE t.id=?1",
+            [&task_id], |row| row.get::<_, Option<String>>(0),
+        )?;
+        anyhow::ensure!(crate::server::plugin_sessions::owner(&store, &task_id)?.is_none(), "plugin session");
+        let root = workspace.map(std::path::PathBuf::from).unwrap_or(store);
+        let path = file_stream::workspace_relative(&root, &query.path)
+            .ok_or_else(|| anyhow::anyhow!("invalid workspace path"))?;
+        let media = mime_guess::from_path(&path).first_or_octet_stream();
+        Ok((file_stream::open_regular(&root, &path)?, media))
+    }).await;
+    if let Ok(Ok((file, media))) = found {
+        let inline = media.type_() == "image";
+        if let Ok(response) = file_stream::respond(file, media.as_ref(), inline, method, &headers).await {
+            return response;
+        }
+    }
+    (StatusCode::NOT_FOUND, Json(json!({"error":"workspace file not found"}))).into_response()
 }
 
 pub async fn get_task(

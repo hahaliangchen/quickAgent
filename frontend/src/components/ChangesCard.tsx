@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import { DiffBlock, type DiffBlockLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChangesSummary, FileDiff } from '../api.ts'
 import { useAgentApi } from '../cordis/react.tsx'
+import type { OpenFilePreview } from '../filePreview.ts'
 import css from './ChangesCard.module.css'
 
 const INITIAL_VISIBLE_COUNT = 3
@@ -24,11 +25,13 @@ export function ChangesCard({
   summary,
   running,
   onChangesUpdated,
+  onFilePreview,
 }: {
   taskId: string
   summary: ChangesSummary
   running: boolean
   onChangesUpdated?: (() => void) | undefined
+  onFilePreview?: OpenFilePreview | undefined
 }) {
   const api = useAgentApi()
   const [local, setLocal] = useState<ChangesSummary | null>(null)
@@ -200,10 +203,10 @@ export function ChangesCard({
             const name = slashIdx >= 0 ? file.path.slice(slashIdx + 1) : file.path
 
             return (
+              <div key={file.path} className={css.fileActions}>
               <button
                 type="button"
                 className={css.fileRow}
-                key={file.path}
                 onClick={() => setSelected(file.path)}
                 title={file.path}
               >
@@ -227,6 +230,8 @@ export function ChangesCard({
                   )}
                 </div>
               </button>
+              {!file.removed && onFilePreview && <button type="button" className={css.previewBtn} title="预览当前文件" aria-label={'预览 ' + file.path} onClick={() => onFilePreview(file.path)}>预览</button>}
+              </div>
             )
           })}
         </div>

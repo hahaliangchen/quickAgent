@@ -400,3 +400,9 @@
 :global(body[data-ui-style='paper']) .header {
   border-bottom: none;
 }
+
+.panel { min-width: 0; color: var(--codex-text-primary); }
+.headerTitleGroup { flex: 1; max-width: none; }
+.modes { display: flex; gap: 2px; margin-inline: 8px; flex: none; }
+.modes button { border: none; border-radius: 5px; background: transparent; color: var(--codex-text-secondary); padding: 4px 9px; cursor: pointer; }
+.modes button[aria-pressed="true"] { background: var(--codex-hover-bg, #ddd4); color: var(--codex-text-primary); }

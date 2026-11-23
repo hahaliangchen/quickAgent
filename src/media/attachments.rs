@@ -769,49 +769,32 @@ pub async fn upload(
 pub async fn download(
     State(state): State<AgentServiceState>,
     Path((task, receipt)): Path<(String, String)>,
+    method: axum::http::Method,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    let result = (|| {
-        ensure!(
-            crate::server::plugin_sessions::owner(state.workspace.root(), &task)?.is_none(),
-            "Use authenticated plugin resources"
-        );
-        let c = agent_service::open_db(state.workspace.root())?;
+    use crate::server::file_stream;
+    let root = state.workspace.root().to_path_buf();
+    let result = tokio::task::spawn_blocking(move || -> Result<_> {
+        ensure!(crate::server::plugin_sessions::owner(&root, &task)?.is_none(),
+            "Use authenticated plugin resources");
+        let c = agent_service::open_db(&root)?;
         schema(&c)?;
         let receipt = if receipt.starts_with("sha256:") {
             c.query_row("SELECT receipt FROM agent_attachments WHERE task_id=?1 AND attachment_id=?2 AND turn IS NOT NULL LIMIT 1",params![task,receipt],|r|r.get::<_,String>(0))?
-        } else {
-            receipt
-        };
-        bytes(&state, &task, &receipt)
-    })();
-    match result {
-        Ok((_, m, b)) => (
-            [
-                (axum::http::header::CONTENT_TYPE, m.clone()),
-                (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
-                (
-                    axum::http::header::CONTENT_DISPOSITION,
-                    if m.starts_with("image/") {
-                        "inline"
-                    } else {
-                        "attachment"
-                    }
-                    .into(),
-                ),
-                (
-                    axum::http::header::CACHE_CONTROL,
-                    "private, no-store".into(),
-                ),
-                (
-                    axum::http::header::CONTENT_SECURITY_POLICY,
-                    "sandbox; default-src 'none'".into(),
-                ),
-            ],
-            b,
-        )
-            .into_response(),
-        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error":e.to_string()}))).into_response(),
+        } else { receipt };
+        let (reference, media, _) = row(&c, &task, &receipt)?;
+        let id = reference["attachmentId"].as_str().context("invalid attachment reference")?;
+        let disk = path(&root, id)?;
+        // Content-addressed storage is written by the upload path. Open the
+        // scoped blob directly so a range does not require a full hash pass.
+        Ok((file_stream::open_regular(&root, disk.strip_prefix(&root)?)?, media))
+    }).await;
+    if let Ok(Ok((file, media))) = result {
+        if let Ok(response) = file_stream::respond(file, &media, media.starts_with("image/"), method, &headers).await {
+            return response;
+        }
     }
+    (StatusCode::NOT_FOUND, Json(json!({"error":"attachment not found"}))).into_response()
 }
 pub fn pending_imports(
     state: &AgentServiceState,

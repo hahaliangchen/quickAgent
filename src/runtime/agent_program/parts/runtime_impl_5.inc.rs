@@ -607,6 +607,9 @@ impl Runtime {
                                             self.store(destination.clone(), val)?;
                                             return Ok(None);
                                         }
+                                        if let Some(qualified) = crate::tools::tool_registry::ToolRegistry::qualified_hint(&name) {
+                                            bail!("TypeError: {name} is not a function (did you mean `{qualified}(...)`?)");
+                                        }
                                         bail!("TypeError: {} is not a function",name);
                                     }
                                 }

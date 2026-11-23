@@ -151,7 +151,15 @@ pub(super) async fn proxy_rust_tool(
                 true,
             ),
             Ok(val) => (val, false),
-            Err(err) => (json!({"error": format!("{err:#}")}), true),
+            Err(err) => {
+                let mut value = json!({"error": format!("{err:#}")});
+                if let Some(failure) = err.downcast_ref::<crate::tools::batch_edits::PreflightFailure>() {
+                    value["failed_files"] = json!([{
+                        "file_index": failure.file_index, "path": failure.path, "edit_index": failure.edit_index,
+                    }]);
+                }
+                (value, true)
+            },
         },
     };
 
@@ -367,10 +375,9 @@ fn normalize_edit_file_args(args: &mut Value) {
     {
         let old_text = obj.remove("old_text").unwrap();
         let new_text = obj.remove("new_text").unwrap();
-        obj.insert(
-            "edits".into(),
-            json!([{"old_text": old_text, "new_text": new_text}]),
-        );
+        let mut edit = json!({"old_text": old_text, "new_text": new_text});
+        if let Some(hint) = obj.remove("line_hint") { edit["line_hint"] = hint; }
+        obj.insert("edits".into(), json!([edit]));
     }
 }
 

@@ -24,7 +24,10 @@ fn now() -> i64 {
 }
 
 fn connection(root: &Path) -> Result<Connection> {
-    let conn = crate::server::agent_service::open_db(root)?;
+    crate::server::agent_service::open_db(root)
+}
+
+pub(crate) fn schema(conn: &Connection) -> Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_context_debug(task_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS agent_request_contexts(
             id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
@@ -35,49 +38,27 @@ fn connection(root: &Path) -> Result<Connection> {
         ("recording", "INTEGER NOT NULL DEFAULT 1"),
         ("retention_days", "INTEGER NOT NULL DEFAULT 7"),
     ] {
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_context_debug') WHERE name=?1)",
-            [column],
-            |row| row.get(0),
-        )?;
-        if !exists {
-            let tx = rusqlite::Transaction::new_unchecked(
-                &conn,
-                rusqlite::TransactionBehavior::Immediate,
-            )?;
-            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_context_debug') WHERE name=?1)", [column], |row| row.get(0))?;
-            if !exists {
-                tx.execute(
-                    &format!("ALTER TABLE agent_context_debug ADD COLUMN {column} {definition}"),
-                    [],
-                )?;
-            }
-            tx.commit()?;
+        crate::context::database::add_column(conn, "agent_context_debug", column, definition)?;
+    }
+    if crate::context::database::add_column(conn, "agent_context_debug", "extended_retention", "INTEGER NOT NULL DEFAULT 0")? {
+        // Compact already-recorded bodies once on upgrade; no cleanup in read handlers.
+        let tasks = conn.prepare("SELECT DISTINCT task_id FROM agent_request_contexts WHERE request_json<>'null'")?
+            .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for task in tasks {
+            let settings = policy(conn, &task)?;
+            expire_bodies(conn, &task, settings["retention_days"].as_u64().unwrap(), now())?;
+            enforce_quota(conn, &task, &settings)?;
         }
     }
-    Ok(conn)
+    Ok(())
 }
 
 fn policy(conn: &Connection, task: &str) -> Result<Value> {
-    let current_schema: bool = conn.query_row("SELECT COUNT(*)=2 FROM pragma_table_info('agent_context_debug') WHERE name IN ('recording','retention_days')", [], |row|row.get(0))?;
-    if !current_schema {
-        return Ok(json!({"enabled":true,"recording":true,"retention_days":7}));
-    }
-    let (enabled, recording, days) = conn
-        .query_row(
-            "SELECT enabled,recording,retention_days FROM agent_context_debug WHERE task_id=?1",
-            [task],
-            |row| {
-                Ok((
-                    row.get::<_, bool>(0)?,
-                    row.get::<_, bool>(1)?,
-                    row.get::<_, u32>(2)?,
-                ))
-            },
-        )
-        .optional()?
-        .unwrap_or((true, true, 7));
-    Ok(json!({"enabled":enabled,"recording":recording,"retention_days":days}))
+    let (enabled, recording, days, extended) = conn.query_row(
+        "SELECT enabled,recording,retention_days,extended_retention FROM agent_context_debug WHERE task_id=?1",
+        [task], |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?, row.get::<_, u32>(2)?, row.get::<_, bool>(3)?)),
+    ).optional()?.unwrap_or((true, true, 7, false));
+    Ok(json!({"enabled":enabled,"recording":recording,"retention_days":days,"extended_retention":extended}))
 }
 
 fn expire_bodies(tx: &Connection, task: &str, days: u64, at: i64) -> Result<()> {
@@ -85,6 +66,27 @@ fn expire_bodies(tx: &Connection, task: &str, days: u64, at: i64) -> Result<()> 
     tx.execute("UPDATE agent_request_contexts SET request_json='null',metadata=json_set(metadata,'$.body_recorded',json('false'),'$.body_expired',json('true'))
         WHERE task_id=?1 AND request_json<>'null' AND COALESCE(json_extract(metadata,'$.created_at'),0)<?2 AND json_extract(metadata,'$.status')<>'pending'",
         params![task,cutoff])?;
+    Ok(())
+}
+
+fn enforce_quota(conn: &Connection, task: &str, settings: &Value) -> Result<()> {
+    let (count, bytes) = if settings["extended_retention"] == true {
+        (60, 64 * 1024 * 1024)
+    } else {
+        (20, 16 * 1024 * 1024)
+    };
+    conn.execute(
+        "WITH retained AS (
+            SELECT id, ROW_NUMBER() OVER newest AS position,
+                SUM(COALESCE(json_extract(metadata,'$.request_bytes'), length(CAST(request_json AS BLOB)))) OVER newest AS bytes
+            FROM agent_request_contexts
+            WHERE task_id=?1 AND request_json<>'null' AND json_extract(metadata,'$.status') IS NOT 'pending'
+            WINDOW newest AS (ORDER BY id DESC ROWS UNBOUNDED PRECEDING)
+        ) UPDATE agent_request_contexts SET request_json='null',
+            metadata=json_set(metadata,'$.body_recorded',json('false'),'$.body_expired',json('true'))
+          WHERE id IN (SELECT id FROM retained WHERE position>?2 OR bytes>?3)",
+        params![task, count, bytes],
+    )?;
     Ok(())
 }
 
@@ -144,10 +146,11 @@ pub async fn set_setting(
         let mut conn = connection(&root)?; exists(&conn, &task_id)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let old = policy(&tx, &task_id)?;
-        tx.execute("INSERT INTO agent_context_debug(task_id,enabled,recording,retention_days) VALUES (?1,?2,?3,?4) ON CONFLICT(task_id) DO UPDATE SET enabled=excluded.enabled,recording=excluded.recording,retention_days=excluded.retention_days",
-            params![task_id,input.enabled.unwrap_or(old["enabled"].as_bool().unwrap()),input.recording.unwrap_or(old["recording"].as_bool().unwrap()),input.retention_days.unwrap_or(old["retention_days"].as_u64().unwrap() as u32)])?;
+        tx.execute("INSERT INTO agent_context_debug(task_id,enabled,recording,retention_days,extended_retention) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(task_id) DO UPDATE SET enabled=excluded.enabled,recording=excluded.recording,retention_days=excluded.retention_days,extended_retention=excluded.extended_retention",
+            params![task_id,input.enabled.unwrap_or(old["enabled"].as_bool().unwrap()),input.recording.unwrap_or(old["recording"].as_bool().unwrap()),input.retention_days.unwrap_or(old["retention_days"].as_u64().unwrap() as u32),input.enabled.unwrap_or(old["extended_retention"] == true)])?;
         let result = policy(&tx, &task_id)?;
         expire_bodies(&tx, &task_id, result["retention_days"].as_u64().unwrap(), now())?;
+        enforce_quota(&tx, &task_id, &result)?;
         tx.commit()?;
         Ok(result)
     }).await)
@@ -168,12 +171,17 @@ pub async fn list(
     let root = state.workspace.root().to_path_buf();
     respond(tokio::task::spawn_blocking(move || -> Result<Value> {
         let conn = connection(&root)?; exists(&conn, &task_id)?;
-        expire_bodies(&conn, &task_id, policy(&conn, &task_id)?["retention_days"].as_u64().unwrap(), now())?;
+        let days = policy(&conn, &task_id)?["retention_days"].as_u64().unwrap();
         let mut stmt = conn.prepare("SELECT id,metadata FROM agent_request_contexts WHERE task_id=?1 AND id<?2 AND (?3 IS NULL OR json_extract(metadata,'$.task_node_id')=?3) ORDER BY id DESC LIMIT 201")?;
         let raw = stmt.query_map(params![task_id,query.before.unwrap_or(i64::MAX),query.frame], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let has_more = raw.len() > 200;
         let mut items = Vec::new();
-        for (id, text) in raw.into_iter().take(200) { let mut item: Value = serde_json::from_str(&text)?; item["id"] = json!(id); items.push(item); }
+        for (id, text) in raw.into_iter().take(200) {
+            let mut item: Value = serde_json::from_str(&text)?;
+            item["id"] = json!(id);
+            mark_expired(&mut item, days);
+            items.push(item);
+        }
         Ok(json!({"items":items,"has_more":has_more}))
     }).await)
 }
@@ -186,16 +194,21 @@ pub async fn get(
     respond(
         tokio::task::spawn_blocking(move || -> Result<Value> {
             let conn = connection(&root)?;
-            expire_bodies(
-                &conn,
-                &task_id,
-                policy(&conn, &task_id)?["retention_days"].as_u64().unwrap(),
-                now(),
-            )?;
             saved_context(&conn, &task_id, id)?.context("request context not found")
         })
         .await,
     )
+}
+
+// Reading an old snapshot must not acquire a write lock just to apply retention.
+fn mark_expired(metadata: &mut Value, days: u64) -> bool {
+    if metadata["status"] != "pending" && metadata["body_recorded"] == true
+        && metadata["created_at"].as_i64().unwrap_or(0) < now().saturating_sub((days * 86_400_000) as i64)
+    {
+        metadata["body_expired"] = json!(true);
+        metadata["body_recorded"] = json!(false);
+    }
+    metadata["body_expired"] == true
 }
 
 /// Resolve a conversation's input-view reference without duplicating the body
@@ -216,12 +229,7 @@ pub fn saved_context(conn: &Connection, task_id: &str, id: i64) -> Result<Option
     row.map(|(meta, body)| {
         let mut metadata: Value = serde_json::from_str(&meta)?;
         metadata["id"] = json!(id);
-        let expired = metadata["status"] != "pending"
-            && metadata["created_at"].as_i64().unwrap_or(0)
-                < now().saturating_sub((days * 86_400_000) as i64);
-        let body = if expired {
-            metadata["body_expired"] = json!(true);
-            metadata["body_recorded"] = json!(false);
+        let body = if mark_expired(&mut metadata, days) {
             Value::Null
         } else {
             serde_json::from_str::<Value>(&body)?
@@ -310,6 +318,7 @@ async fn persist_outcome(root: PathBuf, task_id: String, id: i64, metadata: Valu
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         ensure!(tx.execute("UPDATE agent_request_contexts SET metadata=?1 WHERE id=?2 AND task_id=?3",
             params![metadata.to_string(),id,task_id])? == 1, "request context disappeared");
+        enforce_quota(&tx, &task_id, &policy(&tx, &task_id)?)?;
         crate::server::agent_service::append_event_tx(&tx,&task_id,"debug/context_end",&json!({"id":id,"task_node_id":metadata["task_node_id"]}),None)?;
         tx.commit()?;
         Ok(())
@@ -347,6 +356,7 @@ pub(crate) fn recover_interrupted(conn: &mut Connection, task: &str) -> Result<(
             None,
         )?;
     }
+    enforce_quota(&tx, task, &policy(&tx, task)?)?;
     tx.commit()?;
     Ok(())
 }
@@ -514,6 +524,32 @@ mod tests {
         );
         assert_ne!(rows[1].1, "null");
         assert_ne!(rows[2].1, "null");
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_body_quota_preserves_metadata_at_40_steps() {
+        let root = std::env::temp_dir().join(format!("request-quota-{}", crate::server::agent_service::uuid_like()));
+        let conn = connection(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES('task','','test','running',0,0)", []).unwrap();
+        let body = json!({"messages":[{"role":"user","content":"中".repeat(350_000)}]});
+        // The byte quota binds before the count quota (15 bodies fit, not 20).
+        for step in 0..40 {
+            record(&root, "task", json!({"actor":"worker","step":step,"turn":1}), &body).await.unwrap()
+                .finish_checked("ok", json!({"output_tokens":7})).await.unwrap();
+        }
+        let rows: (i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*), SUM(request_json<>'null'), SUM(json_extract(metadata,'$.body_expired') IS TRUE) FROM agent_request_contexts WHERE task_id='task'",
+            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(rows, (40, 15, 25));
+        let first = saved_context(&conn, "task", 1).unwrap().unwrap();
+        assert!(first["body"].is_null());
+        assert_eq!(first["metadata"]["actor"], "worker");
+        assert_eq!(first["metadata"]["step"], 0);
+        assert_eq!(first["metadata"]["status"], "ok");
+        assert_eq!(saved_context(&conn, "task", 40).unwrap().unwrap()["body"], body);
         drop(conn);
         std::fs::remove_dir_all(root).unwrap();
     }

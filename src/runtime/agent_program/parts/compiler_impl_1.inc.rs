@@ -878,9 +878,11 @@ impl Compiler {
             _ => {
                 if let ast::Expr::Ident(name) = target {
                     // Worded as JS says it, so the author recognises the mistake.
+                    let hint = crate::tools::tool_registry::ToolRegistry::qualified_hint(name.sym.as_ref());
                     let alternative = match name.sym.as_ref() {
-                        "print" | "println" => "use console.log(...); the other log methods are in read_program_guide",
-                        _ => "declare it in this source (AI work is an empty function with a @virtual contract) or use a built-in listed in read_program_guide",
+                        "print" | "println" => "use console.log(...); the other log methods are in host.guide".to_owned(),
+                        _ if hint.is_some() => format!("did you mean `{}(...)`?", hint.unwrap()),
+                        _ => "declare it in this source (AI work is an empty function with a @virtual contract) or use a built-in listed in host.guide".to_owned(),
                     };
                     return self.error(call.span, &format!("{} is not defined: {alternative}", name.sym));
                 }

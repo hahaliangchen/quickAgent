@@ -1,7 +1,8 @@
+import type { PendingOpen, PreviewTheme } from '../filePreview.ts'
 import { usePluginPages } from '../plugins/react.tsx'
 
 /** One plugin page shown on its own, outside the plugin list. */
-export function PluginPageHost({ owner, page, workspaceRoot }: { owner: string; page: string; workspaceRoot: string }) {
+export function PluginPageHost({ owner, page, workspaceRoot, pendingOpen, theme }: { owner: string; page: string; workspaceRoot: string; pendingOpen?: PendingOpen | undefined; theme?: PreviewTheme | undefined }) {
   const { packages, pages, errors } = usePluginPages()
   const installed = packages.find(item => item.id === owner)
   const contribution = pages.find(item => item.owner === owner && item.scope === installed?.scope && item.id === page)
@@ -10,5 +11,5 @@ export function PluginPageHost({ owner, page, workspaceRoot }: { owner: string; 
     return <p style={{ padding: 32, color: 'var(--codex-text-muted)' }}>{reason}</p>
   }
   const Page = contribution.component
-  return <Page key={`${owner}:${installed.scope}:${page}`} owner={installed} pageId={page} workspaceRoot={workspaceRoot} />
+  return <Page key={`${owner}:${installed.scope}:${page}`} owner={installed} pageId={page} workspaceRoot={workspaceRoot} pendingOpen={pendingOpen} theme={theme} />
 }

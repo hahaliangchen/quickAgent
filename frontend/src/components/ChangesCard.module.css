@@ -524,3 +524,8 @@
   border-bottom: none;
   background: transparent;
 }
+
+.fileActions { display: flex; min-width: 0; gap: 4px; }
+.fileActions .fileRow { flex: 1; min-width: 0; }
+.previewBtn { flex: none; font: inherit; color: var(--codex-text-secondary); background: transparent; border: 0; border-radius: 4px; cursor: pointer; padding-inline: 6px; }
+.previewBtn:hover { background: var(--codex-hover-bg, #ddd4); }

@@ -997,7 +997,12 @@ impl Heap {
                     }
                     environment = match parent {
                         Some(parent) => *parent,
-                        None => bail!("ReferenceError: {name} is not defined"),
+                        None => {
+                            if let Some(qualified) = crate::tools::tool_registry::ToolRegistry::qualified_hint(name) {
+                                bail!("ReferenceError: {name} is not defined (did you mean `{qualified}(...)`?)");
+                            }
+                            bail!("ReferenceError: {name} is not defined");
+                        }
                     };
                 }
                 _ => bail!("reference is not a lexical environment"),

@@ -15,6 +15,26 @@ export type SettingsTab = 'general' | 'models' | 'tools' | 'plugins'
 
 type ModelPick = Readonly<{ model: string; provider: string }>
 
+const LAST_MODEL_STORAGE_KEY = 'codex_last_model_pick'
+
+function readSavedModelPick(): ModelPick | undefined {
+  try {
+    const raw = localStorage.getItem(LAST_MODEL_STORAGE_KEY)
+    if (!raw) return undefined
+    const parsed = JSON.parse(raw) as { model?: unknown; provider?: unknown }
+    if (typeof parsed.model === 'string' && parsed.model && typeof parsed.provider === 'string' && parsed.provider) {
+      return { model: parsed.model, provider: parsed.provider }
+    }
+  } catch {}
+  return undefined
+}
+
+function writeSavedModelPick(pick: ModelPick): void {
+  try {
+    localStorage.setItem(LAST_MODEL_STORAGE_KEY, JSON.stringify(pick))
+  } catch {}
+}
+
 function routeTaskId(): string | undefined {
   const match = /^#\/tasks\/(.+)$/.exec(location.hash)
   return match?.[1] === undefined ? undefined : decodeURIComponent(match[1])
@@ -49,7 +69,7 @@ export function useAgentWorkspace() {
   const [settingsOpen, setSettingsOpen] = useState(isSettingsRoute)
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
   const [selectedModel, setSelectedModel] = useState<ModelPick & { taskId: string | undefined }>()
-  const [newSessionModel, setNewSessionModel] = useState<ModelPick>()
+  const [newSessionModel, setNewSessionModel] = useState<ModelPick | undefined>(readSavedModelPick)
   const [selectedEffortOverride, setSelectedEffortOverride] = useState<string | null>()
   const [selectedFastModeOverride, setSelectedFastModeOverride] = useState<boolean>()
 
@@ -240,6 +260,9 @@ export function useAgentWorkspace() {
 
   const selectModel = useCallback(async (providerId: string, modelId: string): Promise<void> => {
     setSelectedModel({ taskId, model: modelId, provider: providerId })
+    const pick = { model: modelId, provider: providerId }
+    setNewSessionModel(pick)
+    writeSavedModelPick(pick)
     let rowError: string | undefined
     try {
       const latest = settings ?? await api.getSettings()
@@ -307,7 +330,11 @@ export function useAgentWorkspace() {
   const composerNote = !ready && info !== undefined ? t('app.notReady') : notice ?? session.error
 
   const activePick = selectedModel?.taskId === taskId ? selectedModel : undefined
-  const draftPick = taskId === undefined ? newSessionModel : undefined
+  const validDraftPick = newSessionModel && (
+    settings === undefined
+    || settings.providers.some(p => p.id === newSessionModel.provider && p.models.includes(newSessionModel.model))
+  ) ? newSessionModel : undefined
+  const draftPick = taskId === undefined ? validDraftPick : undefined
   const sessionModel = activePick?.model ?? task?.model ?? draftPick?.model
   const modelName = sessionModel ?? info?.model ?? settings?.orchestrator_model
   const requestedEffort = selectedEffortOverride !== undefined
@@ -331,7 +358,9 @@ export function useAgentWorkspace() {
   const startNewSession = useCallback(() => {
     // Carry the displayed model into the next draft without waiting for the settings write.
     if (sessionModel && modelProviderId) {
-      setNewSessionModel({ model: sessionModel, provider: modelProviderId })
+      const pick = { model: sessionModel, provider: modelProviderId }
+      setNewSessionModel(pick)
+      writeSavedModelPick(pick)
     }
     openTask(undefined)
   }, [sessionModel, modelProviderId])
@@ -365,6 +394,19 @@ export function useAgentWorkspace() {
         reasoning_effort: reasoningEffort ? reasoningEffort : undefined,
         fast_mode: fastMode,
       })
+      if (modelName && modelProviderId) {
+        const pick = { model: modelName, provider: modelProviderId }
+        setNewSessionModel(pick)
+        writeSavedModelPick(pick)
+        if (settings && (settings.orchestrator_provider !== modelProviderId || settings.orchestrator_model !== modelName)) {
+          void persistDefaults({
+            provider: modelProviderId,
+            model: modelName,
+            reasoning_effort: reasoningEffort,
+            fast_mode: fastMode,
+          }).catch(() => {})
+        }
+      }
       uploadedAttachments.current.clear()
       refreshTasks()
       if (id === taskId) session.reload()
@@ -374,7 +416,7 @@ export function useAgentWorkspace() {
       setNotice(messageOf(cause))
       return false
     }
-  }, [api, activeWorkspace, projects, sidebarMode, fastMode, modelName, modelProviderId, reasoningEffort, refreshTasks, session.reload, taskId])
+  }, [api, activeWorkspace, projects, sidebarMode, fastMode, modelName, modelProviderId, persistDefaults, reasoningEffort, refreshTasks, session.reload, settings, taskId])
 
   const stop = useCallback(() => {
     if (taskId === undefined) return

@@ -1423,7 +1423,7 @@ pub fn tool_definitions() -> Value {
                     "workspace_root":{"type":"string","description":"Optional absolute selected project directory."},
                     "path":{"type":"string"},
                     "expected_code_hash":{"type":"string","description":"Optional current file version. Recommended when the edits depend on code outside their anchors."},
-                    "edits":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","required":["old_text","new_text"],"properties":{"old_text":{"type":"string","minLength":1},"new_text":{"type":"string"}}}}
+                    "edits":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","required":["old_text","new_text"],"properties":{"old_text":{"type":"string","minLength":1},"new_text":{"type":"string"},"line_hint":{"type":"integer","minimum":1,"description":"Disambiguate nearby exact old_text matches using a 1-based start line"}}}}
                 }
             }
         },

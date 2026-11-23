@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { usePluginPages } from '../plugins/react.tsx'
 import { buildStudioCatalog, type StudioModuleCard, type StudioModuleIcon } from '../officeStudio.ts'
+import type { PendingOpen, PreviewTheme } from '../filePreview.ts'
 import { PluginPageHost } from './PluginPageHost.tsx'
 import css from './OfficeStudioView.module.css'
 
@@ -84,11 +85,14 @@ interface OpenedModule {
   readonly owner: string
   readonly page: string
   readonly reloadTick: number
+  readonly request?: PendingOpen | undefined
 }
 
 export interface OfficeStudioViewProps {
   readonly workspaceRoot: string
   readonly resetSignal?: number
+  readonly pendingOpen?: PendingOpen | undefined
+  readonly theme?: PreviewTheme | undefined
   readonly onManagePlugins: () => void
 }
 
@@ -98,7 +102,7 @@ export interface OfficeStudioViewProps {
  * - Clicking a ready module opens it inside a keep-alive workspace with a slim top switcher bar so switching
  *   between modules or returning to Hub/Chat preserves live editing state without reloading.
  */
-export function OfficeStudioView({ workspaceRoot, resetSignal, onManagePlugins }: OfficeStudioViewProps) {
+export function OfficeStudioView({ workspaceRoot, resetSignal, pendingOpen, theme, onManagePlugins }: OfficeStudioViewProps) {
   const { packages } = usePluginPages()
   const catalog = useMemo(() => buildStudioCatalog(packages), [packages])
   const readyCards = useMemo(() => catalog.filter(item => item.ready && item.owner && item.page), [catalog])
@@ -116,6 +120,17 @@ export function OfficeStudioView({ workspaceRoot, resetSignal, onManagePlugins }
     setOpened(prev => prev.filter(item => valid.has(item.key)))
     setActiveKey(prev => (prev && valid.has(prev) ? prev : null))
   }, [readyCards])
+
+  useEffect(() => {
+    if (!pendingOpen) return
+    const card = readyCards.find(item => item.slotId === pendingOpen.slotId)
+    if (!card?.owner || !card.page) return
+    const { key, owner, page } = card
+    setOpened(prev => prev.some(item => item.key === key)
+      ? prev.map(item => item.key === key ? { ...item, request: pendingOpen } : item)
+      : [...prev, { key, owner, page, reloadTick: 0, request: pendingOpen }])
+    setActiveKey(key)
+  }, [pendingOpen, readyCards])
 
   const openModule = (card: StudioModuleCard) => {
     if (!card.ready || !card.owner || !card.page) return
@@ -317,6 +332,8 @@ export function OfficeStudioView({ workspaceRoot, resetSignal, onManagePlugins }
                 owner={item.owner}
                 page={item.page}
                 workspaceRoot={workspaceRoot}
+                pendingOpen={item.request}
+                theme={theme}
               />
             </div>
           ))}

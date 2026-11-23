@@ -17,6 +17,59 @@ const MAX_INFLIGHT_JOBS: usize = 64;
 const MAX_SINGLE_TIMER_WAIT_MS: u64 = 60_000;
 const MAX_SEGMENT_TIMER_WAIT_MS: u64 = 120_000;
 
+const MAX_EDIT_DRAFT_BYTES: usize = 2 * 1024 * 1024;
+
+fn edit_draft_args(tool: &str, args: &Value) -> Option<Value> {
+    if !matches!(tool, "apply_edits" | "edit_file" | "write_file") {
+        return None;
+    }
+    struct Budget(usize);
+    impl std::io::Write for Budget {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.checked_sub(bytes.len()).ok_or_else(|| std::io::Error::other("edit draft exceeds budget"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    serde_json::to_writer(Budget(MAX_EDIT_DRAFT_BYTES), args).ok()?;
+    Some(args.clone())
+}
+
+fn preserve_edit_failure(runtime: &mut Runtime, tool: &str, step: usize, args: Value, result: &mut Value, is_error: bool) {
+    let partial = tool == "apply_edits" && result["failed"].as_u64().is_some_and(|count| count > 0);
+    if !is_error && !partial { return; }
+    let failed_files = if partial {
+        result["files"].as_array().into_iter().flatten().filter(|file| file["error"].is_string()).map(|file| {
+            json!({"file_index":file["file_index"],"path":file["path"],"edit_index":file["edit_index"]})
+        }).collect::<Vec<_>>()
+    } else {
+        result["failed_files"].as_array().cloned().unwrap_or_default()
+    };
+    let error = result["error"].as_str().or_else(|| result["message"].as_str())
+        .unwrap_or(if partial { "some files failed to apply" } else { "edit failed" });
+    let error = &error[..error.floor_char_boundary(2048)];
+    if let Err(error) = runtime.remember_failed_edit(json!({
+        "tool":tool,"step":step,"args":args,"error":error,"failed_files":failed_files
+    })) {
+        tracing::debug!(%error, %tool, "could not retain failed edit in VM");
+        return;
+    }
+    let method = match tool { "apply_edits" => "io.apply_edits", "edit_file" => "io.edit", _ => "io.write" };
+    let hint = if partial {
+        "Draft preserved in globalThis.__lastFailedEdit.args. Patch the failed edits' old_text/line_hint, then call io.apply_edits with only the files listed by failed_files; do not resend successful files or regenerate new_text."
+            .to_owned()
+    } else {
+        format!("Draft preserved in globalThis.__lastFailedEdit.args. After resolving the error, retry with {method}(globalThis.__lastFailedEdit.args) without regenerating new_text.")
+    };
+    if is_error && let Some(message) = result["error"].as_str().or_else(|| result["message"].as_str()) {
+        let message = format!("{message}\n{hint}");
+        result["error"] = json!(message);
+        if result.get("message").is_some() { result["message"] = json!(message); }
+    } else if result.is_object() {
+        result["draft_hint"] = json!(hint);
+    }
+}
+
 /// Execute one prepared JS segment in `runtime` until it returns or fails.
 /// Returns `(terminal_state, external_call_count, segment_context_hints)`.
 pub(super) async fn drive_vm_segment(
@@ -56,6 +109,7 @@ pub(super) async fn drive_vm_segment(
                     match action.kind {
                         ActionKind::Tool { name, args } => {
                             external_tool_calls += 1;
+                            let draft = edit_draft_args(&name, &args);
                             let (mut result, is_error) = tools.proxy_vm_tool(
                                 libs,
                                 node,
@@ -66,6 +120,9 @@ pub(super) async fn drive_vm_segment(
                                 allow_shell,
                             )
                             .await?;
+                            if let Some(args) = draft {
+                                preserve_edit_failure(runtime, &name, step, args, &mut result, is_error);
+                            }
                             if !is_error {
                                 context_doc::tag_resource_handle_in_turn(
                                     &mut result,

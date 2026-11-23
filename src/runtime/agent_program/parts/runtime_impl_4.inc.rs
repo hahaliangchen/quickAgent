@@ -288,6 +288,33 @@ impl Runtime {
         self.test_deadline_after_steps = Some(steps);
     }
     pub fn expire_time_budget(&mut self) { self.fail_capacity(self.budget_error(true)); }
+    /// Import host state into the serialized VM heap, shared by REPL segments.
+    pub fn set_global_json(&mut self, name: &str, value: Value) -> Result<()> {
+        self.heap.initialize_intrinsics()?;
+        let Some(VmValue::Reference(global)) = self.heap.intrinsic("globalThis") else {
+            anyhow::bail!("VM global object unavailable");
+        };
+        let value = self.heap.from_json(&value)?;
+        self.heap.set_property(global, name.into(), value)
+    }
+
+    pub(crate) fn remember_failed_edit(&mut self, draft: Value) -> Result<()> {
+        self.set_global_json("__lastFailedEdit", draft)?;
+        let Some(VmValue::Reference(global)) = self.heap.intrinsic("globalThis") else {
+            anyhow::bail!("VM global object unavailable");
+        };
+        let newest = self.heap.property(global, "__lastFailedEdit")?;
+        let prior = match self.heap.property(global, "__failedEdits")? {
+            VmValue::Reference(id) => match self.heap.get(id)? {
+                HeapNode::Array(items) => &items[items.len().saturating_sub(2)..],
+                _ => &[],
+            },
+            _ => &[],
+        };
+        let ring = self.heap.allocate(HeapNode::Array(prior.iter().cloned().chain([newest]).collect()))?;
+        self.heap.set_property(global, "__failedEdits".into(), VmValue::Reference(ring))
+    }
+
     pub fn resume_action(&mut self, id: &str, value: Value, failed: bool) -> Result<()> {
         if failed && stops_program(&value) {
             let at = self.inflight_async.get(id).map(|p| p.action.at.clone())

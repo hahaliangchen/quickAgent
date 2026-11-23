@@ -1,5 +1,86 @@
 use rusqlite::{Connection, OptionalExtension, Result, params};
-use std::path::Path;
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Arc, Mutex, OnceLock}};
+
+#[derive(PartialEq, Eq)]
+struct DbIdentity {
+    #[cfg(unix)]
+    device_inode: (u64, u64),
+    created: Option<std::time::SystemTime>,
+}
+
+fn identity(path: &Path) -> std::io::Result<DbIdentity> {
+    // Stat only: do not open a second OS descriptor for a live SQLite inode.
+    let metadata = path.metadata()?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Ok(DbIdentity {
+        #[cfg(unix)]
+        device_inode: (metadata.dev(), metadata.ino()),
+        created: metadata.created().ok(),
+    })
+}
+
+#[derive(Default)]
+struct Initialized {
+    file: Option<DbIdentity>,
+    base: bool,
+    agent: bool,
+}
+
+type SchemaCache = Mutex<HashMap<PathBuf, Arc<Mutex<Initialized>>>>;
+static SCHEMAS: OnceLock<SchemaCache> = OnceLock::new();
+
+pub(crate) fn open_initialized(
+    root: &Path,
+    agent_schema: Option<fn(&Connection, &Path) -> anyhow::Result<()>>,
+) -> anyhow::Result<Connection> {
+    let directory = root.join(".codex-workspace-mcp");
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.canonicalize()?.join("codex_state.db");
+    let path = path.canonicalize().unwrap_or(path);
+    let slot = SCHEMAS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+        .entry(path.clone()).or_default().clone();
+    let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+    let before = identity(&path).ok();
+    let mut conn = Connection::open(&path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(30))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    let file = identity(&path)?;
+    anyhow::ensure!(before.as_ref().is_none_or(|previous| previous == &file), "database replaced while opening; retry");
+    if before.is_none() || slot.file.as_ref() != Some(&file) {
+        *slot = Initialized { file: Some(file), ..Default::default() };
+    }
+    if !slot.base {
+        let mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+            anyhow::ensure!(mode.eq_ignore_ascii_case("wal"), "could not enable SQLite WAL");
+        }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        base_schema(&tx)?;
+        tx.commit()?;
+        slot.base = true;
+    }
+    if let Some(schema) = agent_schema.filter(|_| !slot.agent) {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        schema(&tx, root)?;
+        tx.commit()?;
+        slot.agent = true;
+    }
+    Ok(conn)
+}
+
+/// Called with the schema transaction held; all identifiers are internal constants.
+pub(crate) fn add_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+        [table, column], |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+    }
+    Ok(!exists)
+}
 
 /// Ordinary file I/O must never open SQLite's own state files. On Unix,
 /// closing any descriptor for the DB/SHM inode releases this process's POSIX
@@ -38,15 +119,15 @@ fn is_secret_file(resolved: &Path, secrets: &[std::path::PathBuf]) -> bool {
 }
 
 pub fn init_db(workspace_root: &Path) -> Result<Connection> {
-    let index_dir = workspace_root.join(".codex-workspace-mcp");
-    if !index_dir.exists() {
-        let _ = std::fs::create_dir_all(&index_dir);
-    }
-    let db_path = index_dir.join("codex_state.db");
-    let mut conn = Connection::open(db_path)?;
-    let _ = conn.busy_timeout(std::time::Duration::from_secs(30));
-    let _ = conn.execute("PRAGMA journal_mode=WAL;", []);
-    crate::index::symbol_index_state::schema(&conn)?;
+    open_initialized(workspace_root, None).map_err(|error| {
+        error.downcast::<rusqlite::Error>().unwrap_or_else(|error| {
+            rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN), Some(error.to_string()))
+        })
+    })
+}
+
+fn base_schema(conn: &Connection) -> Result<()> {
+    crate::index::symbol_index_state::schema(conn)?;
 
     // Create memories table
     conn.execute(
@@ -63,19 +144,14 @@ pub fn init_db(workspace_root: &Path) -> Result<Connection> {
         [],
     )?;
     // Older workspaces already have the original memories table.
-    let _ = conn.execute("ALTER TABLE memories ADD COLUMN source_task_id TEXT", []);
-    let _ = conn.execute(
-        "ALTER TABLE memories ADD COLUMN kind TEXT NOT NULL DEFAULT 'work'",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE memories ADD COLUMN applies_to TEXT NOT NULL DEFAULT ''",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE memories ADD COLUMN source_refs TEXT NOT NULL DEFAULT '[]'",
-        [],
-    );
+    for (column, definition) in [
+        ("source_task_id", "TEXT"),
+        ("kind", "TEXT NOT NULL DEFAULT 'work'"),
+        ("applies_to", "TEXT NOT NULL DEFAULT ''"),
+        ("source_refs", "TEXT NOT NULL DEFAULT '[]'"),
+    ] {
+        add_column(conn, "memories", column, definition)?;
+    }
     let legacy_memory_index: Option<String> = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE name='idx_memories_source_task'",
@@ -146,7 +222,7 @@ pub fn init_db(workspace_root: &Path) -> Result<Connection> {
         [],
     )?;
 
-    crate::index::symbol_description::schema(&conn)?;
+    crate::index::symbol_description::schema(conn)?;
 
     // Create rust_symbols table
     conn.execute(
@@ -239,7 +315,7 @@ pub fn init_db(workspace_root: &Path) -> Result<Connection> {
         [],
     )?;
 
-    migrate_legacy_symbol_keys(&mut conn)?;
+    migrate_legacy_symbol_keys(conn)?;
 
     for language in ["rust", "ts", "python", "go"] {
         conn.execute_batch(&format!("CREATE INDEX IF NOT EXISTS idx_{language}_workspace_file ON {language}_symbols(workspace_root,file_path,start_line); CREATE INDEX IF NOT EXISTS idx_{language}_workspace_name ON {language}_symbols(workspace_root,name);"))?;
@@ -275,12 +351,12 @@ pub fn init_db(workspace_root: &Path) -> Result<Connection> {
         [],
     )?;
 
-    Ok(conn)
+    Ok(())
 }
 
 /// Older symbol tables used `id` as a global primary key even though IDs are
 /// relative to a workspace. Preserve their rows and IDs while scoping the key.
-fn migrate_legacy_symbol_keys(conn: &mut Connection) -> Result<()> {
+fn migrate_legacy_symbol_keys(conn: &Connection) -> Result<()> {
     let mut legacy = Vec::new();
     for table in ["rust_symbols", "go_symbols", "ts_symbols", "python_symbols"] {
         let schema: String = conn.query_row(
@@ -296,7 +372,6 @@ fn migrate_legacy_symbol_keys(conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
 
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     for (table, schema) in legacy {
         let columns = &schema[schema.find('(').expect("symbol table has columns") + 1
             ..schema
@@ -304,14 +379,14 @@ fn migrate_legacy_symbol_keys(conn: &mut Connection) -> Result<()> {
                 .expect("symbol table has closing parenthesis")];
         let columns = columns.replacen("id TEXT PRIMARY KEY", "id TEXT NOT NULL", 1);
         let migrated = format!("{table}_scope_key_migration");
-        tx.execute_batch(&format!(
+        conn.execute_batch(&format!(
             "CREATE TABLE {migrated} ({columns}, PRIMARY KEY (workspace_root, id));
              INSERT INTO {migrated} SELECT * FROM {table};
              DROP TABLE {table};
              ALTER TABLE {migrated} RENAME TO {table};"
         ))?;
     }
-    tx.commit()
+    Ok(())
 }
 
 /// Record (or update) the timestamp at which a language index was last fully built.
@@ -343,6 +418,31 @@ pub fn get_index_generated_at(conn: &Connection, workspace_root: &str, lang: &st
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn schema_reinitializes_when_the_db_at_the_same_path_is_replaced() {
+        use crate::server::agent_service::open_db;
+        let root = std::env::temp_dir().join(format!("db_replace_{}", crate::server::agent_service::uuid_like()));
+        let conn = open_db(&root).unwrap();
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES('old','','test','completed',0,0)", []).unwrap();
+        drop(conn);
+        let path = root.join(".codex-workspace-mcp/codex_state.db");
+        std::fs::rename(&path, path.with_extension("old")).unwrap();
+        let replacement = rusqlite::Connection::open(&path).unwrap();
+        replacement.execute("CREATE TABLE marker(id INTEGER)", []).unwrap();
+        drop(replacement);
+        let conn = open_db(&root.join(".")).unwrap();
+        for table in ["marker", "memories", "agent_tasks", "agent_request_contexts"] {
+            let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)", [table], |row| row.get(0)).unwrap();
+            assert!(exists, "missing {table}");
+        }
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM agent_tasks", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+        let mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0)).unwrap();
+        assert_eq!(mode, "wal");
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// Several delegates of one conversation write its events at the same time: every write
     /// waits its turn instead of failing with "database is locked", and no sequence number repeats.

@@ -494,7 +494,7 @@ pub(crate) fn render(conn: &Connection, task: &str, turn: i64, before: Option<i6
                         let reference = if result.get("exit_code").is_some() || result["termination_reason"].is_string() {
                             // The last output line is only a clue. Recover the actual
                             // command and full result through the existing history API.
-                            format!("；完整输入/结果 read_session_history({{event_seq:{seq}}})")
+                            format!("；完整输入/结果 session.read_session_history({{event_seq:{seq}}})")
                         } else { String::new() };
                         format!("{line}  // → {}{reference}", outcome(name, result, *failed))
                     },
@@ -630,11 +630,11 @@ mod tests {
             conn.execute("INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data,node_id) VALUES ('t',?1,?1,?2,?3,'request')", params![seq,kind,data.to_string()]).unwrap();
         }
         let record = render(&conn, "t", 1, None).unwrap().unwrap();
-        assert!(record.contains("退出 1：2 failed") && record.contains("read_session_history({event_seq:3})"), "{record}");
+        assert!(record.contains("退出 1：2 failed") && record.contains("session.read_session_history({event_seq:3})"), "{record}");
         assert!(record.contains("python3 probe.py"), "the immutable audit is unchanged");
         let noisy = format!("{record}{}", "// Guess: rebuild everything again.\n".repeat(80));
         let cut = condense(&noisy, 700);
-        assert!(cut.contains("read_session_history({event_seq:3})"), "execution evidence stays before AI commentary: {cut}");
+        assert!(cut.contains("session.read_session_history({event_seq:3})"), "execution evidence stays before AI commentary: {cut}");
         let saved = crate::context::session_history::read(&root, "t", &json!({"event_seq":3})).await.unwrap();
         assert_eq!(serde_json::from_str::<Value>(saved["records"][0]["content"].as_str().unwrap()).unwrap(), original);
         assert_eq!(saved["records"][0]["tool_call"]["arguments"], json!({"cmd":command}).to_string());

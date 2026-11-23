@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { FileTypeIcon, ImageLightbox, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
 import clsx from 'clsx'
 import { t } from '../i18n.ts'
+import { previewKind, type OpenFilePreview } from '../filePreview.ts'
 import css from './AttachmentCard.module.css'
 
 /** One file a user turn was sent with: the image itself, or just its name. */
@@ -47,7 +48,7 @@ function middleShorten(name: string, budget: number): string {
  * the type's own glyph and the name, shortened in the middle so a screenshot's
  * date and extension survive.
  */
-export function AttachmentCards({ items }: { items: readonly UserAttachment[] }) {
+export function AttachmentCards({ items, onFilePreview }: { items: readonly UserAttachment[]; onFilePreview?: OpenFilePreview | undefined }) {
   const [open, setOpen] = useState<UserAttachment | undefined>(undefined)
   const close = useCallback(() => { setOpen(undefined) }, [])
   return (
@@ -64,6 +65,13 @@ export function AttachmentCards({ items }: { items: readonly UserAttachment[] })
           </span>
         )
         if (!file.image) {
+          if (onFilePreview && previewKind(file.name) !== 'unsupported') return (
+            <div key={index} className={css.fileActions}>
+              <button type="button" className={css.card} data-kind="file" title={file.name}
+                onClick={() => onFilePreview(file.name, { url: file.url })}>{footer}</button>
+              <a className={css.download} href={file.url} download={file.name} aria-label={'下载 ' + file.name} title="下载">↓</a>
+            </div>
+          )
           return (
             <a key={`${file.url}-${index}`} className={css.card} data-kind="file"
               href={file.url} download={file.name} title={file.name}>
@@ -74,7 +82,7 @@ export function AttachmentCards({ items }: { items: readonly UserAttachment[] })
         const label = `${t('image.open')} · ${file.name}`
         return (
           <button key={`${file.url}-${index}`} type="button" className={css.card} data-kind="image"
-            title={label} aria-label={label} onClick={() => { setOpen(file) }}>
+            title={label} aria-label={label} onClick={() => { if (onFilePreview) onFilePreview(file.name, { url: file.url }); else setOpen(file) }}>
             {/* The name below carries the label, so the thumbnail stays decorative. */}
             <img className={css.thumb} src={file.url} alt="" loading="lazy" decoding="async" />
             {footer}

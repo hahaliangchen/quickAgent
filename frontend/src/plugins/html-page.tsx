@@ -3,19 +3,29 @@ import clsx from 'clsx'
 import type { PluginPageProps } from './protocol.ts'
 import { createPluginHost } from './host.ts'
 import { useAgentApi } from '../cordis/react.tsx'
+import { studioUrl } from '../filePreview.ts'
 import css from './html-page.module.css'
 
 /** HTML is one implementation adapter for the common page contribution. */
-export function HtmlPluginPage({ owner, workspaceRoot, pageId }: PluginPageProps) {
+export function HtmlPluginPage({ owner, workspaceRoot, pageId, pendingOpen, theme }: PluginPageProps) {
   const frame = useRef<HTMLIFrameElement>(null)
   const api = useAgentApi()
   const host = useMemo(() => createPluginHost(api, owner), [api, owner])
   const [loaded, setLoaded] = useState(false)
   const pageTitle = owner.pages.find(page => page.id === pageId)?.title ?? owner.title ?? pageId
-  const src = `/agent/skill-packages/${encodeURIComponent(owner.id)}/pages/${encodeURIComponent(pageId)}/index`
+  const initial = useRef(owner.remote ? undefined : pendingOpen)
+  const sent = useRef(initial.current?.seq)
+  const [src] = useState(() => studioUrl(owner.id, pageId, initial.current ? 'edit' : undefined,
+    initial.current?.fileUrl, initial.current?.filename, owner.remote ? undefined : theme))
   useEffect(() => {
-    setLoaded(false)
-  }, [src])
+    if (!loaded || owner.remote || !theme) return
+    frame.current?.contentWindow?.postMessage({ type: 'quickagent:theme', theme }, location.origin)
+  }, [loaded, owner.remote, theme])
+  useEffect(() => {
+    if (!loaded || owner.remote || !pendingOpen || pendingOpen.seq === sent.current) return
+    sent.current = pendingOpen.seq
+    frame.current?.contentWindow?.postMessage({ type: 'quickagent:open-file', file: pendingOpen.fileUrl, name: pendingOpen.filename }, location.origin)
+  }, [loaded, owner.remote, pendingOpen])
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow || event.data?.type !== 'skill-package/request') return

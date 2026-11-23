@@ -409,8 +409,8 @@
                 workspace_root: None,
                 path: "demo.txt".to_string(),
                 edits: vec![
-                    TextEdit { old_text: "two".to_string(), new_text: "TWO".to_string() },
-                    TextEdit { old_text: "six".to_string(), new_text: "SIX".to_string() },
+                    TextEdit { old_text: "two".to_string(), new_text: "TWO".to_string(), line_hint: None },
+                    TextEdit { old_text: "six".to_string(), new_text: "SIX".to_string(), line_hint: None },
                 ],
                 replace_all: false,
                 expected_code_hash: None,

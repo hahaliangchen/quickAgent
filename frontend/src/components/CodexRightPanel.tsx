@@ -2,11 +2,22 @@ import { useMemo, useState } from 'react'
 import clsx from 'clsx'
 import type { AgentEvent } from '../api.ts'
 import { changeSummaries } from '../changes.ts'
+import type { OpenFilePreview, PreviewFile, PreviewTheme } from '../filePreview.ts'
+import { FilePreviewPane } from './FilePreviewPane.tsx'
 import { ChangesCard } from './ChangesCard.tsx'
 import css from './CodexRightPanel.module.css'
 
 interface CodexRightPanelProps {
   workspacePath: string
+  mode: 'preview' | 'changes'
+  files?: readonly PreviewFile[] | undefined
+  activeFile?: string | undefined
+  theme: PreviewTheme
+  onMode: (mode: 'preview' | 'changes') => void
+  onSelectFile: (url: string) => void
+  onCloseFile: (url: string) => void
+  onFilePreview: OpenFilePreview
+  onEdit: (slot: string, file: PreviewFile) => void
   taskId?: string | undefined
   events?: readonly AgentEvent[] | undefined
   running?: boolean | undefined
@@ -16,7 +27,7 @@ interface CodexRightPanelProps {
 }
 
 export function CodexRightPanel({
-  workspacePath,
+  workspacePath, mode, files = [], activeFile, theme, onMode, onSelectFile, onCloseFile, onFilePreview, onEdit,
   taskId,
   events = [],
   running = false,
@@ -32,7 +43,7 @@ export function CodexRightPanel({
   const deleted = active.reduce((sum, file) => sum + file.deleted, 0)
 
   return (
-    <aside className={css.panel} style={width ? { width } : undefined} aria-label="会话文件变更">
+    <aside className={css.panel} style={width ? { width } : undefined} aria-label="会话文件抽屉">
       <div className={css.header}>
         <div className={css.titleRow}>
           <div className={css.headerTitleGroup}>
@@ -40,6 +51,10 @@ export function CodexRightPanel({
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
             <span className={css.projectName} title={workspacePath}>{projectName}</span>
+          </div>
+          <div className={css.modes} aria-label="抽屉模式">
+            <button type="button" aria-pressed={mode === 'preview'} onClick={() => onMode('preview')}>预览</button>
+            <button type="button" aria-pressed={mode === 'changes'} onClick={() => onMode('changes')}>变更</button>
           </div>
           <div className={css.headerActions}>
             <button type="button" className={css.iconBtn} title="关闭面板" onClick={onClose}>
@@ -50,7 +65,9 @@ export function CodexRightPanel({
           </div>
         </div>
       </div>
-      <div className={css.content}>
+      <FilePreviewPane files={files} active={activeFile} hidden={mode !== 'preview'} theme={theme}
+        events={events} root={workspacePath} onSelect={onSelectFile} onClose={onCloseFile} onEdit={onEdit} />
+      {mode === 'changes' && <div className={css.content}>
         <section className={css.section}>
           <button
             type="button"
@@ -101,13 +118,14 @@ export function CodexRightPanel({
                     summary={summary}
                     running={running}
                     onChangesUpdated={onChangesUpdated}
+                    onFilePreview={onFilePreview}
                   />
                 </div>
               ))}
             </div>
           )}
         </section>
-      </div>
+      </div>}
     </aside>
   )
 }

@@ -428,3 +428,55 @@ async fn step3_turn_scoped_handle_dedup_reuses_ref_and_collapses_unchanged_rerea
         vec!["跨步句柄自动复用与修改刷新验证通过。"]
     );
 }
+
+#[tokio::test]
+async fn failed_edit_draft_retries_across_vm_segments_without_resending_replacement() {
+    let ws = TestWorkspace::new("cac-v2-failed-edit-draft");
+    let task = "failed-edit-draft";
+    let replacement = "xyz0123456789".repeat(100);
+    std::fs::write(ws.path().join("a.txt"), "unique\n").unwrap();
+    let original = format!("anchor\n{}anchor\n", "padding\n".repeat(39));
+    std::fs::write(ws.path().join("b.txt"), &original).unwrap();
+    init_task_row(ws.path(), task);
+    let source = format!(r#"io.apply_edits({{ files: [
+      {{ path: 'a.txt', edits: [{{ old_text: 'unique', new_text: 'updated' }}] }},
+      {{ path: 'b.txt', edits: [{{ old_text: 'anchor', new_text: '{}' }}] }}
+    ] }});"#, replacement);
+    let step = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+        let source = source.clone();
+        let step = step.clone();
+        async move {
+            let response = match step.fetch_add(1, Ordering::SeqCst) {
+                0 => run_js(&source),
+                1 => {
+                    let failure = last_tool_output(&body);
+                    assert!(failure.contains("Draft preserved in globalThis.__lastFailedEdit.args"), "{failure}");
+                    assert!(failure.contains("file_index=1"), "{failure}");
+                    run_js(r#"
+const draft = globalThis.__lastFailedEdit;
+const site = draft.failed_files[0];
+if (site.file_index !== 1 || site.edit_index !== 0 || site.path !== 'b.txt') throw 'wrong failure location';
+if (globalThis.__failedEdits[0] !== draft) throw 'draft duplicated';
+draft.args.files[site.file_index].edits[site.edit_index].line_hint = 41;
+io.apply_edits(draft.args);
+"#)
+                }
+                2 => {
+                    assert!(last_tool_output(&body).contains("\"changed\":2"), "{}", last_tool_output(&body));
+                    completion("Draft recovered.")
+                }
+                other => panic!("unexpected step {other}"),
+            };
+            Json(response)
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let state = agent_service::tests::test_state(ws.path(), listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    run_task(state, task.into(), "fake".into(), "Recover the failed edit".into(), 5, CancellationToken::new(), 1, false).await.unwrap();
+    server.abort();
+    assert_eq!(assistant_messages(ws.path(), task), ["Draft recovered."]);
+    assert_eq!(std::fs::read_to_string(ws.path().join("a.txt")).unwrap(), "updated\n");
+    assert_eq!(std::fs::read_to_string(ws.path().join("b.txt")).unwrap(), format!("anchor\n{}{replacement}\n", "padding\n".repeat(39)));
+}

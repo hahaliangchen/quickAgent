@@ -1361,10 +1361,12 @@ pub async fn run(
                 .patch(crate::server::agent_service::update_task)
                 .delete(crate::server::agent_service::cancel_task),
         )
+        .route("/agent/tasks/{task_id}/workspace-file", get(crate::server::agent_service::workspace_file))
         .route(
             "/agent/tasks/{task_id}/events",
             get(crate::server::agent_service::get_events),
         )
+        .route("/agent/tasks/{task_id}/events/{seq}", get(crate::server::agent_service::get_event))
         .route(
             "/agent/tasks/{task_id}/changes/{turn}",
             get(crate::tools::workspace_changes::get_summary),

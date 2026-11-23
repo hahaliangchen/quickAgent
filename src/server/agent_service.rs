@@ -26,7 +26,7 @@ pub(crate) use db::{
     save_permission_mode,
 };
 pub use routes::{
-    cancel_task, continue_task, create_draft_task, create_task, get_events, get_task, list_tasks,
+    cancel_task, continue_task, create_draft_task, create_task, get_event, get_events, get_task, list_tasks, workspace_file,
     slash_commands, stream_events, update_task, workspace_files,
 };
 pub(crate) use streaming::consume_model_stream_observed;

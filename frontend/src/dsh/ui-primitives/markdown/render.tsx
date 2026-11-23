@@ -190,6 +190,8 @@ export interface MarkdownFileMentions {
 export interface MarkdownRenderContext {
   /** Streaming arm: fences highlight incrementally as they grow; TeX (including ```math fences) stays literal until the settled pass. */
   readonly streaming: boolean
+  /** Optional diagram renderer for settled Mermaid fences. */
+  readonly renderDiagram?: ((source: string, key: Key) => ReactNode) | undefined
   /** Localized fence copy-button labels. */
   readonly labels: MarkdownLabels
   /** Inside a blockquote's children: tables there always fill the quote's width. */
@@ -471,6 +473,9 @@ function renderCode(node: Md.Code, key: Key, context: MarkdownRenderContext): Re
   // The replaced pipeline recovered the grammar id from the hast class with
   // /language-([\w-]+)/, which truncates at the first non-word character.
   const lang = language === undefined ? undefined : /^[\w-]+/.exec(language)?.[0]
+  if (!context.streaming && lang === 'mermaid' && context.renderDiagram) {
+    return context.renderDiagram(node.value, key)
+  }
   if (!context.streaming && lang === 'flow-json') {
     const flow = parseFlowData(node.value)
     if (flow !== null) return <FlowDiagram key={key} data={flow} source={node.value} />

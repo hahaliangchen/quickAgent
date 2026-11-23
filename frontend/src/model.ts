@@ -6,6 +6,9 @@ export interface ToolResult {
   readonly durationMs: number | undefined
   readonly childTaskId: string | undefined
   readonly time: number
+  readonly detailSeq?: number | undefined
+  readonly fullBytes?: number | undefined
+  readonly summary?: unknown
 }
 
 /** Turn structured tool failures into the short message shown in a row. */
@@ -302,7 +305,7 @@ function reasonOf(value: unknown): TurnEndReason {
   return { kind: 'aborted' }
 }
 
-function resultOf(event: AgentEvent): ToolResult {
+export function resultOf(event: AgentEvent): ToolResult {
   const message = messageOf(event)
   const meta = (event.data.meta ?? {}) as { durationMs?: unknown; result?: { child_task_id?: unknown } }
   return {
@@ -311,6 +314,11 @@ function resultOf(event: AgentEvent): ToolResult {
     durationMs: numberOf(meta.durationMs),
     childTaskId: stringOf(meta.result?.child_task_id),
     time: event.time,
+    ...(event.data.truncated === true ? {
+      detailSeq: numberOf(event.data.detail_seq),
+      fullBytes: numberOf(event.data.full_bytes),
+      summary: meta.result,
+    } : {}),
   }
 }
 
@@ -656,7 +664,7 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
         const call = name === 'create_task' ? functionCall(raw) : undefined
         if (call !== undefined) {
           // The caller records what the function returned; the frame keeps it too.
-          const answer = result === undefined ? {} : recordOf(parsed(result.text))
+          const answer = result === undefined ? {} : recordOf(result.summary ?? parsed(result.text))
           const child = childByCall.get(callId) ?? stringOf(answer.node_id)
           const record = child === undefined ? undefined : frames.get(child)
           const outcome = result === undefined

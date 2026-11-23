@@ -1,0 +1,25 @@
+.root, .viewer { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; user-select: text; }
+.root[hidden], .viewer[hidden] { display: none; }
+.tabs, .toolbar { display: flex; align-items: center; flex: none; border-bottom: 1px solid var(--codex-border-subtle, #ddd); }
+.tabs { overflow-x: auto; }
+.tab { display: flex; align-items: center; flex: 0 0 auto; max-width: 230px; padding: 3px 4px; border-bottom: 2px solid transparent; }
+.tab[data-active] { border-bottom-color: var(--codex-text-primary); background: var(--codex-hover-bg); }
+.tab button, .actions button, .actions a, .zoom button { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; text-decoration: none; padding: 4px 7px; border-radius: 4px; }
+.tab button:hover, .actions button:hover, .actions a:hover, .zoom button:hover { background: var(--codex-hover-bg, #ddd4); }
+.tab button[role='tab'] { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tab button svg { flex: none; }
+.tab span, .toolbar > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar { justify-content: space-between; gap: 8px; padding: 4px 10px; min-height: 31px; font-size: 12px; color: var(--codex-text-secondary); }
+.actions, .zoom { display: flex; align-items: center; gap: 4px; flex: none; }
+.scroller { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.notice { color: var(--codex-text-secondary); padding: 14px; overflow-wrap: anywhere; margin: 0; }
+.markdown { padding: 14px 18px; overflow-wrap: anywhere; }
+.code { width: max-content; min-width: 100%; font: 12px/1.6 var(--ds-font-family-code, monospace); padding-block: 8px; }
+.code > div { display: flex; white-space: pre; scroll-margin-block: 12px; }
+.code > div[data-highlighted] { background: color-mix(in srgb, #d39a25 23%, transparent); }
+.code span { flex: 0 0 6em; position: sticky; left: 0; box-sizing: border-box; text-align: right; padding-right: 1em; color: var(--codex-text-secondary); background: var(--codex-panel-bg, #fbfbfb); user-select: none; }
+.code code { font: inherit; padding-right: 14px; }
+.frame { display: block; flex: 1; min-height: 0; width: 100%; border: 0; }
+.zoom { justify-content: center; padding-block: 4px; position: sticky; left: 0; top: 0; background: var(--codex-panel-bg, #fbfbfb); }
+.image { display: grid; justify-items: center; padding: 12px; }
+.image img { height: auto; object-fit: contain; }

@@ -704,5 +704,23 @@
             .unwrap_err()
             .to_string()
             .contains("image_generation provider is incompatible"));
+        // Dedicated image models like gpt-image-2 do not live in the chat model
+        // catalog and must not block switching the main default model.
+        let img_edit = json!({"revision":view["revision"],"providers":view["providers"],
+            "orchestrator_provider":"c","orchestrator_model":"c-model",
+            "image_generation":{"provider":"r","model":"gpt-image-2"}});
+        let (with_img, _) = save_settings(&path, serde_json::from_value(img_edit).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(with_img.image_generation.model.as_deref(), Some("gpt-image-2"));
+        let view2 = settings_view(&with_img, disk_revision(&path).unwrap());
+        let switch_main = json!({"revision":view2["revision"],"providers":view2["providers"],
+            "orchestrator_provider":"r","orchestrator_model":"r-model"});
+        let (switched, _) = save_settings(&path, serde_json::from_value(switch_main).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(switched.orchestrator_provider.as_deref(), Some("r"));
+        assert_eq!(switched.orchestrator_model.as_deref(), Some("r-model"));
+        assert_eq!(switched.image_generation.model.as_deref(), Some("gpt-image-2"));
         let _ = std::fs::remove_dir_all(root);
     }

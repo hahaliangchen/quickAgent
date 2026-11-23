@@ -564,10 +564,14 @@ fn save_settings(
                 compatible,
                 "configured {name} provider is incompatible"
             );
-            anyhow::ensure!(
-                route.model_map.contains_key(model),
-                "dedicated task model {model} is not in provider {provider}'s catalog"
-            );
+            // Image generation models (e.g. gpt-image-2) target /images/generations
+            // and do not need to be registered in the provider's chat model_map.
+            if name != "image_generation" {
+                anyhow::ensure!(
+                    route.model_map.contains_key(model),
+                    "dedicated task model {model} is not in provider {provider}'s catalog"
+                );
+            }
             if let Some(cap) = config
                 .model_capabilities
                 .get(provider)

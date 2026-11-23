@@ -445,24 +445,34 @@ fn closest_lines(source: &str, old_text: &str) -> Option<String> {
     Some(format!("lines in the file now are {}-{}:\n{}", first + 1, (first + count).min(lines.len()), numbered(&lines, first, count)))
 }
 
-/// How often and on which lines an ambiguous old_text occurs.
-fn occurrences(source: &str, anchor: &str) -> String {
-    let (mut lines, mut count, mut from) = (Vec::<usize>::new(), 0, 0);
+fn select_anchor(source: &str, anchor: &str, hint: Option<usize>) -> std::result::Result<usize, String> {
+    let (mut from, mut previous, mut line) = (0, 0, 1usize);
+    let stride = anchor.chars().next().unwrap().len_utf8();
+    let mut best = (usize::MAX, 0);
+    let mut second = usize::MAX;
+    let mut lines = Vec::new();
+    let mut count = 0;
     while let Some(found) = source[from..].find(anchor) {
         let at = from + found;
+        from = at + stride; // Count overlapping occurrences, too.
+        line += source.as_bytes()[previous..at].iter().filter(|&&b| b == b'\n').count();
+        previous = at;
         count += 1;
-        let line = source[..at].matches('\n').count() + 1;
-        if lines.last() != Some(&line) {
-            lines.push(line);
+        if lines.len() < 10 && lines.last() != Some(&line) { lines.push(line); }
+        let distance = hint.map_or(0, |hint| hint.abs_diff(line));
+        if count == 1 || distance < best.0 {
+            second = best.0;
+            best = (distance, at);
+        } else {
+            second = second.min(distance);
         }
-        if count == 10 {
-            break;
-        }
-        from = at + anchor.chars().next().map_or(1, char::len_utf8);
+    }
+    if count == 1 || (hint.is_some_and(|hint| hint > 0) && best.0 <= 30 && second >= best.0 + 10) {
+        return Ok(best.1);
     }
     let list = lines.iter().map(usize::to_string).collect::<Vec<_>>().join(", ");
-    let times = if count == 10 { "10 or more".to_owned() } else { count.to_string() };
-    format!("it occurs {times} times, at {} {list}", if lines.len() == 1 { "line" } else { "lines" })
+    let suffix = if count > 10 && lines.len() == 10 { ", ..." } else { "" };
+    Err(format!("old_text is ambiguous: it occurs {count} times, at {} {list}{suffix}; supply more surrounding text or a 1-based line_hint near a clearly separated match; no edits applied", if lines.len() == 1 { "line" } else { "lines" }))
 }
 
 pub fn text_edits(source: &str, edits: &[crate::tools::TextEdit]) -> Result<String> {
@@ -488,10 +498,9 @@ pub fn text_edits_with_ranges_replace_all(
     let ending = newline(source);
     let mut replacements = Vec::new();
     for (index, edit) in edits.iter().enumerate() {
+        let invalid = |message| ToolError::IndexedEdit { index, message };
         if edit.old_text.is_empty() {
-            return Err(ToolError::InvalidEdit(format!(
-                "edit {index}: old_text must be a nonempty unique anchor; insert by retaining the anchor in new_text"
-            )));
+            return Err(invalid("old_text must be a nonempty unique anchor; insert by retaining the anchor in new_text".into()));
         }
         // Model excerpts commonly use LF for a CRLF file. Match either the
         // literal bytes or that exact newline-normalized anchor, never regex.
@@ -501,26 +510,20 @@ pub fn text_edits_with_ranges_replace_all(
         } else {
             &normalized
         };
-        let matches = source.match_indices(anchor).collect::<Vec<_>>();
-        if matches.is_empty() {
-            return Err(ToolError::InvalidEdit(match closest_lines(source, &edit.old_text) {
-                Some(lines) => format!(
-                    "edit {index}: old_text not found; no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."
-                ),
-                None => format!(
-                    "edit {index}: old_text not found, and no line of it appears in the file; no edits applied"
-                ),
+        if !source.contains(anchor) {
+            return Err(invalid(match closest_lines(source, &edit.old_text) {
+                Some(lines) => format!("old_text not found; no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."),
+                None => "old_text not found, and no line of it appears in the file; no edits applied".into(),
             }));
         }
-        if !replace_all && matches.len() > 1 {
-            return Err(ToolError::InvalidEdit(format!(
-                "edit {index}: old_text is ambiguous: {}; supply more surrounding text; no edits applied",
-                occurrences(source, anchor)
-            )));
-        }
         let replacement = normalize(&edit.new_text).replace('\n', ending);
-        for (start, _) in matches {
-            replacements.push((start, start + anchor.len(), replacement.clone()));
+        if replace_all {
+            for (start, _) in source.match_indices(anchor) {
+                replacements.push((start, start + anchor.len(), replacement.clone()));
+            }
+        } else {
+            let start = select_anchor(source, anchor, edit.line_hint).map_err(invalid)?;
+            replacements.push((start, start + anchor.len(), replacement));
         }
     }
     replacements.sort_by_key(|edit| edit.0);
@@ -548,7 +551,7 @@ mod tests {
     use super::*;
 
     fn edit(old_text: &str) -> crate::tools::TextEdit {
-        crate::tools::TextEdit { old_text: old_text.into(), new_text: "changed".into() }
+        crate::tools::TextEdit { old_text: old_text.into(), new_text: "changed".into(), line_hint: None }
     }
 
     fn error(source: &str, old_text: &str) -> String {
@@ -575,6 +578,23 @@ mod tests {
     }
 
     #[test]
+    fn line_hint_requires_unique_nearby_match_with_clear_margin() {
+        let source = format!("anchor\n{}anchor\n", "skip\n".repeat(39));
+        let mut change = edit("anchor");
+        for hint in [None, Some(0), Some(21), Some(24), Some(72)] {
+            change.line_hint = hint;
+            let err = text_edits(&source, std::slice::from_ref(&change)).unwrap_err();
+            assert!(err.to_string().contains("lines 1, 41"), "{err}");
+        }
+        change.line_hint = Some(41);
+        let modified = text_edits(&source, std::slice::from_ref(&change)).unwrap();
+        assert!(modified.starts_with("anchor\n") && modified.ends_with("changed\n"));
+        change.line_hint = Some(usize::MAX);
+        assert_eq!(text_edits("anchor", &[change]).unwrap(), "changed");
+        assert!(error("aaa", "aa").contains("ambiguous"));
+    }
+
+    #[test]
     fn changed_preview_merges_hunks_and_keeps_line_numbers() {
         let source = (1..=20).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
         let preview = preview_for_line_ranges(&source, &[(2, 2), (7, 8)]);
@@ -595,7 +615,7 @@ mod tests {
     fn text_edit_ranges_point_into_the_updated_file() {
         let (updated, ranges) = text_edits_with_ranges(
             "one\ntwo\nthree\nfour\n",
-            &[crate::tools::TextEdit { old_text: "two".into(), new_text: "TWO\nTWO-B".into() }],
+            &[crate::tools::TextEdit { old_text: "two".into(), new_text: "TWO\nTWO-B".into(), line_hint: None }],
         ).unwrap();
         assert_eq!(updated, "one\nTWO\nTWO-B\nthree\nfour\n");
         assert_eq!(preview_for_byte_ranges(&updated, &ranges).lines().next(), Some("L1|one"));
@@ -603,7 +623,7 @@ mod tests {
     }
     #[test]
     fn replace_all_updates_every_matching_anchor() {
-        let edits = [crate::tools::TextEdit { old_text: "let value = 1;".into(), new_text: "let value = 2;".into() }];
+        let edits = [crate::tools::TextEdit { old_text: "let value = 1;".into(), new_text: "let value = 2;".into(), line_hint: None }];
         let (updated, ranges) = text_edits_with_ranges_replace_all(
             "let value = 1;\nlet value = 1;\n",
             &edits,

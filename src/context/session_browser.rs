@@ -24,10 +24,7 @@ fn schema_with_default_project(conn: &Connection, root: &FsPath, default_project
     )?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_projects(path TEXT PRIMARY KEY,title TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS agent_session_meta(task_id TEXT PRIMARY KEY,title TEXT,pinned INTEGER NOT NULL DEFAULT 0,archived INTEGER NOT NULL DEFAULT 0,workspace TEXT);")?;
-    let _ = conn.execute(
-        "ALTER TABLE agent_session_meta ADD COLUMN kind TEXT NOT NULL DEFAULT 'code'",
-        [],
-    );
+    crate::context::database::add_column(conn, "agent_session_meta", "kind", "TEXT NOT NULL DEFAULT 'code'")?;
     if fresh && default_project {
         conn.execute(
             "INSERT OR IGNORE INTO agent_projects(path,title) VALUES (?1,?2)",

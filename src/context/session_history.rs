@@ -27,7 +27,7 @@ pub(crate) fn message_text(content: &Value) -> String {
 mod regression_tests;
 mod flow_folder;
 mod store;
-pub use store::{EventQuery, load_events};
+pub use store::{EventQuery, StoredEvent, load_events};
 
 pub fn saved_history_payload<'a>(kind: &str, data: &'a Value) -> Result<&'a Value> {
     let paths: &[&str] = match kind {

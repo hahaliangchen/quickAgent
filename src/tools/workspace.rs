@@ -98,6 +98,8 @@ pub enum ToolError {
     OutsideWorkspace(String),
     #[error("invalid_edit: {0}")]
     InvalidEdit(String),
+    #[error("invalid_edit: edit {index}: {message}")]
+    IndexedEdit { index: usize, message: String },
     #[error("invalid search pattern: {0}")]
     InvalidSearchPattern(String),
     #[error("invalid parameter: {0}")]
@@ -698,6 +700,8 @@ pub struct ReplaceRangeResponse {
 pub struct TextEdit {
     pub old_text: String,
     pub new_text: String,
+    #[serde(default)]
+    pub line_hint: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

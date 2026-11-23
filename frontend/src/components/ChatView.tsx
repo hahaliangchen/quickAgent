@@ -26,6 +26,7 @@ import { t } from '../i18n.ts'
 import { awaitingModel, chatItems, failedToolNames, flattenItems, formatDuration, splitTurnItems, type ChatItem, type TurnEndReason } from '../model.ts'
 import { useTaskDuration } from '../useTaskDuration.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
+import type { OpenFilePreview } from '../filePreview.ts'
 import { AttachmentCards } from './AttachmentCard.tsx'
 import { ConversationTaskProvider } from './ConversationTask.tsx'
 import css from './ChatView.module.css'
@@ -108,8 +109,10 @@ function Item({
   turnClosed,
   slashNames,
   onOpenTask,
+  onFilePreview,
 }: {
   item: ChatItem
+  onFilePreview?: OpenFilePreview | undefined
   turnClosed: boolean
   slashNames: readonly string[]
   onOpenTask: (taskId: string) => void
@@ -121,8 +124,8 @@ function Item({
       return (
         <div className={messageCss.userRow}>
           <div className={messageCss.userStack}>
-            {item.attachments?.length ? <AttachmentCards items={item.attachments} /> : null}
-            {item.text&&<div className={messageCss.bubble}>{projectUserText(item.text, [], slashNames, 'skill')}</div>}
+            {item.attachments?.length ? <AttachmentCards items={item.attachments} onFilePreview={onFilePreview} /> : null}
+            {item.text&&<div className={messageCss.bubble}>{projectUserText(item.text, [], slashNames, 'skill', onFilePreview ? { openFile: onFilePreview } : undefined)}</div>}
           </div>
         </div>
       )
@@ -212,6 +215,7 @@ function AssistantTurnView({
   changes,
   trackingError,
   onChangesUpdated,
+  onFilePreview,
   running,
   liveDurationMs,
   slashNames,
@@ -222,6 +226,7 @@ function AssistantTurnView({
   taskId: string
   changes: ChangesSummary | undefined
   trackingError: string | undefined
+  onFilePreview?: OpenFilePreview | undefined
   onChangesUpdated: (() => void) | undefined
   running: boolean
   liveDurationMs?: number | undefined
@@ -336,7 +341,7 @@ function AssistantTurnView({
 
       {/* 6. Codex-Style Edited Files Summary Card */}
       {/* Shown once the turn ends, as Codex does: mid-turn it read as "done". */}
-      {!isTurnRunning && changes && <ChangesCard taskId={taskId} summary={changes} running={running} onChangesUpdated={onChangesUpdated} />}
+      {!isTurnRunning && changes && <ChangesCard taskId={taskId} summary={changes} running={running} onChangesUpdated={onChangesUpdated} onFilePreview={onFilePreview} />}
       {trackingError && <p role="status" className={css.turnNote}>部分改动未能记录：{trackingError}</p>}
       {!isTurnRunning && !changes && flattenItems(turn.entries).some(item => item.kind === 'tool' && /^(write_file|replace_range|edit_file)$/.test(item.name) && item.result && !item.result.isError) && <p className={css.turnNote}>这轮没有可用的修改前后快照，无法显示准确统计或撤销。</p>}
       {/* 7. Error or Abort notices if any */}
@@ -355,7 +360,7 @@ type ChatNode =
   | { kind: 'turn-end'; item: ChatItem & { kind: 'turn-end' } }
 
 /** Transcript column using ui-chat's ChatView frame, column width, and flow gap; the conversation scroll body scrolls it. */
-export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, onRevealRightPanel }: {
+export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, onRevealRightPanel, onFilePreview }: {
   events: readonly AgentEvent[]
   task?: Task | undefined
   running: boolean
@@ -363,6 +368,7 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, 
   onChangesUpdated?: (() => void) | undefined
   /** Reveal the right inspector panel; a summary file link opens it before naming the path. */
   onRevealRightPanel?: (() => void) | undefined
+  onFilePreview?: OpenFilePreview | undefined
 }) {
   const api = useAgentApi()
   const [slashNames, setSlashNames] = useState<readonly string[]>([])
@@ -379,6 +385,7 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, 
   const [fileNotice, setFileNotice] = useState<{ readonly seq: number; readonly text: string; readonly success: boolean }>()
   const noticeSeq = useRef(0)
   const openFile = useCallback((path: string, options?: { line?: number }) => {
+    if (onFilePreview) { onFilePreview(path, options); return }
     const target = options?.line === undefined ? path : `${path}:${String(options.line)}`
     onRevealRightPanel?.()
     void writeClipboard(target).then((copied) => {
@@ -389,7 +396,7 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, 
         success: copied,
       })
     })
-  }, [onRevealRightPanel])
+  }, [onFilePreview, onRevealRightPanel])
   const items = useMemo(() => chatItems(events, task), [events, task])
   const changes = useMemo(() => changeSummaries(events), [events])
   const trackingErrors = useMemo(() => {
@@ -515,6 +522,7 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, 
                       turnClosed={true}
                       slashNames={slashNames}
                       onOpenTask={onOpenTask}
+                      onFilePreview={onFilePreview}
                     />
                     {(hasText || canRewind) && (
                       <div className={clsx(actionsCss.actions, css.userActions)}>
@@ -535,6 +543,7 @@ export function ChatView({ events, task, running, onOpenTask, onChangesUpdated, 
                       changes={changes.get(node.turn.turn)}
                       trackingError={trackingErrors.get(node.turn.turn)}
                       onChangesUpdated={onChangesUpdated}
+                      onFilePreview={onFilePreview}
                       running={running}
                       liveDurationMs={durationInfo.currentTurnDurationMs}
                       slashNames={slashNames}

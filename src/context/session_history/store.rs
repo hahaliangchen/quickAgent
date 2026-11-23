@@ -15,6 +15,7 @@ pub struct EventQuery<'a> {
     pub kinds: &'a [&'a str],
     pub call_id: Option<&'a str>,
     pub newest: Option<usize>,
+    pub oldest: Option<usize>,
 }
 
 pub struct StoredEvent {
@@ -85,7 +86,7 @@ pub fn load_events(
     } else {
         " ORDER BY seq ASC"
     });
-    if let Some(limit) = query.newest {
+    if let Some(limit) = query.newest.or(query.oldest) {
         args.push(SqlValue::Integer(i64::try_from(limit)?));
         sql.push_str(&format!(" LIMIT ?{}", args.len()));
     }

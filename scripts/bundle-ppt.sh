@@ -58,7 +58,7 @@ boot_head = """<style id="ppt-boot-style">
 </style>
 <script>(function(){
   const origFetch = window.fetch.bind(window);
-  const localApiBase = new URL("../../../local-api/", window.location.href).toString();
+  const localApiBase = new URL("../../local-api/", window.location.href).toString();
   window.fetch = function(input, init) {
     const raw = typeof input === "string" ? input : (input instanceof Request ? input.url : String(input));
     if (raw.startsWith("http://127.0.0.1:8080/")) {

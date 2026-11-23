@@ -6,6 +6,7 @@ import { PlanProgress } from './PlanProgress.tsx'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
 import { latestContextUsage } from './contextUsage.ts'
 import { SkillPagesView } from './SkillPagesView.tsx'
+import type { OpenFilePreview } from '../filePreview.ts'
 import type { AgentSlotProps } from '../cordis/slot-contract.ts'
 import root from '../dsh/conversation/ConversationRoot.module.css'
 import welcomeCss from './Welcome.module.css'
@@ -184,11 +185,13 @@ export function ConversationPage({
   setTab,
   rightPanelOpen = true,
   onToggleRightPanel,
+  onFilePreview,
 }: PageProps & {
   readonly tab: Tab
   readonly setTab: Dispatch<SetStateAction<Tab>>
   readonly rightPanelOpen?: boolean | undefined
   readonly onToggleRightPanel?: (() => void) | undefined
+  readonly onFilePreview?: OpenFilePreview | undefined
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -323,7 +326,7 @@ export function ConversationPage({
           <div className={css.session} data-slot="conversation.session" style={tab === 'flow' ? { height: '100%', flex: 1, display: 'flex', flexDirection: 'column' } : undefined}>
             <div className={root.viewArea} style={tab === 'flow' ? { height: '100%', flex: 1, minHeight: 520, display: 'flex' } : undefined}>
               {tab === 'chat'
-                ? <>{renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: openTask, onChangesUpdated: session.reload, onRevealRightPanel: revealRightPanel })}</>
+                ? <>{renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: openTask, onChangesUpdated: session.reload, onRevealRightPanel: revealRightPanel, onFilePreview })}</>
                 : <>{renderSlot('agent.flow', { taskId: workspace.taskId, events: session.events, task, running })}</>}
             </div>
           </div>

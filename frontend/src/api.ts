@@ -503,6 +503,7 @@ export const api = {
   updateTask: (id: string, payload: { model?: string | undefined; provider?: string | undefined; reasoning_effort?: string | null | undefined; fast_mode?: boolean | undefined; permission_mode?: PermissionMode | undefined }) =>
     patch<Task>(task(id), payload),
   events: async (id: string) => (await request<{ events: AgentEvent[] }>(`${task(id)}/events`)).events,
+  event: (id: string, seq: number) => request<AgentEvent>(`${task(id)}/events/${seq}`, { cache: 'no-store' }),
   contextDebug: (id: string) => request<{ enabled: boolean }>(`${task(id)}/context-debug`, { cache: 'no-store' }),
   setContextDebug: (id: string, enabled: boolean) => put<{ enabled: boolean }>(`${task(id)}/context-debug`, { enabled }),
   requestContexts: (id: string, before?: number, frame?: string) => {

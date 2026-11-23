@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { ConversationPage, HeroPage, SkillPackagesPage, type Tab } from './components/AgentPage.tsx'
 import { SkillWorkbench } from './components/SkillWorkbench.tsx'
 import { PluginPageHost } from './components/PluginPageHost.tsx'
@@ -12,8 +12,12 @@ import { ShellSetupDialog } from './components/ShellSetupDialog.tsx'
 import { isCodeShellContext } from './shellSetup.ts'
 import type { AgentSlotProps } from './cordis/slot-contract.ts'
 import { toggleTheme } from './theme.ts'
+import { previewFile, type OpenFilePreview, type PendingOpen, type PreviewFile } from './filePreview.ts'
 import { useAgentWorkspace } from './useAgentWorkspace.ts'
 import css from './App.module.css'
+
+const limitPanelWidth = (width: number) => Math.min(Math.floor(window.innerWidth * 0.65), 1100, Math.max(300, width))
+type PreviewTabs = { taskId: string; files: PreviewFile[]; active: string | undefined }
 
 /** Assemble the task model and the Codex 4-column layout + SettingsModal overlay. */
 export function App({ renderSlot }: AgentSlotProps) {
@@ -33,9 +37,46 @@ export function App({ renderSlot }: AgentSlotProps) {
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
   const [rightPanelWidth, setRightPanelWidth] = useState(() => {
     const saved = localStorage.getItem('codex_right_panel_width')
-    return saved ? Math.max(300, Math.min(700, Number(saved))) : 380
+    return limitPanelWidth((saved && Number(saved)) || 380)
   })
   const [newChatVersion, setNewChatVersion] = useState(0)
+  const [mode, setMode] = useState<'preview' | 'changes'>('changes')
+  const [preview, setPreview] = useState<PreviewTabs>()
+  const [pendingOpen, setPendingOpen] = useState<PendingOpen>()
+  const taskId = workspace.taskId
+  const taskRoot = workspace.task?.workspace ?? ''
+  const tabs = preview?.taskId === taskId ? preview : undefined
+  const openPreview = useCallback<OpenFilePreview>((path, options) => {
+    if (!taskId) return
+    const file = previewFile(taskId, path, options, taskRoot)
+    if (!file) return
+    setPreview(current => {
+      const files = current?.taskId === taskId ? current.files : []
+      return { taskId, active: file.url, files: files.some(item => item.url === file.url)
+        ? files.map(item => item.url === file.url ? file : item) : [...files, file] }
+    })
+    setMode('preview')
+    setRightPanelOpen(true)
+    setRightPanelWidth(width => limitPanelWidth(width < 520 ? 560 : width))
+  }, [taskId, taskRoot])
+  const closePreview = (url: string) => setPreview(current => {
+    if (!current) return current
+    const index = current.files.findIndex(file => file.url === url)
+    const files = current.files.filter(file => file.url !== url)
+    return { ...current, files, active: current.active === url ? files[Math.min(index, files.length - 1)]?.url : current.active }
+  })
+  const editPreview = (slotId: string, file: PreviewFile) => {
+    setPendingOpen(prev => ({ slotId, fileUrl: file.url, filename: file.name, seq: (prev?.seq ?? 0) + 1 }))
+    setOffice(true)
+    setOfficeMounted(true)
+    setGit(false)
+    setWorkbench(false)
+  }
+  useEffect(() => {
+    const resize = () => setRightPanelWidth(limitPanelWidth)
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [])
 
   const updateSidebarWidth = (w: number) => {
     setSidebarWidth(w)
@@ -163,6 +204,8 @@ export function App({ renderSlot }: AgentSlotProps) {
             <OfficeStudioView
               workspaceRoot={gitWorkspace}
               resetSignal={officeResetSignal}
+              pendingOpen={pendingOpen}
+              theme={dark ? 'dark' : 'light'}
               onManagePlugins={() => {
                 setOffice(false)
                 setWorkbench(false)
@@ -185,6 +228,7 @@ export function App({ renderSlot }: AgentSlotProps) {
             tab={tab}
             setTab={setTab}
             rightPanelOpen={rightPanelOpen}
+            onFilePreview={openPreview}
             onToggleRightPanel={() => setRightPanelOpen(v => !v)}
           />
         ))}
@@ -194,13 +238,14 @@ export function App({ renderSlot }: AgentSlotProps) {
       {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !office && (
         <div
           className={css.dragHandle}
+          role="separator" aria-orientation="vertical" aria-label="调整预览抽屉宽度"
           title="拖动调整面板宽度"
           onPointerDown={(e) => {
             e.preventDefault()
             const startX = e.clientX
             const startW = rightPanelWidth
             const onMove = (moveEvt: PointerEvent) => {
-              const nextW = Math.min(700, Math.max(300, startW + (startX - moveEvt.clientX)))
+              const nextW = limitPanelWidth(startW + startX - moveEvt.clientX)
               updateRightPanelWidth(nextW)
             }
             const onUp = () => {
@@ -217,6 +262,18 @@ export function App({ renderSlot }: AgentSlotProps) {
       {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !office && (
         <CodexRightPanel
           width={rightPanelWidth}
+          mode={tabs ? mode : 'changes'}
+          files={tabs?.files}
+          activeFile={tabs?.active}
+          theme={dark ? 'dark' : 'light'}
+          onMode={next => {
+            if (next === 'preview' && taskId) setPreview(current => current?.taskId === taskId ? current : { taskId, files: [], active: undefined })
+            setMode(next)
+          }}
+          onSelectFile={url => setPreview(current => current ? { ...current, active: url } : current)}
+          onCloseFile={closePreview}
+          onFilePreview={openPreview}
+          onEdit={editPreview}
           taskId={workspace.taskId}
           running={workspace.running}
           onChangesUpdated={workspace.session.reload}

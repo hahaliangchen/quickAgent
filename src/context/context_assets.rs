@@ -293,7 +293,7 @@ pub fn register(
     let mut reference = json!({"asset_id":id,"kind":kind,"content_hash":payload_hash,"bytes":bytes.len(),
         "snapshot_path":relative,"source_tool":tool,
         "history_reference":{"task_id":task,"event_seq":seq,"include_event":true},
-        "read_reference":{"tool":"read_asset","arguments":{"asset_id":id}}});
+        "read_reference":{"tool":"session.read_asset","arguments":{"asset_id":id}}});
     if tool == "shell_output" {
         reference["read_reference"]["arguments"]["max_chars"] = json!(MAX_PAGE_CHARS);
     }
@@ -402,7 +402,7 @@ pub(crate) fn register_file(
             "asset_id":id,"kind":"tool_output","content_hash":payload_hash,"bytes":bytes,
             "snapshot_path":relative,"source_tool":tool,
             "history_reference":{"task_id":task,"event_seq":seq,"include_event":true},
-            "read_reference":{"tool":"read_asset","arguments":{"asset_id":id}}
+            "read_reference":{"tool":"session.read_asset","arguments":{"asset_id":id}}
         });
         if tool == "shell_output" {
             reference["read_reference"]["arguments"]["max_chars"] = json!(MAX_PAGE_CHARS);

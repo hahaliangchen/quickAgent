@@ -136,3 +136,6 @@
 .card:hover .name {
   color: var(--codex-blue-primary, #1d9e75);
 }
+
+.fileActions { display: flex; min-width: 0; align-items: center; gap: 2px; }
+.download { padding: 4px; color: inherit; text-decoration: none; }
