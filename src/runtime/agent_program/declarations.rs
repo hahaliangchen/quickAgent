@@ -453,7 +453,7 @@ pub fn static_library_header(libraries: &Libraries) -> String {
             out.push_str(&format!("  function {method}({sig};\n"));
         }
         if library == "host" {
-            out.push_str("  function context(): { task: string; turn: number; scope: string; tools: string[] };\n");
+            out.push_str("  function context(): { task: string; turn: number; scope: string; readonly model: string; readonly provider: string; tools: string[] };\n");
             out.push_str("  function tools(): { libraries: string[]; orchestration_libraries: Array<{ name: string; description: string; methods: string[] }> };\n");
             if super::libraries::allows_delegation(libraries) {
                 out.push_str("  /** Run an isolated AI worker frame for a single lightweight task (parallelizable via `Promise.all` / `Promise.allSettled`); `context` fields are exposed as safe variables and via `context.<key>`. */\n  function delegate(task: string): Promise<unknown>;\n  function delegate(args: { name?: string; task: string; context?: Record<string, unknown> }): Promise<unknown>;\n");
@@ -941,6 +941,7 @@ mod tests {
         let header = static_library_header(&libs);
         assert!(header.contains("declare namespace host"));
         assert!(header.contains("function contracts"));
+        assert!(header.contains("readonly model: string; readonly provider: string"));
         assert!(header.contains("function delegate(task: string): Promise<unknown>"));
         assert!(header.contains("context?: Record<string, unknown>"));
         assert!(header.contains("libraries?: string[]"));

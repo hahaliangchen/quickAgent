@@ -170,13 +170,12 @@ pub async fn execute(
     .await
     .context("Cannot persist image analysis input; request was not sent")?;
     let reference = trace.history_reference();
-    let diagnostics = crate::model::model_transport::ModelRequestLog::new(
-        state.workspace.root(),
+    let diagnostics = crate::model::model_transport::ModelRequestLog::for_agent(
+        state,
         json!({"actor":"tool","request_id":node,"task_id":context.task_id(),"context_id":trace.id(),
             "turn":context.turn,"tool":"analyze_images","provider":state.provider_name,"model":model}),
-        &state.provider_url,
         &body,
-    );
+    ).await;
     diagnostics.sending();
     let mut raw_response = Value::Null;
     let pending = async {

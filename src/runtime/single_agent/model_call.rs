@@ -1,7 +1,7 @@
 //! Single-shell `run_js` HTTP model caller for Context-as-Code v2.
 //!
 //! Sends:
-//! - Static `system` prompt (incremental JS execution via the single `run_js({ code })`
+//! - Stable `system` prompt (incremental JS execution via the single `run_js({ code })`
 //!   tool + `.d.ts` host library declarations from `declarations::static_library_header`).
 //! - Paired `(user #1, assistant #1, ..., user #N)` messages from `ContextDocument`.
 //! - ZERO business-tool JSON Schemas — ONLY the single fixed 1-parameter `run_js`
@@ -371,14 +371,36 @@ pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String 
     text
 }
 
+const RUNTIME_IDENTITY_MARKER: &str = "/* === RUNTIME IDENTITY === */";
+const RUNTIME_MODEL_PREFIX: &str = "Current runtime model: ";
+const REPORT_MODEL_PREFIX: &str = "When asked which model you are, report this exact runtime model identifier";
+
+fn without_runtime_identity(base: &str) -> String {
+    let mut lines = base.split_inclusive('\n').peekable();
+    let mut text = String::with_capacity(base.len());
+    while let Some(line) = lines.next() {
+        if line.trim_end() == RUNTIME_IDENTITY_MARKER
+            && lines.peek().is_some_and(|next| next.starts_with(RUNTIME_MODEL_PREFIX))
+        {
+            lines.next();
+            if lines.peek().is_some_and(|next| next.starts_with(REPORT_MODEL_PREFIX)) {
+                lines.next();
+            }
+        } else {
+            text.push_str(line);
+        }
+    }
+    text
+}
+
 pub(super) fn build_request_body_for_doc(
     s: &Session<'_>,
     doc: &super::context_doc::ContextDocument,
     base_prompt: &str,
     libs: &Libraries,
 ) -> Value {
-    let mut system_text = String::from(base_prompt);
-    let has_pinned_sdk = base_prompt.contains("/* === RUNTIME HOST SDK (.d.ts) === */");
+    let mut system_text = without_runtime_identity(base_prompt);
+    let has_pinned_sdk = system_text.contains("/* === RUNTIME HOST SDK (.d.ts) === */");
     if !has_pinned_sdk {
         system_text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
         system_text.push_str(&declarations::static_library_header(libs));
@@ -396,6 +418,14 @@ pub(super) fn build_request_body_for_doc(
             }
         }
     }
+
+    system_text.truncate(system_text.trim_end().len());
+    let model = s.model;
+    let provider = &s.state.provider_name;
+    system_text.push_str(&format!(
+        "\n\n{RUNTIME_IDENTITY_MARKER}\n{RUNTIME_MODEL_PREFIX}{model} (provider: {provider})\n\
+         {REPORT_MODEL_PREFIX} (`{model}`) accurately; never guess from pretraining data or echo an earlier turn's different model."
+    ));
 
     let mut messages = vec![json!({"role": "system", "content": system_text})];
     messages.extend(doc.render_conversation_messages());
@@ -525,8 +555,8 @@ async fn send_model_request(
 
     let mut attempt = 1u32;
     loop {
-        let diagnostics = crate::model::model_transport::ModelRequestLog::new(
-            s.state.workspace.root(),
+        let diagnostics = crate::model::model_transport::ModelRequestLog::for_agent(
+            s.state,
             json!({
                 "request_id": node,
                 "context_id": trace.id(),
@@ -538,9 +568,8 @@ async fn send_model_request(
                 "model": s.model,
                 "attempt": attempt,
             }),
-            &s.state.provider_url,
             &body,
-        );
+        ).await;
         let _permit = tokio::select! {
             _ = s.cancel.cancelled() => anyhow::bail!("model request cancelled while waiting for slot"),
             permit = s.state.model_request_slots.acquire() => permit.context("model request queue closed")?,
@@ -658,7 +687,45 @@ async fn send_model_request(
 
 #[cfg(test)]
 mod tests {
-    use super::V2_SYSTEM_PROMPT;
+    use super::*;
+
+    #[test]
+    fn runtime_identity_tracks_model_switch_without_changing_same_model_system_bytes() {
+        let root = std::env::temp_dir().join(format!("runtime-identity-{}", agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut state = agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        state.provider_name = "deepseek".into();
+        let mut new_state = state.clone();
+        new_state.provider_name = "openai".into();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let old = Session {
+            state: &state, task: "task", model: "deepseek-flash", turn: 1, cancel: &cancel,
+            scope: "main".into(), parent: None, agent_id: None, task_node_id: None,
+            plugin: None, ban_execution: false, input_budget: 100_000,
+        };
+        let libs = crate::runtime::agent_program::libraries::builtin();
+        let pinned = pinned_system_prompt(&old, &libs);
+        assert!(!pinned.contains(RUNTIME_IDENTITY_MARKER));
+        let mut w = Window { pinned_system_prompt: Some(pinned.clone()), ..Default::default() };
+        let old_body = build_request_body(&old, &w, &libs);
+        let old_system = old_body["messages"][0]["content"].as_str().unwrap();
+        assert!(old_system.contains("Current runtime model: deepseek-flash (provider: deepseek)"));
+
+        let new = Session { state: &new_state, model: "gpt-6.2-sol", turn: 2, ..old };
+        let switched = build_request_body(&new, &w, &libs);
+        let system = switched["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("Current runtime model: gpt-6.2-sol (provider: openai)"));
+        assert!(!system.contains("deepseek-flash"));
+        assert_eq!(system.matches(RUNTIME_IDENTITY_MARKER).count(), 1);
+
+        // Simulate restoring a legacy window that pinned the full old system message.
+        w.pinned_system_prompt = Some(old_system.into());
+        let reused = build_request_body(&new, &w, &libs);
+        assert_eq!(system.as_bytes(), reused["messages"][0]["content"].as_str().unwrap().as_bytes());
+        let repeated = build_request_body(&new, &w, &libs);
+        assert_eq!(system.as_bytes(), repeated["messages"][0]["content"].as_str().unwrap().as_bytes());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn ui_self_review_is_bounded_and_local_images_register_directly() {

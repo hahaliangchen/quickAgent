@@ -3,6 +3,7 @@
 pub(crate) mod agent_service;
 pub(crate) mod agent_web;
 pub(crate) mod ai_proxy;
+mod external_models;
 pub(crate) mod builtin_plugins;
 pub(crate) mod composer_catalog;
 pub(crate) mod file_stream;

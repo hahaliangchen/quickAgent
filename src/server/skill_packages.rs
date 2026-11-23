@@ -295,7 +295,9 @@ fn settings_path() -> PathBuf {
     crate::server::ai_proxy::config_path().with_file_name("skill-packages.json")
 }
 fn settings() -> Result<Settings> {
-    let path = settings_path();
+    settings_at(&settings_path())
+}
+fn settings_at(path: &Path) -> Result<Settings> {
     if !path.exists() {
         return Ok(Settings::default());
     }
@@ -306,8 +308,23 @@ pub struct Registry {
     entries: RwLock<BTreeMap<String, Package>>,
     mcp_servers: RwLock<BTreeMap<String, Arc<mcp_packages::Server>>>,
     pub transition: Mutex<()>,
+    #[cfg(test)]
+    test_settings_path: std::sync::OnceLock<PathBuf>,
 }
 impl Registry {
+    fn settings_path(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some(path) = self.test_settings_path.get() {
+            return path.clone();
+        }
+        settings_path()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn use_test_settings_path(&self, path: PathBuf) {
+        self.test_settings_path.set(path).unwrap();
+    }
+
     pub fn is_remote(&self, id: &str) -> bool {
         self.entries
             .read()
@@ -887,8 +904,14 @@ impl Plugin for PackagePlugin {
             .insert(current.manifest.id.clone(), current);
         let registry = tools.packages.clone();
         let id = self.0.manifest.id.clone();
+        let scope = ctx.scope();
         ctx.effect(move || {
-            if let Some(package) = registry.entries.write().unwrap().get_mut(&id) {
+            if let Some(package) = registry.entries.write().unwrap().get_mut(&id)
+                && package.scope == Some(scope)
+            {
+                if package.remote.is_some() {
+                    super::external_models::registry().unbind(&id);
+                }
                 package.scope = None;
                 package.local_service_port = None;
             }
@@ -900,18 +923,20 @@ impl Plugin for PackagePlugin {
 }
 
 fn save_settings(config: &Settings) -> Result<()> {
-    let path = settings_path();
+    save_settings_at(&settings_path(), config)
+}
+fn save_settings_at(path: &Path, config: &Settings) -> Result<()> {
     std::fs::create_dir_all(path.parent().context("settings directory missing")?)?;
-    let original = crate::tools::file_edit::snapshot(&path)?;
+    let original = crate::tools::file_edit::snapshot(path)?;
     crate::tools::file_edit::commit(
-        &path,
+        path,
         original.as_deref(),
         &serde_json::to_vec_pretty(config)?,
     )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
@@ -994,7 +1019,8 @@ pub fn remove(runtime: &PluginRuntime, registry: &Registry, id: &str) -> Result<
         old.origin == Origin::External,
         "project-owned plugins can be disabled, not removed from the installed package roster"
     );
-    let mut config = settings()?;
+    let path = registry.settings_path();
+    let mut config = settings_at(&path)?;
     config
         .packages
         .retain(|path| path.canonicalize().ok().as_ref() != Some(&old.root));
@@ -1010,7 +1036,7 @@ pub fn remove(runtime: &PluginRuntime, registry: &Registry, id: &str) -> Result<
     if let Some(scope) = old.scope {
         runtime.unmount(scope)?;
     }
-    if let Err(error) = save_settings(&config) {
+    if let Err(error) = save_settings_at(&path, &config) {
         if old.scope.is_some() {
             runtime.mount(parent, PackagePlugin(old))?;
         }

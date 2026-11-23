@@ -57,13 +57,12 @@ pub(crate) async fn review(
     // A Messages route gets the same request as its own blocks.
     let body = crate::model::anthropic_messages::wire_body(state, model, &body);
     let request_id = crate::server::agent_service::uuid_like();
-    let log = crate::model::model_transport::ModelRequestLog::new(
-        &root,
+    let log = crate::model::model_transport::ModelRequestLog::for_agent(
+        state,
         json!({"actor":"approval_reviewer","request_id":request_id,"task_id":task,
             "provider":state.provider_name,"model":model}),
-        &state.provider_url,
         &body,
-    );
+    ).await;
     log.sending();
     let pending = async {
         let response = crate::model::anthropic_messages::send(state, task, "", &body)

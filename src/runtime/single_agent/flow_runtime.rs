@@ -122,6 +122,8 @@ fn execute_host_builtin(
                     "task": s.task,
                     "turn": s.turn,
                     "scope": s.scope,
+                    "model": s.model,
+                    "provider": s.state.provider_name,
                     "tools": tools,
                 }),
                 false,

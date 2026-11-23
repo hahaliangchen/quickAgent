@@ -239,13 +239,31 @@ pub struct ModelRequestLog {
     root: PathBuf,
     started: Instant,
     identity: Value,
+    record_endpoint: bool,
     progress: Mutex<Progress>,
 }
 
 impl ModelRequestLog {
+    #[cfg(test)]
     pub fn new(root: &Path, identity: Value, url: &str, body: &Value) -> Self {
-        let origin = reqwest::Url::parse(url)
-            .ok()
+        Self::with_endpoint(root, identity, Some(url), body)
+    }
+
+    pub(crate) async fn for_agent(
+        state: &crate::server::agent_service::AgentServiceState,
+        identity: Value,
+        body: &Value,
+    ) -> Self {
+        let external = match &state.config {
+            Some(config) => config.read().await.uses_external_provider(&state.provider_name),
+            None => false,
+        };
+        Self::with_endpoint(state.workspace.root(), identity,
+            (!external).then_some(state.provider_url.as_str()), body)
+    }
+
+    fn with_endpoint(root: &Path, identity: Value, url: Option<&str>, body: &Value) -> Self {
+        let origin = url.and_then(|url| reqwest::Url::parse(url).ok())
             .map(|url| url.origin().ascii_serialization());
         let bytes = serde_json::to_vec(body).unwrap_or_default();
         // A Responses request carries input items instead of messages.
@@ -267,6 +285,7 @@ impl ModelRequestLog {
             root: root.into(),
             started: Instant::now(),
             identity,
+            record_endpoint: url.is_some(),
             progress: Mutex::new(Progress {
                 phase: "prepared",
                 headers_ms: None,
@@ -426,8 +445,9 @@ impl ModelRequestLog {
                 );
             }
         }
+        let remote_addr = if self.record_endpoint { response.remote_addr() } else { None };
         progress.http = json!({"status":response.status().as_u16(),"version":format!("{:?}",response.version()),
-            "remote_addr":response.remote_addr().map(|address|address.to_string()),"headers":headers});
+            "remote_addr":remote_addr.map(|address|address.to_string()),"headers":headers});
         drop(progress);
         self.event("response_headers", json!({}));
     }

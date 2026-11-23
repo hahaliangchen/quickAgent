@@ -22,7 +22,7 @@ use tokio::{
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use crate::server::{builtin_plugins, local_api_proxy, plugin_runtime};
+use crate::server::{builtin_plugins, external_models, local_api_proxy, plugin_runtime};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -84,7 +84,7 @@ fn built_in_capabilities(model: &str) -> ModelCapabilities {
     }
 }
 
-fn default_api_type() -> String {
+pub(super) fn default_api_type() -> String {
     "openai-completions".to_owned()
 }
 
@@ -101,7 +101,7 @@ fn declared_reasoning_efforts(metadata: &Value) -> Vec<String> {
 }
 /// The provider APIs the agent speaks: Chat Completions, Responses as Codex
 /// uses it, and the native Anthropic Messages protocol.
-fn agent_api(api_type: &str) -> bool {
+pub(super) fn agent_api(api_type: &str) -> bool {
     matches!(
         api_type,
         "openai-completions" | "openai-responses" | "anthropic-messages"
@@ -137,6 +137,8 @@ pub(crate) struct AiProxyConfig {
     plugin_models: HashMap<String, Vec<crate::model::model_catalog::ModelRef>>,
     #[serde(default)]
     plugin_generation: HashMap<String, crate::model::model_settings::PluginGeneration>,
+    #[serde(skip)]
+    external_provider: Option<String>,
     #[serde(default)]
     providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
@@ -779,6 +781,31 @@ fn settings_view(config: &AiProxyConfig, revision: String) -> Value {
 
 /// Explicit projection: never expose URLs, credentials or raw probe responses.
 pub(crate) fn catalog_view(config: &AiProxyConfig) -> Value {
+    catalog_with_external(config, external_models::registry().catalog_only())
+}
+
+fn catalog_with_external(
+    config: &AiProxyConfig,
+    external: Option<&external_models::ExternalModelProvider>,
+) -> Value {
+    let Some(provider) = external else { return scoped_catalog_view(config) };
+    let id = provider.id("");
+    if config.providers.contains_key(&id) {
+        return scoped_catalog_view(config);
+    }
+    let mut catalog = config.clone();
+    catalog.insert_external(id.clone(), provider);
+    let mut view = scoped_catalog_view(&catalog);
+    // This entry is informational only; it is not a route for the host or plugins.
+    if let Some(models) = view["models"].as_array_mut() {
+        for model in models.iter_mut().filter(|model| model["provider"] == id) {
+            model["available_for_agent"] = json!(false);
+        }
+    }
+    view
+}
+
+pub(crate) fn scoped_catalog_view(config: &AiProxyConfig) -> Value {
     let mut models = Vec::new();
     for (provider, route) in &config.providers {
         for id in route.model_map.keys() {
@@ -823,11 +850,49 @@ pub(crate) fn catalog_view(config: &AiProxyConfig) -> Value {
     }})
 }
 
+impl AiProxyConfig {
+    pub(crate) fn uses_external_provider(&self, id: &str) -> bool {
+        self.external_provider.as_deref() == Some(id)
+    }
+
+    fn insert_external(&mut self, id: String, provider: &external_models::ExternalModelProvider) {
+        // A host provider with the same ID is only shadowed in this clone.
+        self.model_capabilities.remove(&id);
+        self.providers.insert(id, ProviderConfig {
+            url: provider.url.clone(),
+            api_key: provider.api_key.clone(),
+            api_key_ref: None,
+            model_map: HashMap::from([(provider.model.clone(), provider.model.clone())]),
+            api_type: provider.protocol.clone(),
+            max_output_tokens: HashMap::new(),
+            model_metadata: HashMap::new(),
+            extra: HashMap::new(),
+        });
+    }
+}
+
 pub(crate) fn restricted_config(
     config: &AiProxyConfig,
     plugin: &str,
 ) -> anyhow::Result<AiProxyConfig> {
+    restrict_with_external(config, plugin, external_models::registry())
+}
+
+fn restrict_with_external(
+    config: &AiProxyConfig,
+    plugin: &str,
+    registry: &external_models::ExternalProviderRegistry,
+) -> anyhow::Result<AiProxyConfig> {
     let mut config = config.clone();
+    if let Some(provider) = registry.for_plugin(plugin) {
+        let id = provider.id(plugin);
+        config.insert_external(id.clone(), &provider);
+        config.external_provider = Some(id.clone());
+        config.plugin_models.insert(plugin.to_owned(), vec![crate::model::model_catalog::ModelRef {
+            provider: id,
+            model: provider.model,
+        }]);
+    }
     if let Some(policy) = config.plugin_generation.get(plugin) {
         if let Some(effort) = &policy.reasoning_effort {
             config.reasoning_effort = Some(effort.clone());
@@ -919,8 +984,16 @@ pub(crate) fn restricted_config(
 }
 
 pub(crate) fn plugin_catalog_view(config: &AiProxyConfig, plugin: &str) -> Value {
-    match restricted_config(config, plugin) {
-        Ok(scoped) => catalog_view(&scoped),
+    plugin_catalog_with_external(config, plugin, external_models::registry())
+}
+
+fn plugin_catalog_with_external(
+    config: &AiProxyConfig,
+    plugin: &str,
+    registry: &external_models::ExternalProviderRegistry,
+) -> Value {
+    match restrict_with_external(config, plugin, registry) {
+        Ok(scoped) => scoped_catalog_view(&scoped),
         Err(_) => json!({"version":1,"models":[],"defaults":{}}),
     }
 }
@@ -1014,18 +1087,71 @@ async fn install_skill_package(
         &input.path,
     ))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectRemoteRequest {
+    url: String,
+    token: String,
+    model_provider: Option<external_models::ExternalModelProvider>,
+}
+
 async fn connect_remote_package(
     State(state): State<AiProxyState>,
-    Json(input): Json<crate::server::skill_packages::remote::Config>,
+    headers: HeaderMap,
+    Json(input): Json<ConnectRemoteRequest>,
 ) -> Response {
+    if input.model_provider.is_some() && !trusted_settings_request(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let catalog = state
         .runtime
         .service::<builtin_plugins::ToolCatalog>(plugin_runtime::ROOT, "tools")
         .unwrap();
-    package_response(
-        crate::server::skill_packages::remote::install(&state.runtime, &catalog.packages, input, true)
-            .await,
-    )
+    let remote = crate::server::skill_packages::remote::Config { url: input.url, token: input.token };
+    package_response(crate::server::skill_packages::remote::install(
+        &state.runtime, &catalog.packages, remote, true, input.model_provider,
+    ).await)
+}
+
+async fn put_remote_model_provider(
+    State(state): State<AiProxyState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(provider): Json<external_models::ExternalModelProvider>,
+) -> Response {
+    change_remote_model_provider(&state, &id, &headers, Some(provider))
+}
+
+async fn delete_remote_model_provider(
+    State(state): State<AiProxyState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    change_remote_model_provider(&state, &id, &headers, None)
+}
+
+fn change_remote_model_provider(
+    state: &AiProxyState,
+    id: &str,
+    headers: &HeaderMap,
+    provider: Option<external_models::ExternalModelProvider>,
+) -> Response {
+    if !trusted_settings_request(headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let catalog = state.runtime
+        .service::<builtin_plugins::ToolCatalog>(plugin_runtime::ROOT, "tools");
+    shell_response(catalog.and_then(|catalog| {
+        crate::server::skill_packages::remote::update_model_provider(&catalog.packages, id, provider)
+    }))
+}
+
+fn remote_package_routes() -> Router<AiProxyState> {
+    Router::new()
+        .route("/agent/skill-packages/remote", post(connect_remote_package))
+        .route("/agent/skill-packages/remote/{id}/model-provider",
+            axum::routing::put(put_remote_model_provider).delete(delete_remote_model_provider))
+        .route("/agent/skill-packages/{id}", axum::routing::delete(remove_skill_package))
 }
 async fn remote_page_request(
     State(state): State<AiProxyState>,
@@ -1231,6 +1357,7 @@ pub async fn run(
     workspace: Arc<crate::tools::Workspace>,
 ) -> anyhow::Result<()> {
     let config = load_config(config_path)?;
+    let _ = external_models::registry();
 
     crate::server::agent_service::recover_orphaned_tasks(workspace.root()).await?;
 
@@ -1488,14 +1615,10 @@ pub async fn run(
             "/agent/skill-packages",
             get(skill_packages).post(install_skill_package),
         )
-        .route("/agent/skill-packages/remote", post(connect_remote_package))
+        .merge(remote_package_routes())
         .route(
             "/agent/plugins/{id}/{method}",
             post(remote_page_request).layer(axum::extract::DefaultBodyLimit::max(30 * 1024 * 1024)),
-        )
-        .route(
-            "/agent/skill-packages/{id}",
-            axum::routing::delete(remove_skill_package),
         )
         .route(
             "/agent/skill-packages/{id}/reload",
@@ -1548,6 +1671,10 @@ pub async fn run(
 #[cfg(test)]
 #[path = "parts/local_api_proxy_tests.rs"]
 mod local_api_proxy_tests;
+
+#[cfg(test)]
+#[path = "parts/external_models_tests.rs"]
+mod external_models_tests;
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,6 @@
 //! Remote service adapter for DSH Connection envelopes. No plugin installation.
 use super::*;
-use crate::server::plugin_protocol::{NativeContributions, NativeTool, Page};
+use crate::server::{external_models::{self, ExternalModelProvider}, plugin_protocol::{NativeContributions, NativeTool, Page}};
 use std::{collections::BTreeSet, time::Duration};
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -411,7 +411,7 @@ pub(crate) fn configured_url(registry: &Registry, id: &str) -> Result<String> {
     if let Ok(connection) = registry.remote(id) {
         return Ok(connection.url().to_owned());
     }
-    let configured = settings()?;
+    let configured = settings_at(&registry.settings_path())?;
     ensure!(
         configured.enabled.get(id) != Some(&false) && !configured.removed.contains(id),
         "Plugin disabled"
@@ -427,7 +427,9 @@ pub async fn install(
     registry: &Registry,
     config: Config,
     persist: bool,
+    model_provider: Option<ExternalModelProvider>,
 ) -> Result<Value> {
+    let model_provider = model_provider.map(ExternalModelProvider::validate).transpose()?;
     let package = connect(config.clone()).await?;
     let _transition = registry.transition.lock().unwrap();
     let id = package.manifest.id.clone();
@@ -441,24 +443,61 @@ pub async fn install(
         .find(|p| p.id == "skill-packages")
         .context("package service unavailable")?
         .scope;
-    let mut settings = settings()?;
+    let path = registry.settings_path();
+    let mut settings = settings_at(&path)?;
     let scope = runtime.mount(parent, PackagePlugin(package))?;
     if persist {
         settings.remotes.insert(id.clone(), config);
         settings.enabled.insert(id.clone(), true);
         settings.removed.remove(&id);
-        if let Err(error) = save_settings(&settings) {
+        if let Err(error) = save_settings_at(&path, &settings) {
             runtime.unmount(scope)?;
             registry.entries.write().unwrap().remove(&id);
             return Err(error);
         }
     }
+    if let Some(provider) = model_provider {
+        set_mounted_model_provider(registry, &id, Some(provider))?;
+    }
     Ok(registry.catalog())
 }
+
+pub(crate) fn update_model_provider(
+    registry: &Registry,
+    id: &str,
+    provider: Option<ExternalModelProvider>,
+) -> Result<Value> {
+    let provider = provider.map(ExternalModelProvider::validate).transpose()?;
+    let _transition = registry.transition.lock().unwrap();
+    set_mounted_model_provider(registry, id, provider)
+}
+
+fn set_mounted_model_provider(
+    registry: &Registry,
+    id: &str,
+    provider: Option<ExternalModelProvider>,
+) -> Result<Value> {
+    // Keep the entry locked across the write so the unmount hook cannot race
+    // between validating the mounted scope and publishing its provider.
+    let entries = registry.entries.read().unwrap();
+    let package = entries.get(id).context("plugin not found")?;
+    ensure!(package.scope.is_some(), "plugin disabled");
+    ensure!(package.remote.is_some(), "not a remote plugin");
+    let registry = external_models::registry();
+    if let Some(provider) = provider {
+        let summary = provider.summary(id);
+        registry.bind(id, provider);
+        Ok(summary)
+    } else {
+        Ok(registry.unbind(id).map_or_else(|| json!({"plugin_id":id,"removed":false}),
+            |previous| previous.summary(id)))
+    }
+}
+
 pub async fn restore(runtime: &PluginRuntime, registry: &Registry) -> Result<()> {
-    let config = settings()?;
+    let config = settings_at(&registry.settings_path())?;
     for (id, remote) in config.remotes {
-        match install(runtime, registry, remote, false).await {
+        match install(runtime, registry, remote, false, None).await {
             Ok(_) if config.enabled.get(&id) == Some(&false) => {
                 set_enabled(runtime, registry, &id, false, false)?;
             }

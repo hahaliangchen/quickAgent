@@ -110,7 +110,7 @@ pub async fn prepare_turn(
             model: state.default_model.clone(),
         }
     };
-    let directory = crate::server::ai_proxy::catalog_view(&*state.config.as_ref().unwrap().read().await);
+    let directory = crate::server::ai_proxy::scoped_catalog_view(&*state.config.as_ref().unwrap().read().await);
     let cap = &directory["models"]
         .as_array()
         .unwrap()
