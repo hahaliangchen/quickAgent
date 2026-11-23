@@ -17,19 +17,18 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-use tokio::sync::{Mutex, RwLock};
+use sha2::{Digest, Sha256};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 // Legacy rewind serialization only. Ordinary mutations and undo share the
 // workspace registry below, so a live shell cannot lock unrelated projects.
 pub(crate) static MUTATIONS: RwLock<()> = RwLock::const_new(());
 static WORKSPACE_MUTATIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<RwLock<()>>>>> = std::sync::OnceLock::new();
-static FILE_MUTATIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(PathBuf, PathBuf), std::sync::Weak<Mutex<()>>>>> = std::sync::OnceLock::new();
+static FILE_MUTATIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(PathBuf, PathBuf), std::sync::Weak<RwLock<()>>>>> = std::sync::OnceLock::new();
 
 fn workspace_mutations(workspace: &Path) -> Result<(PathBuf, std::sync::Arc<RwLock<()>>)> {
-    let root = fs::canonicalize(workspace)?;
-    #[cfg(windows)]
-    let root = PathBuf::from(root.to_string_lossy().to_lowercase());
+    let root = path_lock_key(fs::canonicalize(workspace)?);
     let mut locks = WORKSPACE_MUTATIONS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
     locks.retain(|_, lock| lock.strong_count() > 0);
     let lock = match locks.get(&root).and_then(std::sync::Weak::upgrade) {
@@ -52,12 +51,32 @@ impl Drop for ResourceClaim {
         }
     }
 }
-pub(crate) fn resource_key(workspace: &Path, name: &str, args: &Value) -> Result<Option<String>> {
-    if matches!(name, "write_file" | "edit_file" | "replace_range" | "delete_path" | "rename_path" | "create_dir") {
-        let path = args["path"].as_str().context("write path required")?;
-        return Ok(Some(format!("local:{}", crate::tools::file_edit::workspace_path(workspace,path)?.display())));
+fn path_lock_key(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    let path = PathBuf::from(path.to_string_lossy().to_lowercase());
+    path
+}
+
+pub(crate) fn mutation_paths(workspace: &Path, name: &str, args: &Value) -> Result<Vec<PathBuf>> {
+    if name == crate::tools::batch_edits::NAME {
+        return crate::tools::batch_edits::paths(workspace, args);
     }
-    Ok(None)
+    if !matches!(name, "write_file" | "edit_file" | "replace_range" | "delete_path" | "rename_path" | "create_dir") {
+        return Ok(Vec::new());
+    }
+    let path = safe_path(workspace, args["path"].as_str().context("missing file path")?)?;
+    let mut paths = vec![path];
+    if name == "rename_path" {
+        paths.push(safe_path(workspace, args["to"].as_str().context("missing destination path")?)?);
+    }
+    Ok(paths)
+}
+
+pub(crate) fn resource_keys(workspace: &Path, name: &str, args: &Value) -> Result<Vec<String>> {
+    let paths = mutation_paths(workspace, name, args)?;
+    let keys = paths.into_iter().map(|path| format!("local:{}", path_lock_key(path).display()))
+        .collect::<std::collections::BTreeSet<_>>();
+    Ok(keys.into_iter().collect())
 }
 pub(crate) fn claim_resource(root: &Path, task: &str, call_id: &str, resource: String) -> Result<ResourceClaim> {
     let owner=format!("main:{task}:{call_id}");
@@ -72,40 +91,62 @@ pub(crate) fn claim_resource(root: &Path, task: &str, call_id: &str, resource: S
     Ok(ResourceClaim{root:root.to_path_buf(),resource,owner})
 }
 
+pub(crate) enum PathGuard {
+    Read { _guard: tokio::sync::OwnedRwLockReadGuard<()> },
+    Write { _guard: tokio::sync::OwnedRwLockWriteGuard<()> },
+}
+
 pub(crate) enum MutationGuard {
-    File { _workspace: tokio::sync::OwnedRwLockReadGuard<()>, _file: tokio::sync::OwnedMutexGuard<()> },
+    File { _paths: Vec<PathGuard>, _workspace: tokio::sync::OwnedRwLockReadGuard<()> },
     Workspace { _workspace: tokio::sync::OwnedRwLockWriteGuard<()> },
 }
 
 pub(crate) async fn mutation_guard(workspace: &Path, name: &str, args: &Value, cancel: &CancellationToken) -> Result<MutationGuard> {
     let (root, workspace_lock) = workspace_mutations(workspace)?;
-    if !matches!(name, "write_file" | "edit_file" | "replace_range") {
+    let paths = mutation_paths(workspace, name, args)?;
+    if paths.is_empty() {
         let guard = tokio::select! { _ = cancel.cancelled() => bail!("Tool execution cancelled"), guard = workspace_lock.write_owned() => guard };
         ensure!(workspace_mutations(workspace)?.0 == root, "workspace location changed while waiting");
         return Ok(MutationGuard::Workspace { _workspace: guard });
     }
-    let raw = args["path"].as_str().context("missing file path")?;
-    let path = safe_path(workspace, raw)?;
-    #[cfg(windows)]
-    let path = PathBuf::from(path.to_string_lossy().to_lowercase());
-    let file = {
-        let mut locks = FILE_MUTATIONS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        let key = (root.clone(), path.clone());
-        if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) { lock } else {
-            let lock = std::sync::Arc::new(Mutex::new(()));
-            locks.insert(key, std::sync::Arc::downgrade(&lock));
-            lock
+    // Lock leaf paths exclusively and their parents in shared mode so a rename
+    // or recursive delete cannot race a tool editing a child. Order all locks.
+    let mut keys = BTreeMap::new();
+    for path in &paths {
+        let path = path_lock_key(path.clone());
+        keys.insert(path.clone(), true);
+        for parent in path.ancestors().skip(1).take_while(|parent| *parent != root) {
+            keys.entry(parent.to_path_buf()).or_insert(false);
         }
+    }
+    let locks = {
+        let mut registry = FILE_MUTATIONS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        registry.retain(|_, lock| lock.strong_count() > 0);
+        keys.into_iter().map(|(path, exclusive)| {
+            let key = (root.clone(), path);
+            let lock = registry.get(&key).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| {
+                let lock = std::sync::Arc::new(RwLock::new(()));
+                registry.insert(key, std::sync::Arc::downgrade(&lock));
+                lock
+            });
+            (lock, exclusive)
+        }).collect::<Vec<_>>()
     };
     let workspace_guard = tokio::select! { _ = cancel.cancelled() => bail!("Tool execution cancelled"), guard = workspace_lock.read_owned() => guard };
-    let file = tokio::select! { _ = cancel.cancelled() => bail!("Tool execution cancelled"), guard = file.lock_owned() => guard };
-    let resolved = safe_path(workspace, raw)?;
-    #[cfg(windows)]
-    let resolved = PathBuf::from(resolved.to_string_lossy().to_lowercase());
+    let mut guards = Vec::with_capacity(locks.len());
+    for (lock, exclusive) in locks {
+        let guard = tokio::select! {
+            _ = cancel.cancelled() => bail!("Tool execution cancelled"),
+            guard = async {
+                if exclusive { PathGuard::Write { _guard: lock.write_owned().await } }
+                else { PathGuard::Read { _guard: lock.read_owned().await } }
+            } => guard,
+        };
+        guards.push(guard);
+    }
     ensure!(workspace_mutations(workspace)?.0 == root, "workspace location changed while waiting");
-    ensure!(resolved == path, "file location changed while waiting");
-    Ok(MutationGuard::File { _workspace: workspace_guard, _file: file })
+    ensure!(mutation_paths(workspace, name, args)? == paths, "file location changed while waiting");
+    Ok(MutationGuard::File { _paths: guards, _workspace: workspace_guard })
 }
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 const FILE_LIMIT: u64 = 2 * 1024 * 1024;
@@ -167,21 +208,26 @@ pub(crate) fn invalidate_snapshot_cache(root: &Path) {
 struct Image {
     exists: bool,
     bytes: Option<Vec<u8>>,
+    hash: Option<String>,
     stamp: String,
 }
 type Snapshot = BTreeMap<String, Image>;
 
-/// Owned interval state. The runner retains this (and its mutation guard) until
-/// the process exits, including when a tool response returns a live session.
+/// Images and ledger high-water mark retained while the process is running.
 pub(crate) struct ShellSnapshot {
     store: PathBuf,
     workspace: PathBuf,
     task: String,
     turn: usize,
     token: String,
+    start_seq: i64,
     before: Option<Snapshot>,
     managed: Vec<String>,
     errors: Vec<String>,
+}
+
+impl ShellSnapshot {
+    pub(crate) fn token(&self) -> &str { &self.token }
 }
 
 /// The runner supplies effective parallel owners, not raw serial frame IDs.
@@ -214,7 +260,11 @@ impl ShellAttribution {
 }
 
 fn connection(root: &Path) -> Result<Connection> {
-    let conn = crate::server::agent_service::open_db(root)?;
+    crate::server::agent_service::open_db(root)
+}
+
+/// Runs inside the agent schema's immediate transaction, including migration.
+pub(crate) fn schema(conn: &Connection) -> Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_file_changes (
         task_id TEXT NOT NULL, turn INTEGER NOT NULL, path TEXT NOT NULL,
         before_exists INTEGER NOT NULL, before_bytes BLOB, after_exists INTEGER NOT NULL, after_bytes BLOB,
@@ -222,9 +272,28 @@ fn connection(root: &Path) -> Result<Connection> {
         unavailable INTEGER NOT NULL, conflicted INTEGER NOT NULL DEFAULT 0, reverted INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(task_id,turn,path));
         CREATE TABLE IF NOT EXISTS agent_change_turns(task_id TEXT NOT NULL,turn INTEGER NOT NULL,incomplete INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(task_id,turn));
-        CREATE TABLE IF NOT EXISTS agent_shell_change_intervals(workspace TEXT PRIMARY KEY,task_id TEXT NOT NULL,turn INTEGER NOT NULL,token TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS agent_shell_interval_metadata(task_id TEXT NOT NULL,turn INTEGER NOT NULL,workspace TEXT NOT NULL,interval_id TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(task_id,workspace,interval_id));")?;
-    Ok(conn)
+        CREATE TABLE IF NOT EXISTS agent_shell_change_intervals(token TEXT PRIMARY KEY NOT NULL,workspace TEXT NOT NULL,task_id TEXT NOT NULL,turn INTEGER NOT NULL,start_seq INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS agent_shell_interval_metadata(task_id TEXT NOT NULL,turn INTEGER NOT NULL,workspace TEXT NOT NULL,interval_id TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(task_id,workspace,interval_id));
+        CREATE TABLE IF NOT EXISTS agent_change_ledger (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace TEXT NOT NULL, task_id TEXT NOT NULL, turn INTEGER NOT NULL, path TEXT NOT NULL,
+            source TEXT NOT NULL, interval_id TEXT,
+            before_exists INTEGER NOT NULL, before_hash TEXT, before_bytes BLOB,
+            after_exists INTEGER NOT NULL, after_hash TEXT, after_bytes BLOB, created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_change_ledger_ws_seq ON agent_change_ledger(workspace,seq);
+        CREATE INDEX IF NOT EXISTS idx_change_ledger_task_turn ON agent_change_ledger(task_id,turn,seq);")?;
+    let legacy = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_shell_change_intervals') WHERE name='workspace' AND pk=1)",
+        [], |row| row.get::<_, bool>(0))?;
+    if legacy {
+        conn.execute_batch("ALTER TABLE agent_shell_change_intervals RENAME TO agent_shell_change_intervals_legacy;
+            CREATE TABLE agent_shell_change_intervals(token TEXT PRIMARY KEY NOT NULL,workspace TEXT NOT NULL,task_id TEXT NOT NULL,turn INTEGER NOT NULL,start_seq INTEGER NOT NULL DEFAULT 0);
+            INSERT INTO agent_shell_change_intervals(token,workspace,task_id,turn) SELECT token,workspace,task_id,turn FROM agent_shell_change_intervals_legacy;
+            DROP TABLE agent_shell_change_intervals_legacy;")?;
+    }
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_shell_intervals_workspace ON agent_shell_change_intervals(workspace,task_id,turn);
+        CREATE INDEX IF NOT EXISTS idx_shell_intervals_turn ON agent_shell_change_intervals(task_id,turn);")?;
+    Ok(())
 }
 
 // Reject traversal and symlink/junction escapes, including nonexistent destinations.
@@ -286,11 +355,7 @@ fn cached_image(
     let metadata = match fs::metadata(path) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Image {
-                exists: false,
-                bytes: None,
-                stamp: String::new(),
-            }, None));
+            return Ok((Image::missing(), None));
         }
         Err(error) => return Err(error.into()),
     };
@@ -318,11 +383,19 @@ fn cached_image(
     } else {
         None
     };
+    // Large files still get a content identity, even when Undo cannot retain them.
+    let hash = if bytes.is_none() {
+        let mut digest = Sha256::new();
+        let size = std::io::copy(&mut fs::File::open(path)?.take(metadata.len() + 1), &mut digest)?;
+        ensure!(size == metadata.len(), "file changed during snapshot: {}", path.display());
+        Some(format!("{:x}", digest.finalize()))
+    } else { None };
     let after = fs::metadata(path)?;
     ensure!(after.is_file() && FileStamp::new(&after) == stat, "file changed during snapshot: {}", path.display());
     Ok((Image {
         exists: true,
         bytes,
+        hash,
         stamp,
     }, stat))
 }
@@ -349,6 +422,7 @@ fn capture_path_or_tree(
     if metadata.is_dir() {
         let mut stack = vec![path.to_path_buf()];
         while let Some(dir) = stack.pop() {
+            capture_directory(canonical_root, &dir, snapshot)?;
             for entry in fs::read_dir(&dir)? {
                 let entry = entry?;
                 if entry.file_name() == ".git" {
@@ -379,6 +453,18 @@ fn capture_path_or_tree(
     Ok(())
 }
 
+fn capture_directory(root: &Path, path: &Path, snapshot: &mut Snapshot) -> Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) && path != root {
+        ensure!(snapshot.len() < 20_000, "workspace exceeds change-tracking file limit");
+        let relative = path.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
+        // A trailing slash distinguishes directory entries from regular files.
+        snapshot.insert(format!("{relative}/"), Image {
+            exists: true, bytes: None, hash: Some(format!("{:x}", Sha256::digest([]))), stamp: String::new(),
+        });
+    }
+    Ok(())
+}
+
 fn capture(root: &Path, name: &str, args: &Value) -> Result<Snapshot> {
     let mut snapshot = Snapshot::new();
     let mut budget = SNAPSHOT_LIMIT;
@@ -395,6 +481,11 @@ fn capture(root: &Path, name: &str, args: &Value) -> Result<Snapshot> {
         return Ok(snapshot);
     }
     if name == "create_dir" {
+        let root = root.canonicalize()?;
+        let path = safe_path_canonical(&root, args["path"].as_str().context("missing directory path")?)?;
+        for dir in path.ancestors().take_while(|dir| *dir != root) {
+            capture_directory(&root, dir, &mut snapshot)?;
+        }
         return Ok(snapshot);
     }
     if matches!(name, "delete_path" | "rename_path") {
@@ -478,12 +569,21 @@ fn capture(root: &Path, name: &str, args: &Value) -> Result<Snapshot> {
     Ok(snapshot)
 }
 
+impl Image {
+    fn missing() -> Self {
+        Self { exists: false, bytes: None, hash: None, stamp: String::new() }
+    }
+
+    fn hash(&self) -> Option<String> {
+        self.hash.clone().or_else(|| self.bytes.as_ref().map(|bytes| format!("{:x}", Sha256::digest(bytes))))
+    }
+}
+
 fn same(a: &Image, b: &Image) -> bool {
-    a.exists == b.exists
-        && match (&a.bytes, &b.bytes) {
-            (Some(a), Some(b)) => a == b,
-            _ => a.stamp == b.stamp,
-        }
+    a.exists == b.exists && match (&a.bytes, &b.bytes) {
+        (Some(a), Some(b)) => a == b,
+        _ => a.hash() == b.hash(),
+    }
 }
 
 fn text(bytes: &Option<Vec<u8>>) -> Option<&str> {
@@ -619,69 +719,99 @@ fn estimate(a: &[&str], b: &[&str]) -> (usize, usize) {
     (added, deleted)
 }
 
-fn record(
-    root: &Path,
-    task: &str,
-    turn: usize,
-    before: Snapshot,
-    after: Snapshot,
-) -> Result<Value> {
-    let mut conn = connection(root)?;
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let missing = Image {
-        exists: false,
-        bytes: None,
-        stamp: String::new(),
+fn record_file(
+    tx: &Connection, task: &str, turn: usize, path: &str, old: &Image, new: &Image, conflicted: bool,
+) -> Result<()> {
+    let prior = tx.query_row("SELECT before_exists,before_bytes,after_exists,after_bytes,conflicted FROM agent_file_changes WHERE task_id=?1 AND turn=?2 AND path=?3",
+        params![task,turn,path], |row| Ok((row.get::<_,bool>(0)?, row.get::<_,Option<Vec<u8>>>(1)?, row.get::<_,bool>(2)?,row.get::<_,Option<Vec<u8>>>(3)?,row.get::<_,bool>(4)?))).optional()?;
+    let (original_exists, original_bytes, conflict) = match prior {
+        Some((exists, bytes, last_exists, last_bytes, conflict)) => (
+            exists,
+            bytes,
+            conflict || last_exists != old.exists || last_bytes != old.bytes,
+        ),
+        None => (old.exists, old.bytes.clone(), false),
     };
+    let conflict = conflict || conflicted;
+    if !conflict && original_exists == new.exists
+        && original_bytes == new.bytes
+        && (!new.exists || new.bytes.is_some())
+    {
+        tx.execute(
+            "DELETE FROM agent_file_changes WHERE task_id=?1 AND turn=?2 AND path=?3",
+            params![task, turn, path],
+        )?;
+        return Ok(());
+    }
+    let unavailable =
+        (original_exists && original_bytes.is_none()) || (new.exists && new.bytes.is_none());
+    let (added, deleted, binary, coarse) = match (text(&original_bytes), text(&new.bytes)) {
+        (Some(a), Some(b)) if !unavailable => {
+            let (added, deleted, coarse) = counts(a, b);
+            (added, deleted, false, coarse)
+        }
+        _ => (0, 0, true, false),
+    };
+    tx.execute("INSERT INTO agent_file_changes(task_id,turn,path,before_exists,before_bytes,after_exists,after_bytes,added,deleted,binary,coarse,unavailable,conflicted,reverted)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0)
+        ON CONFLICT(task_id,turn,path) DO UPDATE SET after_exists=excluded.after_exists,after_bytes=excluded.after_bytes,
+        added=excluded.added,deleted=excluded.deleted,binary=excluded.binary,coarse=excluded.coarse,
+        unavailable=excluded.unavailable,conflicted=excluded.conflicted,reverted=0",
+        params![task,turn,path,original_exists,original_bytes,new.exists,new.bytes,added,deleted,binary,coarse,unavailable,conflict])?;
+    Ok(())
+}
+
+struct LedgerScope<'a> {
+    workspace: &'a Path,
+    task: &'a str,
+    turn: usize,
+    interval_id: Option<&'a str>,
+}
+
+impl LedgerScope<'_> {
+    fn append(&self, tx: &Connection, path: &str, old: &Image, new: &Image) -> Result<()> {
+        let source = if self.interval_id.is_some() { "shell" } else { "tool" };
+        tx.execute("INSERT INTO agent_change_ledger(workspace,task_id,turn,path,source,interval_id,
+            before_exists,before_hash,before_bytes,after_exists,after_hash,after_bytes,created_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![self.workspace.to_string_lossy(),self.task,self.turn,path,source,self.interval_id,
+                old.exists,old.hash(),old.bytes,new.exists,new.hash(),new.bytes,chrono::Utc::now().timestamp_millis()])?;
+        Ok(())
+    }
+}
+
+fn record_tools(tx: &Connection, scope: &LedgerScope<'_>, before: &Snapshot, after: &Snapshot) -> Result<()> {
+    let missing = Image::missing();
     let keys: std::collections::BTreeSet<_> = before.keys().chain(after.keys()).collect();
     for path in keys {
         let old = before.get(path).unwrap_or(&missing);
         let new = after.get(path).unwrap_or(&missing);
-        if same(old, new) {
-            continue;
+        if same(old, new) { continue; }
+        scope.append(tx, path, old, new)?;
+        // Keep directory changes in the ledger without changing the existing file-only Undo contract.
+        if !path.ends_with('/') {
+            record_file(tx, scope.task, scope.turn, path, old, new, false)?;
         }
-        let prior = tx.query_row("SELECT before_exists,before_bytes,after_exists,after_bytes,conflicted FROM agent_file_changes WHERE task_id=?1 AND turn=?2 AND path=?3",
-            params![task,turn,path], |row| Ok((row.get::<_,bool>(0)?, row.get::<_,Option<Vec<u8>>>(1)?, row.get::<_,bool>(2)?,row.get::<_,Option<Vec<u8>>>(3)?,row.get::<_,bool>(4)?))).optional()?;
-        let (original_exists, original_bytes, conflict) = match prior {
-            Some((exists, bytes, last_exists, last_bytes, conflict)) => (
-                exists,
-                bytes,
-                conflict || last_exists != old.exists || last_bytes != old.bytes,
-            ),
-            None => (old.exists, old.bytes.clone(), false),
-        };
-        if original_exists == new.exists
-            && original_bytes == new.bytes
-            && (!new.exists || new.bytes.is_some())
-        {
-            tx.execute(
-                "DELETE FROM agent_file_changes WHERE task_id=?1 AND turn=?2 AND path=?3",
-                params![task, turn, path],
-            )?;
-            continue;
-        }
-        let unavailable =
-            (original_exists && original_bytes.is_none()) || (new.exists && new.bytes.is_none());
-        let (added, deleted, binary, coarse) = match (text(&original_bytes), text(&new.bytes)) {
-            (Some(a), Some(b)) if !unavailable => {
-                let (added, deleted, coarse) = counts(a, b);
-                (added, deleted, false, coarse)
-            }
-            _ => (0, 0, true, false),
-        };
-        tx.execute("INSERT INTO agent_file_changes(task_id,turn,path,before_exists,before_bytes,after_exists,after_bytes,added,deleted,binary,coarse,unavailable,conflicted,reverted)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0)
-            ON CONFLICT(task_id,turn,path) DO UPDATE SET after_exists=excluded.after_exists,after_bytes=excluded.after_bytes,
-            added=excluded.added,deleted=excluded.deleted,binary=excluded.binary,coarse=excluded.coarse,
-            unavailable=excluded.unavailable,conflicted=excluded.conflicted,reverted=0",
-            params![task,turn,path,original_exists,original_bytes,new.exists,new.bytes,added,deleted,binary,coarse,unavailable,conflict])?;
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn record(root: &Path, task: &str, turn: usize, before: Snapshot, after: Snapshot) -> Result<Value> {
+    let mut conn = connection(root)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    record_tools(&tx, &LedgerScope { workspace: root, task, turn, interval_id: None }, &before, &after)?;
     tx.commit()?;
     summary(root, task, turn)
 }
 
+fn mark_incomplete_tx(conn: &Connection, task: &str, turn: usize) -> Result<()> {
+    conn.execute("INSERT INTO agent_change_turns(task_id,turn,incomplete) VALUES (?1,?2,1) ON CONFLICT(task_id,turn) DO UPDATE SET incomplete=1", params![task, turn])?;
+    Ok(())
+}
+
 fn mark_incomplete(root: &Path, task: &str, turn: usize) -> Result<()> {
-    connection(root)?.execute("INSERT INTO agent_change_turns(task_id,turn,incomplete) VALUES (?1,?2,1) ON CONFLICT(task_id,turn) DO UPDATE SET incomplete=1", params![task, turn])?;
+    mark_incomplete_tx(&connection(root)?, task, turn)?;
     Ok(())
 }
 
@@ -712,27 +842,37 @@ fn shell_begin_error(error: anyhow::Error, cleanup: Result<()>) -> anyhow::Error
     }
 }
 
-/// Stat every file before every command. The runner serializes shell commands
-/// and owns the mutation guard; this function must not acquire that guard again.
-pub(crate) async fn shell_begin(
+#[cfg(test)]
+async fn shell_begin(state: &AgentServiceState, workspace: &Workspace, task: &str, turn: usize) -> Result<ShellSnapshot> {
+    shell_begin_cancellable(state, workspace, task, turn, &CancellationToken::new()).await
+}
+
+/// The barrier prevents tool writes from landing between the high-water mark
+/// and the snapshot. It is released before launching the process.
+pub(crate) async fn shell_begin_cancellable(
     state: &AgentServiceState,
     workspace: &Workspace,
     task: &str,
     turn: usize,
+    cancel: &CancellationToken,
 ) -> Result<ShellSnapshot> {
+    let guard = mutation_guard(workspace.root(), "exec_command", &json!({}), cancel).await?;
     let state = state.clone();
     let files = workspace.root().to_path_buf();
     let task = task.to_owned();
     let before = tokio::task::spawn_blocking(move || -> Result<ShellSnapshot> {
+        let _guard = guard;
         let store = fs::canonicalize(state.workspace.root())?;
         let workspace = fs::canonicalize(files)?;
-        let token = crate::server::agent_service::uuid_like();
-        let conn = connection(&store)?;
-        // Reject invalid task IDs before leaving a durable running marker.
+        let token = format!("interval_{}", crate::server::agent_service::uuid_like());
+        let mut conn = connection(&store)?;
         summary(&store, &task, turn)?;
-        let inserted = conn.execute("INSERT OR IGNORE INTO agent_shell_change_intervals(workspace,task_id,turn,token) VALUES (?1,?2,?3,?4)",
-            params![workspace.to_string_lossy(), task, turn, token])?;
-        ensure!(inserted == 1, "SHELL_BUSY: workspace already has a live shell interval");
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let start_seq = tx.query_row("SELECT COALESCE(MAX(seq),0) FROM agent_change_ledger WHERE workspace=?1",
+            [workspace.to_string_lossy()], |row| row.get(0))?;
+        tx.execute("INSERT INTO agent_shell_change_intervals(workspace,task_id,turn,token,start_seq) VALUES (?1,?2,?3,?4,?5)",
+            params![workspace.to_string_lossy(), task, turn, token, start_seq])?;
+        tx.commit()?;
         let captured = (|| -> Result<_> {
         let mut errors = Vec::new();
         let before = match capture(&workspace, "run_program", &json!({})) {
@@ -763,7 +903,7 @@ pub(crate) async fn shell_begin(
             Ok(captured) => captured,
             Err(error) => return Err(shell_begin_error(error, abandon_shell_begin(&store, &workspace, &task, turn, &token))),
         };
-        Ok(ShellSnapshot { store, workspace, task, turn, token, before, managed, errors })
+        Ok(ShellSnapshot { store, workspace, task, turn, token, start_seq, before, managed, errors })
     }).await??;
     let root = before.store.clone();
     let task = before.task.clone();
@@ -780,8 +920,8 @@ pub(crate) async fn shell_begin(
     Ok(before)
 }
 
-/// Call only after process exit, never merely because a session was returned.
-/// The begin marker keeps `complete` and undo false for the entire live session.
+/// Reconcile only after the last process in this interval has exited. The
+/// snapshot barrier also ensures all tool writes visible on disk are in the WAL.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn shell_finish(
     state: &AgentServiceState,
@@ -793,30 +933,54 @@ pub(crate) async fn shell_finish(
     owners: &[String],
 ) -> Result<Value> {
     ensure!(before.task == task && before.turn == turn, "shell snapshot belongs to another turn");
+    ensure!(fs::canonicalize(state.workspace.root())? == before.store
+        && fs::canonicalize(workspace.root())? == before.workspace, "shell snapshot belongs to another workspace");
     let attribution = ShellAttribution::new(interval_id, owners)?;
-    let state = state.clone();
-    let files = workspace.root().to_path_buf();
+    let guard = mutation_guard(workspace.root(), "exec_command", &json!({}), &CancellationToken::new()).await?;
     let root = before.store.clone();
     let task = before.task.clone();
-    let (value, errors) = tokio::task::spawn_blocking(move || -> Result<(Value, Vec<String>)> {
-        ensure!(fs::canonicalize(state.workspace.root())? == before.store
-            && fs::canonicalize(files)? == before.workspace, "shell snapshot belongs to another workspace");
-        let conn = connection(&before.store)?;
-        let active: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_shell_change_intervals WHERE workspace=?1 AND task_id=?2 AND turn=?3 AND token=?4)",
-            params![before.workspace.to_string_lossy(), before.task, turn, before.token], |row| row.get(0))?;
-        ensure!(active, "shell interval is no longer active");
-        let mut errors = before.errors;
-        let after = match capture(&before.workspace, "run_program", &json!({})) {
-            Ok(snapshot) => Some(snapshot),
-            Err(error) => { errors.push(format!("after snapshot: {error:#}")); None }
-        };
-        if after.as_ref().is_some_and(snapshot_is_incomplete) {
-            mark_incomplete(&before.store, &before.task, turn)?;
+    let files = before.workspace.clone();
+    let (after, mut errors) = tokio::task::spawn_blocking(move || {
+        match capture(&files, "run_program", &json!({})) {
+            Ok(after) => (Some(after), Vec::new()),
+            Err(error) => (None, vec![format!("after snapshot: {error:#}")]),
         }
+    }).await?;
+    let mut before = before;
+    errors.append(&mut before.errors);
+    let incomplete = !errors.is_empty() || after.as_ref().is_some_and(snapshot_is_incomplete);
+    let cleanup = (before.workspace.clone(), before.task.clone(), before.token.clone());
+    let recorded = crate::context::db_writer::write_async(&root, move |conn| {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let removed = tx.execute("DELETE FROM agent_shell_change_intervals WHERE workspace=?1 AND task_id=?2 AND turn=?3 AND token=?4",
+            params![before.workspace.to_string_lossy(), before.task, turn, before.token])?;
+        ensure!(removed == 1, "shell interval is no longer active");
+        let adoptable = match (&before.before, &after) {
+            (Some(old), Some(new)) => reconcile_shell(&tx, &before, &attribution, old, new)?,
+            _ => Default::default(),
+        };
+        if incomplete { mark_incomplete_tx(&tx, &before.task, turn)?; }
+        tx.execute("INSERT INTO agent_shell_interval_metadata(task_id,turn,workspace,interval_id,metadata) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(task_id,workspace,interval_id) DO UPDATE SET metadata=excluded.metadata",
+            params![before.task, turn, before.workspace.to_string_lossy(), attribution.interval_id, attribution.metadata().to_string()])?;
+        tx.commit()?;
+        Ok((before, after, attribution, adoptable))
+    }).await;
+    let (before, after, attribution, adoptable) = match recorded {
+        Ok(recorded) => recorded,
+        Err(error) => {
+            let (files, task, token) = cleanup;
+            let saved_root = root.clone();
+            let cleanup = tokio::task::spawn_blocking(move || abandon_shell_begin(&saved_root, &files, &task, turn, &token))
+                .await.map_err(anyhow::Error::from).and_then(|result| result);
+            return Err(shell_begin_error(error, cleanup));
+        }
+    };
+    let state = state.clone();
+    let (value, errors) = tokio::task::spawn_blocking(move || -> Result<_> {
+        // Retain the barrier until baseline adoption is finished, but not while publishing events.
+        let _guard = guard;
         if let (Some(old), Some(new)) = (before.before, after) {
-            // Baselines are adopted from the very same images that are recorded.
-            // Missing entries are absence only after a fresh safe-path/stat check.
-            for relative in before.managed {
+            for relative in before.managed.into_iter().filter(|path| adoptable.contains(path)) {
                 let adopt = (|| -> Result<()> {
                     let path = safe_path(&before.workspace, &relative)?;
                     let after = if let Some(image) = new.get(&relative) {
@@ -835,15 +999,8 @@ pub(crate) async fn shell_finish(
                 })();
                 if let Err(error) = adopt { errors.push(format!("managed baseline {relative}: {error:#}")); }
             }
-            if let Err(error) = record(&before.store, &before.task, turn, old, new) {
-                errors.push(format!("record shell changes: {error:#}"));
-            }
         }
         if !errors.is_empty() { mark_incomplete(&before.store, &before.task, turn)?; }
-        conn.execute("INSERT INTO agent_shell_interval_metadata(task_id,turn,workspace,interval_id,metadata) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(task_id,workspace,interval_id) DO UPDATE SET metadata=excluded.metadata",
-            params![before.task, turn, before.workspace.to_string_lossy(), attribution.interval_id, attribution.metadata().to_string()])?;
-        conn.execute("DELETE FROM agent_shell_change_intervals WHERE workspace=?1 AND token=?2",
-            params![before.workspace.to_string_lossy(), before.token])?;
         Ok((summary(&before.store, &before.task, turn)?, errors))
     }).await??;
     crate::server::agent_service::emit(&root, &task, "workspace/changes", value.clone()).await?;
@@ -854,8 +1011,57 @@ pub(crate) async fn shell_finish(
     Ok(value)
 }
 
+fn reconcile_shell(
+    tx: &Connection, interval: &ShellSnapshot, attribution: &ShellAttribution,
+    before: &Snapshot, after: &Snapshot,
+) -> Result<std::collections::BTreeSet<String>> {
+    let workspace = interval.workspace.to_string_lossy();
+    let overlapping: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_shell_change_intervals WHERE workspace=?1)",
+        [&workspace], |row| row.get(0))?;
+    let mut stmt = tx.prepare("SELECT seq,path,after_exists,after_hash FROM agent_change_ledger WHERE workspace=?1 AND seq>?2 ORDER BY seq")?;
+    let mut latest = BTreeMap::new();
+    for row in stmt.query_map(params![workspace,interval.start_seq], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, Option<String>>(3)?))
+    })? {
+        let (seq, path, exists, hash) = row?;
+        latest.insert(path, (seq, exists, hash));
+    }
+    let scope = LedgerScope { workspace: &interval.workspace, task: &interval.task, turn: interval.turn,
+        interval_id: Some(&attribution.interval_id) };
+    let mut adoptable = std::collections::BTreeSet::new();
+    let missing = Image::missing();
+    for path in before.keys().chain(after.keys()).collect::<std::collections::BTreeSet<_>>() {
+        let old = before.get(path).unwrap_or(&missing);
+        let new = after.get(path).unwrap_or(&missing);
+        let tracked = latest.get(path);
+        if let Some((_, exists, hash)) = tracked {
+            if new.exists == *exists && new.hash() == *hash { continue; }
+        } else if same(old, new) { continue; }
+        let residual_before = tracked.map(|(seq, exists, hash)| -> Result<Image> {
+            let bytes = tx.query_row("SELECT after_bytes FROM agent_change_ledger WHERE seq=?1", [seq], |row| row.get(0))?;
+            Ok(Image { exists: *exists, hash: hash.clone(), bytes, stamp: String::new() })
+        }).transpose()?;
+        let old = residual_before.as_ref().unwrap_or(old);
+        // Two running processes cannot be distinguished by snapshots alone. Record
+        // the observed residual once, but do not let ambiguous ownership enable undo.
+        let conflicted = tracked.is_some() || overlapping;
+        scope.append(tx, path, old, new)?;
+        record_file(tx, &interval.task, interval.turn, path, old, new, conflicted)?;
+        if tracked.is_some() {
+            tx.execute("UPDATE agent_file_changes SET conflicted=1 WHERE path=?1 AND (task_id,turn) IN (
+                SELECT task_id,turn FROM agent_change_ledger WHERE workspace=?2 AND seq>?3 AND path=?1 AND source='tool')",
+                params![path,workspace,interval.start_seq])?;
+        }
+        if !conflicted { adoptable.insert(path.clone()); }
+    }
+    Ok(adoptable)
+}
+
 pub fn summary(root: &Path, task: &str, turn: usize) -> Result<Value> {
-    let conn = connection(root)?;
+    summary_from(&connection(root)?, task, turn)
+}
+
+fn summary_from(conn: &Connection, task: &str, turn: usize) -> Result<Value> {
     ensure!(
         conn.query_row("SELECT 1 FROM agent_tasks WHERE id=?1", [task], |_| Ok(()))
             .optional()?
@@ -962,23 +1168,27 @@ pub async fn execute_tracked(
     let background_running = result.as_ref().is_ok_and(|value| value["running"] == true);
     let metadata_changed = result.as_ref().is_ok_and(|v|v["git_metadata_changed"] == true)
         || result.as_ref().is_err_and(|e| e.downcast_ref::<crate::tools::git_tools::MetadataMayHaveChanged>().is_some());
+    let captured = tokio::task::spawn_blocking(move || -> Result<_> {
+        let before = before?;
+        let after = capture(&files, &name, &args)?;
+        Ok((fs::canonicalize(&files)?, before, after))
+    }).await?;
+    let saved_task = task.clone();
+    let changes = match captured {
+        Ok((files, before, after)) => crate::context::db_writer::write_async(&root, move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            record_tools(&tx, &LedgerScope { workspace: &files, task: &saved_task, turn, interval_id: None }, &before, &after)?;
+            // The process can still write after we return its background handle.
+            if metadata_changed || background_running { mark_incomplete_tx(&tx, &saved_task, turn)?; }
+            let value = summary_from(&tx, &saved_task, turn)?;
+            tx.commit()?;
+            Ok(value)
+        }).await,
+        Err(error) => Err(error),
+    };
     if metadata_changed {
         crate::server::agent_service::emit(&root, &task, "workspace/git_metadata", json!({"turn":turn,"reversible":false,"confirmed":result.is_ok()})).await?;
     }
-    let saved_root = root.clone();
-    let saved_task = task.clone();
-    let changes = tokio::task::spawn_blocking(move || {
-        let before = before?;
-        let after = capture(&files,&name,&args)?;
-        record(&saved_root,&saved_task,turn,before,after)?;
-        if metadata_changed { mark_incomplete(&saved_root,&saved_task,turn)?; }
-        if background_running {
-            // A running script can change files after this snapshot. Do not
-            // advertise an atomic undo for an incomplete execution interval.
-            connection(&saved_root)?.execute("INSERT INTO agent_change_turns(task_id,turn,incomplete) VALUES (?1,?2,1) ON CONFLICT(task_id,turn) DO UPDATE SET incomplete=1",params![saved_task,turn])?;
-        }
-        summary(&saved_root,&saved_task,turn)
-    }).await?;
     match changes {
         Ok(summary) => {
             crate::server::agent_service::emit(&root, &task, "workspace/changes", summary).await?;
@@ -1081,22 +1291,30 @@ fn restore(path: &Path, bytes: &Option<Vec<u8>>) -> Result<()> {
     }
 }
 
+pub(crate) fn destructive_guard(root: &Path, files: &Path) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>> {
+    let (_, lock) = workspace_mutations(files)?;
+    let guard = lock.try_write_owned().map_err(|_| anyhow::anyhow!("conflict: workspace files are being mutated"))?;
+    ensure_no_shell(root, files)?;
+    Ok(guard)
+}
+
+pub(crate) fn ensure_no_shell(root: &Path, files: &Path) -> Result<()> {
+    let workspace = fs::canonicalize(files)?;
+    let shell_running: bool = connection(root)?.query_row("SELECT EXISTS(SELECT 1 FROM agent_shell_change_intervals WHERE workspace=?1)",
+        [workspace.to_string_lossy()], |row| row.get(0))?;
+    ensure!(!shell_running, "conflict: SHELL_BUSY: wait for the running shell to exit before restoring files");
+    Ok(())
+}
+
 pub(crate) fn undo(root: &Path, task: &str, turn: usize) -> Result<Value> {
-    // Paths are relative to the task's project; the log is in the server store.
     let files = crate::context::session_browser::task_workspace(root, task)?;
-    let (files, lock) = workspace_mutations(&files)?;
-    // Also protects synchronous rewind callers. Fail fast rather than blocking
-    // an async worker (or waiting for a long-running shell session).
-    let _guard = lock.try_write_owned().map_err(|_| anyhow::anyhow!("conflict: workspace files are being mutated"))?;
+    let _guard = destructive_guard(root, &files)?;
     undo_locked(root, task, turn, &files)
 }
 
-fn undo_locked(root: &Path, task: &str, turn: usize, files: &Path) -> Result<Value> {
+/// The caller must hold the destructive workspace guard.
+pub(crate) fn undo_locked(root: &Path, task: &str, turn: usize, files: &Path) -> Result<Value> {
     let conn = connection(root)?;
-    let canonical = fs::canonicalize(&files)?;
-    let shell_running: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM agent_shell_change_intervals WHERE workspace=?1)",
-        [canonical.to_string_lossy()], |row| row.get(0))?;
-    ensure!(!shell_running, "conflict: wait for the running shell to exit before undoing files");
     let active: usize = conn.query_row(
         "SELECT COUNT(*) FROM agent_tasks WHERE status IN ('running','cancelling')",
         [],
@@ -1214,6 +1432,13 @@ pub async fn undo_turn(
     RoutePath((task, turn)): RoutePath<(String, usize)>,
 ) -> Response {
     let root = state.workspace.root().to_path_buf();
+    let files = match crate::context::session_browser::task_workspace(&root, &task) {
+        Ok(files) => files,
+        Err(error) => return response(Ok(Err(error))),
+    };
+    if let Err(error) = crate::tools::shell_process::wait_for_own_writers(&files, &root, &task).await {
+        return response(Ok(Err(error)));
+    }
     let saved_root = root.clone();
     let saved_task = task.clone();
     let result = tokio::task::spawn_blocking(move || undo(&saved_root, &saved_task, turn)).await;

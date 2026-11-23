@@ -463,8 +463,9 @@ pub(super) async fn business_tool_inner(
         .await;
     }
     crate::tools::process_sandbox::scope_tool_sandbox(sandbox_boundary, extra_roots, async {
-        if crate::tools::workspace_changes::is_mutation(name) {
-            crate::tools::shell_process::ensure_idle(tool_workspace.root()).await?;
+        let destructive = name == "git_restore";
+        if destructive {
+            crate::tools::shell_process::wait_for_own_writers(tool_workspace.root(), s.state.workspace.root(), s.task).await?;
         }
         if s.delegate_id().is_some()
             && tool_workspace.root() != s.state.workspace.root()
@@ -475,9 +476,9 @@ pub(super) async fn business_tool_inner(
                 "GIT_DELEGATE_BACKGROUND_WRITE_DENIED: finish foreground processes before the branch is snapshotted"
             );
         }
-        let _mutation_guard = if crate::tools::workspace_changes::is_mutation(name)
+        let _mutation_guard = if destructive || (crate::tools::workspace_changes::is_mutation(name)
             && s.delegate_id().is_none()
-            && s.plugin.is_none()
+            && s.plugin.is_none())
         {
             Some(
                 crate::tools::workspace_changes::mutation_guard(
@@ -491,18 +492,13 @@ pub(super) async fn business_tool_inner(
         } else {
             None
         };
-        let _claim = if let Some(resource) =
-            crate::tools::workspace_changes::resource_key(tool_workspace.root(), name, &args)?
-        {
-            Some(crate::tools::workspace_changes::claim_resource(
-                s.state.workspace.root(),
-                s.task,
-                call_id,
-                resource,
-            )?)
-        } else {
-            None
-        };
+        if destructive {
+            crate::tools::workspace_changes::ensure_no_shell(s.state.workspace.root(), tool_workspace.root())?;
+        }
+        let _claims = crate::tools::workspace_changes::resource_keys(tool_workspace.root(), name, &args)?
+            .into_iter().map(|resource| crate::tools::workspace_changes::claim_resource(
+                s.state.workspace.root(), s.task, call_id, resource,
+            )).collect::<Result<Vec<_>>>()?;
         let parallel_owner = s.task_node_id.as_deref().and_then(|id| {
             let conn = agent_service::open_db(s.state.workspace.root()).ok()?;
             let node = crate::runtime::function_frames::get(&conn, s.task, id).ok()?;

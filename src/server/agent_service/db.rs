@@ -47,6 +47,7 @@ fn agent_schema(conn: &rusqlite::Connection, root: &std::path::Path) -> anyhow::
         add_column(conn, "agent_task_events", column, "TEXT")?;
     }
     crate::tools::plan_tools::schema(conn)?;
+    crate::tools::workspace_changes::schema(conn)?;
     crate::runtime::function_frames::schema(conn)?;
     conn.execute_batch("CREATE INDEX IF NOT EXISTS task_events_node ON agent_task_events(task_id,node_id,seq);")?;
     for (column, definition) in [

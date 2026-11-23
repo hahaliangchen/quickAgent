@@ -54,6 +54,8 @@ fn per_turn_tables(conn: &Connection) -> Result<Vec<String>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut found = Vec::new();
     for table in tables {
+        // The WAL is append-only; rewind drops projections, not history.
+        if table == "agent_change_ledger" { continue; }
         let columns = conn
             .prepare(&format!(
                 "SELECT name FROM pragma_table_info('{}')",
@@ -138,6 +140,8 @@ pub fn rewind(root: &std::path::Path, task: &str, turn: usize) -> Result<Value> 
     )?;
     ensure!(!has_git_write, "conflict: 此范围包含无法通过回退恢复的 Git 暂存区或历史改动");
 
+    let files = crate::context::session_browser::task_workspace(root, task)?;
+    let _workspace = crate::tools::workspace_changes::destructive_guard(root, &files)?;
     // Files first, newest turn first, so each undo meets the state it produced.
     // A conflict stops here with the conversation untouched.
     let turns = conn
@@ -146,7 +150,7 @@ pub fn rewind(root: &std::path::Path, task: &str, turn: usize) -> Result<Value> 
         .unwrap_or_default();
     let mut undone = Vec::new();
     for changed in &turns {
-        if let Err(error) = crate::tools::workspace_changes::undo(root, task, *changed as usize) {
+        if let Err(error) = crate::tools::workspace_changes::undo_locked(root, task, *changed as usize, &files) {
             bail!(
                 "conflict: 撤销第 {changed} 轮的文件改动失败（已撤销：{undone:?}），对话未回退：{error}"
             );
@@ -232,7 +236,14 @@ pub async fn post(
 ) -> Response {
     let _guard = crate::tools::workspace_changes::MUTATIONS.write().await;
     let root = state.workspace.root().to_path_buf();
-    let result = tokio::task::spawn_blocking(move || rewind(&root, &task, input.turn)).await;
+    let ready = async {
+        let files = crate::context::session_browser::task_workspace(&root, &task)?;
+        crate::tools::shell_process::wait_for_own_writers(&files, &root, &task).await
+    }.await;
+    let result = match ready {
+        Ok(()) => tokio::task::spawn_blocking(move || rewind(&root, &task, input.turn)).await,
+        Err(error) => Ok(Err(error)),
+    };
     match result {
         Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(error)) => {

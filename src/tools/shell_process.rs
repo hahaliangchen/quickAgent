@@ -18,6 +18,7 @@ use crate::{server::agent_service::AgentServiceState, tools::process_sandbox::Ex
 
 pub const TOOLS: &[&str] = &["exec_command", "write_stdin", "kill_session"];
 pub const PROGRAM_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
+const DEFAULT_YIELD_MS: u64 = 10_000;
 const READ_ONLY_PREVIEW_CHARS: usize = 48 * 1024;
 #[derive(Debug)]
 pub struct OutputCapacityError(pub Value);
@@ -61,7 +62,7 @@ struct Session {
     finished: AtomicBool,
     changed: Notify,
     stop: mpsc::UnboundedSender<String>,
-    interval: Arc<Interval>,
+    interval: Option<Arc<Interval>>,
     had_truncation: AtomicBool,
     archive: Mutex<Option<(u64,u64,bool,Value)>>,
 }
@@ -70,21 +71,28 @@ struct Session {
 // command without falsely attributing the server's writes to that probe.
 struct Interval {
     id: String,
-    host: PathBuf,
     task: String,
     turn: usize,
     remaining: AtomicUsize,
     commands: AtomicUsize,
     settled: AtomicBool,
-    resources: Mutex<Option<(crate::tools::workspace_changes::MutationGuard, crate::tools::workspace_changes::ShellSnapshot)>>,
+    snapshot: Mutex<Option<crate::tools::workspace_changes::ShellSnapshot>>,
     slot: IntervalSlot,
     owners: std::sync::Mutex<BTreeSet<String>>,
 }
 type IntervalSlot = Arc<Mutex<Option<Arc<Interval>>>>;
-static INTERVALS: OnceLock<std::sync::Mutex<BTreeMap<PathBuf, IntervalSlot>>> = OnceLock::new();
-fn interval_slot(root: &Path) -> IntervalSlot {
-    INTERVALS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
-        .entry(root.to_path_buf()).or_default().clone()
+type IntervalKey = (PathBuf, PathBuf, String, usize);
+type IntervalSlots = BTreeMap<IntervalKey, std::sync::Weak<Mutex<Option<Arc<Interval>>>>>;
+static INTERVALS: OnceLock<std::sync::Mutex<IntervalSlots>> = OnceLock::new();
+fn interval_slot(key: IntervalKey) -> IntervalSlot {
+    let mut slots = INTERVALS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    slots.retain(|_, slot| slot.strong_count() > 0);
+    if let Some(slot) = slots.get(&key).and_then(std::sync::Weak::upgrade) {
+        return slot;
+    }
+    let slot = IntervalSlot::default();
+    slots.insert(key, Arc::downgrade(&slot));
+    slot
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -140,36 +148,34 @@ async fn begin_interval(state: &AgentServiceState, workspace: &crate::tools::Wor
         let frame = crate::runtime::function_frames::get(&conn, task, id)?;
         frame.metadata["parallel_owner"].as_str().unwrap_or("@main").to_owned()
     } else { "@main".into() };
-    let slot = interval_slot(&root);
+    let slot = interval_slot((root, host, task.into(), turn));
     let mut current = slot.lock().await;
+    ensure!(!cancel.is_cancelled(), "shell task cancelled");
     if let Some(interval) = current.as_ref() {
-        ensure!(interval.host == host && interval.task == task && interval.turn == turn,
-            "SHELL_BUSY: another task or turn has running commands in this workspace");
         interval.remaining.fetch_add(1, Ordering::AcqRel);
         interval.commands.fetch_add(1, Ordering::AcqRel);
         interval.owners.lock().unwrap_or_else(|e| e.into_inner()).insert(owner);
         return Ok(interval.clone());
     }
-    let guard = crate::tools::workspace_changes::mutation_guard(&root, "exec_command", &json!({}), cancel).await?;
-    let before = crate::tools::workspace_changes::shell_begin(state, workspace, task, turn).await?;
+    let before = crate::tools::workspace_changes::shell_begin_cancellable(state, workspace, task, turn, cancel).await?;
     let interval = Arc::new(Interval {
-        id: format!("interval_{}", crate::server::agent_service::uuid_like()), host,
+        id: before.token().to_owned(),
         task:task.into(), turn, remaining:AtomicUsize::new(1), commands:AtomicUsize::new(1),
         settled:AtomicBool::new(false),
-        resources:Mutex::new(Some((guard,before))), slot:slot.clone(),
+        snapshot:Mutex::new(Some(before)), slot:slot.clone(),
         owners:std::sync::Mutex::new(BTreeSet::from([owner])),
     });
     *current = Some(interval.clone());
     Ok(interval)
 }
 
-async fn finish_interval(state: &AgentServiceState, workspace: &crate::tools::Workspace, interval: &Interval) -> Result<()> {
+async fn finish_interval(state: &AgentServiceState, workspace: &crate::tools::Workspace, interval: Option<&Interval>) -> Result<()> {
+    let Some(interval) = interval else { return Ok(()) };
     let mut current = interval.slot.lock().await;
     if interval.remaining.fetch_sub(1, Ordering::AcqRel) != 1 { return Ok(()); }
-    let (guard, before) = interval.resources.lock().await.take().context("shell interval already finished")?;
+    let before = interval.snapshot.lock().await.take().context("shell interval already finished")?;
     let owners = interval.owners.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect::<Vec<_>>();
     let result = crate::tools::workspace_changes::shell_finish(state, workspace, &interval.task, interval.turn, before, &interval.id, &owners).await;
-    drop(guard);
     *current = None;
     interval.settled.store(true, Ordering::Release);
     result.map(|_| ())
@@ -183,10 +189,20 @@ pub async fn active(workspace: &Path) -> Option<String> {
         .find(|s| s.workspace == root && !s.finished.load(Ordering::Acquire)).map(|s| s.id.clone())
 }
 
-pub async fn ensure_idle(workspace: &Path) -> Result<()> {
-    if let Some(id) = active(workspace).await {
-        anyhow::bail!("SHELL_BUSY: session {id} is still running. Poll it with write_stdin or stop it with kill_session before host file changes. Commands from the same task/turn may coexist; other tasks must wait.");
-    }
+/// Wait briefly for this task's own write-capable shells, never for another task.
+/// Destructive callers still check the durable markers with the workspace lock held.
+pub(crate) async fn wait_for_own_writers(workspace: &Path, host: &Path, task: &str) -> Result<()> {
+    let root = workspace.canonicalize()?;
+    let host = host.canonicalize()?;
+    let live = sessions().lock().await.values().filter(|s|
+        s.workspace == root && s.interval.is_some() && !s.finished.load(Ordering::Acquire)
+    ).cloned().collect::<Vec<_>>();
+    if live.iter().any(|s| s.host != host || s.task != task) { return Ok(()); }
+    let _ = tokio::time::timeout(Duration::from_millis(2_500), async {
+        for session in live {
+            wait_finished(&session, Duration::from_secs(3)).await;
+        }
+    }).await;
     Ok(())
 }
 
@@ -268,7 +284,7 @@ async fn execute_with_delivery(
         }
     }
     let duration = if name == "kill_session" { 10_000 } else {
-        args["yield_time_ms"].as_u64().unwrap_or(1000).min(30_000)
+        args["yield_time_ms"].as_u64().unwrap_or(DEFAULT_YIELD_MS).min(30_000)
     };
     tokio::select! {
         _ = wait_finished(&s, Duration::from_millis(duration)) => {},
@@ -344,15 +360,19 @@ async fn launch(
         return Err(launch_failure(&host, task, turn, owner, command_bytes, limit));
     }
     // Finish the tracking interval even when process startup fails.
-    let interval = begin_interval(state, workspace, task, turn, owner, cancel).await?;
+    let interval = if boundary == ExecutionBoundary::ReadOnly {
+        None
+    } else {
+        Some(begin_interval(state, workspace, task, turn, owner, cancel).await?)
+    };
     if cancel.is_cancelled() {
-        finish_interval(state, workspace, &interval).await?;
+        finish_interval(state, workspace, interval.as_deref()).await?;
         anyhow::bail!("shell task cancelled");
     }
     let mut child = match command.spawn().context("could not launch platform shell") {
         Ok(child) => child,
         Err(error) => {
-            finish_interval(state, workspace, &interval).await?;
+            finish_interval(state, workspace, interval.as_deref()).await?;
             if is_argument_list_too_long(&error) {
                 return Err(launch_failure(&host, task, turn, owner, command_bytes, limit));
             }
@@ -364,7 +384,7 @@ async fn launch(
         Ok(group) => group,
         Err(error) => {
             let _ = child.kill().await;
-            finish_interval(state, workspace, &interval).await?;
+            finish_interval(state, workspace, interval.as_deref()).await?;
             return Err(error);
         }
     };
@@ -377,7 +397,7 @@ async fn launch(
         Err(error) => {
             let _ = group.terminate();
             let _ = child.wait().await;
-            finish_interval(state, workspace, &interval).await?;
+            finish_interval(state, workspace, interval.as_deref()).await?;
             return Err(error);
         }
     };
@@ -422,7 +442,7 @@ async fn launch(
             }
         }
         let exit_code = match status { Ok(status) => status.code(), Err(error) => { errors.push(error.to_string()); None } };
-        if let Err(error) = finish_interval(&state, &workspace, &session.interval).await {
+        if let Err(error) = finish_interval(&state, &workspace, session.interval.as_deref()).await {
             errors.push(format!("change tracking failed: {error:#}"));
         }
         // Completion must publish the final output even if nobody polls again.
@@ -732,9 +752,11 @@ async fn response(s: &Session, args: &Value, program:bool) -> Result<Value> {
         "session_id":s.id,"running":!ended,"exit_code":completion.exit_code,
         "duration_ms":s.started.elapsed().as_millis() as u64,"workdir":s.cwd.to_string_lossy(),
         "cmd":s.command,"encoding":encodings,"capture_error":completion.error,"termination_reason":completion.reason,
-        "change_interval":{"id":s.interval.id,"task":s.interval.task,"turn":s.interval.turn,
-            "commands":s.interval.commands.load(Ordering::Acquire),"merged":s.interval.commands.load(Ordering::Acquire)>1},
-        "changes_pending":!s.interval.settled.load(Ordering::Acquire),
+        "change_interval":s.interval.as_ref().map(|interval| {
+            let commands = interval.commands.load(Ordering::Acquire);
+            json!({"id":interval.id,"task":interval.task,"turn":interval.turn,"commands":commands,"merged":commands > 1})
+        }),
+        "changes_pending":s.interval.as_ref().is_some_and(|interval| !interval.settled.load(Ordering::Acquire)),
         "delivery":if program {"program"} else {"preview"},
         "output_limit_bytes":if program {Some(PROGRAM_OUTPUT_LIMIT)} else {None},
         "stdout_bytes":out_bytes,"stderr_bytes":err_bytes,
@@ -782,15 +804,15 @@ pub async fn cleanup_frame(host: &Path, task: &str, owner: &str) {
 
 pub fn definitions() -> Vec<Value> {
     let limit = json!({"type":"integer","minimum":128,"maximum":24000,"default":4000});
-    let wait = json!({"type":"integer","minimum":0,"maximum":30000,"default":1000});
+    let wait = json!({"type":"integer","minimum":0,"maximum":30000,"default":DEFAULT_YIELD_MS});
     let tool = |name: &str, description: &str, properties: Value, required: Value| {
         json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":output_schema()})
     };
     vec![
         tool("exec_command", if cfg!(windows) {
-            "Run PowerShell 7 with pipes, no profile or PTY. Use PowerShell syntax; each call starts a fresh shell. Module code receives full stdout/stderr (LF normalized) and exit_code, up to the combined program-memory budget per delivery. Excess output fails with SHELL_OUTPUT_OVER_CAPACITY and a saved-output reference; no partial prefix is returned to code. max_output_tokens limits external MCP previews only. The command gets no standard input unless started with stdin:true. Long commands return session_id. Same-task/turn commands may overlap in one change interval. Oversized output is fully saved as an asset and can be paged. In Grow, this method is for module deterministic code only."
+            "Run PowerShell 7 with pipes, no profile or PTY. Use PowerShell syntax; each call starts a fresh shell. Module code receives full stdout/stderr (LF normalized) and exit_code, up to the combined program-memory budget per delivery. Excess output fails with SHELL_OUTPUT_OVER_CAPACITY and a saved-output reference; no partial prefix is returned to code. max_output_tokens limits external MCP previews only. The command gets no standard input unless started with stdin:true. Waits up to 10,000 ms by default; commands still running return session_id. Same-task/turn commands may overlap in one change interval. Oversized output is fully saved as an asset and can be paged. In Grow, this method is for module deterministic code only."
         } else {
-            "Run Bash with pipes, no profile or PTY. Use Bash syntax; each call starts a fresh shell. Module code receives full stdout/stderr and exit_code, up to the combined program-memory budget per delivery. Excess output fails with SHELL_OUTPUT_OVER_CAPACITY and a saved-output reference; no partial prefix is returned to code. max_output_tokens limits external MCP previews only. The command gets no standard input unless started with stdin:true. Long commands return session_id. Same-task/turn commands may overlap in one change interval. Oversized output is fully saved as an asset and can be paged. In Grow, this method is for module deterministic code only."
+            "Run Bash with pipes, no profile or PTY. Use Bash syntax; each call starts a fresh shell. Module code receives full stdout/stderr and exit_code, up to the combined program-memory budget per delivery. Excess output fails with SHELL_OUTPUT_OVER_CAPACITY and a saved-output reference; no partial prefix is returned to code. max_output_tokens limits external MCP previews only. The command gets no standard input unless started with stdin:true. Waits up to 10,000 ms by default; commands still running return session_id. Same-task/turn commands may overlap in one change interval. Oversized output is fully saved as an asset and can be paged. In Grow, this method is for module deterministic code only."
         },
             json!({"cmd":{"type":"string","minLength":1},"workdir":{"type":"string","default":"."},"yield_time_ms":wait,"max_output_tokens":limit,
                 "stdin":{"type":"boolean","default":false,"description":"Keep standard input open so write_stdin can send chars to this command. Off by default: the command reads end-of-input at once, so tools that fall back to stdin when given no file do not wait."}}),json!(["cmd"])),
@@ -955,7 +977,7 @@ pub fn output_schema() -> Value {
             "delivery":{"enum":["program","preview"]},"output_limit_bytes":{"type":["integer","null"]},
             "stdout_bytes":{"type":"integer","description":"Cumulative raw bytes captured; not just this chunk."},"stderr_bytes":{"type":"integer"},
             "changes_pending":{"type":"boolean","description":"Other overlapping commands may keep the shared change interval open after this session exits."},
-            "change_interval":{"type":"object","required":["id","task","turn","commands","merged"],"properties":{
+            "change_interval":{"type":["object","null"],"required":["id","task","turn","commands","merged"],"properties":{
                 "id":{"type":"string"},"task":{"type":"string"},"turn":{"type":"integer"},"commands":{"type":"integer"},"merged":{"type":"boolean"}}},
             "output_asset":{"type":"object","description":"Stable reference to an immutable full stdout/stderr snapshot."},
             "read_output":{"type":"object"},
@@ -990,6 +1012,62 @@ mod tests {
     }
     impl Drop for Fixture {
         fn drop(&mut self) { self.cancel.cancel(); /* Keep failed-test artifacts for diagnosis. */ }
+    }
+
+    #[tokio::test]
+    async fn default_yield_waits_for_short_exec_and_stdin() -> Result<()> {
+        let f = Fixture::new()?;
+        let sleep = if cfg!(windows) { "Start-Sleep -Milliseconds 1500" } else { "sleep 1.5" };
+        let ended = f.call("exec_command", json!({"cmd":sleep})).await?;
+        assert_eq!(ended["running"], false, "{ended}");
+        assert_eq!(ended["exit_code"], 0, "{ended}");
+        assert!(active(&f.root).await.is_none());
+        let read = if cfg!(windows) { "[Console]::ReadLine()" } else { "read -r line" };
+        let started = f.call("exec_command", json!({"cmd":format!("{read}; {sleep}"),"stdin":true,"yield_time_ms":0})).await?;
+        assert_eq!(started["running"], true, "{started}");
+        let ended = f.call("write_stdin", json!({"session_id":started["session_id"],"chars":"go\n"})).await?;
+        assert_eq!(ended["running"], false, "{ended}");
+        assert_eq!(ended["exit_code"], 0, "{ended}");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn read_only_session_takes_no_mutation_lock_or_interval() -> Result<()> {
+        use crate::tools::workspace_changes;
+        let f = Fixture::new()?;
+        let guard = workspace_changes::mutation_guard(&f.root, "git_restore", &json!({}), &f.cancel).await?;
+        let args = json!({"cmd":"read -r line; printf '%s' \"$line\"","stdin":true,"yield_time_ms":0});
+        let started = tokio::time::timeout(Duration::from_secs(5), execute(&f.state, &f.state.workspace,
+            "shell-test", 1, None, "exec_command", &args, &f.cancel, true)).await?;
+        let started = match started {
+            Ok(value) => value,
+            Err(error) if format!("{error:#}").contains("SANDBOX_UNAVAILABLE") => {
+                eprintln!("skipped: read-only sandbox unavailable: {error:#}");
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        assert_eq!(started["running"], true, "{started}");
+        assert_eq!(started["change_interval"], Value::Null, "{started}");
+        assert_eq!(started["changes_pending"], false);
+        let conn = crate::server::agent_service::open_db(&f.root)?;
+        let intervals = || conn.query_row("SELECT COUNT(*) FROM agent_shell_change_intervals", [], |row| row.get::<_, usize>(0));
+        assert_eq!(intervals()?, 0);
+        drop(guard);
+        let file_args = json!({"path":"tool.txt","content":"after"});
+        let _file = tokio::time::timeout(Duration::from_secs(3),
+            workspace_changes::mutation_guard(&f.root, "write_file", &file_args, &f.cancel)).await??;
+        workspace_changes::execute_tracked(f.state.clone(), f.state.workspace.clone(), "shell-test".into(), 1,
+            "write_file".into(), file_args, f.cancel.clone()).await?;
+        assert_eq!(std::fs::read_to_string(f.root.join("tool.txt"))?, "after");
+        let ended = f.call("write_stdin", json!({"session_id":started["session_id"],"chars":"ready\n"})).await?;
+        assert_eq!(ended["running"], false, "{ended}");
+        assert_eq!(ended["stdout"], "ready", "{ended}");
+        assert_eq!(intervals()?, 0);
+        let shell_rows: usize = conn.query_row("SELECT COUNT(*) FROM agent_change_ledger WHERE source='shell'", [], |row| row.get(0))?;
+        assert_eq!(shell_rows, 0);
+        Ok(())
     }
 
     /// The main AI's own command looks without changing anything: reads and
@@ -1184,9 +1262,24 @@ mod tests {
         let v = f.call("exec_command", json!({"cmd":read,"yield_time_ms":20,"stdin":true})).await?;
         assert_eq!(v["running"], true, "{v}");
         let id = v["session_id"].as_str().unwrap();
-        let foreign = execute(&f.state, &f.state.workspace, "foreign-task", 1, None, "write_stdin", &json!({"session_id":id}), &f.cancel, false).await.unwrap_err();
-        assert!(foreign.to_string().contains("SCOPE_DENIED"));
-        assert!(execute(&f.state, &f.state.workspace, "foreign-task", 1, None, "exec_command", &json!({"cmd":"echo should-not-run"}), &f.cancel, false).await.unwrap_err().to_string().contains("SHELL_BUSY"));
+        let conn = crate::server::agent_service::open_db(&f.root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('foreign-task','','fake','completed',0,0)", [])?;
+        for control in ["write_stdin", "kill_session"] {
+            let foreign = execute(&f.state, &f.state.workspace, "foreign-task", 1, None, control,
+                &json!({"session_id":id,"chars":"must not send\n"}), &f.cancel, false).await.unwrap_err();
+            assert!(foreign.to_string().contains("SHELL_SESSION_SCOPE_DENIED"), "{foreign:#}");
+        }
+        let other = execute(&f.state, &f.state.workspace, "foreign-task", 1, None, "exec_command",
+            &json!({"cmd":read,"yield_time_ms":0,"stdin":true}), &f.cancel, false).await?;
+        assert_eq!(other["running"], true, "{other}");
+        assert_ne!(other["change_interval"]["id"], v["change_interval"]["id"]);
+        assert_eq!(other["change_interval"]["task"], "foreign-task");
+        let active: usize = conn.query_row("SELECT COUNT(*) FROM agent_shell_change_intervals", [], |row| row.get(0))?;
+        assert_eq!(active, 2);
+        let other = execute(&f.state, &f.state.workspace, "foreign-task", 1, None, "write_stdin",
+            &json!({"session_id":other["session_id"],"chars":"parallel\n"}), &f.cancel, false).await?;
+        assert_eq!(other["running"], false, "{other}");
+        assert_eq!(other["stdout"], "received:parallel\n");
         let v = f.run(if cfg!(windows) { "Write-Output parallel" } else { "echo parallel" }).await?;
         assert_eq!(v["change_interval"]["merged"], true);
         assert_eq!(v["changes_pending"], true);
@@ -1293,7 +1386,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(delay)).await;
             run.abort();
             let _ = run.await;
-            let slot = interval_slot(&f.root.canonicalize()?);
+            let canonical = f.root.canonicalize()?;
+            let slot = interval_slot((canonical.clone(), canonical, "shell-test".into(), 1));
             tokio::time::timeout(Duration::from_secs(10),async {
                 loop {
                     if slot.lock().await.is_none() && active(&f.root).await.is_none() { break; }

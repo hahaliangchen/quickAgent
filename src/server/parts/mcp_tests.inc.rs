@@ -170,15 +170,21 @@
                 json!({"name":name,"arguments":{"session_id":id,"chars":"must-not-send\n"}})).await;
             assert!(rejected["error"]["message"].as_str().unwrap().contains("SHELL_SESSION_SCOPE_DENIED"), "{rejected}");
         }
-        let (_, busy) = rpc(&workspace, Some(&second.id), "tools/call",
-            json!({"name":"exec_command","arguments":{"cmd":"echo must-not-run"}})).await;
-        assert!(busy["error"]["message"].as_str().unwrap().contains("SHELL_BUSY"), "{busy}");
+        let written_by_second = second.call(&workspace, "write_file",
+            json!({"path":"parallel.txt","content":"visible now"})).await;
+        assert!(written_by_second.is_object());
+        assert_eq!(std::fs::read_to_string(root.join("parallel.txt")).unwrap(), "visible now");
+        let (_, stateless) = rpc(&workspace, None, "tools/call", json!({
+            "name":"write_file", "arguments":{"path":"stateless.txt","content":"visible too"}
+        })).await;
+        assert!(stateless["error"].is_null(), "{stateless}");
+        assert_eq!(std::fs::read_to_string(root.join("stateless.txt")).unwrap(), "visible too");
         let coexist_command = if cfg!(windows) { "Write-Output coexist" } else { "printf coexist" };
-        let alongside = first.call(&workspace, "exec_command",
-            json!({"cmd":coexist_command,"yield_time_ms":10000})).await;
+        let alongside = second.call(&workspace, "exec_command", json!({"cmd":coexist_command})).await;
         assert_eq!(alongside["running"], false, "{alongside}");
         assert_eq!(alongside["stdout"].as_str().unwrap().trim_end(), "coexist");
         assert!(alongside["capture_error"].is_null(), "{alongside}");
+        assert_ne!(started["change_interval"]["id"], alongside["change_interval"]["id"]);
         let mut written = first.call(&workspace, "write_stdin",
             json!({"session_id":id,"chars":"hello\n","yield_time_ms":1000})).await;
         let mut stdout = written["stdout"].as_str().unwrap().to_owned();
@@ -228,6 +234,15 @@
         let events: i64 = conn.query_row("SELECT count(*) FROM agent_task_events WHERE task_id=?1 AND kind IN ('workspace/changes','shell/output')",
             [&task], |row| row.get(0)).unwrap();
         assert!(events >= 3);
+        let other_task = second.skills.lock().await.shell.task.clone();
+        let (owner, source, count): (String, String, usize) = conn.query_row(
+            "SELECT task_id,source,count(*) FROM agent_change_ledger WHERE path='parallel.txt'", [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!((owner, source.as_str(), count), (other_task, "tool", 1));
+        let entries: Vec<(String, String)> = conn.prepare("SELECT task_id,source FROM agent_change_ledger WHERE path='stateless.txt'").unwrap()
+            .query_map([], |row| Ok((row.get(0)?,row.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(entries, vec![("mcp_stateless_edits".to_owned(), "tool".to_owned())]);
         drop(conn);
         drop(first);
         drop(second);

@@ -450,6 +450,7 @@
             Image {
                 exists: true,
                 bytes: Some(b"old\n".to_vec()),
+                hash: None,
                 stamp: String::new(),
             },
         );
@@ -459,6 +460,7 @@
             Image {
                 exists: true,
                 bytes: Some(b"new\n".to_vec()),
+                hash: None,
                 stamp: String::new(),
             },
         );
@@ -536,7 +538,7 @@
             [],
         )?;
         let (before, after, changed) = edited_big_file();
-        let image = |bytes: String| Image { exists: true, bytes: Some(bytes.into_bytes()), stamp: String::new() };
+        let image = |bytes: String| Image { exists: true, bytes: Some(bytes.into_bytes()), hash: None, stamp: String::new() };
         let mut before_snapshot = Snapshot::new();
         before_snapshot.insert("big.txt".into(), image(before));
         let mut after_snapshot = Snapshot::new();
@@ -572,3 +574,99 @@
         Ok(())
     }
 
+
+    async fn tracked_edit(state: &AgentServiceState, task: &str, turn: usize, file: &str, old: &str, new: &str) -> Result<()> {
+        let cancel = CancellationToken::new();
+        let args = json!({"path":file,"edits":[{"old_text":old,"new_text":new}]});
+        let _guard = mutation_guard(state.workspace.root(), "edit_file", &args, &cancel).await?;
+        execute_tracked(state.clone(), state.workspace.clone(), task.into(), turn, "edit_file".into(), args, cancel).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_shell_and_tracked_tool_write_separate_files_and_undo_independently() -> Result<()> {
+        let (root, mut state) = shell_state()?;
+        state.permission_mode = crate::server::agent_service::PermissionMode::FullAccess;
+        let conn = connection(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('editor','','fake','completed',0,0)", [])?;
+        fs::write(root.join("a.txt"), "a before")?;
+        fs::write(root.join("b.txt"), "b before")?;
+        state.shell_matching_baselines("t", &root, |_, _| false)?;
+        conn.execute("INSERT INTO agent_file_baselines(task_id,workspace,path,exists_at_baseline,bytes) VALUES ('t',?1,'b.txt',1,?2)",
+            params![root.canonicalize()?.to_string_lossy(), b"b before".as_slice()])?;
+        let cancel = CancellationToken::new();
+        let cmd = if cfg!(windows) {
+            "[Console]::ReadLine() | Out-Null; [IO.File]::WriteAllText((Join-Path $PWD a.txt), 'a after')"
+        } else { "read -r line; printf 'a after' > a.txt" };
+        use crate::tools::shell_process::execute;
+        let started = execute(&state, &state.workspace, "t", 1, None, "exec_command",
+            &json!({"cmd":cmd,"yield_time_ms":0,"stdin":true}), &cancel, false).await?;
+        assert_eq!(started["running"], true, "{started}");
+        tokio::time::timeout(std::time::Duration::from_secs(3), tracked_edit(&state, "editor", 1, "b.txt", "b before", "b after")).await??;
+        assert_eq!(fs::read(root.join("b.txt"))?, b"b after");
+        assert_eq!(fs::read(root.join("a.txt"))?, b"a before");
+        assert!(ensure_no_shell(&root, &root).unwrap_err().to_string().contains("SHELL_BUSY"));
+        let ended = execute(&state, &state.workspace, "t", 1, None, "write_stdin",
+            &json!({"session_id":started["session_id"],"chars":"go\n"}), &cancel, false).await?;
+        assert_eq!(ended["running"], false, "{ended}");
+        assert_eq!(ended["exit_code"], 0, "{ended}");
+        assert!(ended["capture_error"].is_null(), "{ended}");
+        let rows = conn.prepare("SELECT task_id,source,path,after_hash,after_bytes FROM agent_change_ledger ORDER BY seq")?
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?, row.get::<_, Vec<u8>>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        for ((task, source, path, hash, bytes), (want_task, want_source, want_path, want_bytes)) in rows.iter().zip([
+            ("editor", "tool", "b.txt", b"b after"), ("t", "shell", "a.txt", b"a after"),
+        ]) {
+            assert_eq!((task.as_str(), source.as_str(), path.as_str(), bytes.as_slice()), (want_task, want_source, want_path, want_bytes.as_slice()));
+            assert_eq!(hash, &format!("{:x}", Sha256::digest(want_bytes)));
+        }
+        let baseline: Vec<u8> = conn.query_row("SELECT bytes FROM agent_file_baselines WHERE task_id='t' AND path='b.txt'", [], |row| row.get(0))?;
+        assert_eq!(baseline, b"b before", "shell must not adopt another task's tool write");
+        conn.execute("UPDATE agent_tasks SET status='completed' WHERE id='t'", [])?;
+        assert_eq!(summary(&root, "t", 1)?["files"][0]["path"], "a.txt");
+        assert_eq!(summary(&root, "editor", 1)?["files"][0]["path"], "b.txt");
+        undo(&root, "t", 1)?;
+        assert_eq!(fs::read(root.join("a.txt"))?, b"a before");
+        assert_eq!(fs::read(root.join("b.txt"))?, b"b after");
+        undo(&root, "editor", 1)?;
+        assert_eq!(fs::read(root.join("b.txt"))?, b"b before");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shell_reconciles_against_latest_tool_hash_and_flags_same_path_residual() -> Result<()> {
+        let (root, state) = shell_state()?;
+        fs::write(root.join("shared.txt"), "start")?;
+        let before = shell_begin(&state, &state.workspace, "t", 1).await?;
+        tracked_edit(&state, "t", 1, "shared.txt", "start", "first").await?;
+        tracked_edit(&state, "t", 1, "shared.txt", "first", "latest").await?;
+        // Even a shell restoring the original bytes is a residual change after the tool.
+        fs::write(root.join("shared.txt"), "start")?;
+        let value = shell_finish(&state, &state.workspace, "t", 1, before, "mixed", &["@main".into()]).await?;
+        assert_eq!(value["files"][0]["conflicted"], true, "{value}");
+        assert_eq!(value["undo_available"], false, "{value}");
+        let conn = connection(&root)?;
+        let (before, after): (Vec<u8>, Vec<u8>) = conn.query_row("SELECT before_bytes,after_bytes FROM agent_change_ledger WHERE source='shell' AND interval_id='mixed'", [],
+            |row| Ok((row.get(0)?, row.get(1)?)))?;
+        assert_eq!(before, b"latest");
+        assert_eq!(after, b"start");
+        Ok(())
+    }
+
+    #[test]
+    fn ledger_schema_migrates_legacy_workspace_primary_key_without_dropping_intervals() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch("CREATE TABLE agent_shell_change_intervals(workspace TEXT PRIMARY KEY,task_id TEXT NOT NULL,turn INTEGER NOT NULL,token TEXT NOT NULL);
+            INSERT INTO agent_shell_change_intervals VALUES ('ws','old-task',1,'old-token');")?;
+        let tx = conn.transaction()?;
+        schema(&tx)?;
+        schema(&tx)?;
+        tx.execute("INSERT INTO agent_shell_change_intervals(workspace,task_id,turn,token,start_seq) VALUES ('ws','other',1,'other-token',42)", [])?;
+        tx.commit()?;
+        let original: i64 = conn.query_row("SELECT start_seq FROM agent_shell_change_intervals WHERE token='old-token'", [], |row| row.get(0))?;
+        assert_eq!(original, 0);
+        let count: usize = conn.query_row("SELECT COUNT(*) FROM agent_shell_change_intervals WHERE workspace='ws'", [], |row| row.get(0))?;
+        assert_eq!(count, 2);
+        Ok(())
+    }

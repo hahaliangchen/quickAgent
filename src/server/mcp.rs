@@ -219,7 +219,27 @@ impl McpShellScope {
         })
     }
 }
+fn is_tracked_file_mutation(name: &str) -> bool {
+    matches!(name, "write_file" | "edit_file" | "replace_range" | "batch_edits" | "delete_path" | "rename_path" | "create_dir" | "git_restore")
+}
+
 impl McpShellContext {
+    async fn execute_mutation(self, workspace: Arc<Workspace>, name: String, args: Value) -> anyhow::Result<Value> {
+        use crate::tools::{shell_process, workspace_changes};
+        if name == "git_restore" {
+            shell_process::wait_for_own_writers(workspace.root(), self.state.workspace.root(), &self.task).await?;
+        }
+        let _guard = workspace_changes::mutation_guard(workspace.root(), &name, &args, &self.cancel).await?;
+        if name == "git_restore" {
+            workspace_changes::ensure_no_shell(self.state.workspace.root(), workspace.root())?;
+        }
+        let call = crate::server::agent_service::uuid_like();
+        let _claims = workspace_changes::resource_keys(workspace.root(), &name, &args)?.into_iter().map(|resource|
+            workspace_changes::claim_resource(self.state.workspace.root(), &self.task, &call, resource)
+        ).collect::<anyhow::Result<Vec<_>>>()?;
+        workspace_changes::execute_tracked(self.state, workspace, self.task, 1, name, args, self.cancel).await
+    }
+
     async fn execute(&self, workspace: &Arc<Workspace>, name: &str, args: &Value) -> anyhow::Result<Value> {
         // MCP has no automatic user-turn signal. Keep one execution turn per
         // session so its background shells can coexist with later commands.
@@ -470,7 +490,7 @@ async fn dispatch(
         return Ok(mcp_value(context.execute(workspace, name, &args).await?));
     }
     // Preserve skill activation and package scopes under the existing lock for
-    // every other RPC. Shell I/O alone runs outside it so kill can interrupt it.
+    // every other RPC. Shell I/O runs outside it so kill can interrupt it.
     let mut activation = if let Some(activation) = activation {
         Some(activation.lock().await)
     } else {
@@ -614,6 +634,23 @@ async fn dispatch_activated(
                 !RETIRED_CODE_INDEX_TOOLS.contains(&name),
                 "TOOL_UNAVAILABLE: {name} has been retired; use search_text and read_file_lines"
             );
+            if is_tracked_file_mutation(name) {
+                // Stateless edits still need an owner distinct from any shell session.
+                let mut stateless;
+                let scope = match activation {
+                    Some(activation) => &mut activation.shell,
+                    None => {
+                        stateless = McpShellScope::default();
+                        stateless.task = "mcp_stateless_edits".into();
+                        &mut stateless
+                    }
+                };
+                let context = scope.context(workspace).await?;
+                // Once a disk write starts, keep its locks until it is in the WAL,
+                // even if the HTTP caller drops the request.
+                let write = tokio::spawn(context.execute_mutation(workspace.clone(), name.to_owned(), args));
+                return Ok(mcp_value(write.await??));
+            }
             call_tool(workspace, request.params).await
         }
         "notifications/initialized" => Ok(json!({})),
@@ -1649,6 +1686,6 @@ pub fn tool_definitions() -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+mod mcp_tests {
     include!("parts/mcp_tests.inc.rs");
 }
