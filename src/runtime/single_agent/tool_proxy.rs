@@ -409,6 +409,48 @@ mod tests {
     }
 
     #[test]
+    fn read_tool_contracts_returns_full_schema_for_plugin_libraries_like_ssh() {
+        let mut libs = libraries::builtin();
+        libs.insert(
+            "ssh".into(),
+            std::collections::BTreeMap::from([
+                ("add_server".into(), "ssh__add_server".into()),
+                ("exec".into(), "ssh__exec".into()),
+            ]),
+        );
+        let defs = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "ssh__add_server",
+                "description": "Register a new SSH server profile.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["name", "host", "username"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "host": { "type": "string" },
+                        "port": { "type": "integer" },
+                        "username": { "type": "string" },
+                        "credential": { "type": "string" }
+                    }
+                }
+            }
+        })];
+        let (result, failed) = super::handle_read_tool_contracts_with_defs(
+            &libs,
+            &json!({"methods": ["ssh.add_server"]}),
+            || defs,
+        );
+        assert!(!failed);
+        let decl = result["declarations"].as_str().unwrap();
+        assert!(decl.contains("declare namespace ssh"), "{decl}");
+        assert!(decl.contains("function add_server(args:"), "{decl}");
+        assert!(decl.contains("host: (string)"), "{decl}");
+        assert!(decl.contains("credential?: (string)"), "{decl}");
+        assert_eq!(result["schemas"][0]["tool"], "ssh__add_server");
+    }
+
+    #[test]
     fn edit_file_shorthand_normalizes_to_edits_array() {
         let mut args = json!({
             "path": "src/a.ts",

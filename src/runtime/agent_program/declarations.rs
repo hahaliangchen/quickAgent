@@ -288,7 +288,21 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
 /// stable library names and typed method shapes without emitting JSON Schema
 /// tool definitions on the wire.
 pub(crate) fn lazy_contract_library(name: &str) -> bool {
-    name == "desktop" || name.starts_with("mcp_")
+    !matches!(
+        name,
+        "io" | "git"
+            | "process"
+            | "verify"
+            | "plan"
+            | "http"
+            | "browser"
+            | "vision"
+            | "host"
+            | "attachments"
+            | "memory"
+            | "session"
+            | "previous"
+    )
 }
 
 pub fn static_library_header(libraries: &Libraries) -> String {
@@ -474,9 +488,12 @@ pub fn directory(libraries: &Libraries) -> String {
         ]),
         ("Run and inspect applications", &[
             ("process", process_purpose),
+            ("ssh", "Connect to saved remote servers, register new SSH profiles (`ssh.add_server`), run remote commands (`ssh.exec`), transfer files via SFTP, and tail remote logs; discover full schemas on demand with `host.contracts({ libraries: [\"ssh\"] })`."),
             ("http", "Probe HTTP endpoints."),
             ("browser", "Open, inspect, and interact with browser pages."),
             ("desktop", "Inspect and operate the local desktop; discover contracts on demand."),
+            ("web", "Search the web and fetch remote pages; discover contracts on demand."),
+            ("code_index", "Query indexed code symbols and call graphs; discover contracts on demand."),
             ("vision", "View and analyze images."),
         ]),
         ("Conversation and saved material", &[
