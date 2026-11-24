@@ -13,6 +13,14 @@
   --ssh-accent-border: #bfe2d4;
   --ssh-warn: #a63a22;
   --ssh-warn-bg: #fff1eb;
+  --ssh-warn-border: #f0c9b8;
+  --ssh-warn-soft: #c8562f;
+  --ssh-ok: #12694f;
+  --ssh-ok-soft: #2f8f6b;
+  --ssh-info: #1f5f9e;
+  --ssh-info-soft: #3b7cbf;
+  --ssh-mono: "JetBrains Mono", "Cascadia Mono", "DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono", Menlo, Consolas, monospace;
+  --ssh-out-bg: #f2f5f3;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -39,6 +47,13 @@
   --ssh-accent-border: #2d5548;
   --ssh-warn: #ffc6ab;
   --ssh-warn-bg: #3e2822;
+  --ssh-warn-border: #8a4a38;
+  --ssh-warn-soft: #ffab8c;
+  --ssh-ok: #7fe0c0;
+  --ssh-ok-soft: #a4ecd6;
+  --ssh-info: #9ecbf5;
+  --ssh-info-soft: #c2defa;
+  --ssh-out-bg: #101413;
 }
 .root h1, .root h2, .root h3, .root p { margin: 0; }
 .root h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
@@ -264,6 +279,8 @@
 }
 .aiTools > span { margin-inline-end: auto; color: var(--ssh-muted); font-size: 12px; }
 .aiTools > span[data-connected='true'] { color: var(--ssh-accent); font-weight: 500; }
+.aiTools > em.aiCount { font-style: normal; font-size: 11.5px; color: var(--ssh-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.aiTools > em.aiCount[data-failed='true'] { color: var(--ssh-warn); font-weight: 600; }
 .aiTools button, .terminalTools button {
   border-color: var(--ssh-border);
   background: var(--ssh-surface);
@@ -284,6 +301,146 @@
 .terminalHost :global(.xterm) { height: 100%; background: var(--ssh-term-bg); }
 .terminalHost :global(.xterm-viewport) { background-color: var(--ssh-term-bg) !important; }
 .terminalHost :global(.xterm-screen) { background-color: var(--ssh-term-bg); }
+
+/* The AI pane is a transcript, not a raw stream: one card per command, so the
+   line the AI sent never reads as one of its own output lines. */
+.transcriptArea { position: relative; flex: 1; min-height: 0; display: flex; }
+.transcript {
+  /* anser maps the eight basic SGR colours onto these design-system tokens;
+     re-pointing them here keeps command output in the terminal's palette
+     instead of the page's. */
+  --dsw-alias-label-primary: var(--ssh-text);
+  --dsw-alias-label-tertiary: var(--ssh-muted);
+  --dsw-alias-state-success-primary: var(--ssh-ok);
+  --dsw-alias-state-success-secondary: var(--ssh-ok-soft);
+  --dsw-alias-state-error-primary: var(--ssh-warn);
+  --dsw-alias-state-error-secondary: var(--ssh-warn-soft);
+  --dsw-alias-state-warn-primary: var(--ssh-warn);
+  --dsw-alias-state-warn-secondary: var(--ssh-warn-soft);
+  --dsw-alias-state-business-primary: var(--ssh-info);
+  --dsw-static-blue-400: var(--ssh-info-soft);
+  --dsw-static-blue-500: var(--ssh-info-soft);
+  --dsw-static-blue-600: var(--ssh-info);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px 18px;
+  background: var(--ssh-term-bg);
+  font-family: var(--ssh-mono);
+  font-size: 12.5px;
+  overscroll-behavior: contain;
+}
+.cmd {
+  margin: 0 0 10px;
+  border: 1px solid var(--ssh-border);
+  border-radius: 10px;
+  background: var(--ssh-panel);
+  overflow: hidden;
+}
+.cmd[data-tone='running'] { border-color: var(--ssh-accent-border); }
+.cmd[data-tone='fail'] { border-color: var(--ssh-warn-border); }
+/* A failed command has to be findable while scrolling, so its header carries the
+   error tint instead of only a slightly warmer border. */
+.cmd[data-tone='fail'] > .cmdHead { background: var(--ssh-warn-bg); color: var(--ssh-warn); }
+.cmdHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 4px 9px;
+  background: var(--ssh-surface);
+  border-bottom: 1px solid var(--ssh-border-subtle);
+  font-size: 11.5px;
+  color: var(--ssh-muted);
+}
+.cmdBadge {
+  flex: none;
+  border: 1px solid var(--ssh-accent-border);
+  background: var(--ssh-accent-bg);
+  color: var(--ssh-accent);
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.cmdCwd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--ssh-mono);
+  font-size: 11.5px;
+}
+.cmdState {
+  flex: none;
+  margin-inline-start: auto;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.cmdState[data-tone='ok'] { color: var(--ssh-ok); }
+.cmdState[data-tone='fail'] { color: var(--ssh-warn); font-weight: 600; }
+.cmdState[data-tone='running'] { color: var(--ssh-accent); }
+.cmdState[data-tone='unknown'] { color: var(--ssh-muted); }
+.cmdBody { padding: 6px 9px 8px; }
+.cmdLine {
+  display: flex;
+  gap: 6px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  font-family: var(--ssh-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ssh-text);
+}
+.cmdPrompt { flex: none; width: 9px; color: var(--ssh-accent); font-weight: 600; }
+.cmdText { flex: 1; min-width: 0; }
+.cmdOut {
+  margin: 7px 0 0;
+  padding: 8px 9px;
+  border: 1px solid var(--ssh-border-subtle);
+  border-radius: 8px;
+  background: var(--ssh-out-bg);
+  color: var(--ssh-text);
+  font-family: var(--ssh-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-x: auto;
+  tab-size: 8;
+}
+.outLine { display: block; }
+.note {
+  margin: 0 0 10px;
+  padding: 6px 9px;
+  border: 1px solid var(--ssh-accent-border);
+  border-radius: 8px;
+  background: var(--ssh-accent-bg);
+  color: var(--ssh-text);
+  font-family: var(--ssh-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.emptyHint { display: grid; gap: 4px; padding: 6px 2px; font-size: 12px; }
+.emptyHint p { margin: 0; }
+.transcriptArea > .jumpLatest {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 10px;
+  z-index: 2;
+  width: max-content;
+  margin-inline: auto;
+  border: 1px solid var(--ssh-accent-border);
+  border-radius: 999px;
+  background: var(--ssh-panel);
+  color: var(--ssh-accent);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
 
 .empty {
   flex: 1;

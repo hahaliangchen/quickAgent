@@ -163,7 +163,7 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
           <button aria-label={item.kind === 'ai' ? '关闭 AI 实时终端 ' + item.profile.name : '关闭终端 ' + item.id} onClick={() => closeTerminal(item.id)}>×</button>
         </div>)}</div><button className={css.newTerminal} disabled={!server} onClick={() => { if (server) openTerminal(server) }}>＋ 新建终端</button></div>
         {tabs.length === 0 && <div className={css.empty}><span className={css.promptIcon} aria-hidden="true">&gt;_</span><p>没有打开的终端</p></div>}
-        {tabs.map(item => item.kind === 'ai' ? <AiTerminalPane key={item.id} serverId={item.profile.id} taskId={item.taskId} active={tab === item.id} theme={theme}
+        {tabs.map(item => item.kind === 'ai' ? <AiTerminalPane key={item.id} serverId={item.profile.id} taskId={item.taskId} active={tab === item.id}
           onOpenHuman={() => openTerminal(serverList.current.find(profile => profile.id === item.profile.id) ?? item.profile)} onActivity={event => liveActivity(item, event)} diagnose={context.diagnose} /> : <TerminalPane key={item.id} server={item.profile} access={item.access} active={tab === item.id} theme={theme} onError={cause => report(cause, item.profile.id)} onConnection={activity} diagnose={context.diagnose} />)}
       </main>
       {servers.filter(profile => profile.id === selected || visited.has(profile.id)).map(profile => <SftpExplorer key={profile.id} server={profile} access={access}
