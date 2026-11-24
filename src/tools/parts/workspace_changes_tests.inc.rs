@@ -123,7 +123,13 @@
             if stage == "emit" {
                 conn.execute_batch("CREATE TRIGGER reject_shell_begin BEFORE INSERT ON agent_task_events WHEN NEW.kind='workspace/changes' BEGIN SELECT RAISE(ABORT,'injected emit failure'); END;")?;
             } else {
-                fs::File::create(root.join("large.bin"))?.set_len(FILE_LIMIT + 1)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let blocked = root.join("unreadable.txt");
+                    fs::write(&blocked, "secret")?;
+                    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))?;
+                }
                 conn.execute_batch("CREATE TRIGGER reject_shell_begin BEFORE INSERT ON agent_change_turns BEGIN SELECT RAISE(ABORT,'injected incomplete failure'); END;")?;
             }
             let result = shell_begin(&state, &state.workspace, "t", 1).await;
@@ -132,6 +138,13 @@
             assert_eq!(active, 0, "failed {stage} begin stranded a running marker");
             if stage == "emit" { assert_eq!(summary(&root, "t", 1)?["complete"], false); }
             conn.execute_batch("DROP TRIGGER reject_shell_begin;")?;
+            #[cfg(unix)]
+            if stage == "incomplete" {
+                use std::os::unix::fs::PermissionsExt;
+                let blocked = root.join("unreadable.txt");
+                let _ = fs::set_permissions(&blocked, fs::Permissions::from_mode(0o644));
+                let _ = fs::remove_file(&blocked);
+            }
             let before = shell_begin(&state, &state.workspace, "t", 1).await?;
             shell_finish(&state, &state.workspace, "t", 1, before, "retry", &["@main".into()]).await?;
             drop(conn);
@@ -195,15 +208,40 @@
     }
 
     #[tokio::test]
-    async fn shell_snapshot_limits_remain_explicitly_incomplete() -> Result<()> {
+    async fn untouched_large_file_keeps_shell_turn_undoable_while_mutated_large_file_is_incomplete() -> Result<()> {
+        // Case 1: repo has an untouched file > FILE_LIMIT, shell edits only a small file.
         let (root, state) = shell_state()?;
         fs::File::create(root.join("large.bin"))?.set_len(FILE_LIMIT + 1)?;
+        fs::write(root.join("small.txt"), "before\n")?;
         let before = shell_begin(&state, &state.workspace, "t", 1).await?;
-        let value = shell_finish(&state, &state.workspace, "t", 1, before, "limits", &["@main".into()]).await?;
-        assert_eq!(value["complete"], false);
-        assert_eq!(value["undo_available"], false);
+        fs::write(root.join("small.txt"), "after\n")?;
+        let value = shell_finish(&state, &state.workspace, "t", 1, before, "untouched-large", &["@main".into()]).await?;
+        assert_eq!(value["complete"], true, "untouched large file must not poison turn completeness: {value}");
+        assert_eq!(value["undo_available"], true, "normal file edits remain undoable: {value}");
+        assert_eq!(value["total"], 1);
+        let conn = connection(&root)?;
+        conn.execute("INSERT INTO agent_session_meta(task_id,workspace) VALUES ('t',?1)", [root.to_string_lossy()])?;
+        conn.execute("UPDATE agent_tasks SET status='completed' WHERE id='t'", [])?;
+        drop(conn);
+        let undone = undo(&root, "t", 1)?;
+        assert_eq!(undone["reverted"], true);
+        assert_eq!(fs::read_to_string(root.join("small.txt"))?, "before\n");
+        assert_eq!(fs::metadata(root.join("large.bin"))?.len(), FILE_LIMIT + 1);
         drop(state);
         let _ = fs::remove_dir_all(root);
+
+        // Case 2: shell actually mutates the > FILE_LIMIT file -> explicitly incomplete & non-undoable.
+        let (root2, state2) = shell_state()?;
+        fs::File::create(root2.join("large.bin"))?.set_len(FILE_LIMIT + 1)?;
+        let before2 = shell_begin(&state2, &state2.workspace, "t", 1).await?;
+        fs::File::create(root2.join("large.bin"))?.set_len(FILE_LIMIT + 2)?;
+        let value2 = shell_finish(&state2, &state2.workspace, "t", 1, before2, "mutated-large", &["@main".into()]).await?;
+        assert_eq!(value2["complete"], false, "mutated large file must remain incomplete: {value2}");
+        assert_eq!(value2["undo_available"], false);
+        assert_eq!(value2["files"][0]["path"], "large.bin");
+        assert_eq!(value2["files"][0]["unavailable"], true);
+        drop(state2);
+        let _ = fs::remove_dir_all(root2);
         Ok(())
     }
 

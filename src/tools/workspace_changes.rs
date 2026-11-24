@@ -150,7 +150,7 @@ pub(crate) async fn mutation_guard(workspace: &Path, name: &str, args: &Value, c
 }
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 const FILE_LIMIT: u64 = 2 * 1024 * 1024;
-const SNAPSHOT_LIMIT: usize = 32 * 1024 * 1024;
+const SNAPSHOT_LIMIT: usize = 128 * 1024 * 1024;
 
 // Keep at most one workspace's bounded byte cache. A cache hit still requires
 // walking, safe_path validation and fresh metadata; it is never a before-image.
@@ -815,6 +815,7 @@ fn mark_incomplete(root: &Path, task: &str, turn: usize) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn snapshot_is_incomplete(snapshot: &Snapshot) -> bool {
     snapshot.values().any(|image| image.exists && image.bytes.is_none())
 }
@@ -894,7 +895,7 @@ pub(crate) async fn shell_begin_cancellable(
                 Err(error) => { errors.push(format!("managed baseline: {error:#}")); Vec::new() }
             }
         } else { Vec::new() };
-        if !errors.is_empty() || before.as_ref().is_some_and(snapshot_is_incomplete) {
+        if !errors.is_empty() {
             mark_incomplete(&store, &task, turn)?;
         }
         Ok((before, managed, errors))
@@ -948,18 +949,18 @@ pub(crate) async fn shell_finish(
     }).await?;
     let mut before = before;
     errors.append(&mut before.errors);
-    let incomplete = !errors.is_empty() || after.as_ref().is_some_and(snapshot_is_incomplete);
+    let capture_failed = !errors.is_empty() || before.before.is_none() || after.is_none();
     let cleanup = (before.workspace.clone(), before.task.clone(), before.token.clone());
     let recorded = crate::context::db_writer::write_async(&root, move |conn| {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let removed = tx.execute("DELETE FROM agent_shell_change_intervals WHERE workspace=?1 AND task_id=?2 AND turn=?3 AND token=?4",
             params![before.workspace.to_string_lossy(), before.task, turn, before.token])?;
         ensure!(removed == 1, "shell interval is no longer active");
-        let adoptable = match (&before.before, &after) {
+        let (adoptable, changed_incomplete) = match (&before.before, &after) {
             (Some(old), Some(new)) => reconcile_shell(&tx, &before, &attribution, old, new)?,
-            _ => Default::default(),
+            _ => (Default::default(), true),
         };
-        if incomplete { mark_incomplete_tx(&tx, &before.task, turn)?; }
+        if capture_failed || changed_incomplete { mark_incomplete_tx(&tx, &before.task, turn)?; }
         tx.execute("INSERT INTO agent_shell_interval_metadata(task_id,turn,workspace,interval_id,metadata) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(task_id,workspace,interval_id) DO UPDATE SET metadata=excluded.metadata",
             params![before.task, turn, before.workspace.to_string_lossy(), attribution.interval_id, attribution.metadata().to_string()])?;
         tx.commit()?;
@@ -1014,7 +1015,7 @@ pub(crate) async fn shell_finish(
 fn reconcile_shell(
     tx: &Connection, interval: &ShellSnapshot, attribution: &ShellAttribution,
     before: &Snapshot, after: &Snapshot,
-) -> Result<std::collections::BTreeSet<String>> {
+) -> Result<(std::collections::BTreeSet<String>, bool)> {
     let workspace = interval.workspace.to_string_lossy();
     let overlapping: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_shell_change_intervals WHERE workspace=?1)",
         [&workspace], |row| row.get(0))?;
@@ -1029,6 +1030,7 @@ fn reconcile_shell(
     let scope = LedgerScope { workspace: &interval.workspace, task: &interval.task, turn: interval.turn,
         interval_id: Some(&attribution.interval_id) };
     let mut adoptable = std::collections::BTreeSet::new();
+    let mut changed_incomplete = false;
     let missing = Image::missing();
     for path in before.keys().chain(after.keys()).collect::<std::collections::BTreeSet<_>>() {
         let old = before.get(path).unwrap_or(&missing);
@@ -1042,6 +1044,9 @@ fn reconcile_shell(
             Ok(Image { exists: *exists, hash: hash.clone(), bytes, stamp: String::new() })
         }).transpose()?;
         let old = residual_before.as_ref().unwrap_or(old);
+        if (old.exists && old.bytes.is_none()) || (new.exists && new.bytes.is_none()) {
+            changed_incomplete = true;
+        }
         // Two running processes cannot be distinguished by snapshots alone. Record
         // the observed residual once, but do not let ambiguous ownership enable undo.
         let conflicted = tracked.is_some() || overlapping;
@@ -1054,7 +1059,7 @@ fn reconcile_shell(
         }
         if !conflicted { adoptable.insert(path.clone()); }
     }
-    Ok(adoptable)
+    Ok((adoptable, changed_incomplete))
 }
 
 pub fn summary(root: &Path, task: &str, turn: usize) -> Result<Value> {
