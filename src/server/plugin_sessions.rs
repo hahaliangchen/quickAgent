@@ -229,7 +229,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("plugin_ws_{}", agent_service::uuid_like()));
         std::fs::create_dir_all(&root).unwrap();
         let a = workspace_dir(&root, "ppt-master").unwrap();
-        let b = workspace_dir(&root, "code-flow").unwrap();
+        let b = workspace_dir(&root, "blueprint").unwrap();
         assert!(a.is_dir() && b.is_dir() && a != b);
         assert!(a.starts_with(&root));
         assert!(workspace_dir(&root, "../x").is_err());
@@ -259,7 +259,7 @@ mod tests {
         let models = body(
             handle(
                 state.clone(),
-                "code-flow",
+                "blueprint",
                 json!({"method":"models","package_scope":scope}),
             )
             .await
@@ -271,7 +271,7 @@ mod tests {
         assert!(
             handle(
                 state.clone(),
-                "code-flow",
+                "blueprint",
                 json!({"method":"models","package_scope":999})
             )
             .await
@@ -280,7 +280,7 @@ mod tests {
         let created = body(
             handle(
                 state.clone(),
-                "code-flow",
+                "blueprint",
                 json!({"method":"create","package_scope":scope}),
             )
             .await
@@ -288,11 +288,11 @@ mod tests {
         )
         .await;
         let task = created["task_id"].as_str().unwrap();
-        assert_eq!(owner(&root, task).unwrap().as_deref(), Some("code-flow"));
+        assert_eq!(owner(&root, task).unwrap().as_deref(), Some("blueprint"));
         let opened = body(
             handle(
                 state.clone(),
-                "code-flow",
+                "blueprint",
                 json!({"method":"open","package_scope":scope}),
             )
             .await
@@ -319,7 +319,7 @@ mod tests {
         let history = body(
             handle(
                 state.clone(),
-                "code-flow",
+                "blueprint",
                 json!({"method":"events","package_scope":scope,"task_id":task,"after_seq":0}),
             )
             .await
@@ -331,7 +331,7 @@ mod tests {
         for (kind, result) in [("task/node_started", Value::Null), ("task/node_returned", json!({"result":"{\"saved\":true}"}))] {
             agent_service::emit(&root, task, kind, json!({"node_id":"child","metadata":{"role":"temp"},"title":"author","inputs":{"html":"private large input"},"result":result})).await.unwrap();
         }
-        let frames = body(handle(state.clone(), "code-flow", json!({"method":"events","package_scope":scope,"task_id":task,"after_seq":1})).await.unwrap()).await;
+        let frames = body(handle(state.clone(), "blueprint", json!({"method":"events","package_scope":scope,"task_id":task,"after_seq":1})).await.unwrap()).await;
         let frames = frames["events"].as_array().unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0]["data"]["metadata"]["role"], "temp");
@@ -342,7 +342,7 @@ mod tests {
             json!({"method":"create"}),
             json!({"method":"create","package_scope":999}),
         ] {
-            assert!(handle(state.clone(), "code-flow", args).await.is_err());
+            assert!(handle(state.clone(), "blueprint", args).await.is_err());
         }
         // Built-in plugins cannot be disabled; unmounting retires the scope just the same.
         runtime
@@ -351,7 +351,7 @@ mod tests {
         assert!(
             handle(
                 state,
-                "code-flow",
+                "blueprint",
                 json!({"method":"events","package_scope":scope,"task_id":task})
             )
             .await

@@ -177,7 +177,7 @@ mod tests {
                 "deepseek":{"url":"http://deepseek/v1","api_type":"anthropic-messages","model_map":{"deepseek-flash":"deepseek-flash"}},
                 "responses":{"url":"http://responses/v1","api_type":"openai-responses","model_map":{"gpt-6.2-sol":"gpt-6.2-sol"}}
             },
-            "plugin_models":{"code-flow":[{"provider":"qwen","model":"local"},{"provider":"deepseek","model":"deepseek-flash"},{"provider":"responses","model":"gpt-6.2-sol"}],"denied":[]}
+            "plugin_models":{"blueprint":[{"provider":"qwen","model":"local"},{"provider":"deepseek","model":"deepseek-flash"},{"provider":"responses","model":"gpt-6.2-sol"}],"denied":[]}
         }))
         .unwrap();
         assert_eq!(
@@ -193,7 +193,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let directory = crate::server::ai_proxy::plugin_catalog_view(&config, "code-flow");
+        let directory = crate::server::ai_proxy::plugin_catalog_view(&config, "blueprint");
         assert_eq!(directory["models"].as_array().unwrap().len(), 3);
         assert_eq!(directory["defaults"]["agent"]["model"], "local");
         assert_eq!(
@@ -211,7 +211,7 @@ mod tests {
         state.tool_catalog = Some(catalog);
         let response = crate::server::plugin_sessions::handle(
             state.clone(),
-            "code-flow",
+            "blueprint",
             serde_json::json!({"method":"create","package_scope":scope}),
         )
         .await
@@ -235,7 +235,7 @@ mod tests {
         // Plugin defaults override an old saved effort, while explicit supported
         // choices remain available without changing other plugins or the host.
         let mut edited = serde_json::to_value(&*shared.read().await).unwrap();
-        edited["plugin_generation"] = serde_json::json!({"code-flow":{"reasoning_effort":"low","visual_reasoning_effort":"low"}});
+        edited["plugin_generation"] = serde_json::json!({"blueprint":{"reasoning_effort":"low","visual_reasoning_effort":"low"}});
         edited["model_capabilities"] =
             serde_json::json!({"qwen":{"local":{"reasoning_efforts":["low","medium","high"]}}});
         *shared.write().await = serde_json::from_value(edited).unwrap();

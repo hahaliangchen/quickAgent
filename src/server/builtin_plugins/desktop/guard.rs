@@ -319,7 +319,8 @@ pub(super) fn open_target(target: &str) -> Result<OpenTarget> {
         ));
     }
     if url.port_or_known_default().is_some_and(|port| {
-        matches!(port, 3000 | 3001) || crate::tools::process_sandbox::is_host_control_port(port)
+        matches!(port, 3000 | 3001 | 41200 | 41201)
+            || crate::tools::process_sandbox::is_host_control_port(port)
     }) {
         return Err(fault(
             "CONTROL_PORT_BLOCKED",

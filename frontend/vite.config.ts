@@ -3,7 +3,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 const dsh = (path: string): string => fileURLToPath(new URL(`./src/dsh/${path}`, import.meta.url))
-const backend = process.env.AGENT_BACKEND ?? 'http://127.0.0.1:3001'
+const backend = process.env.AGENT_BACKEND ?? 'http://127.0.0.1:41201'
 
 export default defineConfig({
   base: '/agent/',
@@ -22,6 +22,7 @@ export default defineConfig({
     proxy: {
       '/api/session/uploadFileBinary': backend,
       '/agent/tasks': backend,
+      '/api/blueprint': backend,
       '/agent/ssh': { target: backend, ws: true },
       '/agent/sessions': backend,
       '/agent/info': backend,

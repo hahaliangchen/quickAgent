@@ -7,7 +7,8 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.mjs",
-    "test:ssh": "playwright test --config playwright.ssh.config.mjs"
+    "test:ssh": "playwright test --config playwright.ssh.config.mjs",
+    "test:blueprint": "playwright test --config playwright.blueprint.config.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.4",

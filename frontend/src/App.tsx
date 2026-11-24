@@ -3,6 +3,7 @@ import { ConversationPage, HeroPage, SkillPackagesPage, type Tab } from './compo
 import { SkillWorkbench } from './components/SkillWorkbench.tsx'
 import { PluginPageHost } from './components/PluginPageHost.tsx'
 import { OfficeStudioView } from './components/OfficeStudioView.tsx'
+import { BlueprintContext } from './builtin_plugins/blueprint/api.ts'
 import { CodeChatDock } from './components/CodeChatDock.tsx'
 import { type AiFocus, type RemoteTool, remoteTools, SshContext } from './builtin_plugins/ssh/api.ts'
 import { CodexDock } from './components/CodexDock.tsx'
@@ -26,6 +27,13 @@ export function App({ renderSlot }: AgentSlotProps) {
   const [tab, setTab] = useState<Tab>('chat')
   const [workbench, setWorkbench] = useState(false)
   const [git, setGit] = useState(false)
+  const [blueprint, setBlueprint] = useState(false)
+  const [blueprintDraft, setBlueprintDraft] = useState<{ text: string; kind: 'prompt' }>()
+  const [blueprintChatOpenSignal, setBlueprintChatOpenSignal] = useState(0)
+  const sendBlueprintDraft = useCallback((text: string) => {
+    setBlueprintDraft({ text, kind: 'prompt' })
+    setBlueprintChatOpenSignal(value => value + 1)
+  }, [])
   const [ssh, setSsh] = useState(false)
   const [sshMounted, setSshMounted] = useState(false)
   const [followAi, setFollowAi] = useState(() => {
@@ -94,7 +102,7 @@ export function App({ renderSlot }: AgentSlotProps) {
     observation.seq = Math.max(observation.seq, events.at(-1)?.seq ?? -1)
     if (latest) setAiFocus(latest)
     if (open) {
-      setSsh(true); setSshMounted(true); setOffice(false); setGit(false); setWorkbench(false)
+      setSsh(true); setSshMounted(true); setOffice(false); setGit(false); setBlueprint(false); setWorkbench(false)
       setSshChatOpenSignal(value => value + 1)
     }
   }, [taskId, workspace.session.task, workspace.session.events, workspace.newTaskLaunch, followAi])
@@ -120,6 +128,7 @@ export function App({ renderSlot }: AgentSlotProps) {
     return { ...current, files, active: current.active === url ? files[Math.min(index, files.length - 1)]?.url : current.active }
   })
   const editPreview = (slotId: string, file: PreviewFile) => {
+    setBlueprint(false)
     setPendingOpen(prev => ({ slotId, fileUrl: file.url, filename: file.name, seq: (prev?.seq ?? 0) + 1 }))
     setOffice(true)
     setSsh(false)
@@ -158,6 +167,7 @@ export function App({ renderSlot }: AgentSlotProps) {
   }
 
   const handleNewChat = () => {
+    setBlueprint(false); setBlueprintDraft(undefined)
     setOffice(false)
     setWorkbench(false)
     setGit(false)
@@ -206,9 +216,11 @@ export function App({ renderSlot }: AgentSlotProps) {
     <div className={css.appFrame} data-ds-dark-theme={dark ? '' : undefined}>
       {/* 1. Activity Dock (48px fixed on left) */}
       <CodexDock
-        activeTab={office ? 'office' : ssh ? 'ssh' : git ? 'git' : workbench || tab === 'skill-pages' ? 'skills' : 'home'}
+        activeTab={office ? 'office' : ssh ? 'ssh' : blueprint ? 'blueprint' : git ? 'git' : workbench || tab === 'skill-pages' ? 'skills' : 'home'}
         onSelectTab={selected => {
           setSsh(selected === 'ssh')
+          setBlueprint(selected === 'blueprint')
+          if (selected !== 'blueprint') setBlueprintDraft(undefined)
           if (selected === 'ssh') setSshMounted(true)
           if (selected !== 'ssh') setSshDraft(undefined)
           if (selected === 'office') {
@@ -234,14 +246,14 @@ export function App({ renderSlot }: AgentSlotProps) {
       />
 
       {/* 2. Codex Sidebar (collapsible & resizable) */}
-      {!sidebarCollapsed && !workbench && !git && !ssh && !office && (
+      {!sidebarCollapsed && !workbench && !git && !ssh && !office && !blueprint && (
         <div className={css.sidebarCol} style={{ width: actualSidebarWidth }}>
           {sidebar}
         </div>
       )}
 
       {/* Drag handle for Sidebar */}
-      {!sidebarCollapsed && !workbench && !git && !ssh && !office && (
+      {!sidebarCollapsed && !workbench && !git && !ssh && !office && !blueprint && (
         <div
           className={css.dragHandle}
           onPointerDown={(e) => {
@@ -294,7 +306,15 @@ export function App({ renderSlot }: AgentSlotProps) {
           </SshContext.Provider>
           {gitWorkspace && <CodeChatDock key="ssh" workspace={gitWorkspace} renderSlot={renderSlot} onOpenInChat={openSshChat} diagnostic={sshDraft} embeddedLauncher linkedTaskId={taskId} linkedSession={workspace.session} openSignal={sshChatOpenSignal} />}
         </div>}
-        {!office && !ssh && (git ? <div className={css.dockedView}>
+        {blueprint && <div className={css.dockedView}>
+          <BlueprintContext.Provider value={{ sendToAi: sendBlueprintDraft, refreshSignal: workspace.session.task?.status }}>
+            <div className={css.dockedPage}><PluginPageHost owner="blueprint" page="workbench" workspaceRoot={gitWorkspace} theme={dark ? 'dark' : 'light'} /></div>
+          </BlueprintContext.Provider>
+          {gitWorkspace && <CodeChatDock key="blueprint" workspace={gitWorkspace} renderSlot={renderSlot}
+            onOpenInChat={id => { setBlueprint(false); setBlueprintDraft(undefined); setWorkbench(false); setTab('chat'); workspace.openTask(id) }}
+            diagnostic={blueprintDraft} embeddedLauncher linkedTaskId={taskId} linkedSession={workspace.session} openSignal={blueprintChatOpenSignal} />}
+        </div>}
+        {!office && !ssh && !blueprint && (git ? <div className={css.dockedView}>
           <div className={css.dockedPage}><PluginPageHost owner="git" page="history" workspaceRoot={gitWorkspace} /></div>
           {gitWorkspace && <CodeChatDock key="git" workspace={gitWorkspace} renderSlot={renderSlot} onOpenInChat={id => { setGit(false); setWorkbench(false); setTab('chat'); workspace.openTask(id) }} />}
         </div>
@@ -314,7 +334,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       </div>
 
       {/* Drag handle for Right Panel */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && !blueprint && (
         <div
           className={css.dragHandle}
           role="separator" aria-orientation="vertical" aria-label="调整预览抽屉宽度"
@@ -338,7 +358,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       )}
 
       {/* 4. Right Inspector Panel (Changes, Sources) */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && !blueprint && (
         <CodexRightPanel
           width={rightPanelWidth}
           mode={tabs ? mode : 'changes'}
@@ -363,7 +383,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       )}
 
       <ShellSetupDialog
-        enabled={!git && !workbench && tab !== 'skill-pages' && !workspace.settingsOpen && isCodeShellContext(workspace.taskId, workspace.task, workspace.sidebarMode, workspace.activeWorkspace ?? '')}
+        enabled={!git && !blueprint && !workbench && tab !== 'skill-pages' && !workspace.settingsOpen && isCodeShellContext(workspace.taskId, workspace.task, workspace.sidebarMode, workspace.activeWorkspace ?? '')}
         scope={workspace.taskId ?? workspace.activeWorkspace ?? ''}
         onReady={workspace.refreshInfoAndSettings}
       />

@@ -493,6 +493,7 @@ pub fn directory(libraries: &Libraries) -> String {
             ("browser", "Open, inspect, and interact with browser pages."),
             ("desktop", "Inspect and operate the local desktop; discover contracts on demand."),
             ("web", "Search the web and fetch remote pages; discover contracts on demand."),
+            ("blueprint", "Inspect or maintain this project's trigger-first architecture blueprint (.quickagent/blueprint), trace cross-layer impact/invariants, and verify sync against git diff; discover full schemas on demand with `host.contracts({ libraries: [\"blueprint\"] })`."),
             ("code_index", "Query indexed code symbols and call graphs; discover contracts on demand."),
             ("vision", "View and analyze images."),
         ]),

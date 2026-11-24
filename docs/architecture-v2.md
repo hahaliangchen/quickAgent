@@ -133,7 +133,7 @@ QuickAgent 将“缓存命中率”视为一等架构指标：
 | `browser` | `open / read / wait / diagnostics / fill / click / press_key / set_viewport / scroll / upload / screenshot(selector) / close` | 直连 Chrome DevTools Protocol，支持切亮/暗主题、移动端视口与 CSS 选择器局部截图，实现零 Shell 前端视觉验收 |
 | `vision` | `register_image / analyze_images / view_image / generate_image / image_analysis_results` | 本地或 `/tmp` 截图一步入库并预算压缩，与前端 `VisualEvidenceStrip` + `ImageLightbox` 联动 |
 | `plan` | `set / update` | 宿主 `task_local!` 绑定会话与轮次，单 SQLite 事务落盘并推 `plan/updated` SSE，支持 `rewind` 恢复，前端输入框上方实时展示进度面板 |
-| `code_index` / `flow` | `index / list / search / read` / `read_code_flow` | Rust / TS / Go / Python 四语言符号索引与调用链路分析 |
+| `code_index` / `blueprint` | 符号查询 / `overview`, `read_graph`, `impact`, `verify_sync` | 四语言符号索引与入口驱动的架构蓝图 |
 | `process` | `exec_command / write_stdin / kill_session / run_readonly / run_program / run_project_script` | 托管 PTY 后台会话、Linux `bubblewrap` 写隔离、超时与进程组清理 |
 
 ### 纵深安全与可恢复性

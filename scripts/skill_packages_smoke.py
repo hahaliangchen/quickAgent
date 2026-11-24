@@ -102,7 +102,7 @@ def main():
             with urllib.request.urlopen(f'http://127.0.0.1:{server.agent_port}/agent/skill-packages/smoke/pages/view/index') as response:
                 assert b'Package page' in response.read()
             try:
-                server.request('/agent/skill-packages/smoke/tools/read_code_flow', {})
+                server.request('/agent/skill-packages/smoke/tools/blueprint__overview', {})
                 raise AssertionError('cross-package tool call accepted')
             except urllib.error.HTTPError as error:
                 assert error.code == 400
@@ -129,17 +129,21 @@ def main():
             assert all(p['id'] != 'smoke' for p in server.request('/agent/skill-packages')[1]['packages'])
             server.request('/agent/skill-packages', {'path': str(package)})
             assert next(p for p in server.request('/agent/skill-packages')[1]['packages'] if p['id'] == 'smoke')['enabled']
-            assert next(p for p in server.request('/agent/skill-packages')[1]['packages'] if p['id'] == 'code-flow')['origin'] == 'builtin'
+            assert next(p for p in server.request('/agent/skill-packages')[1]['packages'] if p['id'] == 'blueprint')['origin'] == 'builtin'
             assert next(p for p in server.request('/agent/skill-packages')[1]['packages'] if p['id'] == 'smoke')['origin'] == 'external'
-            server.request('/agent/skill-packages/code-flow/enabled', {'enabled': False})
+            try:
+                server.request('/agent/skill-packages/blueprint/enabled', {'enabled': False})
+                raise AssertionError('built-in plugin disabled')
+            except urllib.error.HTTPError as error:
+                assert error.code == 400
         finally:
             server.close()
         server = Harness(directory)
         try:
             packages = server.request('/agent/skill-packages')[1]['packages']
-            assert sum(p['id'] == 'code-flow' for p in packages) == 1
-            assert next(p for p in packages if p['id'] == 'code-flow')['enabled'] is False
-            server.request('/agent/skill-packages/code-flow/enabled', {'enabled': True})
+            assert sum(p['id'] == 'blueprint' for p in packages) == 1
+            assert next(p for p in packages if p['id'] == 'blueprint')['enabled'] is True
+            server.request('/agent/skill-packages/blueprint/enabled', {'enabled': True})
         finally:
             server.close()
         print('PASS: dynamic install/RPC/SSE/reload/ownership/disable/restart/remove/reinstall')

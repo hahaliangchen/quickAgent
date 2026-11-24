@@ -177,9 +177,9 @@ node --test tests/*.test.mjs
 
 本项目的开发得到 Claude 和 OpenAI Codex 的协助。具体贡献可在 Git 提交记录中查看。
 
-## 按功能查看代码 Flow
+## 按入口查看架构蓝图
 
-会话顶部 **技能页面 → 代码 Flow** 按功能分级展示当前方法调用关系。根目录 [code-flow.json](code-flow.json) 声明职责、公共入口、方法绑定和测试入口；宿主只提取源码证据，不自动判断耦合或重复实现。人和 AI 的 `read_code_flow` 工具使用同一个图读取器。首版支持 Rust，并明确保留边界、歧义和未解析调用。详见 [代码 Flow 首版说明](docs/code_flow_v1.md)。
+左侧导航 **架构蓝图** 按页面交互、接口或后台任务组织架构画布。项目启用后，画布和共享实体保存在 `.quickagent/blueprint/`；可检查源码锚点漂移，并通过 `blueprint.impact` 查询跨画布依赖、约束和测试入口。未启用时不会创建蓝图文件。
 
 历史数据访问已收敛到 `session_history/store.rs`：原始要求、引用校验、恢复、资产补回和界面历史读取共用该访问层，原始事件按编号升序返回。
 
@@ -190,7 +190,7 @@ node --test tests/*.test.mjs
 
 左侧主导航的“技能页面”无需已有对话或模型配置，支持输入本地目录安装，以及启用、停用、重载和移除包。移除只注销贡献，不删除包文件。配置保存在当前 DSH profile 下的 `skill-packages.json`；也可通过 `DSH_SKILL_PACKAGES_DIR` 指定启动扫描目录。同一路径只加载一次。包格式、独立程序的 JSON-RPC 协议和页面接口见 [技能插件包接口](docs/skill_packages.md)。本地独立程序工具和 HTML 页面无需重新编译宿主；内置源码位于 `src/builtin_plugins/` 和 `frontend/src/builtin_plugins/`，共享项目构建；外置即使下载到项目中也仍由安装器按外置身份加载。两者遵循相同声明、依赖、贡献注册与清理规则。
 
-MCP `initialize` 返回 `Mcp-Session-Id`，后续 POST/GET/DELETE 应携带该头。每个客户端会话独立激活技能，默认工具列表不带代码 Flow 等包工具。`read_skill` 加载后，服务通过 GET SSE 发送 `notifications/tools/list_changed`，客户端应刷新 `tools/list`；`unload_skill`、重置和包生命周期变化也发送通知。新任务边界可调用 `reset_skill_activation`，结束时 DELETE `/mcp`。MCP 不提供用户轮次信号，服务不会根据消息猜测边界。未携带会话头的旧客户端仍可使用基础工具，但不能启用包工具。
+MCP `initialize` 返回 `Mcp-Session-Id`，后续 POST/GET/DELETE 应携带该头。每个客户端会话独立激活技能，默认工具列表不带架构蓝图等包工具。`read_skill` 加载后，服务通过 GET SSE 发送 `notifications/tools/list_changed`，客户端应刷新 `tools/list`；`unload_skill`、重置和包生命周期变化也发送通知。新任务边界可调用 `reset_skill_activation`，结束时 DELETE `/mcp`。MCP 不提供用户轮次信号，服务不会根据消息猜测边界。未携带会话头的旧客户端仍可使用基础工具，但不能启用包工具。
 
 聊天附件支持选择、拖拽和粘贴图片，并使用持久引用在多轮中读取资料及调用视觉分析。插件附件能力由插件声明，协议兼容范围、解析边界及测试见[会话附件](docs/attachments.md)。
 

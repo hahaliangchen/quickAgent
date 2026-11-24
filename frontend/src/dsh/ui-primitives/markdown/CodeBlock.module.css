@@ -121,7 +121,7 @@
 
 .numbered :where(pre) code {
   display: block;
-  counter-reset: source-line;
+  counter-reset: source-line var(--dsl-code-block-counter-start, 0);
   white-space: normal;
 }
 

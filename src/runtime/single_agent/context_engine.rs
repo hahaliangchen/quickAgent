@@ -172,6 +172,10 @@ impl<'s, 'a> ContextEngine<'s, 'a> {
                 .filter_map(|part| part["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+        let turn_user_text = match model_call::workspace_blueprint_hint(s, &libs) {
+            Some(hint) => format!("{turn_user_text}\n\n{hint}"),
+            None => turn_user_text,
+        };
         w.context_doc.begin_turn(turn, &turn_user_text);
         self.save_window(&w).await?;
         Ok((w, libs))

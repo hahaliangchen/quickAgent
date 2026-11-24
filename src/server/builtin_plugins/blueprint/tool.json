@@ -1,0 +1,345 @@
+[
+  {
+    "name": "blueprint__overview",
+    "description": "List project and trigger-first canvas metadata without initializing storage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_root": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "blueprint__read_graph",
+    "description": "Read one canvas with its shared entities, port anchor status, edges and invariants; this view excludes pixel coordinates.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_root": {
+          "type": "string"
+        },
+        "graph_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "graph_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "blueprint__impact",
+    "description": "Trace upstream and downstream across canvases. Provide entity_id or workspace-relative file_path; optionally constrain the first hop to port_id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_root": {
+          "type": "string"
+        },
+        "entity_id": {
+          "type": "string"
+        },
+        "file_path": {
+          "type": "string"
+        },
+        "port_id": {
+          "type": "string"
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "blueprint__verify_sync",
+    "description": "Compare source anchors and Git changes with the last synced commit; does not change the project.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_root": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "blueprint__upsert_entities",
+    "description": "Merge shared entities and ports by ID. Use replace_ports or remove_entity_ids explicitly to remove ports or entities and their graph references.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "entities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "trigger_ui",
+                  "trigger_api",
+                  "trigger_job",
+                  "service",
+                  "store",
+                  "external",
+                  "test_guard"
+                ]
+              },
+              "traits": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "file_path": {
+                "type": "string",
+                "description": "Workspace-relative source path"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "direction": {
+                      "type": "string",
+                      "enum": [
+                        "in",
+                        "out",
+                        "both"
+                      ]
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "event",
+                        "method",
+                        "route",
+                        "tool",
+                        "query",
+                        "mutation",
+                        "state",
+                        "guard"
+                      ]
+                    },
+                    "symbol": {
+                      "type": "string"
+                    },
+                    "line_start": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "line_end": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "summary": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "direction",
+                    "kind"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "remove_entity_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "replace_ports": {
+          "type": "boolean"
+        },
+        "project_kind": {
+          "type": "string",
+          "enum": [
+            "fullstack",
+            "frontend",
+            "backend",
+            "cli",
+            "library"
+          ]
+        },
+        "last_synced_commit": {
+          "type": "string",
+          "description": "Latest verified Git commit (hex object ID)"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "blueprint__upsert_graph",
+    "description": "Create or patch a trigger-first canvas. Omit unchanged fields; omit node x/y to preserve existing positions. New nodes are laid out automatically.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "title": {
+          "type": "string"
+        },
+        "entry_kind": {
+          "type": "string",
+          "enum": [
+            "ui_page",
+            "service_api",
+            "background_job",
+            "cli_command",
+            "custom"
+          ]
+        },
+        "entry_summary": {
+          "type": "string"
+        },
+        "invariants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "entity_id": {
+                "type": "string"
+              },
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "entity_id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "source_entity": {
+                "type": "string"
+              },
+              "source_port": {
+                "type": "string"
+              },
+              "target_entity": {
+                "type": "string"
+              },
+              "target_port": {
+                "type": "string"
+              },
+              "relation": {
+                "type": "string",
+                "enum": [
+                  "triggers",
+                  "http",
+                  "calls",
+                  "reads",
+                  "writes",
+                  "emits",
+                  "must_sync",
+                  "guards"
+                ]
+              },
+              "label": {
+                "type": "string"
+              },
+              "invariant": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "info",
+                  "warning",
+                  "critical"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "source_entity",
+              "source_port",
+              "target_entity",
+              "target_port",
+              "relation"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "project_kind": {
+          "type": "string",
+          "enum": [
+            "fullstack",
+            "frontend",
+            "backend",
+            "cli",
+            "library"
+          ]
+        },
+        "last_synced_commit": {
+          "type": "string",
+          "description": "Latest verified Git commit (hex object ID)"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

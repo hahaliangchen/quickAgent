@@ -249,7 +249,7 @@ impl Drop for InactiveWatch {
 fn blocked_browser_urls() -> Vec<String> {
     crate::tools::process_sandbox::host_control_ports()
         .into_iter()
-        .chain([3000, 3001])
+        .chain([3000, 3001, 41200, 41201])
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .map(|port| format!("*://*:{port}/*"))

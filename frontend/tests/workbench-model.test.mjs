@@ -10,12 +10,12 @@ const run = (status, extra={}) => ({seq:1,status,rewritten_by:null,calls:[],reje
 
 test('sessions group by project, by the plugin that owns them, and plain chats; draft conversations stay out', () => {
   const tasks=[task('a',{workspace:'/p/one',updated_at:3}),task('b',{workspace:'/p/two',updated_at:5}),task('old',{workspace:null,updated_at:1}),
-    task('ppt',{plugin_id:'ppt-master',kind:'chat',updated_at:4}),task('flow',{plugin_id:'code-flow',kind:'chat',updated_at:2}),task('chat',{kind:'chat'}),
+    task('ppt',{plugin_id:'ppt-master',kind:'chat',updated_at:4}),task('blueprint',{plugin_id:'blueprint',kind:'chat',updated_at:2}),task('chat',{kind:'chat'}),
     task('draft-chat',{workspace:'/root/.codex-workspace-mcp/workflow-drafts/x'}),task('child',{parent_task_id:'a'}),task('archived',{archived:true}),task('blank',{prompt:'',status:'draft'})]
-  const packages=[{id:'ppt-master',title:'PPT Master',origin:'external'},{id:'code-flow',title:'代码 Flow',origin:'builtin'}]
+  const packages=[{id:'ppt-master',title:'PPT Master',origin:'external'},{id:'blueprint',title:'架构蓝图',origin:'builtin'}]
   const groups=sessionGroups(tasks,[{path:'/p/two',title:'Two'},{path:'/p/one',title:'One'}],packages,'/p/one',new Set(['draft-chat']),'')
   assert.deepEqual(groups.projects.map(g=>[g.title,g.tasks.map(t=>t.task_id)]),[['Two',['b']],['One',['a','old']]])
-  assert.deepEqual(groups.plugins.map(g=>[g.title,g.detail,g.tasks.map(t=>t.task_id)]),[['PPT Master','外部插件',['ppt']],['代码 Flow','内置插件',['flow']]])
+  assert.deepEqual(groups.plugins.map(g=>[g.title,g.detail,g.tasks.map(t=>t.task_id)]),[['PPT Master','外部插件',['ppt']],['架构蓝图','内置插件',['blueprint']]])
   assert.deepEqual(groups.chats.map(t=>t.task_id),['chat'])
   assert.deepEqual(sessionGroups(tasks,[],packages,'/p/one',new Set(),'ppt master').plugins.map(g=>g.tasks.map(t=>t.task_id)),[['ppt']],'a plugin session is found by its plugin name')
 })

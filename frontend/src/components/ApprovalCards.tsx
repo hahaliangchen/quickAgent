@@ -25,7 +25,7 @@ const TOOL_LABELS: Record<string, string> = {
   browser_press_key: '在浏览器里按键', browser_upload: '在浏览器里上传文件', browser_screenshot: '浏览器截图',
   browser_read: '读取浏览器页面', browser_wait: '等待浏览器页面', browser_diagnostics: '读取浏览器诊断', browser_close: '关闭浏览器',
   write_file: '写入工作区外的文件', edit_file: '修改工作区外的文件', replace_range: '修改工作区外的文件',
-  sync_git: '同步 Git 仓库', read_git: '读取工作区外的 Git 仓库', read_code_flow: '分析工作区外的代码流程',
+  sync_git: '同步 Git 仓库', read_git: '读取工作区外的 Git 仓库', blueprint__overview: '读取工作区外的架构蓝图', blueprint__read_graph: '读取工作区外的蓝图画布', blueprint__impact: '查询工作区外的蓝图影响面', blueprint__verify_sync: '校验工作区外的架构蓝图',
   workspace_info: '读取工作区外的信息',
   code_index__index: '索引工作区外的代码', code_index__status: '读取工作区外的索引状态',
   code_index__list: '列出工作区外的符号', code_index__search: '搜索工作区外的符号', code_index__read: '读取工作区外的符号',

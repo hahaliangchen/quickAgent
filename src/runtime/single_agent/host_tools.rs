@@ -1050,7 +1050,10 @@ pub(super) fn outside_read_paths(
         "list_dir"
             | "search_text"
             | "read_git"
-            | "read_code_flow"
+            | "blueprint__overview"
+            | "blueprint__read_graph"
+            | "blueprint__impact"
+            | "blueprint__verify_sync"
             | "workspace_info"
             | "git_status"
             | "git_diff"
@@ -1082,7 +1085,10 @@ pub(super) fn outside_read_paths(
     let base = args["workspace_root"]
         .as_str()
         .filter(|raw| !raw.trim().is_empty())
-        .map(|raw| std::path::PathBuf::from(raw.trim()));
+        .map(|raw| {
+            let path = std::path::PathBuf::from(raw.trim());
+            if name.starts_with("blueprint__") && path.is_relative() { root.join(path) } else { path }
+        });
     let outside = |path: std::path::PathBuf| {
         let resolved = path.canonicalize().unwrap_or(path);
         !resolved.starts_with(&root)
@@ -1094,8 +1100,10 @@ pub(super) fn outside_read_paths(
     {
         found.push(base.to_string_lossy().into_owned());
     }
-    if !matches!(name, "read_git" | "read_code_flow") {
+    if name != "read_git" {
         for raw in args["path"].as_str().into_iter().chain(
+            (name == "blueprint__impact").then(|| args["file_path"].as_str()).flatten(),
+        ).chain(
             args["paths"]
                 .as_array()
                 .into_iter()

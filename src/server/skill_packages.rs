@@ -1183,7 +1183,7 @@ mod tests {
             load(&root).unwrap().manifest.library.as_deref(),
             Some("ppt")
         );
-        manifest["library"] = json!("flow");
+        manifest["library"] = json!("blueprint");
         std::fs::write(root.join("plugin.json"), manifest.to_string()).unwrap();
         let (runtime, catalog) = test_runtime();
         let parent = runtime
@@ -1199,7 +1199,7 @@ mod tests {
             format!("{error:#}").contains("namespace already belongs"),
             "{error:#}"
         );
-        assert_eq!(catalog.packages.catalog()[0]["library"], "flow");
+        assert_eq!(catalog.packages.catalog()[0]["library"], "blueprint");
         runtime.shutdown().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1261,7 +1261,7 @@ mod tests {
             "---\nname: protocol-test\ndescription: Protocol test\n---\nInstructions.",
         )
         .unwrap();
-        let mut manifest = json!({"version":1,"id":"protocol-test","title":"Protocol","skill":"SKILL.md","inject":["plugin:code-flow"],"tools":["arbitrary_native"]});
+        let mut manifest = json!({"version":1,"id":"protocol-test","title":"Protocol","skill":"SKILL.md","inject":["plugin:blueprint"],"tools":["arbitrary_native"]});
         std::fs::write(root.join("plugin.json"), manifest.to_string()).unwrap();
         let native = Arc::new(crate::server::plugin_protocol::NativeContributions {
             tools: BTreeMap::from([(
@@ -1298,7 +1298,7 @@ mod tests {
             "arbitrary_native"
         );
         assert!(
-            set_enabled(&runtime, &catalog.packages, "code-flow", false, false).is_err(),
+            set_enabled(&runtime, &catalog.packages, "blueprint", false, false).is_err(),
             "a live dependency prevents provider unloading"
         );
         runtime.unmount(scope).unwrap();
@@ -1423,47 +1423,47 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':r['params']}))
     #[test]
     fn package_owns_skill_tools_and_pages_across_unload_and_reload() {
         let (runtime, tools) = test_runtime();
-        assert!(tools.contains("read_code_flow"));
-        assert!(tools.packages.owns_tool("code-flow", "read_code_flow"));
-        assert_eq!(tools.packages.skills()[0]["name"], "code-flow");
+        assert!(tools.contains("blueprint__overview"));
+        assert!(tools.packages.owns_tool("blueprint", "blueprint__overview"));
+        assert_eq!(tools.packages.skills()[0]["name"], "blueprint");
         let original = std::fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("src/server/builtin_plugins/code_flow/SKILL.md"),
+                .join("src/server/builtin_plugins/blueprint/SKILL.md"),
         )
         .unwrap();
         assert_eq!(
-            tools.packages.read("code-flow").unwrap()["content"],
+            tools.packages.read("blueprint").unwrap()["content"],
             original
         );
         assert!(tools.packages.tools(&Default::default()).is_empty());
         assert_eq!(
             tools
                 .packages
-                .tools(&std::collections::BTreeSet::from(["code-flow".into()]))
+                .tools(&std::collections::BTreeSet::from(["blueprint".into()]))
                 .len(),
-            1
+            6
         );
         assert!(
-            set_enabled(&runtime, &tools.packages, "code-flow", false, false).is_err(),
+            set_enabled(&runtime, &tools.packages, "blueprint", false, false).is_err(),
             "built-in plugins stay active"
         );
-        assert!(tools.contains("read_code_flow"));
-        let scope = tools.packages.entries.read().unwrap()["code-flow"].scope.unwrap();
+        assert!(tools.contains("blueprint__overview"));
+        let scope = tools.packages.entries.read().unwrap()["blueprint"].scope.unwrap();
         runtime.unmount(scope).unwrap();
-        assert!(!tools.contains("read_code_flow"));
-        assert!(tools.packages.read("code-flow").is_err());
+        assert!(!tools.contains("blueprint__overview"));
+        assert!(tools.packages.read("blueprint").is_err());
         assert!(tools.packages.skills().as_array().unwrap().is_empty());
         assert_eq!(tools.packages.catalog()[0]["enabled"], false);
         assert!(
             tools
                 .packages
-                .tools(&std::collections::BTreeSet::from(["code-flow".into()]))
+                .tools(&std::collections::BTreeSet::from(["blueprint".into()]))
                 .is_empty()
         );
-        set_enabled(&runtime, &tools.packages, "code-flow", true, false).unwrap();
-        assert!(tools.contains("read_code_flow"));
+        set_enabled(&runtime, &tools.packages, "blueprint", true, false).unwrap();
+        assert!(tools.contains("blueprint__overview"));
         runtime.shutdown().unwrap();
-        assert!(!tools.contains("read_code_flow"));
+        assert!(!tools.contains("blueprint__overview"));
         assert!(tools.packages.skills().as_array().unwrap().is_empty());
     }
     #[test]

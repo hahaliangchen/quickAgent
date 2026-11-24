@@ -1640,6 +1640,7 @@ pub async fn run(
     let addr = listener.local_addr()?;
     let app = if addr.ip().is_loopback() {
         app.merge(crate::server::builtin_plugins::ssh::routes::router())
+            .merge(crate::server::builtin_plugins::blueprint::routes::router())
     } else {
         app
     };

@@ -376,11 +376,6 @@
         let root =
             std::env::temp_dir().join(format!("mcp-skill-{}", crate::server::agent_service::uuid_like()));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
-            root.join("code-flow.json"),
-            r#"{"version":1,"features":[]}"#,
-        )
-        .unwrap();
         let workspace = Arc::new(Workspace::new(&root).unwrap());
         let (runtime, catalog) = crate::server::skill_packages::test_runtime();
         crate::server::skill_packages::bind_root(&catalog);
@@ -389,14 +384,14 @@
         let first = headers["mcp-session-id"].to_str().unwrap().to_owned();
         let (headers, _) = rpc(&workspace, None, "initialize", json!({})).await;
         let second = headers["mcp-session-id"].to_str().unwrap().to_owned();
-        let has_flow = |packet: &Value| {
+        let has_blueprint = |packet: &Value| {
             packet["result"]["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|tool| tool["name"] == "read_code_flow")
+                .any(|tool| tool["name"] == "blueprint__overview")
         };
-        assert!(!has_flow(
+        assert!(!has_blueprint(
             &rpc(&workspace, Some(&first), "tools/list", json!({}))
                 .await
                 .1
@@ -412,31 +407,31 @@
             &workspace,
             Some(&first),
             "tools/call",
-            json!({"name":"read_skill","arguments":{"name":"code-flow"}}),
+            json!({"name":"read_skill","arguments":{"name":"blueprint"}}),
         )
         .await
         .1;
         assert!(packet["error"].is_null());
         assert!(changed.has_changed().unwrap());
         changed.borrow_and_update();
-        assert!(has_flow(
+        assert!(has_blueprint(
             &rpc(&workspace, Some(&first), "tools/list", json!({}))
                 .await
                 .1
         ));
-        assert!(!has_flow(
+        assert!(!has_blueprint(
             &rpc(&workspace, Some(&second), "tools/list", json!({}))
                 .await
                 .1
         ));
-        assert!(!has_flow(
+        assert!(!has_blueprint(
             &rpc(&workspace, None, "tools/list", json!({})).await.1
         ));
         let rejected = rpc(
             &workspace,
             Some(&second),
             "tools/call",
-            json!({"name":"read_code_flow"}),
+            json!({"name":"blueprint__overview"}),
         )
         .await
         .1;
@@ -450,13 +445,13 @@
             &workspace,
             Some(&first),
             "tools/call",
-            json!({"name":"read_code_flow"}),
+            json!({"name":"blueprint__overview"}),
         )
         .await
         .1;
-        assert!(result["result"]["structuredContent"]["features"].is_array());
-        crate::server::skill_packages::reload(&runtime, &catalog.packages, "code-flow").unwrap();
-        assert!(!has_flow(
+        assert_eq!(result["result"]["structuredContent"]["exists"], false);
+        crate::server::skill_packages::reload(&runtime, &catalog.packages, "blueprint").unwrap();
+        assert!(!has_blueprint(
             &rpc(&workspace, Some(&first), "tools/list", json!({}))
                 .await
                 .1
@@ -465,17 +460,17 @@
             &workspace,
             Some(&first),
             "tools/call",
-            json!({"name":"read_skill","arguments":{"name":"code-flow"}}),
+            json!({"name":"read_skill","arguments":{"name":"blueprint"}}),
         )
         .await;
         rpc(
             &workspace,
             Some(&first),
             "tools/call",
-            json!({"name":"unload_skill","arguments":{"name":"code-flow"}}),
+            json!({"name":"unload_skill","arguments":{"name":"blueprint"}}),
         )
         .await;
-        assert!(!has_flow(
+        assert!(!has_blueprint(
             &rpc(&workspace, Some(&first), "tools/list", json!({}))
                 .await
                 .1
@@ -484,7 +479,7 @@
             &workspace,
             Some(&first),
             "tools/call",
-            json!({"name":"read_skill","arguments":{"name":"code-flow"}}),
+            json!({"name":"read_skill","arguments":{"name":"blueprint"}}),
         )
         .await;
         rpc(
@@ -494,7 +489,7 @@
             json!({"name":"reset_skill_activation"}),
         )
         .await;
-        assert!(!has_flow(
+        assert!(!has_blueprint(
             &rpc(&workspace, Some(&first), "tools/list", json!({}))
                 .await
                 .1

@@ -159,7 +159,7 @@ function fallback(name: string): Omit<ToolVisual, 'summary'> {
   if (/^browser_/.test(name)) return { tone: 'web', icon: <IconBrowseOutlineMedium />, title: '操作了浏览器' }
   if (/write|edit|replace|apply|patch|create|delete/.test(name)) return { tone: 'edit', icon: <FilePenIcon />, title: '编辑了文件' }
   if (/search|grep/.test(name)) return { tone: 'search', icon: <IconSearchOutlineMedium />, title: '搜索了代码' }
-  if (/symbol|index|code_map|code_flow/.test(name)) return { tone: 'search', icon: <IconWorkspaceTreeOutlineMedium />, title: '检索了符号' }
+  if (/symbol|index|code_map|blueprint/.test(name)) return { tone: 'search', icon: <IconWorkspaceTreeOutlineMedium />, title: '检索了符号' }
   if (/list|find/.test(name)) return { tone: 'search', icon: <IconFolderOpenOutlineMedium />, title: '浏览了目录' }
   if (/memory|architecture|business/.test(name)) return { tone: 'context', icon: <IconDatabaseOutlineMedium />, title: '读取了工作区记忆' }
   if (/read|view_file|open|view/.test(name)) return { tone: 'read', icon: <FileTextIcon />, title: '读取了文件' }

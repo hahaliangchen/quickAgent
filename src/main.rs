@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
         return ai_proxy::run(listener, &ai_config_path, workspace).await;
     }
     {
-        let agent_bind = env::var("AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:3001".to_string());
+        let agent_bind = env::var("AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:41201".to_string());
         match TcpListener::bind(&agent_bind).await {
             Ok(listener) => {
                 info!(path = %ai_config_path.display(), bind = %agent_bind, "Agent service starting");
@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let bind = env::var("MCP_BIND").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let bind = env::var("MCP_BIND").unwrap_or_else(|_| "127.0.0.1:41200".to_string());
     let addr: SocketAddr = bind.parse()?;
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, mode = "http", "listening");

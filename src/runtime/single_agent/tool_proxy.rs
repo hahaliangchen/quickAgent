@@ -451,6 +451,28 @@ mod tests {
     }
 
     #[test]
+    fn blueprint_read_tool_contracts_includes_all_registered_schemas() {
+        let (runtime, tools) = crate::server::skill_packages::test_runtime();
+        let defs = tools.packages.tools(&tools.packages.enabled());
+        let libs = libraries::catalog(&defs, &tools.packages.catalog());
+        assert!(crate::runtime::agent_program::declarations::lazy_contract_library("blueprint"));
+        let (result, failed) = super::handle_read_tool_contracts_with_defs(
+            &libs, &json!({"libraries":["blueprint"]}), || defs,
+        );
+        assert!(!failed, "{result}");
+        let text = result["declarations"].as_str().unwrap();
+        let schemas = result["schemas"].as_array().unwrap();
+        assert_eq!(schemas.len(), 6);
+        for method in ["overview", "read_graph", "impact", "verify_sync", "upsert_entities", "upsert_graph"] {
+            assert!(text.contains(&format!("function {method}(args:")), "{text}");
+            let schema = schemas.iter().find(|s| s["tool"] == format!("blueprint__{method}")).unwrap();
+            assert!(schema["inputSchema"]["properties"].is_object(), "{schema}");
+        }
+        assert!(text.contains("source_port: (string)"), "{text}");
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
     fn edit_file_shorthand_normalizes_to_edits_array() {
         let mut args = json!({
             "path": "src/a.ts",

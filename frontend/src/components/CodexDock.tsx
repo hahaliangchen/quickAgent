@@ -4,7 +4,7 @@ import css from './CodexDock.module.css'
 /** The rail's icons: a 2px round stroke on a 24px grid, like the workbench's. */
 const STROKE = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { display: 'block' } } as const
 
-export type DockTab = 'home' | 'skills' | 'git' | 'ssh' | 'office'
+export type DockTab = 'home' | 'skills' | 'git' | 'ssh' | 'blueprint' | 'office'
 
 interface CodexDockProps {
   activeTab?: DockTab
@@ -71,6 +71,10 @@ export function CodexDock({
         <button type="button" className={clsx(css.dockBtn, activeTab === 'ssh' && css.active)}
           title="远程终端 (SSH)" aria-label="远程终端" onClick={() => onSelectTab?.('ssh')}>
           <svg {...STROKE} aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2" /><path d="m7 9 3 3-3 3m6 0h4" /></svg>
+        </button>
+        <button type="button" className={clsx(css.dockBtn, activeTab === 'blueprint' && css.active)}
+          title="架构蓝图 (Blueprint)" aria-label="架构蓝图" onClick={() => onSelectTab?.('blueprint')}>
+          <svg {...STROKE} aria-hidden="true"><rect x="3" y="4" width="6" height="6" rx="1" /><rect x="15" y="14" width="6" height="6" rx="1" /><path d="M9 7h4a4 4 0 0 1 4 4v3" /></svg>
         </button>
 
         <button

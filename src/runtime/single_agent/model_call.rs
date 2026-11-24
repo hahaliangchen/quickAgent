@@ -357,7 +357,7 @@ pub(super) fn build_request_body(
 pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String {
     let mut text = String::from(V2_SYSTEM_PROMPT);
     text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
-    text.push_str(&declarations::static_library_header(libs));
+    text.push_str(&model_library_header(libs));
     if !s.scope.starts_with("virtual:") {
         let orch = crate::runtime::flow_libraries::list_libraries(s);
         if !orch.is_empty() {
@@ -369,6 +369,24 @@ pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String 
         }
     }
     text
+}
+
+// Keep the pinned header stable and give only opted-in workspaces a blueprint hint.
+fn model_library_header(libs: &Libraries) -> String {
+    if !libs.contains_key("blueprint") { return declarations::static_library_header(libs); }
+    let mut listed = libs.clone();
+    listed.remove("blueprint");
+    declarations::static_library_header(&listed)
+}
+
+pub(super) fn workspace_blueprint_hint(s: &Session<'_>, libs: &Libraries) -> Option<String> {
+    if !libs.contains_key("blueprint") { return None; }
+    let base = s.state.workspace.root();
+    let root = match crate::server::plugin_sessions::owner(base, s.task).ok()? {
+        Some(plugin) => crate::server::plugin_sessions::workspace_dir(base, &plugin).ok()?,
+        None => crate::context::session_browser::task_workspace(base, s.task).ok()?,
+    };
+    crate::server::builtin_plugins::blueprint::workspace_blueprint_hint(&root)
 }
 
 const RUNTIME_IDENTITY_MARKER: &str = "/* === RUNTIME IDENTITY === */";
@@ -403,7 +421,7 @@ pub(super) fn build_request_body_for_doc(
     let has_pinned_sdk = system_text.contains("/* === RUNTIME HOST SDK (.d.ts) === */");
     if !has_pinned_sdk {
         system_text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
-        system_text.push_str(&declarations::static_library_header(libs));
+        system_text.push_str(&model_library_header(libs));
     }
     if !has_pinned_sdk && !s.scope.starts_with("virtual:") {
         let orch = crate::runtime::flow_libraries::list_libraries(s);

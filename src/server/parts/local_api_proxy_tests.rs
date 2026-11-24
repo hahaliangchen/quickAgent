@@ -45,7 +45,7 @@ async fn host(upstream_port: u16, read_timeout: Duration) -> Server {
     let (runtime, catalog) = crate::server::skill_packages::test_runtime();
     catalog
         .packages
-        .set_test_local_service_port("code-flow", upstream_port);
+        .set_test_local_service_port("blueprint", upstream_port);
     let state = AiProxyState {
         config: Default::default(),
         config_path: Default::default(),
@@ -62,7 +62,7 @@ async fn host(upstream_port: u16, read_timeout: Duration) -> Server {
     .await
 }
 
-const PREFIX: &str = "/agent/skill-packages/code-flow/local-api";
+const PREFIX: &str = "/agent/skill-packages/blueprint/local-api";
 
 #[tokio::test]
 async fn local_api_streams_24_mib_through_the_real_route_in_both_directions() {

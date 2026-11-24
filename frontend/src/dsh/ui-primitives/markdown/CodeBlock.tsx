@@ -34,6 +34,8 @@ export interface CodeBlockProps {
   contentRef?: Ref<HTMLDivElement> | undefined
   /** Show a numbered gutter without adding numbers to copied source. Defaults to false. */
   lineNumbers?: boolean | undefined
+  /** First source line when rendering a snippet. */
+  lineNumberStart?: number | undefined
   /** Show the language and copy header; false when the caller supplies a toolbar. Defaults to true. */
   showHeader?: boolean | undefined
   /** Copy-button idle label; the owner passes localized copy (this package is cordis-free, so copy arrives via props). */
@@ -112,7 +114,7 @@ function renderTerminalLines(lines: readonly string[]): ReactNode {
 }
 
 export function CodeBlock({
-  code, lang, streaming, className, contentRef, lineNumbers = false, showHeader = true, copyLabel, copiedLabel, toolbarLabels, wrap,
+  code, lang, streaming, className, contentRef, lineNumbers = false, lineNumberStart = 1, showHeader = true, copyLabel, copiedLabel, toolbarLabels, wrap,
 }: CodeBlockProps) {
   const trimmed = code.endsWith('\n') ? code.slice(0, -1) : code
   const lines = useMemo(() => trimmed.split('\n'), [trimmed])
@@ -294,7 +296,8 @@ export function CodeBlock({
       data-line-numbers={numbered || undefined}
       data-code-wrap={toolbarLabels === undefined ? undefined : wrapped}
       style={sourceLines === undefined ? undefined : {
-        '--dsl-code-block-line-number-width': `${Math.max(2, String(sourceLines.length).length)}ch`,
+        '--dsl-code-block-line-number-width': `${Math.max(2, String(lineNumberStart + sourceLines.length - 1).length)}ch`,
+        '--dsl-code-block-counter-start': lineNumberStart - 1,
       } as CSSProperties}>
       {/* These paired attributes are stable semantic hooks for owner styling and DOM tests. */}
       {showHeader && <div className={css.bannerWrap}>

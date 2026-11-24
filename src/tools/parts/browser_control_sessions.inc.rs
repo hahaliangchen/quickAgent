@@ -126,7 +126,8 @@ fn check_browser_port(url: &reqwest::Url) -> Result<()> {
         return Ok(());
     };
     ensure!(
-        !matches!(port, 3000 | 3001) && !crate::tools::process_sandbox::is_host_control_port(port),
+        !matches!(port, 3000 | 3001 | 41200 | 41201)
+            && !crate::tools::process_sandbox::is_host_control_port(port),
         "CONTROL_PORT_BLOCKED: refusing browser access on port {port}"
     );
     Ok(())

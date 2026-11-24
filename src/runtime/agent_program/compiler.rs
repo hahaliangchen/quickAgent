@@ -610,9 +610,25 @@ fn compile_inner(
         let caret_offset = prefix.len() + (col0 - start);
         format!("\n  {prefix}{window}{suffix}\n  {}^", " ".repeat(caret_offset))
     };
-    let template_backtick_hint = |line_1based: usize| -> &'static str {
+    let diagnostic_hint = |line_1based: usize, kind_str: &str| -> &'static str {
         let lines: Vec<&str> = source.lines().collect();
         let idx = line_1based.saturating_sub(1);
+        let tail = source.trim_end();
+        let unclosed_template_at_eof = (kind_str == "UnterminatedTpl"
+            || kind_str.contains("<lexing error>")
+            || kind_str == "Eof")
+            && (source.matches('`').count() % 2 == 1)
+            && line_1based >= lines.len();
+        let truncated_tail = tail.ends_with("'{")
+            || tail.ends_with("\"{")
+            || tail.ends_with('{')
+            || tail.ends_with('(')
+            || tail.ends_with('[')
+            || tail.ends_with(':')
+            || tail.ends_with(',');
+        if unclosed_template_at_eof && truncated_tail {
+            return "\n  Hint: your `run_js` code appears truncated before closing the template/string (often caused by an upstream unescaped `\"` such as `-d '{\"...\"'` inside the tool JSON). Avoid double-quoted JSON payloads inside shell template strings; pass data via `JSON.stringify(...)` or a single-quoted Python/JS script instead.";
+        }
         let current_has_backtick = lines.get(idx).is_some_and(|l| l.contains('`'));
         let prior_opens_template = lines
             .get(..idx)
@@ -626,25 +642,27 @@ fn compile_inner(
     let module = parser.parse_module().map_err(|e| {
         let p = map.lookup_char_pos(e.span().lo);
         let col = p.col.0 + 1;
+        let kind_str = format!("{:?}", e.kind());
         anyhow::anyhow!(
             "TS_PROGRAM {}:{}: {}{}{}",
             p.line,
             col,
-            describe(format!("{:?}", e.kind())),
+            describe(kind_str.clone()),
             format_snippet(p.line, col),
-            template_backtick_hint(p.line),
+            diagnostic_hint(p.line, &kind_str),
         )
     })?;
     if let Some(e) = parser.take_errors().first() {
         let p = map.lookup_char_pos(e.span().lo);
         let col = p.col.0 + 1;
+        let kind_str = format!("{:?}", e.kind());
         bail!(
             "TS_PROGRAM {}:{}: {}{}{}",
             p.line,
             col,
-            describe(format!("{:?}", e.kind())),
+            describe(kind_str.clone()),
             format_snippet(p.line, col),
-            template_backtick_hint(p.line),
+            diagnostic_hint(p.line, &kind_str),
         );
     }
     if !internal {
@@ -1393,5 +1411,34 @@ fn is_bare_query_expr(mut expr: &ast::Expr) -> bool {
             true
         }
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_hint_tests {
+    use super::compile;
+
+    #[test]
+    fn truncated_shell_json_template_reports_truncation_hint() {
+        let truncated = "const ok = 1;\nconst emb = process.exec_command({cmd:String.raw`curl --noproxy '*' -d '{";
+        let err = compile(truncated).unwrap_err().to_string();
+        assert!(
+            err.contains("appears truncated before closing the template/string"),
+            "expected truncation hint, got: {err}"
+        );
+        assert!(
+            err.contains("JSON.stringify"),
+            "expected JSON.stringify guidance, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unescaped_backtick_inside_template_keeps_backtick_hint() {
+        let bad = "const md = `\nhello\n`code` here\n`;";
+        let err = compile(bad).unwrap_err().to_string();
+        assert!(
+            err.contains("an unescaped backtick"),
+            "expected backtick hint, got: {err}"
+        );
     }
 }

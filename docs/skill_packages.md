@@ -10,7 +10,7 @@
 src/builtin_plugins/
   mod.rs                       # 后端项目成员 roster
   services.rs                  # 宿主基础服务插件，遵循 Plugin 生命周期
-  code_flow/
+  blueprint/
     mod.rs                     # 声明原生工具实现、schema 与权限
     plugin.json                # 固定协议清单
     SKILL.md
@@ -19,14 +19,14 @@ src/builtin_plugins/
 frontend/src/builtin_plugins/
   index.ts                     # 前端项目成员 roster
   shell.ts                     # 基础界面插件，使用 Cordis 插槽
-  code-flow/
+  blueprint/
     index.ts                   # Cordis name / inject / apply
     page.tsx
     graph.ts
     style.module.css
 ```
 
-内置页面共用项目的 React、Cordis、组件库和构建工程。宿主的技能页面只显示贡献目录，不知道 code-flow 的实现或磁盘路径。后端也不在通用加载器中判断某个插件的工具名。
+内置页面共用项目的 React、Cordis、组件库和构建工程。宿主的技能页面只显示贡献目录，不知道 blueprint 的实现或磁盘路径。后端也不在通用加载器中判断某个插件的工具名。
 
 ## 清单与实现适配
 
@@ -59,9 +59,9 @@ frontend/src/builtin_plugins/
 
 宿主从 inputSchema 自动生成 program_tool_headers 声明，供模型阅读参数和约束，程序源码仍是无类型 JS 子集。原生／远程工具可提供 outputSchema，命令工具可提供 output_schema；没有返回契约时声明 unknown。规划请求只发声明，虚函数任务用 invoke_library 传输同一个固定方法名及原参数，执行仍进入原 handler 和权限检查。编译调用和原生传输都交回原工具 JSON；资产交付 envelope 和事件序号不是库返回字段。原生 spawn/join 和工具组加载不是模型的另一套编排入口。详见[执行语言](agent-program.md#工具声明与固定名字)。
 
-`tools` 是完整声明。实现可由项目的原生贡献适配器提供，或通过 `command_tools` 的独立程序适配器提供。两者都经过相同清单校验、注册和清理；通用加载器没有 code-flow 特例。原生适配器提供工具 schema、handler 和权限等级，外置包不能借用项目的原生实现。
+`tools` 是完整声明。实现可由项目的原生贡献适配器提供，或通过 `command_tools` 的独立程序适配器提供。两者都经过相同清单校验、注册和清理；通用加载器没有 blueprint 特例。原生适配器提供工具 schema、handler 和权限等级，外置包不能借用项目的原生实现。
 
-`renderer: react` 表示 Cordis 页面模块：内置模块的 entry 为项目注册键（例如 `code-flow.architecture`），外置 entry 为包内已构建 JS/MJS 模块。`renderer: html` 是通用 HTML 页面适配器，内置外置均可使用。资源路径不得越出包或页面目录。
+`renderer: react` 表示 Cordis 页面模块：内置模块的 entry 为项目注册键（例如 `blueprint.workbench`），外置 entry 为包内已构建 JS/MJS 模块。`renderer: html` 是通用 HTML 页面适配器，内置外置均可使用。资源路径不得越出包或页面目录。
 
 ## 插件页面的业务指令
 
@@ -229,7 +229,7 @@ Remote 包络、确认、工具映射、页面声明、凭证隔离与卸载。
 隔离及页面生命周期。PPT 前端的 `npm run test:ppt-plugin` 在 Chromium 中验证
 模块和 iframe 的持续聊天、选页、只读呈现及工具详情不展示。
 
-`cargo test skill_ -- --nocapture` 验证共同后端协议、来源、依赖、权限、激活与清理。`node --test tests/plugin-pages.test.mjs tests/code-flow.test.mjs` 验证实际 Cordis 的前端依赖、页面归属、卸载和图布局。构建 Rust 后，`python3 scripts/skill_packages_smoke.py` 在临时 profile/工作区验证安装、RPC、SSE、重载和持久化，不调用模型。MCP 接口参考 [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) 与 [Tools](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)。
+`cargo test skill_ -- --nocapture` 验证共同后端协议、来源、依赖、权限、激活与清理。`node --test tests/plugin-pages.test.mjs` 验证 Cordis 页面生命周期；`npm run test:blueprint` 在构建后验证蓝图端到端。构建 Rust 后，`python3 scripts/skill_packages_smoke.py` 在临时 profile/工作区验证安装、RPC、SSE、重载和持久化，不调用模型。MCP 接口参考 [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) 与 [Tools](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)。
 
 ## 独立插件页面登录接入
 

@@ -59,7 +59,7 @@ def main():
         if previous.exists(): shutil.rmtree(previous)
     copy_tree(source/"agent/frontend/dist", app/"agent-web")
     if (app/"agent-resources").exists(): shutil.rmtree(app/"agent-resources")
-    for name in ["code_flow", "code_index", "git", "web"]:
+    for name in ["blueprint", "code_index", "git", "web"]:
         copy_tree(source/"agent/src/server/builtin_plugins"/name, app/"agent-resources/src/server/builtin_plugins"/name)
     copy_tree(source/"view/build", app/"server/web")
     # Other modules' example documents are not customer PPT assets.
