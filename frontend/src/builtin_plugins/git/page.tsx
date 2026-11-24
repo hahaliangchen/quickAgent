@@ -8,6 +8,7 @@ import {
   type GitCommitDetail, type GitFile, type GitOverview, type GitPatch, type GraphRow,
 } from './graph.ts'
 import { FileTree } from './FileTree.tsx'
+import { Picker, type PickerOption } from './Picker.tsx'
 import { CodeView, type GitFileText } from './CodeView.tsx'
 import { useCordis } from '../../cordis/react.tsx'
 import css from './style.module.css'
@@ -134,11 +135,22 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
   const rows = useMemo(() => layoutGraph(commits), [commits])
   const graphWidth = Math.min(8, Math.max(1, ...rows.map(row => row.width)))
   const authors = useMemo(() => [...new Set(commits.map(c => c.author))].sort(), [commits])
+  const countsByAuthor = useMemo(() => commits.reduce((counts, commit) => counts.set(commit.author, (counts.get(commit.author) ?? 0) + 1), new Map<string, number>()), [commits])
   const needle = query.trim().toLowerCase()
   const filtered = !needle && !author
   const visible = commits.map((commit, i) => ({ commit, row: rows[i]! })).filter(({ commit }) =>
     (!author || commit.author === author) && (!needle || commit.subject.toLowerCase().includes(needle) || commit.hash.startsWith(needle) || commit.author.toLowerCase().includes(needle)))
   const localBranches = data?.branches.filter(b => !b.remote) ?? []
+  // The picker needs a display row per choice; the relative time tells apart
+  // the branches a rebase or a stale remote left behind.
+  const branchOptions = useMemo<PickerOption[]>(() => [
+    { value: '', label: '全部分支', divider: true },
+    ...localBranches.map(branch => ({ value: branch.name, label: branch.name, hint: branch.name === data?.head ? '当前' : relativeTime(branch.time) })),
+  ], [localBranches, data?.head])
+  const authorOptions = useMemo<PickerOption[]>(() => [
+    { value: '', label: '全部作者', divider: true },
+    ...authors.map(name => ({ value: name, label: name, hint: `${countsByAuthor.get(name) ?? 0} 个提交` })),
+  ], [authors, countsByAuthor])
   const changeCodes = useMemo(() => new Map((data?.changes ?? []).map(change => [change.path,
     change.conflict ? '!' : change.index !== '.' && change.index !== '?' ? change.index : change.worktree])), [data])
   function showWorkingDiff(path: string) {
@@ -203,21 +215,13 @@ export default function GitPage({ workspaceRoot, owner }: PluginPageProps) {
 
         {view === 'graph' && <>
           <div className={css.toolbar}>
-            <label className={css.select}><BranchIcon />
-              <select value={branch} onChange={event => { setBranch(event.target.value); void load(event.target.value) }}>
-                <option value="">全部分支</option>
-                {localBranches.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}
-              </select>
-            </label>
+            <Picker icon={<BranchIcon />} label="分支" mono value={branch} options={branchOptions} placeholder="全部分支"
+              onChange={next => { setBranch(next); void load(next) }} />
             <label className={css.search}><Icon name="search" size={15} />
               <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索提交（消息、哈希、作者…）" />
             </label>
-            <label className={css.select}><Icon name="user" size={15} />
-              <select value={author} onChange={event => setAuthor(event.target.value)}>
-                <option value="">全部作者</option>
-                {authors.map(name => <option key={name} value={name}>{name}</option>)}
-              </select>
-            </label>
+            <Picker icon={<Icon name="user" size={15} />} label="作者" value={author} options={authorOptions} placeholder="全部作者"
+              onChange={setAuthor} />
           </div>
           <div className={css.table} role="table">
             <div className={clsx(css.tr, css.th)} role="row">

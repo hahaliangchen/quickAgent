@@ -100,14 +100,75 @@
 .synced { display: inline-flex; align-items: center; gap: 4px; color: var(--git-accent); font-size: 12.5px; }
 .statusBar > .remote { margin-left: auto; gap: 14px; }
 
-.toolbar { display: flex; gap: 10px; flex-wrap: wrap; }
-.select, .search {
-  display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 10px;
+.toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.search {
+  display: inline-flex; align-items: center; gap: 8px; flex: 1; min-width: 180px; box-sizing: border-box; height: 34px; padding: 0 10px;
   border: 1px solid var(--codex-card-border); border-radius: 8px; background: var(--codex-card-bg); color: var(--codex-text-secondary);
+  transition: border-color .15s, box-shadow .15s;
 }
-.select select { font: inherit; border: 0; background: none; color: var(--codex-text-primary); outline: none; min-width: 90px; }
-.search { flex: 1; min-width: 180px; }
+.search:focus-within { border-color: var(--git-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--git-accent) 15%, transparent); }
 .search input { flex: 1; font: inherit; border: 0; background: none; outline: none; color: var(--codex-text-primary); min-width: 0; }
+/* The UA placeholder grey is unreadable on the dark card. */
+.search input::placeholder, .menuSearch input::placeholder { color: var(--codex-text-muted); opacity: 1; }
+
+/* Filter chip: one control — glyph, value, chevron. The native <select> it
+   replaces drew its own inset field and arrow inside the label's border, which
+   is what made the old control read as two stacked boxes. */
+.picker {
+  display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px 0 10px; max-width: 260px;
+  border: 1px solid var(--codex-card-border); border-radius: 8px; background: var(--codex-card-bg);
+  color: var(--codex-text-primary); font: inherit; cursor: pointer;
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.picker:hover { background: var(--codex-hover-bg); border-color: color-mix(in srgb, var(--git-accent) 40%, var(--codex-card-border)); }
+.picker:focus-visible { outline: none; border-color: var(--git-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--git-accent) 15%, transparent); }
+.picker[aria-expanded='true'] { border-color: var(--git-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--git-accent) 15%, transparent); }
+.pickerIcon { display: inline-flex; flex-shrink: 0; color: var(--codex-text-muted); transition: color .15s; }
+.picker[aria-expanded='true'] .pickerIcon { color: var(--git-accent); }
+.pickerValue { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pickerPlaceholder { color: var(--codex-text-secondary); }
+.pickerMono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.pickerChevron { display: inline-flex; flex-shrink: 0; color: var(--codex-text-muted); transition: transform .16s, color .16s; }
+.picker[aria-expanded='true'] .pickerChevron { transform: rotate(180deg); color: var(--git-accent); }
+
+/* Menu card, portaled to the body: the panel around the toolbar clips its own
+   overflow, and a long branch list must be able to hang over the commit table.
+   Nothing inherits from .root here, so the type stack and the two accents the
+   rows read are redeclared. */
+.menu {
+  --git-accent: var(--codex-blue-primary, #1d9e75);
+  --git-accent-soft: var(--sprout-soft, #e3f1ea);
+  position: fixed; z-index: 1200; display: flex; flex-direction: column; box-sizing: border-box;
+  padding: 5px; border: 1px solid var(--codex-card-border); border-radius: 10px; background: var(--codex-card-bg);
+  box-shadow: 0 10px 26px -14px rgb(15 23 42 / 22%), 0 2px 6px -3px rgb(15 23 42 / 8%);
+  font-family: var(--codex-font-sans); font-size: 13.5px; color: var(--codex-text-primary);
+}
+.menuSearch {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0; height: 30px; margin-bottom: 4px; padding: 0 8px;
+  border-radius: 7px; background: var(--codex-panel-bg); color: var(--codex-text-muted);
+}
+.menuSearch input { flex: 1; min-width: 0; font: inherit; border: 0; background: none; outline: none; color: var(--codex-text-primary); }
+.menuList { display: flex; flex-direction: column; gap: 1px; overflow: auto; overscroll-behavior: contain; }
+.option {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0; height: 30px; padding: 0 6px 0 8px;
+  border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; text-align: left;
+  white-space: nowrap; cursor: pointer;
+}
+.optionActive { background: var(--codex-hover-bg); }
+/* The chosen row is marked by a tint, the weight and the leading check; the
+   label keeps the body colour, so emerald never has to carry 13.5px text
+   (it lands at ~2.3:1 on the dark tint). */
+.optionSelected { font-weight: 600; background: color-mix(in srgb, var(--git-accent) 9%, transparent); }
+.optionSelected.optionActive { background: var(--git-accent-soft); }
+.optionLabel { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.optionHint { flex-shrink: 0; color: var(--codex-text-muted); font-size: 12px; font-weight: 400; }
+.optionCheck { display: inline-flex; justify-content: center; flex-shrink: 0; width: 14px; color: var(--git-accent); }
+/* The check sits on a card, where the deep emerald is too dark to read: the
+   dark theme brightens it to the mint the brand mark already uses. */
+:global(body[data-ds-dark-theme]) .optionCheck { color: var(--brand-mark, #34d399); }
+.menuEmpty { margin: 0; padding: 8px; font-size: 12.5px; color: var(--codex-text-muted); }
+/* Ends a group — the 'all branches / all authors' reset row above the real ones. */
+.menuSeparator { flex-shrink: 0; height: 1px; margin: 4px 6px; background: var(--codex-border-subtle); }
 
 .table { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--codex-card-border); border-radius: 10px; background: var(--codex-card-bg); }
 .tr { display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 12px; cursor: pointer; }
