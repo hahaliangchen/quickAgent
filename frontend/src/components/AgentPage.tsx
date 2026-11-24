@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetStateAction, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetStateAction } from 'react'
 import clsx from 'clsx'
 import { BrandMark } from './BrandMark.tsx'
-import { prefillComposer } from './RewindControl.tsx'
 import { PlanProgress } from './PlanProgress.tsx'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
 import { latestContextUsage } from './contextUsage.ts'
@@ -24,87 +23,9 @@ interface PageProps {
   readonly renderSlot: AgentSlotProps['renderSlot']
 }
 
-interface StarterAction {
-  readonly id: string
-  readonly label: string
-  readonly prompt: string
-  readonly icon: ReactNode
-}
-
-const CODE_STARTERS: readonly StarterAction[] = [
-  {
-    id: 'review-diff',
-    label: '审查最近改动',
-    prompt: '请审查当前仓库最近的改动，指出潜在风险、边界问题或可改进之处。',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <line x1="8" x2="21" y1="6" y2="6" /><line x1="8" x2="21" y1="12" y2="12" /><line x1="8" x2="21" y1="18" y2="18" />
-        <line x1="3" x2="3.01" y1="6" y2="6" /><line x1="3" x2="3.01" y1="12" y2="12" /><line x1="3" x2="3.01" y1="18" y2="18" />
-      </svg>
-    ),
-  },
-  {
-    id: 'explain-arch',
-    label: '梳理项目架构',
-    prompt: '请梳理当前项目的核心架构、关键目录职责与主要执行链路。',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-        <line x1="8" x2="16" y1="9" y2="9" /><line x1="8" x2="13" y1="13" y2="13" />
-      </svg>
-    ),
-  },
-  {
-    id: 'run-tests',
-    label: '运行并修复测试',
-    prompt: '请运行项目测试，定位所有失败项并修复后重新验证。',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <polyline points="4 17 10 11 4 5" /><line x1="12" x2="20" y1="19" y2="19" />
-      </svg>
-    ),
-  },
-]
-
-const CHAT_STARTERS: readonly StarterAction[] = [
-  {
-    id: 'break-down',
-    label: '拆解复杂问题',
-    prompt: '请帮我把下面这个问题拆解成清晰的可执行步骤与关键风险：',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <line x1="8" x2="21" y1="6" y2="6" /><line x1="8" x2="21" y1="12" y2="12" /><line x1="8" x2="21" y1="18" y2="18" />
-        <line x1="3" x2="3.01" y1="6" y2="6" /><line x1="3" x2="3.01" y1="12" y2="12" /><line x1="3" x2="3.01" y1="18" y2="18" />
-      </svg>
-    ),
-  },
-  {
-    id: 'compare-options',
-    label: '对比技术方案',
-    prompt: '请从架构复杂度、性能与维护成本几个维度，帮我对比以下技术方案：',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-        <line x1="8" x2="16" y1="9" y2="9" /><line x1="8" x2="13" y1="13" y2="13" />
-      </svg>
-    ),
-  },
-  {
-    id: 'polish-doc',
-    label: '润色与总结文档',
-    prompt: '请帮我提炼以下内容的核心要点，并改写得更精炼易读：',
-    icon: (
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-      </svg>
-    ),
-  },
-]
-
 export function HeroPage({ workspace, renderSlot }: PageProps) {
   const currentWs = workspace.projects.find(project => project.path === workspace.activeWorkspace)?.path ?? ''
   const wsName = workspaceName(currentWs)
-  const starters = workspace.sidebarMode === 'chat' ? CHAT_STARTERS : CODE_STARTERS
 
   return (
     <main className={welcomeCss.page} data-phase="hero">
@@ -147,20 +68,6 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
             onSubmit: workspace.submit,
             onStop: undefined,
           })}
-        </div>
-        <div className={welcomeCss.starters} role="group" aria-label="快捷开始">
-          {starters.map(item => (
-            <button
-              key={item.id}
-              type="button"
-              className={welcomeCss.starterChip}
-              disabled={!workspace.ready}
-              onClick={() => prefillComposer(item.prompt)}
-            >
-              <span className={welcomeCss.starterIcon}>{item.icon}</span>
-              <span>{item.label}</span>
-            </button>
-          ))}
         </div>
       </div>
     </main>
