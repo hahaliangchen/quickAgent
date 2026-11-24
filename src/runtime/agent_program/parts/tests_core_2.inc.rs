@@ -1515,3 +1515,29 @@ function main(){
     );
 }
 
+#[test]
+fn shadowed_host_library_emits_require_recovery_hint() {
+    let shadowed = "const plan = { x: 1 }; plan.set({ steps: [] });";
+    let mut run = top_level_task(compile_with_libraries(shadowed, libraries::builtin()).unwrap());
+    match run.next() {
+        State::Failed(error) => {
+            let msg = error["message"].as_str().unwrap_or("");
+            assert!(
+                msg.contains("shadowed host library `plan`") && msg.contains("require(\"plan\").set(...)"),
+                "expected shadowing recovery hint, got: {msg}"
+            );
+        }
+        other => panic!("expected failure, got {other:?}"),
+    }
+
+    let recovered = "const plan = { x: 1 }; require('plan').set({ steps: [] });";
+    let mut run = top_level_task(compile_with_libraries(recovered, libraries::builtin()).unwrap());
+    let State::Action(req) = run.next() else { panic!("require asks the host for plan") };
+    assert!(matches!(&req.kind, ActionKind::Require { library } if library == "plan"), "got {req:?}");
+    run.resume(json!({"library":"plan","methods":{"set":"plan_set"}}), false).unwrap();
+    assert!(matches!(
+        run.next(),
+        State::Action(Action { kind: ActionKind::Tool { name, .. }, .. }) if name == "plan_set"
+    ));
+}
+

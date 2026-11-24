@@ -279,7 +279,10 @@ pub(super) async fn business_tool_inner(
         );
     }
     let ssh_protected = crate::server::builtin_plugins::ssh::requires_approval(name, &args);
-    if ssh_protected
+    // A report submission leaves the machine, so it is time-boxed to one card.
+    let guarded = ssh_protected
+        || crate::server::builtin_plugins::daily_report_requires_approval(name, &args);
+    if guarded
         || (!(name == "write_stdin" && args["chars"].as_str().is_none_or(str::is_empty))
             && crate::tools::tool_approvals::needs_approval(
                 s.state.permission_mode,
@@ -665,12 +668,18 @@ pub(super) async fn business_tool_inner(
                             )
                             .await
                         } else {
-                            crate::server::plugin_io::execute(
-                                s.state,
-                                s.task,
-                                tool_workspace.clone(),
-                                name,
-                                args.clone(),
+                            // Plugins that need the calling task inside their handler
+                            // scope; every other tool simply runs.
+                            crate::server::builtin_plugins::scoped_plugin(
+                                s.task.to_owned(),
+                                guarded,
+                                crate::server::plugin_io::execute(
+                                    s.state,
+                                    s.task,
+                                    tool_workspace.clone(),
+                                    name,
+                                    args.clone(),
+                                ),
                             )
                             .await
                         }

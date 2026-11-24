@@ -74,7 +74,10 @@ export function CodexDock({
         </button>
         <button type="button" className={clsx(css.dockBtn, activeTab === 'blueprint' && css.active)}
           title="架构蓝图 (Blueprint)" aria-label="架构蓝图" onClick={() => onSelectTab?.('blueprint')}>
-          <svg {...STROKE} aria-hidden="true"><rect x="3" y="4" width="6" height="6" rx="1" /><rect x="15" y="14" width="6" height="6" rx="1" /><path d="M9 7h4a4 4 0 0 1 4 4v3" /></svg>
+          <svg {...STROKE} aria-hidden="true">
+            <path d="M3 6.5 9 4l6 2.5L21 4v13.5L15 20l-6-2.5L3 20V6.5Z" />
+            <path d="M9 4v13.5M15 6.5V20" />
+          </svg>
         </button>
 
         <button

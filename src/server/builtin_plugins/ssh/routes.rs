@@ -63,6 +63,7 @@ pub(crate) fn router() -> Router {
 
 pub(super) fn with_directory(directory: PathBuf) -> Router {
     Router::new()
+        .route("/agent/ssh/ai-streams", get(ai_streams))
         .route("/agent/ssh/servers", get(list).post(create))
         .route(
             "/agent/ssh/servers/{id}",
@@ -244,6 +245,10 @@ impl Workbench {
 
 async fn list(State(state): State<Workbench>) -> ApiResult<Json<Vec<Server>>> {
     Ok(Json(state.db(|store| store.list()).await?))
+}
+
+async fn ai_streams() -> Json<Value> {
+    Json(json!({ "streams": live::list_streams() }))
 }
 
 #[derive(Deserialize)]

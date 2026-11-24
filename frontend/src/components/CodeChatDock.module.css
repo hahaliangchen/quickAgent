@@ -32,6 +32,9 @@
 .iconButton:hover:not(:disabled) { background: var(--codex-hover-bg); color: var(--codex-text-primary); }
 .iconButton:disabled { opacity: .4; cursor: default; }
 .plus { font-size: 20px; line-height: 1; }
+/* The scroller keeps its own box; the control floats in this frame instead, so it
+   cannot be scrolled away with the messages it undoes. */
+.chatArea { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .body { flex: 1; min-height: 0; overflow: auto; position: relative; padding: 10px 16px 20px; }
 .greeting { margin: 14px; padding: 14px 16px; border-radius: 12px; background: var(--codex-hover-bg); }
 .greeting strong { display: block; font-size: 14.5px; margin-bottom: 6px; }

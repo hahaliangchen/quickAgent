@@ -247,7 +247,12 @@ test('follows only new SSH calls and keeps the linked chat, SFTP and independent
   await expect(following).not.toBeChecked()
   await following.check()
   await page.getByTitle('首页 / 新会话').click()
+  const followNested = page.waitForRequest(req => req.url().includes('/sftp/list?path=%2Fnested'))
   await push(event(11, 'turn/start', { turn: 4 }), call(12, 4, 'ssh__list_dir', { path: '/nested' }))
+  await followNested
+  // Once connected and auto-opened in this session, later turns stay on Home without hijacking focus.
+  await expect(workbench).toBeHidden()
+  await page.getByRole('button', { name: '远程终端', exact: true }).click()
   await expect(workbench).toBeVisible()
   await expect(aiTab).toHaveAttribute('aria-selected', 'true')
   await expect(sftp.getByRole('navigation', { name: '远程目录' }).locator('[aria-current="page"]')).toHaveText('nested')

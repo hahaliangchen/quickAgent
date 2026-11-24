@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "daily-report",
+  "library": "daily_report",
+  "title": "团队日报",
+  "skill": "SKILL.md",
+  "tools": [
+    "daily_report__read_guide",
+    "daily_report__write_guide",
+    "daily_report__today_activity",
+    "daily_report__list",
+    "daily_report__prepare_draft",
+    "daily_report__submit"
+  ],
+  "pages": [
+    {
+      "id": "workbench",
+      "title": "团队日报",
+      "entry": "daily-report.workbench",
+      "renderer": "react"
+    }
+  ]
+}

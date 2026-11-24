@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, type Dispatch
 import clsx from 'clsx'
 import { BrandMark } from './BrandMark.tsx'
 import { PlanProgress } from './PlanProgress.tsx'
+import { ScrollToBottom, useScrollToBottom } from './ScrollToBottom.tsx'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
 import { latestContextUsage } from './contextUsage.ts'
 import { SkillPagesView } from './SkillPagesView.tsx'
@@ -99,7 +100,9 @@ export function ConversationPage({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
+  const composerRef = useRef<HTMLDivElement>(null)
   const followTail = useRef(true)
+  const { away: tailHidden, jump: jumpToTail } = useScrollToBottom(scrollRef)
   const pendingJump = useRef<{ taskId: string | undefined; key: string }>()
   const scrollToMessage = useCallback((key: string) => {
     const scroll = scrollRef.current
@@ -140,6 +143,18 @@ export function ConversationPage({
     pendingJump.current = undefined
     if (jump.taskId === workspace.taskId) scrollToMessage(jump.key)
   }, [tab, workspace.taskId, scrollToMessage])
+  // The floating control clears the composer, which changes height as the draft
+  // grows; the seat is measured instead of guessed so it never covers the input.
+  useLayoutEffect(() => {
+    const seat = composerRef.current
+    const body = bodyRef.current
+    if (seat === null || body === null) return
+    const report = () => body.style.setProperty('--dsh-composer-height', `${Math.round(seat.getBoundingClientRect().height)}px`)
+    report()
+    const observer = new ResizeObserver(report)
+    observer.observe(seat)
+    return () => { observer.disconnect(); body.style.removeProperty('--dsh-composer-height') }
+  }, [tab])
   useEffect(() => {
     const scroll = scrollRef.current
     const transcript = scroll?.firstElementChild
@@ -277,7 +292,14 @@ export function ConversationPage({
                 : <>{renderSlot('agent.flow', { taskId: workspace.taskId, events: session.events, task, running })}</>}
             </div>
           </div>
-          <div className={root.composerSeat}>
+          {tab === 'chat' && (
+            <ScrollToBottom
+              show={tailHidden}
+              onJump={() => { followTail.current = true; jumpToTail() }}
+              className={css.backToBottom}
+            />
+          )}
+          <div ref={composerRef} className={root.composerSeat}>
             {tab === 'chat' && <PlanProgress key={workspace.taskId ?? 'plan'} events={session.events} variant="dock" />}
             {isChild
               ? (

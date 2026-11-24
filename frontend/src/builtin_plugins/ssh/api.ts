@@ -15,6 +15,7 @@ export interface Failure { error?: string; code?: string; trusted?: string; rece
 export const remoteTools = ['ssh__exec', 'ssh__list_dir', 'ssh__read_file', 'ssh__write_file', 'ssh__upload', 'ssh__tail_log'] as const
 export type RemoteTool = typeof remoteTools[number]
 export interface AiFocus { seq: number; taskId: string; serverId: string; tool: RemoteTool; remotePath?: string }
+export interface AiStreamSummary { task_id: string; server_id: string; touched: number; buffered_bytes: number }
 export interface AiActivity { type: 'activity'; action: string; remote_path: string | null; detail: string }
 export interface WorkbenchContext {
   access: Access
@@ -70,6 +71,7 @@ export const ssh = {
   terminal: (id: string, ticket: string) => stream(id, '/terminal', ticket),
   aiStreamTicket: (id: string, taskId: string, signal: AbortSignal) => request<{ ticket: string }>(at(id, '/ai-stream-ticket'), 'POST', { task_id: taskId }, signal),
   aiStream: (id: string, ticket: string) => stream(id, '/ai-stream', ticket),
+  aiStreams: (signal?: AbortSignal) => request<{ streams: AiStreamSummary[] }>('/agent/ssh/ai-streams', 'GET', undefined, signal),
   entries: (id: string, path: string, signal?: AbortSignal) => request<{ path: string; entries: Entry[] }>(remote(id, 'list', path), 'GET', undefined, signal),
   preview: (id: string, path: string, access: Access) => request<{ text: string; truncated: boolean }>(remote(id, 'preview', path, access)),
   download: (id: string, path: string, access: Access) => remote(id, 'download', path, access),

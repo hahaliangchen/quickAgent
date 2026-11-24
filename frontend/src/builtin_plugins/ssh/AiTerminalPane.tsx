@@ -11,6 +11,7 @@ import {
   emptyTranscript,
   feedTranscript,
 } from './transcript.ts'
+import { ScrollToBottom } from '../../components/ScrollToBottom.tsx'
 import css from './style.module.css'
 
 /** How one command reads in a card footer. */
@@ -257,7 +258,7 @@ export default function AiTerminalPane({ serverId, taskId, active, onOpenHuman, 
           </div>
           : <AiTranscript blocks={blocks} />}
       </div>
-      {paused && <button className={css.jumpLatest} onClick={jump}>↓ 回到底部</button>}
+      <ScrollToBottom show={paused} onJump={jump} />
     </div>
   </section>
 }

@@ -2,12 +2,12 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'r
 import { Background, BackgroundVariant, Controls, MiniMap, ReactFlow, applyEdgeChanges, applyNodeChanges, useNodesInitialized, useReactFlow, ReactFlowProvider, type Connection, type EdgeChange, type NodeChange } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { PluginPageProps } from '../../plugins/protocol.ts'
-import { BlueprintContext, blueprintApi } from './api.ts'
+import { BlueprintContext, blueprintApi, fetchBlueprintProjects } from './api.ts'
 import { BlueprintNode, type Card } from './BlueprintNode.tsx'
 import { BlueprintEdge, type Wire } from './BlueprintEdge.tsx'
 import { Choices, Drawer, EdgeEditor, EntityEditor, Field, ImpactPanel, newEntity } from './InspectorDrawer.tsx'
 import { layout } from './layout.ts'
-import { entryKinds, entryLabels, kindColors, projectKinds, type BlueprintState, type Entity, type EntryKind, type Graph, type GraphEdge, type GraphNode, type GraphView, type Impact, type ProjectKind } from './types.ts'
+import { entryKinds, entryLabels, kindColors, projectKinds, type BlueprintProjectStatus, type BlueprintState, type Entity, type EntryKind, type Graph, type GraphEdge, type GraphNode, type GraphView, type Impact, type ProjectKind } from './types.ts'
 import css from './style.module.css'
 
 const nodeTypes = { blueprint: BlueprintNode }
@@ -17,6 +17,15 @@ const syncPrompt = '增量同步架构蓝图。先调用 blueprint.verify_sync({
 const idOf = (prefix: string) => prefix + '-' + crypto.randomUUID().slice(0, 8)
 const explain = (error: unknown) => error instanceof Error ? error.message : String(error)
 const nodesOnly = (nodes: GraphNode[]) => nodes.map(({ entity_id }) => ({ entity_id }))
+const baseName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path
+function formatBuildTime(iso: string | null | undefined, full = false): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const mdhm = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return full ? `${d.getFullYear()}-${mdhm}:${pad(d.getSeconds())}` : mdhm
+}
 type Inspect = { type: 'create' | 'meta' | 'scope' } | { type: 'entity'; id: string; port?: string; addPort?: boolean; draft?: Entity } | { type: 'edge'; id: string; draft?: GraphEdge } | { type: 'impact'; entity: string; port?: string }
 
 export default function BlueprintPage({ workspaceRoot, theme }: PluginPageProps) {
@@ -26,7 +35,17 @@ export default function BlueprintPage({ workspaceRoot, theme }: PluginPageProps)
 
 function Workbench({ root, dark }: { root: string; dark: boolean }) {
   const api = useMemo(() => blueprintApi(root), [root])
-  const { sendToAi, refreshSignal } = useContext(BlueprintContext)
+  const { sendToAi, refreshSignal, projects = [], selectWorkspace } = useContext(BlueprintContext)
+  const [projectStatuses, setProjectStatuses] = useState<Record<string, BlueprintProjectStatus>>({})
+  const projectPathsKey = useMemo(() => projects.map(p => p.path).join('\0'), [projects])
+  const refreshProjects = useCallback(async () => {
+    if (!projects.length) return
+    try {
+      const list = await fetchBlueprintProjects(projects.map(p => p.path))
+      setProjectStatuses(Object.fromEntries(list.map(item => [item.workspace_root, item])))
+    } catch { /* Non-fatal; active workspace state still loads independently. */ }
+  }, [projectPathsKey])
+  useEffect(() => { void refreshProjects() }, [refreshProjects, refreshSignal])
   const flow = useReactFlow<Card, Wire>()
   const nodesInitialized = useNodesInitialized()
   const canvas = useRef<HTMLDivElement>(null)
@@ -108,6 +127,7 @@ function Workbench({ root, dark }: { root: string; dark: boolean }) {
       await change()
       if (close) setDrawer(undefined)
       await refresh(true)
+      void refreshProjects()
     } catch (error) { setError(explain(error)) }
     finally { writing.current = false; setBusy(false) }
   }
@@ -221,9 +241,10 @@ function Workbench({ root, dark }: { root: string; dark: boolean }) {
   return <section className={css.workbench} data-theme={dark ? 'dark' : 'light'} data-testid='blueprint-workbench'>
     <header className={css.toolbar}>
       <button type='button' className={css.iconButton} onClick={() => setFolded(!folded)} aria-label={folded ? '展开蓝图侧栏' : '折叠蓝图侧栏'} title={folded ? '展开蓝图侧栏' : '折叠蓝图侧栏'}>☷</button>
-      <strong className={css.title} title={graph?.title}>{graph?.title ?? '架构蓝图'}</strong>
+      <strong className={css.title} title={graph?.title ?? root}>{graph?.title ?? baseName(root)}</strong>
       {state?.manifest && <span className={css.badge}>{state.manifest.project_kind}</span>}
       {stale?.exists && <span className={css.fresh} data-stale={stale.stale || undefined}>{drift ? '发现 ' + drift + ' 处漂移' : stale.stale ? '有变更待同步' : '已同步'}</span>}
+      {state?.manifest?.updated_at && <span className={css.buildTime} title={'蓝图构建/同步时间：' + formatBuildTime(state.manifest.updated_at, true)}>构建于 {formatBuildTime(state.manifest.updated_at)}</span>}
       <div className={css.spacer} />
       <div className={css.actions}>
         {graph && <>
@@ -235,30 +256,60 @@ function Workbench({ root, dark }: { root: string; dark: boolean }) {
           <button type='button' disabled={!sendToAi || !selectedCards.length && !selectedWires.length && !activePort} onClick={discuss}>发给 AI 讨论</button>
           <button type='button' className={css.primary} disabled={busy} onClick={() => { const draft = newEntity(); setDrawer({ type: 'entity', id: draft.id, draft }) }}>+ 新建节点</button>
         </>}
-        <button type='button' className={css.iconButton} title='刷新蓝图' aria-label='刷新蓝图' disabled={busy} onClick={() => { setError(''); void flushLayout().then(() => refresh(true)) }}>↻</button>
+        <button type='button' className={css.iconButton} title='刷新蓝图' aria-label='刷新蓝图' disabled={busy} onClick={() => { setError(''); void flushLayout().then(() => Promise.all([refresh(true), refreshProjects()])) }}>↻</button>
       </div>
     </header>
     {error && <div role='alert' className={css.error}><span>{error}</span><button type='button' onClick={() => setError('')} aria-label='关闭错误'>×</button></div>}
     <div className={css.main}>
-      {state?.exists && !folded && <nav aria-label='蓝图画布与共享实体' className={css.sidebar}>
-        <div className={css.sectionHead}><h2>画布</h2><button type='button' onClick={showCreate}>+ 新建画布</button></div>
-        {entryKinds.map(kind => {
-          const group = state.graphs.filter(g => g.entry_kind === kind)
-          return group.length > 0 && <section key={kind} className={css.group}><h3>{entryLabels[kind]}</h3>{group.map(g => <button type='button' key={g.id} aria-current={g.id === id ? 'page' : undefined} title={g.entry_summary || g.title} onClick={() => choose(g.id)}>{g.title}</button>)}</section>
-        })}
-        {graph && <section className={css.rules}>
-          <div className={css.sectionHead}><h2>画布红线</h2><button type='button' onClick={() => setDrawer({ type: 'meta' })} aria-label='编辑画布和红线'>编辑</button></div>
-          {graph.invariants.length ? <ul>{graph.invariants.map((text, i) => <li key={i}>{text}</li>)}</ul> : <p>暂无红线</p>}
+      {(state?.exists || projects.length > 0) && !folded && <nav aria-label='蓝图画布与共享实体' className={css.sidebar}>
+        {projects.length > 0 && <section className={css.projects}>
+          <div className={css.sectionHead}><h2>已打开项目</h2><span>{projects.length}</span></div>
+          <div className={css.projectList}>
+            {projects.map(project => {
+              const info = projectStatuses[project.path]
+              const active = project.path === root
+              const status = info?.status ?? (active && state ? (state.exists ? (state.verify.stale ? 'stale' : 'synced') : 'unbuilt') : undefined)
+              const builtAt = info?.updated_at ?? (active ? state?.manifest?.updated_at : null)
+              const graphsCount = info?.graph_count ?? (active ? state?.graphs.length ?? 0 : 0)
+              const driftCount = info ? info.drifted_ports + info.missing_ports : (active ? drift : 0)
+              const changedCount = info?.changed_files ?? (active ? state?.verify.changed_files.length ?? 0 : 0)
+              const statusLabel = status === 'synced' ? '已同步' : status === 'stale' ? '待同步' : status === 'unbuilt' ? '未构建' : '检测中'
+              const metaText = status === 'unbuilt'
+                ? '未构建蓝图'
+                : builtAt
+                  ? `${formatBuildTime(builtAt)} · ${graphsCount} 图${driftCount ? ` · ${driftCount} 漂移` : changedCount ? ` · ${changedCount} 变更` : ''}`
+                  : status ? `${graphsCount} 图` : '读取状态…'
+              const tooltip = `${project.path}${builtAt ? `\n构建时间：${formatBuildTime(builtAt, true)}` : '\n尚未构建蓝图'}`
+              return <button key={project.path} type='button' className={css.projectItem} aria-current={active ? 'location' : undefined} title={tooltip} onClick={() => selectWorkspace?.(project.path)}>
+                <span className={css.projectRow}>
+                  <span className={css.projectName}>{project.title || baseName(project.path)}</span>
+                  <span className={css.projectBadge} data-status={status ?? 'loading'}>{statusLabel}</span>
+                </span>
+                <span className={css.projectMeta}>{metaText}</span>
+              </button>
+            })}
+          </div>
         </section>}
-        <section className={css.library}>
-          <div className={css.sectionHead}><h2>共享实体</h2><span>{state.entities.length}</span></div>
-          <input placeholder='搜索名称或路径' aria-label='搜索共享实体' value={filter} onChange={e => setFilter(e.target.value)} />
-          {available.map(e => <div key={e.id} className={css.libraryItem}>
-            <button type='button' title={e.name} draggable onDragStart={event => { event.dataTransfer.setData('application/blueprint-entity', e.id); event.dataTransfer.effectAllowed = 'copy' }} onClick={() => graph && !graph.nodes.some(n => n.entity_id === e.id) ? addEntity(e.id) : inspect(e.id)}><i style={{ background: kindColors[e.kind] }} />{e.name}</button>
-            <button type='button' title='检查共享实体' aria-label={'检查 ' + e.name} onClick={() => inspect(e.id)}>⊙</button>
-          </div>)}
-          {!available.length && <p>{filter ? '无匹配实体' : '暂无实体'}</p>}
-        </section>
+        {state?.exists && <>
+          <div className={projects.length > 0 ? `${css.sectionHead} ${css.sectionDivider}` : css.sectionHead}><h2>画布</h2><button type='button' onClick={showCreate}>+ 新建画布</button></div>
+          {entryKinds.map(kind => {
+            const group = state.graphs.filter(g => g.entry_kind === kind)
+            return group.length > 0 && <section key={kind} className={css.group}><h3>{entryLabels[kind]}</h3>{group.map(g => <button type='button' key={g.id} aria-current={g.id === id ? 'page' : undefined} title={g.entry_summary || g.title} onClick={() => choose(g.id)}>{g.title}</button>)}</section>
+          })}
+          {graph && <section className={css.rules}>
+            <div className={css.sectionHead}><h2>画布红线</h2><button type='button' onClick={() => setDrawer({ type: 'meta' })} aria-label='编辑画布和红线'>编辑</button></div>
+            {graph.invariants.length ? <ul>{graph.invariants.map((text, i) => <li key={i}>{text}</li>)}</ul> : <p>暂无红线</p>}
+          </section>}
+          <section className={css.library}>
+            <div className={css.sectionHead}><h2>共享实体</h2><span>{state.entities.length}</span></div>
+            <input placeholder='搜索名称或路径' aria-label='搜索共享实体' value={filter} onChange={e => setFilter(e.target.value)} />
+            {available.map(e => <div key={e.id} className={css.libraryItem}>
+              <button type='button' title={e.name} draggable onDragStart={event => { event.dataTransfer.setData('application/blueprint-entity', e.id); event.dataTransfer.effectAllowed = 'copy' }} onClick={() => graph && !graph.nodes.some(n => n.entity_id === e.id) ? addEntity(e.id) : inspect(e.id)}><i style={{ background: kindColors[e.kind] }} />{e.name}</button>
+              <button type='button' title='检查共享实体' aria-label={'检查 ' + e.name} onClick={() => inspect(e.id)}>⊙</button>
+            </div>)}
+            {!available.length && <p>{filter ? '无匹配实体' : '暂无实体'}</p>}
+          </section>
+        </>}
       </nav>}
       <div ref={canvas} className={css.canvas} data-testid='blueprint-canvas' onDragOver={e => { if (e.dataTransfer.types.includes('application/blueprint-entity')) e.preventDefault() }} onDrop={e => { const entity = e.dataTransfer.getData('application/blueprint-entity'); if (entity) { e.preventDefault(); addEntity(entity) } }}>
         {graph ? <>
@@ -273,8 +324,9 @@ function Workbench({ root, dark }: { root: string; dark: boolean }) {
           </ReactFlow>
           {!cards.length && <div className={css.canvasEmpty}>空白画布</div>}
         </> : <div className={css.empty}>
-          <div className={css.emptyIcon} aria-hidden='true'><svg viewBox='0 0 44 44' fill='none' stroke='currentColor' strokeWidth='1.5'><rect x='5' y='8' width='13' height='11' rx='2'/><rect x='26' y='25' width='13' height='11' rx='2'/><path d='M18 14h4a4 4 0 0 1 4 4v8'/><path d='M5 30h11M5 35h7'/></svg></div>
+          <div className={css.emptyIcon} aria-hidden='true'><svg viewBox='0 0 44 44' fill='none' stroke='currentColor' strokeWidth='1.75' strokeLinecap='round' strokeLinejoin='round'><path d='M5 12 16 7.5 28 12 39 7.5v24.5L28 36.5 16 32 5 36.5V12Z'/><path d='M16 7.5V32M28 12v24.5'/></svg></div>
           <h1>{state ? state.exists ? '选择或新建画布' : '此项目尚未建立蓝图' : error ? '无法加载蓝图' : '正在加载架构蓝图'}</h1>
+          {projects.length > 0 && <p className={css.emptySub}>{baseName(root)}</p>}
           {state && <div className={css.emptyActions}>
             <button className={css.primary} type='button' onClick={() => sendToAi?.(firstAnalysis)} disabled={!sendToAi}>启动全项目蓝图分析</button>
             <button type='button' onClick={showCreate}>{state.exists ? '新建画布' : '手动新建空白蓝图'}</button>

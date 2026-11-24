@@ -2,9 +2,11 @@
 name = "codex-workspace-mcp"
 version = "0.2.1"
 edition = "2024"
-
 [features]
 vm-measurements = []
+# Internal office-system plugin. Customer and desktop builds must never enable it:
+# see docs/PLAN_DAILY_REPORT_PLUGIN.md.
+internal-daily-report = ["dep:aes", "dep:rand", "dep:rsa"]
 
 [[bin]]
 name = "vm-measurements"
@@ -51,6 +53,10 @@ quote = "1.0.45"
 rustpython-parser = { version = "0.4.0", default-features = false, features = ["num-bigint"] }
 rusqlite = { version = "0.33.0", features = ["bundled"] }
 base64 = "0.22.1"
+# Internal daily-report login envelope only (see the feature above).
+aes = { version = "0.9", optional = true }
+rand = { version = "0.10", optional = true }
+rsa = { version = "0.10.0-rc.18", optional = true }
 sha2 = "0.10.9"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 jsonschema = { version = "0.60.2", default-features = false }

@@ -321,7 +321,8 @@ async fn wait_with(
     let outside_kind = outside.map(|(k, _)| k);
     let outside_paths = outside.map(|(_, p)| p);
     let force_once = crate::server::builtin_plugins::desktop::requires_confirmation(name)
-        || crate::server::builtin_plugins::ssh::requires_approval(name, args);
+        || crate::server::builtin_plugins::ssh::requires_approval(name, args)
+        || crate::server::builtin_plugins::daily_report_requires_approval(name, args);
     let scopes_to_check: Vec<String> = if outside.is_none() && !force_once {
         if crate::tools::shell_process::is_tool(name) {
             base_scopes

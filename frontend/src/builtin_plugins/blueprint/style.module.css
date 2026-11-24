@@ -25,11 +25,24 @@
 .actions button[aria-pressed=true] { color:var(--bp-service); background:color-mix(in srgb,var(--bp-service) 12%,transparent); }
 .iconButton { min-width:28px; font-size:15px !important; line-height:19px; }
 .spacer { flex:1; }
-.badge,.fresh { font-size:11px; padding:2px 6px; border-radius:5px; background:var(--codex-panel-bg); color:var(--codex-text-muted); }
+.badge,.fresh,.buildTime { font-size:11px; padding:2px 6px; border-radius:5px; background:var(--codex-panel-bg); color:var(--codex-text-muted); }
 .fresh { color:var(--bp-store); }
 .fresh[data-stale] { color:var(--bp-test); }
+.buildTime { font-variant-numeric:tabular-nums; }
 .main { flex:1; display:flex; min-height:0; position:relative; }
-.sidebar { flex:0 0 clamp(145px,17vw,234px); min-width:0; padding:12px; border-right:1px solid var(--codex-border-subtle); overflow:auto; background:var(--codex-panel-bg); }
+.sidebar { flex:0 0 clamp(180px,19vw,256px); min-width:0; padding:12px; border-right:1px solid var(--codex-border-subtle); overflow:auto; background:var(--codex-panel-bg); }
+.projects { margin-bottom:10px; }
+.projectList { display:flex; flex-direction:column; gap:4px; margin-top:4px; }
+.workbench .projectItem { width:100%; display:flex; flex-direction:column; gap:3px; padding:6px 8px; text-align:left; border-radius:6px; border:1px solid transparent; }
+.workbench .projectItem[aria-current=location] { background:color-mix(in srgb,var(--bp-service) 12%,transparent); border-color:color-mix(in srgb,var(--bp-service) 30%,transparent); }
+.projectRow { display:flex; align-items:center; justify-content:space-between; gap:6px; width:100%; min-width:0; }
+.projectName { font-size:12px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.projectBadge { flex:none; font-size:10px; line-height:14px; padding:1px 5px; border-radius:4px; background:color-mix(in srgb,var(--codex-text-muted) 12%,transparent); color:var(--codex-text-muted); }
+.projectBadge[data-status=synced] { background:color-mix(in srgb,var(--bp-store) 14%,transparent); color:var(--bp-store); }
+.projectBadge[data-status=stale] { background:color-mix(in srgb,var(--bp-test) 16%,transparent); color:var(--bp-test); }
+.projectMeta { font-size:10.5px; color:var(--codex-text-muted); font-variant-numeric:tabular-nums; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sectionDivider { border-top:1px solid var(--codex-border-subtle); padding-top:9px; margin-top:8px; }
+.emptySub { font-size:12px; color:var(--codex-text-muted); margin-top:-6px; }
 .sectionHead { justify-content:space-between; min-height:27px; }
 .sectionHead > :is(button,span),.group h3 { font-size:11px; color:var(--codex-text-muted); }
 .group { margin:9px 0; }

@@ -1359,7 +1359,14 @@ pub async fn run(
     let config = load_config(config_path)?;
     let _ = external_models::registry();
 
-    crate::server::agent_service::recover_orphaned_tasks(workspace.root()).await?;
+    let _service_lock =
+        crate::server::agent_service::acquire_service_lock_and_recover(workspace.root()).await?;
+    if _service_lock.is_none() {
+        tracing::warn!(
+            workspace = %workspace.root().display(),
+            "another live agent instance already holds service.lock; skipping orphan task recovery"
+        );
+    }
 
     let total_maps: usize = config.providers.values().map(|p| p.model_map.len()).sum();
 
@@ -1638,12 +1645,19 @@ pub async fn run(
         .layer(CorsLayer::permissive());
 
     let addr = listener.local_addr()?;
-    let app = if addr.ip().is_loopback() {
+    #[allow(unused_mut)]
+    let mut app = if addr.ip().is_loopback() {
         app.merge(crate::server::builtin_plugins::ssh::routes::router())
             .merge(crate::server::builtin_plugins::blueprint::routes::router())
     } else {
         app
     };
+    // The internal daily report is loopback-only and only in builds that opt
+    // into its feature, so a customer binary answers 404 for its routes.
+    #[cfg(feature = "internal-daily-report")]
+    if addr.ip().is_loopback() {
+        app = app.merge(crate::server::builtin_plugins::daily_report::routes::router());
+    }
     crate::tools::process_sandbox::register_control_port(addr.port());
     let app = if std::env::args().any(|arg| arg == "--desktop-agent") {
         app.layer(axum::middleware::from_fn_with_state(
@@ -1663,10 +1677,37 @@ pub async fn run(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await;
     runtime.shutdown()?;
     served?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        let terminate = async {
+            if let Ok(mut sig) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                sig.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            () = ctrl_c => {},
+            () = terminate => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 #[cfg(test)]

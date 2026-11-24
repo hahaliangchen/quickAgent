@@ -1,7 +1,29 @@
 import { createContext } from 'react'
-import type { BlueprintState, Entity, Graph, GraphNode, GraphView, Impact, ProjectKind, Source, Verify } from './types.ts'
+import type { BlueprintProjectStatus, BlueprintState, Entity, Graph, GraphNode, GraphView, Impact, ProjectKind, Source, Verify } from './types.ts'
 
-export const BlueprintContext = createContext<{ sendToAi?: (text: string) => void; refreshSignal?: string | undefined }>({})
+export interface BlueprintProjectOption {
+  readonly path: string
+  readonly title: string
+}
+
+export const BlueprintContext = createContext<{
+  sendToAi?: (text: string) => void
+  refreshSignal?: string | undefined
+  projects?: readonly BlueprintProjectOption[]
+  selectWorkspace?: (path: string) => void
+}>({})
+
+export async function fetchBlueprintProjects(workspaces: readonly string[]): Promise<BlueprintProjectStatus[]> {
+  if (!workspaces.length) return []
+  const response = await fetch('/api/blueprint/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspaces }),
+  })
+  const data = await response.json().catch(() => null)
+  if (!response.ok) throw new Error(data?.error ?? '加载项目蓝图状态失败（' + response.status + '）')
+  return (data?.projects ?? []) as BlueprintProjectStatus[]
+}
 export function blueprintApi(workspaceRoot: string) {
   async function request<T>(path: string, method = 'GET', body?: unknown, query: Record<string, string> = {}): Promise<T> {
     const params = new URLSearchParams({ workspace_root: workspaceRoot, ...query })

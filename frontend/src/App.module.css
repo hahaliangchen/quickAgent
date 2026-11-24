@@ -63,6 +63,12 @@
   overflow: hidden;
 }
 
+/* Floats on the transcript's centre line, clear of the composer seat, whose live
+   height ConversationPage publishes on .body (--dsh-composer-height). */
+.backToBottom {
+  bottom: calc(var(--dsh-composer-height, 120px) + 12px);
+}
+
 .status {
   color: var(--codex-text-muted, #71717a);
   font-size: 12px;

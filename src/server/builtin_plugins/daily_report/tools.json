@@ -1,0 +1,160 @@
+[
+  {
+    "name": "daily_report__read_guide",
+    "description": "Read the daily-report writing guide and the directory it lives in. Returns empty: true when nobody has written one yet.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "daily_report__write_guide",
+    "description": "Replace the daily-report writing guide with text the user approved; the guide is plain Markdown.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "Full Markdown body to store as the guide."
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "daily_report__today_activity",
+    "description": "Today's real work across QuickAgent projects: session prompts, changed files and git commits. Facts only; use them to write the report.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "description": "Local date YYYY-MM-DD; defaults to today."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "daily_report__list",
+    "description": "Project options and the reports already submitted, read from the company daily-report system. Fails with AUTH_EXPIRED when the workbench login expired.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "report_year": {
+          "type": "string",
+          "description": "Four-digit year, e.g. 2026."
+        },
+        "report_month": {
+          "type": "string",
+          "description": "Month 1-12."
+        },
+        "report_date": {
+          "type": "string",
+          "description": "Local date YYYY-MM-DD to list one day."
+        },
+        "page_size": {
+          "type": "integer",
+          "description": "Rows to return, default 20."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "daily_report__prepare_draft",
+    "description": "Store the structured daily-report draft and open the workbench page so the user can review it before anything is sent.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "report_date": {
+          "type": "string",
+          "description": "Local date YYYY-MM-DD the report is for."
+        },
+        "projects": {
+          "type": "array",
+          "description": "One entry per project worked on that day.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "project_id": {
+                "type": "integer"
+              },
+              "project_name": {
+                "type": "string",
+                "description": "Exact name from daily_report.list."
+              },
+              "work_content": {
+                "type": "string",
+                "description": "What was done, in the guide's format."
+              }
+            },
+            "required": [
+              "project_name",
+              "work_content"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "problems": {
+          "type": "string",
+          "description": "Problems hit today; empty when there were none."
+        },
+        "remark": {
+          "type": "string",
+          "description": "Anything else the report should carry."
+        },
+        "overtime_hours": {
+          "type": "number",
+          "description": "Overtime hours; 0 when none."
+        },
+        "leave_hours": {
+          "type": "number",
+          "description": "Leave hours; 0 when none."
+        },
+        "reimbursement": {
+          "type": "number",
+          "description": "Reimbursement amount; 0 when none."
+        },
+        "reimbursement_reason": {
+          "type": "string",
+          "description": "Why the reimbursement happened."
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "create",
+            "update"
+          ],
+          "description": "Update when the day already has a report."
+        },
+        "report_id": {
+          "type": "string",
+          "description": "Server id of the existing report being updated."
+        }
+      },
+      "required": [
+        "report_date",
+        "projects"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "daily_report__submit",
+    "description": "Submit the stored draft to the company daily-report system. Always asks for one-shot human approval.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+]

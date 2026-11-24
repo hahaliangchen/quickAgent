@@ -11,6 +11,7 @@ import { clock } from '../workbenchModel.ts'
 import { toolVisual } from './toolVisuals.tsx'
 import { PlanProgress } from './PlanProgress.tsx'
 import { Icon } from './WorkbenchIcon.tsx'
+import { ScrollToBottom, useScrollToBottom } from './ScrollToBottom.tsx'
 import styles from './SkillWorkbench.module.css'
 
 const STARTERS = ['说明每段程序做了什么、确认点在哪里', '把只属于这一次的值改成参数', '检查改写后的流程有没有漏掉原来的步骤']
@@ -46,9 +47,21 @@ export function DraftChat({ chatId, draftLabel, draftFolder, source, hidden, exp
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const body = useRef<HTMLDivElement>(null)
+  const { away: tailHidden, jump: jumpToTail, following } = useScrollToBottom(body)
   useEffect(() => { onRunning(running) }, [running, onRunning])
-  // A hidden body cannot scroll, so reopening the conversation scrolls to its newest message too.
-  useEffect(() => { body.current?.scrollTo({ top: body.current.scrollHeight }) }, [items, hidden])
+  // A hidden body cannot scroll, so reopening the conversation scrolls to its newest
+  // message. After that only a reader still at the tail is carried along, so scrolling
+  // up to read is never yanked back by the next token.
+  useEffect(() => {
+    const box = body.current
+    if (!box || hidden) return
+    following.current = true
+    box.scrollTop = box.scrollHeight
+  }, [hidden, chatId, following])
+  useEffect(() => {
+    const box = body.current
+    if (box && following.current) box.scrollTop = box.scrollHeight
+  }, [items, following])
 
   const send = async (text: string) => {
     if (!text.trim() || busy || running) return
@@ -146,17 +159,20 @@ export function DraftChat({ chatId, draftLabel, draftFolder, source, hidden, exp
       <button type="button" onClick={onClose} title="收起" aria-label="收起"><Icon name="minus" size={17} /></button>
       <button type="button" onClick={onExpand} title={expanded ? '还原' : '放大'} aria-label={expanded ? '还原' : '放大'}><Icon name={expanded ? 'shrink' : 'expand'} size={16} /></button>
     </div>
-    <div className={styles.chatBody} ref={body}>
-      <PlanProgress key={chatId} events={session.events} />
-      {rows.length === 0 && <div className={styles.chatIntro}>
-        <p>这是这份草稿自己的对话。AI 在草稿文件夹里工作，可以分析、修改 <code>programs/</code> 里的草稿，原始流程不会被改动。</p>
-        <p>这里没有插件页面的工具，真实插件测试尚未接入；AI 说的检查结果以它实际读过、跑过的为准。</p>
-        <div className={styles.starters}>{STARTERS.map(text => <button key={text} type="button" onClick={() => setInput(text)}>{text}</button>)}</div>
-      </div>}
-      {rows}
-      {running && !lastStreaming && <div className={styles.chatWorking}><span className={styles.spinner} />AI 正在处理…</div>}
-      {(error || session.error) && <div className={styles.chatError}>{error || session.error}</div>}
-    </div>
+      <div className={styles.chatScroll}>
+        <div className={styles.chatBody} ref={body}>
+          <PlanProgress key={chatId} events={session.events} />
+          {rows.length === 0 && <div className={styles.chatIntro}>
+            <p>这是这份草稿自己的对话。AI 在草稿文件夹里工作，可以分析、修改 <code>programs/</code> 里的草稿，原始流程不会被改动。</p>
+            <p>这里没有插件页面的工具，真实插件测试尚未接入；AI 说的检查结果以它实际读过、跑过的为准。</p>
+            <div className={styles.starters}>{STARTERS.map(text => <button key={text} type="button" onClick={() => setInput(text)}>{text}</button>)}</div>
+          </div>}
+          {rows}
+          {running && !lastStreaming && <div className={styles.chatWorking}><span className={styles.spinner} />AI 正在处理…</div>}
+          {(error || session.error) && <div className={styles.chatError}>{error || session.error}</div>}
+        </div>
+        <ScrollToBottom show={tailHidden} onJump={jumpToTail} />
+      </div>
     <form className={styles.chatForm} onSubmit={event => { event.preventDefault(); void send(input) }}>
       <textarea value={input} onChange={event => setInput(event.target.value)} aria-label="给 AI 的修改或测试要求" placeholder="输入修改或测试要求…" rows={2}
         onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send(input) } }} />

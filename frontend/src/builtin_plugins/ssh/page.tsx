@@ -35,6 +35,8 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
   const [testing, setTesting] = useState(false)
   const next = useRef(0)
   const followSeq = useRef(0)
+  const dismissedAi = useRef<Map<string, number>>(new Map())
+  const latestTouched = useRef<Map<string, number>>(new Map())
   const serverList = useRef(servers)
   serverList.current = servers
   const focus = context.followAi ? context.aiFocus : undefined
@@ -51,6 +53,52 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
     }, error => { if (live) { report(error); setReady(true) } })
     return () => { live = false }
   }, [])
+  useEffect(() => {
+    if (!ready) return
+    let active = true
+    let controller: AbortController | undefined
+    const syncStreams = async () => {
+      if (document.visibilityState === 'hidden') return
+      controller?.abort()
+      controller = new AbortController()
+      try {
+        const { streams } = await ssh.aiStreams(controller.signal)
+        if (!active || !streams.length) return
+        let profiles = serverList.current
+        if (streams.some(s => !profiles.some(p => p.id === s.server_id))) {
+          profiles = await ssh.list()
+          if (!active) return
+          setServers(profiles)
+        }
+        const toAdd: Tab[] = []
+        for (const stream of streams) {
+          const id = aiTabId(stream.task_id, stream.server_id)
+          latestTouched.current.set(id, stream.touched)
+          const closedAt = dismissedAi.current.get(id)
+          if (closedAt !== undefined && stream.touched <= closedAt) continue
+          dismissedAi.current.delete(id)
+          const profile = profiles.find(item => item.id === stream.server_id)
+          if (!profile) continue
+          toAdd.push({ kind: 'ai', id, taskId: stream.task_id, profile })
+        }
+        if (!toAdd.length) return
+        setTabs(current => {
+          const added = toAdd.filter(item => !current.some(existing => existing.id === item.id))
+          if (!added.length) return current
+          if (current.length === 0) {
+            setTab(added[0]!.id)
+            setSelected(added[0]!.profile.id)
+          }
+          return [...current, ...added]
+        })
+      } catch {
+        /* Older mock fixtures may not expose /agent/ssh/ai-streams; ignore silently. */
+      }
+    }
+    void syncStreams()
+    const timer = window.setInterval(() => void syncStreams(), 4000)
+    return () => { active = false; controller?.abort(); window.clearInterval(timer) }
+  }, [ready])
   useEffect(() => {
     const abort = new AbortController()
     setHistory([])
@@ -108,6 +156,9 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
     setTabs(items => [...items, { kind: 'human', id, profile, access: { ...access, approved: profile.require_approval } }]); setTab(id); setError('')
   }
   function closeTerminal(id: Tab['id']) {
+    if (typeof id === 'string') {
+      dismissedAi.current.set(id, latestTouched.current.get(id) ?? Number.MAX_SAFE_INTEGER)
+    }
     const remaining = tabs.filter(item => item.id !== id)
     setTabs(remaining)
     if (id === tab) { const last = remaining.at(-1); setTab(last?.id); if (last) setSelected(last.profile.id) }
@@ -158,10 +209,19 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
         </>}
       </aside>
       <main className={css.terminalColumn} aria-label="终端区">
-        <div className={css.tabbar}><div className={css.tabs} role="tablist" aria-label="终端标签">{tabs.map(item => <div key={item.id} className={css.tab} data-active={item.id === tab}>
-          <button role="tab" aria-selected={item.id === tab} onClick={() => { setTab(item.id); setSelected(item.profile.id) }}>{item.profile.name} · {item.kind === 'ai' ? 'AI 实时' : item.id}</button>
-          <button aria-label={item.kind === 'ai' ? '关闭 AI 实时终端 ' + item.profile.name : '关闭终端 ' + item.id} onClick={() => closeTerminal(item.id)}>×</button>
-        </div>)}</div><button className={css.newTerminal} disabled={!server} onClick={() => { if (server) openTerminal(server) }}>＋ 新建终端</button></div>
+        <div className={css.tabbar}><div className={css.tabs} role="tablist" aria-label="终端标签">{tabs.map(item => {
+          const sameServerAi = item.kind === 'ai' ? tabs.filter(other => other.kind === 'ai' && other.profile.id === item.profile.id).length : 0
+          const rawTitle = item.kind === 'ai' ? context.titleFor?.(item.taskId) : undefined
+          const shortTitle = rawTitle ? (rawTitle.length > 12 ? rawTitle.slice(0, 12) + '…' : rawTitle) : item.kind === 'ai' ? item.taskId.slice(-6) : ''
+          const label = item.kind === 'ai'
+            ? (sameServerAi > 1 ? `${item.profile.name} · AI · ${shortTitle}` : `${item.profile.name} · AI 实时`)
+            : `${item.profile.name} · ${item.id}`
+          const tabTip = item.kind === 'ai' ? `${item.profile.name} · AI 会话：${rawTitle || item.taskId}` : `${item.profile.name} · 人工终端 ${item.id}`
+          return <div key={item.id} className={css.tab} data-active={item.id === tab}>
+            <button role="tab" aria-selected={item.id === tab} title={tabTip} onClick={() => { setTab(item.id); setSelected(item.profile.id) }}>{label}</button>
+            <button aria-label={item.kind === 'ai' ? '关闭 AI 实时终端 ' + item.profile.name : '关闭终端 ' + item.id} onClick={() => closeTerminal(item.id)}>×</button>
+          </div>
+        })}</div><button className={css.newTerminal} disabled={!server} onClick={() => { if (server) openTerminal(server) }}>＋ 新建终端</button></div>
         {tabs.length === 0 && <div className={css.empty}><span className={css.promptIcon} aria-hidden="true">&gt;_</span><p>没有打开的终端</p></div>}
         {tabs.map(item => item.kind === 'ai' ? <AiTerminalPane key={item.id} serverId={item.profile.id} taskId={item.taskId} active={tab === item.id}
           onOpenHuman={() => openTerminal(serverList.current.find(profile => profile.id === item.profile.id) ?? item.profile)} onActivity={event => liveActivity(item, event)} diagnose={context.diagnose} /> : <TerminalPane key={item.id} server={item.profile} access={item.access} active={tab === item.id} theme={theme} onError={cause => report(cause, item.profile.id)} onConnection={activity} diagnose={context.diagnose} />)}

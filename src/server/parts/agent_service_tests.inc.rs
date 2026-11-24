@@ -329,6 +329,47 @@
     }
 
     #[tokio::test]
+    async fn live_service_lock_prevents_second_instance_from_interrupting_running_task() {
+        let root = std::env::temp_dir().join(format!("service-lock-{}", uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let live_lock = try_acquire_service_lock(&root)
+            .unwrap()
+            .expect("first server acquires exclusive service lock");
+        let task_id = "task_live_running".to_string();
+        {
+            let conn = open_db(&root).unwrap();
+            conn.execute(
+                "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES (?1,'test','fake-model','running',?2,?2)",
+                params![task_id, now()],
+            )
+            .unwrap();
+        }
+        append_event(&root, &task_id, "turn/start", json!({"turn":1}), None).unwrap();
+
+        // While the live server holds the lock, a second server opening the same
+        // state directory must skip orphan recovery and leave the running task intact.
+        let second = acquire_service_lock_and_recover(&root).await.unwrap();
+        assert!(second.is_none(), "second server must see existing lock");
+        let status_while_locked: String = open_db(&root)
+            .unwrap()
+            .query_row("SELECT status FROM agent_tasks WHERE id=?1", [&task_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status_while_locked, "running");
+
+        // Once the first server exits (lock dropped), recovery runs normally.
+        drop(live_lock);
+        let recovered = acquire_service_lock_and_recover(&root).await.unwrap();
+        assert!(recovered.is_some(), "lock should be free after first server exits");
+        let status_after_drop: String = open_db(&root)
+            .unwrap()
+            .query_row("SELECT status FROM agent_tasks WHERE id=?1", [&task_id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status_after_drop, "interrupted");
+        drop(recovered);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn workspace_file_http_range_and_task_scope() {
         use axum::{routing::get, Router};
         use reqwest::header;

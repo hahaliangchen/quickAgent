@@ -517,7 +517,7 @@ pub fn text_edits_with_ranges_replace_all(
             }));
         }
         let replacement = normalize(&edit.new_text).replace('\n', ending);
-        if replace_all {
+        if replace_all || edit.replace_all {
             for (start, _) in source.match_indices(anchor) {
                 replacements.push((start, start + anchor.len(), replacement.clone()));
             }
@@ -551,7 +551,7 @@ mod tests {
     use super::*;
 
     fn edit(old_text: &str) -> crate::tools::TextEdit {
-        crate::tools::TextEdit { old_text: old_text.into(), new_text: "changed".into(), line_hint: None }
+        crate::tools::TextEdit { old_text: old_text.into(), new_text: "changed".into(), line_hint: None, replace_all: false }
     }
 
     fn error(source: &str, old_text: &str) -> String {
@@ -615,7 +615,7 @@ mod tests {
     fn text_edit_ranges_point_into_the_updated_file() {
         let (updated, ranges) = text_edits_with_ranges(
             "one\ntwo\nthree\nfour\n",
-            &[crate::tools::TextEdit { old_text: "two".into(), new_text: "TWO\nTWO-B".into(), line_hint: None }],
+            &[crate::tools::TextEdit { old_text: "two".into(), new_text: "TWO\nTWO-B".into(), line_hint: None, replace_all: false }],
         ).unwrap();
         assert_eq!(updated, "one\nTWO\nTWO-B\nthree\nfour\n");
         assert_eq!(preview_for_byte_ranges(&updated, &ranges).lines().next(), Some("L1|one"));
@@ -623,7 +623,7 @@ mod tests {
     }
     #[test]
     fn replace_all_updates_every_matching_anchor() {
-        let edits = [crate::tools::TextEdit { old_text: "let value = 1;".into(), new_text: "let value = 2;".into(), line_hint: None }];
+        let edits = [crate::tools::TextEdit { old_text: "let value = 1;".into(), new_text: "let value = 2;".into(), line_hint: None, replace_all: false }];
         let (updated, ranges) = text_edits_with_ranges_replace_all(
             "let value = 1;\nlet value = 1;\n",
             &edits,
@@ -631,6 +631,21 @@ mod tests {
         ).unwrap();
         assert_eq!(updated, "let value = 2;\nlet value = 2;\n");
         assert_eq!(ranges.len(), 2);
+    }
+
+    #[test]
+    fn per_edit_replace_all_works_when_top_level_flag_is_false() {
+        let edits = [
+            crate::tools::TextEdit { old_text: "foo".into(), new_text: "bar".into(), line_hint: None, replace_all: true },
+            crate::tools::TextEdit { old_text: "only_once".into(), new_text: "ONCE".into(), line_hint: None, replace_all: false },
+        ];
+        let (updated, ranges) = text_edits_with_ranges_replace_all(
+            "foo\nonly_once\nfoo\n",
+            &edits,
+            false,
+        ).unwrap();
+        assert_eq!(updated, "bar\nONCE\nbar\n");
+        assert_eq!(ranges.len(), 3);
     }
 
     #[test]

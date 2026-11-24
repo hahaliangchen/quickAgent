@@ -23,6 +23,22 @@ export type GraphView = { graph: Graph; entities: Entity[]; statuses: Record<str
 export type Reach = { graph_id: string; entity_id: string; port_id: string; depth: number; edge: GraphEdge }
 export type Impact = { matches: { entity: Entity; graphs: string[] }[]; graphs: string[]; upstream: Reach[]; downstream: Reach[]; invariants: { text: string; severity: GraphEdge['severity'] }[]; test_guards: Entity[] }
 export type Source = { file_path: string; line_start: number; line_end: number; lines: { line: number; text: string }[] }
+export type BlueprintProjectStatus = {
+  workspace_root: string
+  exists: boolean
+  status: 'unbuilt' | 'synced' | 'stale'
+  project_kind: ProjectKind | null
+  graph_count: number
+  entity_count: number
+  updated_at: string | null
+  last_synced_commit: string | null
+  head_commit: string | null
+  drifted_ports: number
+  missing_ports: number
+  changed_files: number
+  stale: boolean
+  error?: string
+}
 export const entryLabels: Record<EntryKind, string> = { ui_page: '页面交互', service_api: '纯接口', background_job: '后台任务', cli_command: '命令行', custom: '自定义入口' }
 export const entityLabels: Record<EntityKind, string> = { trigger_ui: '页面触发', trigger_api: '接口触发', trigger_job: '任务触发', service: '服务', store: '存储', external: '外部系统', test_guard: '测试守卫' }
 export const kindColors: Record<EntityKind, string> = { trigger_ui: 'var(--bp-ui)', trigger_api: 'var(--bp-api)', trigger_job: 'var(--bp-job)', service: 'var(--bp-service)', store: 'var(--bp-store)', external: 'var(--bp-external)', test_guard: 'var(--bp-test)' }

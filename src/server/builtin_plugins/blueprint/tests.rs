@@ -289,3 +289,48 @@ fn blueprint_refuses_out_of_scope_symlinks() {
     assert!(store.upsert_graph("test", GraphUpdate::default()).is_err());
     assert!(!outside.0.join("blueprint").exists());
 }
+#[test]
+fn blueprint_projects_endpoint_reports_unbuilt_synced_and_stale() {
+    let unbuilt = Workspace::new();
+    let built = Workspace::new();
+    let stale = Workspace::new();
+    fs::write(built.0.join("app.ts"), "export function okFn() {}\n").unwrap();
+    fs::write(stale.0.join("app.ts"), "export function missingLater() {}\n").unwrap();
+    {
+        let s = built.open();
+        s.upsert_entities(
+            serde_json::from_value(json!({"entities":[{
+                "id":"ui.app","name":"App","kind":"trigger_ui","file_path":"app.ts",
+                "ports":[{"id":"p1","name":"ok","direction":"out","kind":"event","symbol":"okFn","line_start":1,"line_end":1}]
+            }]})).unwrap(),
+        ).unwrap();
+        graph(&s, "main", json!({"entry_kind":"ui_page","nodes":[{"entity_id":"ui.app"}]}));
+    }
+    {
+        let s = stale.open();
+        s.upsert_entities(
+            serde_json::from_value(json!({"entities":[{
+                "id":"ui.app","name":"App","kind":"trigger_ui","file_path":"app.ts",
+                "ports":[{"id":"p1","name":"gone","direction":"out","kind":"event","symbol":"missingLater","line_start":1,"line_end":1}]
+            }]})).unwrap(),
+        ).unwrap();
+        graph(&s, "main", json!({"entry_kind":"ui_page","nodes":[{"entity_id":"ui.app"}]}));
+        fs::write(stale.0.join("app.ts"), "export function renamed() {}\n").unwrap();
+    }
+    let parsed = super::routes::scan_project_statuses(vec![
+        unbuilt.0.clone(),
+        built.0.clone(),
+        stale.0.clone(),
+        built.0.clone(),
+    ]);
+    let items = parsed["projects"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0]["status"], "unbuilt");
+    assert_eq!(items[0]["exists"], false);
+    assert!(!unbuilt.0.join(".quickagent").exists());
+    assert_eq!(items[1]["status"], "synced");
+    assert_eq!(items[1]["graph_count"], 1);
+    assert!(items[1]["updated_at"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(items[2]["status"], "stale");
+    assert_eq!(items[2]["missing_ports"], 1);
+}

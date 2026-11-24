@@ -20,6 +20,7 @@ use std::path::PathBuf;
 
 pub(crate) fn router() -> Router {
     Router::new()
+        .route("/api/blueprint/projects", post(project_statuses))
         .route("/api/blueprint/state", get(state))
         .route("/api/blueprint/graph", post(create_graph))
         .route(
@@ -91,6 +92,94 @@ struct Impact {
 #[derive(Deserialize)]
 struct Layout {
     nodes: Vec<GraphNode>,
+}
+#[derive(Deserialize)]
+struct ProjectsQuery {
+    workspaces: Vec<PathBuf>,
+}
+
+async fn project_statuses(Json(args): Json<ProjectsQuery>) -> Response {
+    match tokio::task::spawn_blocking(move || scan_project_statuses(args.workspaces)).await {
+        Ok(value) => Json(value).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"blueprint project scan failed"})),
+        )
+            .into_response(),
+    }
+}
+
+pub(super) fn scan_project_statuses(workspaces: Vec<PathBuf>) -> Value {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut items = Vec::new();
+    for root in workspaces.into_iter().take(64) {
+        if !root.is_absolute() {
+            continue;
+        }
+        let key = root.to_string_lossy().into_owned();
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let summary = (|| -> Result<Value> {
+            let store = Store::open(&root)?;
+            let manifest = store.manifest()?;
+            let Some(m) = manifest else {
+                return Ok(json!({
+                    "workspace_root": key,
+                    "exists": false,
+                    "status": "unbuilt",
+                    "project_kind": null,
+                    "graph_count": 0,
+                    "entity_count": 0,
+                    "updated_at": null,
+                    "last_synced_commit": null,
+                    "head_commit": null,
+                    "drifted_ports": 0,
+                    "missing_ports": 0,
+                    "changed_files": 0,
+                    "stale": false
+                }));
+            };
+            let (entities, graphs) = contents(&store, Some(&m))?;
+            let verify = verify::verify(&store, Some(&m), &entities, &graphs);
+            let status = if verify.stale { "stale" } else { "synced" };
+            Ok(json!({
+                "workspace_root": key,
+                "exists": true,
+                "status": status,
+                "project_kind": m.project_kind,
+                "graph_count": m.graphs.len(),
+                "entity_count": entities.len(),
+                "updated_at": if m.updated_at.is_empty() { Value::Null } else { json!(m.updated_at) },
+                "last_synced_commit": m.last_synced_commit,
+                "head_commit": verify.head_commit,
+                "drifted_ports": verify.drifted_ports,
+                "missing_ports": verify.missing_ports,
+                "changed_files": verify.changed_files.len(),
+                "stale": verify.stale
+            }))
+        })()
+        .unwrap_or_else(|err| {
+            json!({
+                "workspace_root": key,
+                "exists": false,
+                "status": "unbuilt",
+                "error": err.to_string(),
+                "project_kind": null,
+                "graph_count": 0,
+                "entity_count": 0,
+                "updated_at": null,
+                "last_synced_commit": null,
+                "head_commit": null,
+                "drifted_ports": 0,
+                "missing_ports": 0,
+                "changed_files": 0,
+                "stale": false
+            })
+        });
+        items.push(summary);
+    }
+    json!({ "projects": items })
 }
 
 async fn run(root: PathBuf, op: impl FnOnce(&Store) -> Result<Value> + Send + 'static) -> Response {

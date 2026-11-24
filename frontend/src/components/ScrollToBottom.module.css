@@ -1,0 +1,72 @@
+/* One control for every transcript in the app: a circle that floats just above
+   the input, on the transcript's centre line. It is drawn from the same floating
+   surface tokens as the composer's raised cards so it reads as chrome, not text. */
+.jump {
+  position: absolute;
+  right: 0;
+  left: 0;
+  bottom: 12px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin: 0 auto;
+  padding: 0;
+  /* The ring leans on the label colour, not only on the hairline border token: over
+     dense text in dark mode that hairline alone disappears. */
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-primary) 20%, var(--dsw-alias-border-l3));
+  border-radius: 999px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-button-floating-fill);
+  box-shadow: var(--dsw-elevation-panel), 0 2px 6px rgb(0 0 0 / 12%);
+  /* Text keeps scrolling behind the control; blurring it keeps the glyph ring clean. */
+  backdrop-filter: blur(6px) saturate(1.4);
+  -webkit-backdrop-filter: blur(6px) saturate(1.4);
+  cursor: pointer;
+  /* Hidden by state, not by unmounting: the fade is the affordance that content
+     appeared below, and it must not shift the transcript's layout. */
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(4px) scale(0.94);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease,
+    visibility 0.16s,
+    background 0.16s;
+  pointer-events: none;
+}
+
+.shown {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  pointer-events: auto;
+}
+
+/* On a dark transcript the floating surface token sits only a step above the page,
+   so the control needs a slightly lifted fill and a firmer ring to read as chrome
+   rather than as a gap in the text. Both theme attributes are covered: the app frame
+   publishes data-ds-dark-theme, plugin pages publish data-theme. */
+:global([data-ds-dark-theme]) .jump,
+:global([data-theme='dark']) .jump {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 12%, var(--dsw-alias-button-floating-fill));
+  border-color: color-mix(in srgb, var(--dsw-alias-label-primary) 30%, var(--dsw-alias-border-l3));
+}
+
+.jump:hover {
+  background: var(--dsw-alias-button-floating-hover);
+}
+
+.jump:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jump {
+    transition: opacity 0.16s ease, visibility 0.16s, background 0.16s;
+    transform: none;
+  }
+}

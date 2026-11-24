@@ -6,10 +6,14 @@ import { callName, clock, draftFileOf, duration, plainText, programEntries, prog
 import { CodeView, DiffView, diffStats } from './WorkbenchCode.tsx'
 import { DraftChat } from './WorkbenchChat.tsx'
 import { Icon, type IconName } from './WorkbenchIcon.tsx'
+import { PluginPageHost } from './PluginPageHost.tsx'
 import styles from './SkillWorkbench.module.css'
 
 const TONE_ICON: Record<Tone, IconName> = { ok: 'check', error: 'close', warn: 'bars', live: 'spark', muted: 'minus' }
 const TONE_CLASS: Record<Tone, string | undefined> = { ok: styles.toneOk, error: styles.toneError, warn: styles.toneWarn, live: styles.toneLive, muted: styles.toneMuted }
+/** Workbench-hosted plugin pages; the dock plugins keep their own icon. */
+const WORKBENCH_PAGES = new Set(['daily-report'])
+
 /** Sessions a group shows before "显示其余"; a long project must not push the other groups away. */
 const GROUP_ROWS = 6
 /** Turn tabs shown at once, so they fit one line even in the narrow layout. */
@@ -36,13 +40,16 @@ function Status({ tone, label }: { tone: Tone; label: string }) {
 }
 
 /** Recorded workflows of real sessions, and drafts of them that an Agent conversation edits. */
-export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, onPackages }: {
+export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, onPackages, pageRequest }: {
   tasks: readonly Task[]
   projects: readonly Project[]
   defaultWorkspace: string
   onOpenChat: (id: string) => void
   onPackages: () => void
+  /** A plugin conversation asked for its page; the signal changes on every request. */
+  pageRequest?: { owner: string; seq: number } | undefined
 }) {
+  const [pluginPage, setPluginPage] = useState<string>()
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedId, setSelectedId] = useState(() => stored<string | null>('skill-workbench:session', null) ?? undefined)
@@ -75,6 +82,20 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
     void api.skillPackages().then(result => setPackages(result.packages), () => {})
     void refreshDrafts()
   }, [refreshDrafts])
+
+  // Plugins whose page belongs to the workbench rather than to the dock. The
+  // backend decides whether the plugin exists at all; this list only says where
+  // its page is shown.
+  const pagePlugins = useMemo(
+    () => packages.filter(item => WORKBENCH_PAGES.has(item.id) && item.enabled && item.pages.some(page => page.id === 'workbench')),
+    [packages],
+  )
+  useEffect(() => {
+    if (!pageRequest) return
+    if (!pagePlugins.some(item => item.id === pageRequest.owner)) return
+    setPluginPage(pageRequest.owner)
+    setSelectedId(undefined)
+  }, [pageRequest, pagePlugins])
 
   const hidden = useMemo(() => new Set(drafts.flatMap(item => item.chat_task ? [item.chat_task] : [])), [drafts])
   const groups = useMemo(() => sessionGroups(tasks, projects, packages, defaultWorkspace, hidden, query), [tasks, projects, packages, defaultWorkspace, hidden, query])
@@ -145,7 +166,7 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
   const rejectedCount = (turns ?? []).reduce((sum, turn) => sum + turn.rejected.length + turn.programs.reduce((count, program) => count + program.rejected.length, 0), 0)
   const draftLabel = draft ? `${draft.draft.id.slice(0, 6)}${draft.draft.created_at ? `（${clock(draft.draft.created_at)} 创建）` : ''}` : ''
 
-  const selectSession = (id: string) => { setSelectedId(id); setListOpen(false) }
+  const selectSession = (id: string) => { setPluginPage(undefined); setSelectedId(id); setListOpen(false) }
   const selectProgram = (seq: number) => { setSelectedSeq(seq); setFilePath(undefined) }
   const selectTurn = (turn: SessionTurn) => { setRequestOpen(false); const last = turn.programs.at(-1); if (last) selectProgram(last.seq) }
   const showFile = useCallback((path: string) => {
@@ -241,6 +262,14 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
         {groups.plugins.length > 0 && section('section:plugins', '插件会话', groups.plugins.map(entry => group(entry, 'plug', true)))}
         {groups.chats.length > 0 && section('section:chats', '普通聊天', <div className={styles.groupRows}>{rowsOf('chats', groups.chats)}</div>)}
         {empty && <p className={styles.hint}>{query.trim() ? '没有匹配的会话' : '还没有会话'}</p>}
+        {pagePlugins.length > 0 && section('section:plugin-pages', '插件页', <div className={styles.groupRows}>
+          {pagePlugins.map(item => <button key={item.id} type="button" title={`打开 ${item.title}`}
+            className={clsx(styles.sessionRow, pluginPage === item.id && styles.sessionActive)}
+            onClick={() => { setPluginPage(item.id); setSelectedId(undefined) }}>
+            <Icon name="plug" size={18} />
+            <span className={styles.sessionTitle}>{item.title}</span>
+          </button>)}
+        </div>)}
       </div>
     </aside>
     <div className={styles.scrim} onClick={() => { setListOpen(false); setContextOpen(false) }} />
@@ -250,7 +279,9 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
         <button type="button" className={clsx(styles.ghostButton, styles.listToggle)} onClick={() => setListOpen(true)}><Icon name="list" size={16} />会话</button>
         {task && <button type="button" className={clsx(styles.ghostButton, styles.contextToggle)} onClick={() => setContextOpen(true)}><Icon name="panel" size={16} />流程上下文</button>}
       </div>
-      {!task ? <div className={styles.empty}>
+      {pluginPage ? <div className={styles.pluginPage}>
+        <PluginPageHost owner={pluginPage} page="workbench" workspaceRoot={defaultWorkspace} />
+      </div> : !task ? <div className={styles.empty}>
         <span className={styles.emptyIcon}><Icon name="code" size={26} /></span>
         <strong>选择一个会话</strong>
         <span>查看它运行过的流程代码、当时的用户请求和运行结果，再把流程整理成可复用的技能草稿。</span>

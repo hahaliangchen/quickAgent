@@ -102,6 +102,42 @@ pub(crate) fn save_permission_mode(
     Ok(())
 }
 
+/// Advisory process lock held for the lifetime of an agent service instance so
+/// another process sharing the same workspace state directory never mistakes
+/// live running tasks for crashed orphans.
+pub struct ServiceLock(#[allow(dead_code)] std::fs::File);
+
+/// Try to claim exclusive ownership of `<workspace>/.codex-workspace-mcp/service.lock`.
+/// Returns `Ok(None)` when another live agent process already holds it.
+pub fn try_acquire_service_lock(workspace_root: &std::path::Path) -> anyhow::Result<Option<ServiceLock>> {
+    let dir = workspace_root.join(".codex-workspace-mcp");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("service.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(ServiceLock(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// Acquire the workspace service lock and recover orphaned tasks only when no
+/// other live instance owns the workspace state directory.
+pub async fn acquire_service_lock_and_recover(
+    workspace_root: &std::path::Path,
+) -> anyhow::Result<Option<ServiceLock>> {
+    let lock = try_acquire_service_lock(workspace_root)?;
+    if lock.is_some() {
+        recover_orphaned_tasks(workspace_root).await?;
+    }
+    Ok(lock)
+}
+
 pub async fn recover_orphaned_tasks(workspace_root: &std::path::Path) -> anyhow::Result<()> {
     let root = workspace_root.to_path_buf();
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {

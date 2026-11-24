@@ -12,6 +12,7 @@ import { useSession, type Session } from '../useSession.ts'
 import { Icon } from './WorkbenchIcon.tsx'
 import { ShellSetupDialog } from './ShellSetupDialog.tsx'
 import { ModelSelect } from '../dsh/model-selection/ModelSelect.tsx'
+import { ScrollToBottom, transcriptScroller, useScrollToBottom } from './ScrollToBottom.tsx'
 import css from './CodeChatDock.module.css'
 
 /** One conversation per repository, remembered on this device. */
@@ -76,6 +77,8 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
   const openFromSignal = useRef(0)
   const input = useRef<HTMLTextAreaElement>(null)
   const panel = useRef<HTMLElement>(null)
+  const transcript = useRef<HTMLDivElement>(null)
+  const { away: tailHidden, jump: jumpToTail, following } = useScrollToBottom(transcript, open)
   const filePicker = useRef<HTMLInputElement>(null)
   const pasteEventSeen = useRef(false)
   const fallbackPasteTimer = useRef<number | null>(null)
@@ -112,6 +115,23 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
   }, [open, width])
   useEffect(() => { setTaskId(rememberedTask(workspace)) }, [workspace])
   useEffect(() => { if (open && !linkedTaskId) input.current?.focus() }, [open, linkedTaskId])
+  // Opening the dock (or switching its conversation) lands on the newest line. The
+  // transcript is still laying out when this runs, so the pin follows the rendered
+  // size instead of measuring a half-built list once; after that only a reader still
+  // at the tail is carried along.
+  useLayoutEffect(() => {
+    if (!open) return
+    const host = transcript.current
+    if (host === null) return
+    const box = transcriptScroller(host)
+    following.current = true
+    const pin = () => { if (following.current) box.scrollTop = box.scrollHeight }
+    pin()
+    const observer = new ResizeObserver(pin)
+    observer.observe(box)
+    for (const node of Array.from(box.children)) observer.observe(node)
+    return () => observer.disconnect()
+  }, [open, taskId, following])
   useEffect(() => {
     if (openSignal !== undefined && openSignal > openFromSignal.current) {
       openFromSignal.current = openSignal
@@ -221,13 +241,16 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
     <div className={css.repoRow}>
       <span className={css.repo} title={linkedTaskId ? (task?.title || linkedTaskId) : workspace}><Icon name="folder" size={14} />{linkedTaskId ? (task?.title?.trim() || '当前会话') : baseName(workspace)}</span>
     </div>
-    <div className={css.body}>
-      {taskId && task
-        ? renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: onOpenInChat, onChangesUpdated: session.reload })
-        : <div className={css.greeting}>
-          <strong>👋 你好！我是 QuickAgent 代码助手</strong>
-          <p>我可以阅读、解释当前仓库的代码，回答开发问题。打开文件后直接提问，AI 会读这个文件来回答；把左侧文件树里的文件或文件夹拖到这里，可以一起问。</p>
-        </div>}
+    <div className={css.chatArea}>
+      <div ref={transcript} className={css.body}>
+        {taskId && task
+          ? renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: onOpenInChat, onChangesUpdated: session.reload })
+          : <div className={css.greeting}>
+            <strong>👋 你好！我是 QuickAgent 代码助手</strong>
+            <p>我可以阅读、解释当前仓库的代码，回答开发问题。打开文件后直接提问，AI 会读这个文件来回答；把左侧文件树里的文件或文件夹拖到这里，可以一起问。</p>
+          </div>}
+      </div>
+      {taskId && task && <ScrollToBottom show={tailHidden} onJump={jumpToTail} />}
     </div>
     {dropping && <div className={css.dropMask}>松开即添加为上下文</div>}
     <footer className={css.composer}>

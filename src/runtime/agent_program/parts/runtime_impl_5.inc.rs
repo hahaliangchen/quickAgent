@@ -608,6 +608,13 @@ impl Runtime {
                                             return Ok(None);
                                         }
                                         if let Some(qualified) = crate::tools::tool_registry::ToolRegistry::qualified_hint(&name) {
+                                            if receiver != VmValue::Undefined
+                                                && let Some((lib, _)) = qualified.split_once('.')
+                                            {
+                                                bail!(
+                                                    "TypeError: {name} is not a function (a local variable may have shadowed host library `{lib}`; call `require(\"{lib}\").{name}(...)` or rename that variable)"
+                                                );
+                                            }
                                             bail!("TypeError: {name} is not a function (did you mean `{qualified}(...)`?)");
                                         }
                                         bail!("TypeError: {} is not a function",name);

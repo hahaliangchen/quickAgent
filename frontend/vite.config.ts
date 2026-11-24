@@ -23,6 +23,7 @@ export default defineConfig({
       '/api/session/uploadFileBinary': backend,
       '/agent/tasks': backend,
       '/api/blueprint': backend,
+      '/api/daily-report': backend,
       '/agent/ssh': { target: backend, ws: true },
       '/agent/sessions': backend,
       '/agent/info': backend,

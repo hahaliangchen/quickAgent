@@ -520,6 +520,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 name = "codex-workspace-mcp"
 version = "0.2.1"
 dependencies = [
+ "aes",
  "anyhow",
  "axum",
  "base64",
@@ -542,6 +543,7 @@ dependencies = [
  "rand 0.10.3",
  "regex",
  "reqwest",
+ "rsa",
  "rusqlite",
  "russh",
  "russh-sftp",

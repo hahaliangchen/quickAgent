@@ -78,6 +78,41 @@ fn hub() -> &'static Mutex<Hub> {
     HUB.get_or_init(Mutex::default)
 }
 
+#[derive(Clone, serde::Serialize)]
+pub(super) struct StreamSummary {
+    pub task_id: String,
+    pub server_id: String,
+    pub touched: u64,
+    pub buffered_bytes: usize,
+}
+
+pub(super) fn list_streams() -> Vec<StreamSummary> {
+    hub().lock().unwrap().list_streams()
+}
+
+impl Hub {
+    fn list_streams(&self) -> Vec<StreamSummary> {
+        let mut items: Vec<StreamSummary> = self
+            .channels
+            .iter()
+            .filter(|(_, channel)| !channel.replay.is_empty())
+            .map(|((task_id, server_id), channel)| StreamSummary {
+                task_id: task_id.clone(),
+                server_id: server_id.clone(),
+                touched: channel.touched,
+                buffered_bytes: channel.replay.len(),
+            })
+            .collect();
+        items.sort_by(|a, b| {
+            b.touched
+                .cmp(&a.touched)
+                .then_with(|| a.server_id.cmp(&b.server_id))
+                .then_with(|| a.task_id.cmp(&b.task_id))
+        });
+        items
+    }
+}
+
 pub(super) fn subscribe(task: &str, server: &str) -> (Vec<u8>, broadcast::Receiver<LiveMessage>) {
     let mut hub = hub().lock().unwrap();
     let channel = hub.channel(task, server);
@@ -272,5 +307,20 @@ mod tests {
             b"\r\nB\r\n"
         );
         assert!(filter.finish().is_empty());
+    }
+
+    #[test]
+    fn lists_only_nonempty_streams_newest_first() {
+        let mut hub = Hub::default();
+        hub.channel("empty_task", "srv1");
+        hub.channel("task_a", "srv1").write(b"first");
+        hub.channel("task_b", "srv2").write(b"second");
+        let streams = hub.list_streams();
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[0].task_id, "task_b");
+        assert_eq!(streams[0].server_id, "srv2");
+        assert_eq!(streams[0].buffered_bytes, 6);
+        assert_eq!(streams[1].task_id, "task_a");
+        assert_eq!(streams[1].server_id, "srv1");
     }
 }

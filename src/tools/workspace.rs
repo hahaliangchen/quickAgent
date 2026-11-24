@@ -702,6 +702,8 @@ pub struct TextEdit {
     pub new_text: String,
     #[serde(default)]
     pub line_hint: Option<usize>,
+    #[serde(default)]
+    pub replace_all: bool,
 }
 
 #[derive(Debug, Deserialize)]

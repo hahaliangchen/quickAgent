@@ -215,6 +215,25 @@ fn build(
     build_with_outputs(program, root, extra_writable_roots, cwd, boundary, offline, &[])
 }
 
+/// Internal wiring env vars of the running agent daemon that must never leak
+/// into child shells (otherwise a child test server launched without explicit
+/// `WORKSPACE_ROOT` inherits the live desktop DB and corrupts active tasks).
+const HOST_AGENT_INTERNAL_ENVS: &[&str] = &[
+    "WORKSPACE_ROOT",
+    "GROW_CONFIG_DIR",
+    "GROW_RESOURCES_DIR",
+    "GROW_DESKTOP_BIND",
+    "AGENT_WEB_DIR",
+    "AGENT_BIND",
+    "DAILY_REPORT_DATA_DIR",
+];
+
+fn strip_host_agent_envs(cmd: &mut Command) {
+    for key in HOST_AGENT_INTERNAL_ENVS {
+        cmd.env_remove(key);
+    }
+}
+
 fn build_with_outputs(
     program: impl AsRef<OsStr>,
     root: &Path,
@@ -225,7 +244,9 @@ fn build_with_outputs(
     outputs: &[PathBuf],
 ) -> Result<Command> {
     if boundary == ExecutionBoundary::Host {
-        return Ok(Command::new(program));
+        let mut cmd = Command::new(program);
+        strip_host_agent_envs(&mut cmd);
+        return Ok(cmd);
     }
     ensure!(
         cfg!(target_os = "linux"),
@@ -321,6 +342,7 @@ fn build_with_outputs(
             cmd.env_remove(&key);
         }
     }
+    strip_host_agent_envs(&mut cmd);
     cmd.env(SANDBOX_MARKER, "1");
     cmd.env("TMPDIR", "/tmp")
         .env("TMP", "/tmp")
@@ -1513,5 +1535,28 @@ except urllib.error.HTTPError as e:
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "403");
+    }
+
+    #[test]
+    fn host_boundary_strips_parent_agent_internal_envs() {
+        let work = std::env::temp_dir().join(format!(
+            "grow-env-strip-test-{}-{}",
+            std::process::id(),
+            crate::server::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&work).unwrap();
+        let cmd = command("sh", &work, &work, ExecutionBoundary::Host).unwrap();
+        let removed: Vec<&str> = cmd
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| v.is_none().then(|| k.to_str()).flatten())
+            .collect();
+        let _ = std::fs::remove_dir_all(&work);
+        for key in HOST_AGENT_INTERNAL_ENVS {
+            assert!(
+                removed.contains(key),
+                "expected {key} to be stripped from child command, got {removed:?}"
+            );
+        }
     }
 }

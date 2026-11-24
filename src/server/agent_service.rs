@@ -20,7 +20,9 @@ mod routes;
 mod streaming;
 mod tools;
 
-pub use db::recover_orphaned_tasks;
+pub use db::acquire_service_lock_and_recover;
+#[cfg(test)]
+pub(crate) use db::{recover_orphaned_tasks, try_acquire_service_lock};
 pub(crate) use db::{
     append_event_tx, emit, finish, next_event_seq, now, open_db, permission_mode_for,
     save_permission_mode,
