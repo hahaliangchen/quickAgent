@@ -110,6 +110,13 @@ pub(super) async fn proxy_rust_tool(
             Ok(val) => (val, false),
             Err(err) => (json!({"error": format!("{err:#}")}), true),
         },
+        "list_sessions" => match crate::context::session_browser::list_sessions(
+            s.state.workspace.root(),
+            &args,
+        ) {
+            Ok(val) => (val, false),
+            Err(err) => (json!({"error": format!("{err:#}")}), true),
+        },
         "list_skills" => handle_list_skills(s),
         "read_skill" => handle_read_skill(s, &args),
         "read_tool_contracts" => handle_read_tool_contracts_with_defs(libs, &args, || {

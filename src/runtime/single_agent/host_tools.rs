@@ -33,6 +33,7 @@ pub(super) fn page_allows(s: &Session<'_>, name: &str) -> bool {
             | "read_skill"
             | "unload_skill"
             | "read_session_history"
+            | "list_sessions"
             | "read_asset"
             | "snapshot"
             | "list_context_assets"

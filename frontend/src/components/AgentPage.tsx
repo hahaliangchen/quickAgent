@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, type Dispatch, type SetStateAction } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
 import clsx from 'clsx'
 import { BrandMark } from './BrandMark.tsx'
 import { PlanProgress } from './PlanProgress.tsx'
 import { ScrollToBottom, useScrollToBottom } from './ScrollToBottom.tsx'
+import { ChatHistoryModal, flashCss, type HistoryJump } from './ChatHistoryModal.tsx'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
 import { latestContextUsage } from './contextUsage.ts'
 import { SkillPagesView } from './SkillPagesView.tsx'
@@ -18,6 +19,19 @@ import { useTaskDuration } from '../useTaskDuration.ts'
 import type { AgentWorkspace } from '../useAgentWorkspace.ts'
 import css from '../App.module.css'
 import headerCss from './CodexHeader.module.css'
+
+/** The class the history dialog's stylesheet gives a revealed row. */
+const FLASH_CLASS: string = flashCss['flash'] ?? 'historyFlash'
+
+/** Marks a revealed row for a moment, then lets it settle back. */
+function flash(element: HTMLElement) {
+  element.classList.remove(FLASH_CLASS)
+  // Reading a layout value restarts the animation when the same row is revealed
+  // twice, which classList alone would not.
+  void element.offsetWidth
+  element.classList.add(FLASH_CLASS)
+  window.setTimeout(() => element.classList.remove(FLASH_CLASS), 1400)
+}
 
 interface PageProps {
   readonly workspace: AgentWorkspace
@@ -98,19 +112,40 @@ export function ConversationPage({
   readonly onToggleRightPanel?: (() => void) | undefined
   readonly onFilePreview?: OpenFilePreview | undefined
 }) {
+  const [historyOpen, setHistoryOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLDivElement>(null)
   const followTail = useRef(true)
   const { away: tailHidden, jump: jumpToTail } = useScrollToBottom(scrollRef)
-  const pendingJump = useRef<{ taskId: string | undefined; key: string }>()
-  const scrollToMessage = useCallback((key: string) => {
+  const pendingJump = useRef<{ taskId: string | undefined; key: string; turn: number | undefined }>()
+  // Reveals one row and reports whether it existed: a jump that arrives before
+  // the transcript has rendered is retried rather than silently dropped.
+  const scrollToMessage = useCallback((key: string, turn?: number, expect?: string | undefined): boolean => {
     const scroll = scrollRef.current
-    const message = scroll?.querySelector<HTMLElement>(`[data-chat-turn-message="${CSS.escape(key)}"]`)
-    if (!scroll || !message) return
+    if (scroll === null) return false
+    // While another conversation loads, the previous transcript is still mounted;
+    // its rows share sequence numbers, so only the right chat may answer.
+    if (expect !== undefined) {
+      const shown = scroll.querySelector<HTMLElement>('[data-chat-task]')?.dataset.chatTask
+      if (shown !== expect) return false
+    }
+    // The transcript keys every rendered row by event kind and sequence.
+    let message = scroll.querySelector<HTMLElement>('[data-event-seq="' + CSS.escape(key) + '"]')
+    if (message === null && turn !== undefined && turn > 0) {
+      // A reply folded into a collapsed process has no row of its own yet: reveal
+      // the turn that holds it rather than pretending the jump failed.
+      message = scroll.querySelector<HTMLElement>('[data-turn="' + turn + '"]')
+    }
+    if (message === null) {
+      message = scroll.querySelector<HTMLElement>('[data-chat-turn-message="' + CSS.escape(key) + '"]')
+    }
+    if (message === null) return false
     followTail.current = false
     message.focus({ preventScroll: true })
     scroll.scrollTop += message.getBoundingClientRect().top - scroll.getBoundingClientRect().top - 12
+    flash(message)
+    return true
   }, [])
   // The chat width scales with the space the conversation actually has (the
   // window minus the sidebar and any open side panel), which CSS reads from
@@ -140,9 +175,11 @@ export function ConversationPage({
   useLayoutEffect(() => {
     const jump = pendingJump.current
     if (tab !== 'chat' || jump === undefined) return
-    pendingJump.current = undefined
-    if (jump.taskId === workspace.taskId) scrollToMessage(jump.key)
-  }, [tab, workspace.taskId, scrollToMessage])
+    // Another conversation first has to load its events; the effect runs again
+    // when they arrive, so the jump survives the wait instead of being lost.
+    if (jump.taskId !== workspace.taskId) return
+    if (scrollToMessage(jump.key, jump.turn, workspace.taskId)) pendingJump.current = undefined
+  }, [tab, workspace.taskId, workspace.session.events.length, scrollToMessage])
   // The floating control clears the composer, which changes height as the draft
   // grows; the seat is measured instead of guessed so it never covers the input.
   useLayoutEffect(() => {
@@ -181,14 +218,39 @@ export function ConversationPage({
     text: item.text.trim().replace(/\s+/g, ' ') || item.attachments?.map(file => file.name).join('、') || '附件消息',
   })), [items])
 
-  const jumpToTurn = (key: string) => {
+  // Ctrl+F or Cmd+F opens the history dialog, the way it opens "find chat
+  // content" in the chat apps this page is modelled on.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') return
+      // ConversationPage stays mounted while hidden (Home <-> SSH keep-alive);
+      // only capture Ctrl+F when the conversation view is actually visible.
+      if (bodyRef.current === null || bodyRef.current.offsetParent === null) return
+      event.preventDefault()
+      setHistoryOpen(true)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
+  const jumpToTurn = (key: string, turn?: number) => {
     if (tab === 'chat') {
-      scrollToMessage(key)
+      scrollToMessage(key, turn)
     } else {
-      pendingJump.current = { taskId: workspace.taskId, key }
+      pendingJump.current = { taskId: workspace.taskId, key, turn }
       setTab('chat')
     }
   }
+  // The history dialog reveals a row in the transcript. A row from another
+  // conversation switches there first and reveals itself once it is on screen.
+  const revealHistory = useCallback((jump: HistoryJump) => {
+    setTab('chat')
+    if (jump.task_id === workspace.taskId && tab === 'chat' && scrollToMessage(jump.key, jump.turn, workspace.taskId)) return
+    // Queue it for the pending-jump effect, which waits for the transcript.
+    pendingJump.current = { taskId: jump.task_id, key: jump.key, turn: jump.turn }
+    if (jump.task_id !== workspace.taskId) workspace.openTask(jump.task_id)
+    else scrollToMessage(jump.key, jump.turn, workspace.taskId)
+  }, [tab, workspace.taskId, workspace.openTask, scrollToMessage])
   // A summary file link reveals the inspector when it is closed; the toggle is
   // only asked to open, so a click never folds a panel the user is reading.
   const revealRightPanel = () => {
@@ -248,8 +310,20 @@ export function ConversationPage({
           </button>
         </div>
 
-        {/* Right: Duration badge, Right Panel Toggle */}
+        {/* Right: Duration badge, History search, Right Panel Toggle */}
         <div className={headerCss.rightUtils}>
+          <button
+            type="button"
+            className={headerCss.iconBtn}
+            title="查找聊天记录与素材（Ctrl+F）"
+            aria-label="查找聊天记录与素材"
+            onClick={() => setHistoryOpen(true)}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2">
+              <circle cx="11" cy="11" r="7" />
+              <line x1="16.5" x2="21" y1="16.5" y2="21" />
+            </svg>
+          </button>
           {durationInfo.currentTurnDurationMs !== undefined && (
             <div className={headerCss.durationBadge}>
               {durationInfo.isRunning && <span className={headerCss.liveDot} />}
@@ -346,6 +420,15 @@ export function ConversationPage({
           </div>
         </div>
       </div>
+
+      <ChatHistoryModal
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        taskId={workspace.taskId}
+        taskTitle={currentTitle}
+        onJump={revealHistory}
+        onFilePreview={onFilePreview}
+      />
     </main>
   )
 }

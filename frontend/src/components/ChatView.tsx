@@ -310,7 +310,7 @@ function AssistantTurnView({
 
       {/* 3. Conclusion (Final Answer Text) */}
       {conclusionText !== '' && (
-        <div className={css.conclusionBody}>
+        <div className={css.conclusionBody} data-event-seq={conclusion?.key}>
           <AssistantMessage
             text={conclusionText}
             reasoning=""
@@ -505,7 +505,9 @@ export function ChatView({ events, projectedItems, task, running, onOpenTask, on
   }, [items, closedBefore, running])
 
   const frame = (
-    <div className={chatCss.frame}>
+    // The transcript names the conversation it renders: a jump that arrives while
+    // the previous chat is still on screen must not scroll the wrong rows.
+    <div className={chatCss.frame} data-chat-task={task?.task_id ?? ''}>
       <div className={chatCss.root}>
         <div className={chatCss.scroll} data-chat-scroll>
           <div className={chatCss.column}>
@@ -517,7 +519,7 @@ export function ChatView({ events, projectedItems, task, running, onOpenTask, on
                 const canRewind = Boolean(task && !running && task.parent_task_id === null)
                 const hasText = node.item.text.trim() !== ''
                 return (
-                  <div key={node.item.key} className={`${chatCss.flowItem} ${css.userWithRewind}`} data-chat-flow-kind="user" data-chat-turn-message={node.item.key} tabIndex={-1}>
+                  <div key={node.item.key} className={`${chatCss.flowItem} ${css.userWithRewind}`} data-chat-flow-kind="user" data-chat-turn-message={node.item.key} data-event-seq={node.item.key} data-turn={node.turn} tabIndex={-1}>
                     <Item
                       item={node.item}
                       turnClosed={true}
@@ -537,7 +539,7 @@ export function ChatView({ events, projectedItems, task, running, onOpenTask, on
 
               if (node.kind === 'assistant-turn') {
                 return (
-                  <div key={node.turn.key} className={chatCss.flowItem} data-chat-flow-kind="assistant">
+                  <div key={node.turn.key} className={chatCss.flowItem} data-chat-flow-kind="assistant" data-turn={node.turn.turn}>
                     <AssistantTurnView
                       turn={node.turn}
                       taskId={task?.task_id ?? ''}
@@ -556,7 +558,7 @@ export function ChatView({ events, projectedItems, task, running, onOpenTask, on
               }
 
               return (
-                <div key={node.item.key} className={chatCss.flowItem} data-chat-flow-kind={node.item.kind}>
+                <div key={node.item.key} className={chatCss.flowItem} data-chat-flow-kind={node.item.kind} data-event-seq={node.item.key}>
                   <Item
                     item={node.item}
                     turnClosed={true}

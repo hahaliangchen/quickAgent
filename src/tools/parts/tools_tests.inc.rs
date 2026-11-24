@@ -141,6 +141,63 @@
     }
 
     #[test]
+    fn missing_style_typo_and_missing_dir_hints_rank_closest_matches_and_css_imports() {
+        let root = temp_workspace("not_found_smart_hints");
+        fs::create_dir_all(root.join("frontend/src/components")).unwrap();
+        fs::write(
+            root.join("frontend/src/components/SettingsModal.tsx"),
+            "import React from 'react'\nimport rootCss from '../dsh/settings/SettingsRoot.module.css'\nexport function SettingsModal() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("frontend/src/components/WorkspaceModal.module.css"),
+            ".modal {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("frontend/src/components/AgentPage.tsx"),
+            "export function AgentPage() {}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::new(&root).unwrap();
+        let read = |path: &str| {
+            workspace
+                .read_file(ReadFileRequest {
+                    workspace_root: None,
+                    path: path.to_owned(),
+                    max_bytes: 1024,
+                })
+                .unwrap_err()
+                .to_string()
+        };
+
+        // Missing `.module.css` reveals the sibling component's real CSS import and closest modal files.
+        let css_hint = read("frontend/src/components/SettingsModal.module.css");
+        assert!(
+            css_hint.contains("SettingsModal.tsx imports: ../dsh/settings/SettingsRoot.module.css"),
+            "{css_hint}"
+        );
+        assert!(
+            css_hint.contains("SettingsModal.tsx") && css_hint.contains("WorkspaceModal.module.css"),
+            "{css_hint}"
+        );
+
+        // Filename typo matches via edit distance.
+        let typo_hint = read("frontend/src/components/SetingsModal.tsx");
+        assert!(typo_hint.contains("SettingsModal.tsx"), "{typo_hint}");
+
+        // Missing intermediate directory falls back to nearest existing ancestor.
+        let dir_hint = read("frontend/src/store/index.ts");
+        assert!(
+            dir_hint.contains("missing dir `store` under frontend/src/") && dir_hint.contains("components/"),
+            "{dir_hint}"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_missing_dependency_path_names_the_vite_or_tsconfig_alias_hint() {
         let root = temp_workspace("not_found_node_modules");
         let workspace = Workspace::new(&root).unwrap();

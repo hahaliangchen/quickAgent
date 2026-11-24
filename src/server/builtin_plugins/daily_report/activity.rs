@@ -117,7 +117,10 @@ pub(super) fn today(state_root: &Path, date: Option<&str>) -> Result<Value> {
             for row in rows {
                 let workspace = row["workspace"].as_str().unwrap_or_default().to_owned();
                 let entry = grouped.entry(workspace).or_default();
+                // The task id lets the model follow a session into
+                // session.read_session_history instead of guessing at details.
                 entry.sessions.push(json!({
+                    "task_id": row["task_id"],
                     "title": row["title"],
                     "status": row["status"],
                     "created_at": row["created_at"],

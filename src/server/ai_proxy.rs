@@ -1479,6 +1479,20 @@ pub async fn run(
             "/agent/sessions/search",
             get(crate::context::session_browser::search),
         )
+        // The WeChat-style history dialog: messages, their pictures and files,
+        // and the calendar of days that hold any. Read-only, instance-scoped.
+        .route(
+            "/agent/history/messages",
+            get(crate::context::session_browser::history_messages),
+        )
+        .route(
+            "/agent/history/media",
+            get(crate::context::session_browser::history_media),
+        )
+        .route(
+            "/agent/history/dates",
+            get(crate::context::session_browser::history_dates),
+        )
         .route("/agent/memories", get(crate::context::memory_panel::get))
         .route(
             "/agent/memories/{kind}/{id}",

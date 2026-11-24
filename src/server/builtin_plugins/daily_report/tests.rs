@@ -406,6 +406,8 @@ async fn today_activity_reads_the_state_database() {
     assert_eq!(day["totals"]["sessions"], 1);
     let project = &day["projects"][0];
     assert_eq!(project["sessions"][0]["title"], "日报插件");
+    // The model follows this id into session.read_session_history for details.
+    assert_eq!(project["sessions"][0]["task_id"], "t1");
     assert!(project["workspace"].as_str().unwrap_or_default().contains("daily-report-activity-workspace"));
     // An explicit date with no work is empty, not yesterday.
     let quiet = activity::today(&workspace, Some("2020-01-01")).unwrap();

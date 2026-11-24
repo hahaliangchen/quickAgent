@@ -456,6 +456,75 @@ function patch<T>(path: string, body?: unknown): Promise<T> {
 
 const task = (id: string): string => `/agent/tasks/${encodeURIComponent(id)}`
 
+/** One chat message as the history dialog lists it. */
+export interface HistoryMessage {
+  readonly task_id: string
+  readonly task_title: string
+  /** Transcript key of the row, so the dialog can name the message it reveals. */
+  readonly key: string
+  readonly seq: number
+  readonly turn: number
+  readonly role: 'user' | 'assistant'
+  readonly timestamp: number
+  readonly snippet: string
+  readonly text: string
+  readonly attachments: readonly string[]
+}
+
+/** A picture in the history dialog: an upload or a visual product. */
+export interface HistoryImage {
+  readonly source: 'upload' | 'artifact'
+  readonly url: string
+  readonly thumb_url: string
+  readonly label: string
+  readonly artifact_id?: string
+  readonly bytes?: number | null
+  readonly width?: number | null
+  readonly height?: number | null
+  readonly timestamp: number
+  readonly turn: number
+  readonly seq: number
+  readonly task_id: string
+  readonly task_title: string
+}
+
+/** A file in the history dialog: an attachment or a tracked workspace change. */
+export interface HistoryFile {
+  readonly source: 'upload' | 'workspace_change'
+  readonly name: string
+  readonly path: string
+  readonly media_type?: string
+  readonly added?: number
+  readonly deleted?: number
+  readonly removed?: boolean
+  readonly binary?: boolean
+  readonly bytes?: number | null
+  readonly download_url: string
+  readonly timestamp: number
+  readonly turn: number
+  readonly seq: number
+  readonly task_id: string
+  readonly task_title: string
+}
+
+/** The calendar behind the date tab. */
+export interface HistoryDates {
+  readonly month: string
+  readonly days: readonly { readonly date: string; readonly count: number }[]
+  readonly months: readonly string[]
+}
+
+/** Query string without empty values, so the server sees only real filters. */
+function historyQuery(params: Readonly<Record<string, string | number | undefined>>): string {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === '') continue
+    query.set(key, String(value))
+  }
+  const search = query.toString()
+  return search === '' ? '' : '?' + search
+}
+
 export const api = {
   models: () => request<ModelCatalog>('/agent/models'),
   upload: (id:string,file:File,signal:AbortSignal,onProgress:(percent:number)=>void) => new Promise<{receiptId:string;file:AttachmentRef}>((resolve,reject)=>{
@@ -470,6 +539,13 @@ export const api = {
   updateMemory: (workspace: string, kind: MemoryKind, id: number, summary: string) => patch<Memories>(`/agent/memories/${kind}/${id}`, { workspace, summary }),
   forgetMemory: (workspace: string, kind: MemoryKind, id: number) => request<Memories>(`/agent/memories/${kind}/${id}?workspace=${encodeURIComponent(workspace)}`, { method: 'DELETE' }),
   searchSessions: (q: string) => request<{ matches: { task_id: string; snippet: string }[] }>(`/agent/sessions/search?q=${encodeURIComponent(q)}`),
+  /** Chat history for the find dialog: one conversation, or every one. */
+  historyMessages: (params: { task_id?: string | undefined; q?: string | undefined; date?: string | undefined; limit?: number | undefined; offset?: number | undefined }) =>
+    request<{ total: number; items: readonly HistoryMessage[] }>(`/agent/history/messages${historyQuery(params)}`, { cache: 'no-store' }),
+  historyMedia: (params: { task_id?: string | undefined; kind: 'images' | 'files'; q?: string | undefined; date?: string | undefined; limit?: number | undefined; offset?: number | undefined }) =>
+    request<{ total: number; items: readonly (HistoryImage & HistoryFile)[] }>(`/agent/history/media${historyQuery(params)}`, { cache: 'no-store' }),
+  historyDates: (params: { task_id?: string | undefined; month?: string | undefined }) =>
+    request<HistoryDates>(`/agent/history/dates${historyQuery(params)}`, { cache: 'no-store' }),
   rewind: (taskId: string, turn: number) => post<{ turn: number; prompt: string; undone_turns: number[] }>(`${task(taskId)}/rewind`, { turn }),
   interject: (taskId: string, text: string) => post<{ seq: number }>(`${task(taskId)}/interjections`, { text }),
   skillDraft: (taskId: string, input: SkillDraftInput) => post<SkillDraft>(`${task(taskId)}/skill-draft`, input),

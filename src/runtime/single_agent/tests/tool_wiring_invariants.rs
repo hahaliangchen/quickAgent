@@ -47,6 +47,7 @@ fn dedicated_dispatch(name: &str) -> bool {
             | "read_asset"
             | "snapshot"
             | "read_session_history"
+            | "list_sessions"
             | "read_attachment"
             | "generate_image"
             | "register_image"

@@ -1333,30 +1333,68 @@ impl Workspace {
             }
         }
 
-        // Check close sibling names inside the existing parent directory.
-        let parent = candidate.parent()?;
-        let wanted = candidate.file_stem().and_then(|s| s.to_str()).unwrap_or(raw).to_ascii_lowercase();
-        if !parent.is_dir() || wanted.is_empty() {
+        // Check close sibling names inside the existing parent directory (or nearest
+        // existing ancestor when intermediate directories do not exist).
+        let Some(parent) = candidate.parent() else {
+            return None;
+        };
+        let target_name = candidate
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(raw);
+        let wanted_stem = base_stem(target_name);
+        if wanted_stem.is_empty() {
             return None;
         }
-        let mut matches: Vec<String> = std::fs::read_dir(parent)
-            .ok()?
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                let lower = name.to_ascii_lowercase();
-                if lower.starts_with(&wanted) || lower.contains(&wanted) || wanted.contains(lower.trim_end_matches(".rs")) {
-                    let suffix = if e.path().is_dir() { "/" } else { "" };
-                    Some(format!("{name}{suffix}"))
-                } else {
-                    None
+        if !parent.is_dir() {
+            // Walk up to the nearest existing ancestor inside the workspace so
+            // missing intermediate folders (e.g. `frontend/src/store/index.ts`)
+            // still get concrete directory guidance.
+            let mut missing_seg = parent.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let mut cur = parent.parent();
+            while let Some(dir) = cur {
+                if !dir.starts_with(&self.root) {
+                    break;
                 }
-            })
-            .collect();
-        matches.sort();
-        matches.truncate(5);
-        if !matches.is_empty() {
-            return Some(format!("similar in parent dir: {}", matches.join(", ")));
+                if dir.is_dir() {
+                    let similar = ranked_similar_entries(dir, missing_seg, 5);
+                    if !similar.is_empty() {
+                        return Some(format!(
+                            "missing dir `{missing_seg}` under {}/; similar: {}",
+                            display_path(dir),
+                            similar.join(", ")
+                        ));
+                    }
+                    let entries = list_dir_preview(dir, 8);
+                    if !entries.is_empty() {
+                        return Some(format!(
+                            "missing dir `{missing_seg}` under {}/; entries: {}",
+                            display_path(dir),
+                            entries.join(", ")
+                        ));
+                    }
+                    break;
+                }
+                missing_seg = dir.file_name().and_then(|s| s.to_str()).unwrap_or(missing_seg);
+                cur = dir.parent();
+            }
+            return None;
+        }
+
+        let mut smart_hints = Vec::new();
+        // When a stylesheet (`.css`/`.scss`/`.less`) is missing, peek at any
+        // same-stem component sibling (e.g. `SettingsModal.tsx`) for actual CSS imports.
+        if is_style_filename(target_name) {
+            if let Some((sibling_name, imports)) = sibling_style_imports(parent, &wanted_stem) {
+                smart_hints.push(format!("{sibling_name} imports: {}", imports.join(", ")));
+            }
+        }
+        let similar = ranked_similar_entries(parent, target_name, 5);
+        if !similar.is_empty() {
+            smart_hints.push(format!("similar in parent dir: {}", similar.join(", ")));
+        }
+        if !smart_hints.is_empty() {
+            return Some(smart_hints.join("; "));
         }
 
         // If no fuzzy name matched, show the sibling module and a small,
@@ -1368,23 +1406,7 @@ impl Workspace {
                 hints.push(format!("found sibling module file: {}", display_path(&sibling)));
             }
         }
-        let mut entries: Vec<String> = std::fs::read_dir(parent)
-            .ok()?
-            .flatten()
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let is_noise_dir = entry.path().is_dir() && NOISE_DIRS.contains(&name.as_str());
-                (!is_noise_dir).then(|| {
-                    if entry.path().is_dir() {
-                        format!("{name}/")
-                    } else {
-                        name
-                    }
-                })
-            })
-            .collect();
-        entries.sort();
-        entries.truncate(8);
+        let entries = list_dir_preview(parent, 8);
         if !entries.is_empty() {
             hints.push(format!("entries in {}/: {}", display_path(parent), entries.join(", ")));
         }
@@ -1433,4 +1455,215 @@ fn in_repository_metadata(root: &Path, path: &Path) -> bool {
                 .any(|part| part.as_os_str() == ".git")
         })
         .unwrap_or(false)
+}
+
+/// Extract the logical stem before compound extensions like `.module.css`,
+/// `.inc.rs`, `.test.mjs`, or `.d.ts` while preserving leading dotfiles.
+fn base_stem(filename: &str) -> String {
+    let trimmed = filename.trim_end_matches('/');
+    if let Some(rest) = trimmed.strip_prefix('.') {
+        let head = rest.split('.').next().unwrap_or(rest);
+        format!(".{head}")
+    } else {
+        trimmed.split('.').next().unwrap_or(trimmed).to_owned()
+    }
+}
+
+fn suffix_after_stem(filename: &str) -> &str {
+    let trimmed = filename.trim_end_matches('/');
+    let start = usize::from(trimmed.starts_with('.'));
+    trimmed[start..]
+        .find('.')
+        .map(|idx| &trimmed[start + idx..])
+        .unwrap_or("")
+}
+
+fn is_style_filename(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower.ends_with(".css") || lower.ends_with(".scss") || lower.ends_with(".less")
+}
+
+/// Split CamelCase / snake_case / kebab-case stems into lowercase search tokens.
+fn name_tokens(stem: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = stem.chars().collect();
+    for (idx, &ch) in chars.iter().enumerate() {
+        if !ch.is_alphanumeric() {
+            if current.len() >= 3 {
+                tokens.push(current.to_ascii_lowercase());
+            }
+            current.clear();
+            continue;
+        }
+        let prev_lower = idx > 0 && chars[idx - 1].is_ascii_lowercase();
+        let next_lower = idx + 1 < chars.len() && chars[idx + 1].is_ascii_lowercase();
+        if ch.is_ascii_uppercase() && !current.is_empty() && (prev_lower || next_lower) {
+            if current.len() >= 3 {
+                tokens.push(current.to_ascii_lowercase());
+            }
+            current.clear();
+        }
+        current.push(ch);
+    }
+    if current.len() >= 3 {
+        tokens.push(current.to_ascii_lowercase());
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn levenshtein_bounded(a: &str, b: &str, max_dist: usize) -> Option<usize> {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > max_dist {
+        return None;
+    }
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        let mut row_min = curr[0];
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            let best = (prev[j + 1] + 1)
+                .min(curr[j] + 1)
+                .min(prev[j] + cost);
+            curr[j + 1] = best;
+            row_min = row_min.min(best);
+        }
+        if row_min > max_dist {
+            return None;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    (prev[b.len()] <= max_dist).then_some(prev[b.len()])
+}
+
+/// If `SettingsModal.module.css` is missing, peek at `SettingsModal.{tsx,ts,jsx,js}`
+/// for its actual stylesheet imports so the model gets the real CSS paths immediately.
+fn sibling_style_imports(parent: &Path, wanted_stem: &str) -> Option<(String, Vec<String>)> {
+    let wanted_lower = wanted_stem.to_ascii_lowercase();
+    let mut candidate_file: Option<(String, PathBuf)> = None;
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let lower = name.to_ascii_lowercase();
+        if matches!(
+            Path::new(&lower).extension().and_then(|e| e.to_str()),
+            Some("tsx" | "ts" | "jsx" | "js")
+        ) && base_stem(&name).to_ascii_lowercase() == wanted_lower
+        {
+            candidate_file = Some((name, path));
+            break;
+        }
+    }
+    let (sibling_name, path) = candidate_file?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let mut imports = Vec::new();
+    for line in content.lines().take(60) {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("import ") {
+            continue;
+        }
+        for quote in ['\'', '"'] {
+            let parts: Vec<&str> = trimmed.split(quote).collect();
+            if parts.len() >= 3 {
+                let spec = parts[parts.len() - 2].trim();
+                if is_style_filename(spec) && !imports.iter().any(|existing| existing == spec) {
+                    imports.push(spec.to_owned());
+                    if imports.len() >= 6 {
+                        return Some((sibling_name, imports));
+                    }
+                }
+            }
+        }
+    }
+    (!imports.is_empty()).then_some((sibling_name, imports))
+}
+
+fn ranked_similar_entries(dir: &Path, target_name: &str, limit: usize) -> Vec<String> {
+    let wanted_stem = base_stem(target_name);
+    let wanted_lower = wanted_stem.to_ascii_lowercase();
+    if wanted_lower.is_empty() {
+        return Vec::new();
+    }
+    let wanted_tokens = name_tokens(&wanted_stem);
+    let wanted_suffix = suffix_after_stem(target_name).to_ascii_lowercase();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut scored: Vec<(usize, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = path.is_dir();
+            if is_dir && NOISE_DIRS.contains(&name.as_str()) {
+                return None;
+            }
+            let cand_stem = base_stem(&name);
+            let cand_lower = cand_stem.to_ascii_lowercase();
+            let mut score = 0usize;
+            if cand_lower == wanted_lower {
+                score += 100;
+            } else if wanted_lower.len() >= 3
+                && cand_lower.len() >= 3
+                && (cand_lower.starts_with(&wanted_lower)
+                    || cand_lower.contains(&wanted_lower)
+                    || wanted_lower.contains(&cand_lower))
+            {
+                score += 60;
+            } else if wanted_lower.len() >= 4 && cand_lower.len() >= 4 {
+                if let Some(dist) = levenshtein_bounded(&wanted_lower, &cand_lower, 2) {
+                    score += if dist <= 1 { 45 } else { 30 };
+                }
+            }
+            if !wanted_tokens.is_empty() {
+                let cand_tokens = name_tokens(&cand_stem);
+                let shared = wanted_tokens
+                    .iter()
+                    .filter(|token| cand_tokens.contains(token))
+                    .count();
+                score += shared * 22;
+            }
+            if score == 0 {
+                return None;
+            }
+            if !wanted_suffix.is_empty()
+                && suffix_after_stem(&name).eq_ignore_ascii_case(&wanted_suffix)
+            {
+                score += 10;
+            }
+            let display = if is_dir { format!("{name}/") } else { name };
+            Some((score, display))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().take(limit).map(|(_, name)| name).collect()
+}
+
+fn list_dir_preview(dir: &Path, limit: usize) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = path.is_dir();
+            if is_dir && NOISE_DIRS.contains(&name.as_str()) {
+                return None;
+            }
+            Some(if is_dir { format!("{name}/") } else { name })
+        })
+        .collect();
+    names.sort();
+    names.truncate(limit);
+    names
 }

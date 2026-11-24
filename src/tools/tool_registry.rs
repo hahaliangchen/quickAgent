@@ -208,6 +208,7 @@ const SPECS: &[ToolSpec] = tool_specs! {
         vision.register_image;
         attachments.read_attachment;
         session.read_session_history;
+        session.list_sessions;
         session.read_asset;
         session.snapshot;
         // Control-plane methods resolve to the existing permission-checked handlers.
