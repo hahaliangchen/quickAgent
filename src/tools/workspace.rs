@@ -1523,6 +1523,7 @@ struct ScanFound {
 #[derive(Clone)]
 struct CompiledGlobs {
     workspace_root: PathBuf,
+    path_include: Option<ignore::overrides::Override>,
     include: Option<ignore::overrides::Override>,
     exclude: Option<ignore::overrides::Override>,
 }
@@ -1552,6 +1553,11 @@ impl CompiledGlobs {
         if self.is_excluded(path, is_dir) {
             return false;
         }
+        if let Some(path_include) = &self.path_include
+            && !path_include.matched(path, is_dir).is_whitelist()
+        {
+            return false;
+        }
         match &self.include {
             Some(include) => include.matched(path, is_dir).is_whitelist(),
             None => true,
@@ -1566,6 +1572,7 @@ fn search_globs(
     root: &Path,
     globs: &[String],
     excludes: &[String],
+    path_globs: &[String],
 ) -> Result<Option<CompiledGlobs>> {
     let mut include_patterns = Vec::new();
     let mut exclude_patterns = Vec::new();
@@ -1585,7 +1592,7 @@ fn search_globs(
             exclude_patterns.push(pat.to_owned());
         }
     }
-    if include_patterns.is_empty() && exclude_patterns.is_empty() {
+    if include_patterns.is_empty() && exclude_patterns.is_empty() && path_globs.is_empty() {
         return Ok(None);
     }
     let build_override = |patterns: &[String]| -> Result<Option<ignore::overrides::Override>> {
@@ -1606,6 +1613,7 @@ fn search_globs(
     };
     Ok(Some(CompiledGlobs {
         workspace_root: root.to_path_buf(),
+        path_include: build_override(path_globs)?,
         include: build_override(&include_patterns)?,
         exclude: build_override(&exclude_patterns)?,
     }))

@@ -1,6 +1,7 @@
 import { useContext, useEffect, useRef, useState } from 'react'
 import type { PluginPageProps } from '../../plugins/protocol.ts'
 import { type Access, type AiActivity, type RemoteTool, type Server, type Usage, confirmAccess, message, ssh, SshContext, SshError } from './api.ts'
+import { appConfirm } from '../../components/AppDialog.tsx'
 import TerminalPane from './TerminalPane.tsx'
 import AiTerminalPane from './AiTerminalPane.tsx'
 import SftpExplorer from './SftpExplorer.tsx'
@@ -150,8 +151,8 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
     setServers(items => items.some(item => item.id === profile.id) ? items.map(item => item.id === profile.id ? profile : item) : [...items, profile])
     setSelected(profile.id); setForm(undefined); setMismatch(undefined); setError('')
   }
-  function openTerminal(profile: Server) {
-    if (!confirmAccess(profile, '打开交互式终端；输入会直接发送到远程服务器。')) return
+  async function openTerminal(profile: Server) {
+    if (!await confirmAccess(profile, '打开交互式终端；输入会直接发送到远程服务器。')) return
     const id = ++next.current
     setTabs(items => [...items, { kind: 'human', id, profile, access: { ...access, approved: profile.require_approval } }]); setTab(id); setError('')
   }
@@ -164,7 +165,7 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
     if (id === tab) { const last = remaining.at(-1); setTab(last?.id); if (last) setSelected(last.profile.id) }
   }
   async function remove(profile: Server) {
-    if (!window.confirm('删除档案 ' + profile.name + ' 及其已保存凭据和使用记录？')) return
+    if (!await appConfirm({ title: '删除服务器档案', message: '删除档案 ' + profile.name + ' 及其已保存凭据和使用记录？', confirmText: '删除', danger: true })) return
     try {
       await ssh.delete(profile.id)
       const remaining = servers.filter(item => item.id !== profile.id)
@@ -221,10 +222,10 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
             <button role="tab" aria-selected={item.id === tab} title={tabTip} onClick={() => { setTab(item.id); setSelected(item.profile.id) }}>{label}</button>
             <button aria-label={item.kind === 'ai' ? '关闭 AI 实时终端 ' + item.profile.name : '关闭终端 ' + item.id} onClick={() => closeTerminal(item.id)}>×</button>
           </div>
-        })}</div><button className={css.newTerminal} disabled={!server} onClick={() => { if (server) openTerminal(server) }}>＋ 新建终端</button></div>
+        })}</div><button className={css.newTerminal} disabled={!server} onClick={() => { if (server) void openTerminal(server) }}>＋ 新建终端</button></div>
         {tabs.length === 0 && <div className={css.empty}><span className={css.promptIcon} aria-hidden="true">&gt;_</span><p>没有打开的终端</p></div>}
         {tabs.map(item => item.kind === 'ai' ? <AiTerminalPane key={item.id} serverId={item.profile.id} taskId={item.taskId} active={tab === item.id}
-          onOpenHuman={() => openTerminal(serverList.current.find(profile => profile.id === item.profile.id) ?? item.profile)} onActivity={event => liveActivity(item, event)} diagnose={context.diagnose} /> : <TerminalPane key={item.id} server={item.profile} access={item.access} active={tab === item.id} theme={theme} onError={cause => report(cause, item.profile.id)} onConnection={activity} diagnose={context.diagnose} />)}
+          onOpenHuman={() => void openTerminal(serverList.current.find(profile => profile.id === item.profile.id) ?? item.profile)} onActivity={event => liveActivity(item, event)} diagnose={context.diagnose} /> : <TerminalPane key={item.id} server={item.profile} access={item.access} active={tab === item.id} theme={theme} onError={cause => report(cause, item.profile.id)} onConnection={activity} diagnose={context.diagnose} />)}
       </main>
       {servers.filter(profile => profile.id === selected || visited.has(profile.id)).map(profile => <SftpExplorer key={profile.id} server={profile} access={access}
         hidden={profile.id !== selected} theme={theme} followTarget={followTarget?.serverId === profile.id ? followTarget : undefined}

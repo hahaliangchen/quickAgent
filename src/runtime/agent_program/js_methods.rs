@@ -940,7 +940,7 @@ pub(super) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
         | "Number.isSafeInteger" | "Number.isFinite" | "Number.isNaN" => (1, 1),
         "Object.keys" | "Object.values" | "Object.entries" | "Object.fromEntries" | "Array.isArray"
         | "Array.from" => (1, 1),
-        "Object"=>(0,1),"Function"=>(0,64),"new URL"=>(1,2),"Buffer.from"=>(1,2),"Buffer.byteLength"=>(1,2),"path.isAbsolute"=>(1,1),"Object.create"=>(1,2),"Object.getPrototypeOf"|"$$forInKeys"=>(1,1),"Object.setPrototypeOf"=>(2,2),
+        "Object"=>(0,1),"Function"=>(0,64),"new URL"=>(1,2),"Buffer.from"=>(1,2),"Buffer.byteLength"=>(1,2),"Buffer.isBuffer"=>(1,1),"path.isAbsolute"=>(1,1),"Object.create"=>(1,2),"Object.getPrototypeOf"|"$$forInKeys"=>(1,1),"Object.setPrototypeOf"=>(2,2),
         "Object.assign" => (1, 64),
         "Array.of" => (0, 64),
         "Array" | "new Array" | "String.fromCharCode" | "String.fromCodePoint" => (0, 64),
@@ -1031,7 +1031,35 @@ pub(super) fn js_pow(base: f64, exponent: f64) -> f64 {
     }
 }
 
+pub(super) fn buffer_to_string(heap: &Heap, receiver: &VmValue, args: &[VmValue]) -> Result<VmValue> {
+    let VmValue::Reference(id) = receiver else {
+        bail!("TypeError: Buffer.prototype.toString requires a Buffer receiver");
+    };
+    let HeapNode::Array(items) = heap.get(*id)? else {
+        bail!("TypeError: Buffer.prototype.toString requires a Buffer receiver");
+    };
+    let mut bytes = Vec::with_capacity(items.len());
+    for item in items {
+        let byte = match item {
+            VmValue::Number(n) => (n.get() as i64 & 0xff) as u8,
+            _ => 0,
+        };
+        bytes.push(byte);
+    }
+    let encoding = match args.first() {
+        None | Some(VmValue::Undefined) => "utf8".to_owned(),
+        Some(value) => to_string(heap, value)?,
+    };
+    Ok(VmValue::String(super::builtins::encode_bytes(&bytes, &encoding)?))
+}
+
 pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<VmValue> {
+    if name == "Buffer.isBuffer" {
+        return Ok(VmValue::Boolean(matches!(
+            args.first(),
+            Some(VmValue::Reference(id)) if heap.is_buffer(*id)
+        )));
+    }
     if name=="$$rawExponential" {let VmValue::Number(value)=args[0] else{bail!("TypeError: Number.prototype.toExponential requires a Number receiver")};return number_method(heap,value.get(),"toExponential",&args[1..]);}
     if let Some(name)=match name {"$$rawEncodeURI"=>Some("encodeURI"),"$$rawDecodeURI"=>Some("decodeURI"),"$$rawEncodeURIComponent"=>Some("encodeURIComponent"),"$$rawDecodeURIComponent"=>Some("decodeURIComponent"),_=>None} { return builtin(heap,name,args); }
     if name=="$$rawLocaleCompare" { return super::js_locale::compare(heap,args); }
@@ -1361,7 +1389,14 @@ pub(super) fn builtin(heap: &mut Heap, name: &str, args: &[VmValue]) -> Result<V
             if name == "process.env" && result.is_null() {
                 return Ok(VmValue::Undefined);
             }
-            heap.from_json(&result)?
+            let value = heap.from_json(&result)?;
+            if name == "Buffer.from"
+                && let VmValue::Reference(id) = value
+                && let Some(VmValue::Reference(proto)) = heap.intrinsic("Buffer.prototype")
+            {
+                let _ = heap.set_prototype(id, Some(proto));
+            }
+            value
         }
     })
 }

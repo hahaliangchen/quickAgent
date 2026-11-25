@@ -663,6 +663,11 @@ async fn exercise_ai_tools() -> Result<()> {
     ));
     assert!(package::requires_approval_in(
         config.path(),
+        "ssh__edit_file",
+        &json!({ "server_id": prod_id })
+    ));
+    assert!(package::requires_approval_in(
+        config.path(),
         "ssh__upload",
         &json!({ "server_id": prod_id })
     ));
@@ -761,6 +766,51 @@ async fn exercise_ai_tools() -> Result<()> {
     assert_eq!(
         fs::read_to_string(remote_root.path().join("deploy/config.toml.bak")).await?,
         "line1\nline2\nline3\nline4\n"
+    );
+
+    // 3b. ssh__edit_file (multi-edit + indent-shifted reindentation + backup + preview)
+    fs::write(
+        remote_root.path().join("deploy/script.py"),
+        "def run():\n    if ok:\n        step_a()\n        step_b()\n",
+    )
+    .await?;
+    let edited = package::scoped(
+        "task-deploy-1".into(),
+        false,
+        package::execute_tool(
+            cfg.clone(),
+            ws.clone(),
+            "ssh__edit_file",
+            json!({
+                "server_id": dev_id,
+                "path": "/deploy/script.py",
+                "backup": true,
+                "edits": [
+                    {
+                        "old_text": "            step_a()\n            step_b()",
+                        "new_text": "            step_a_v2()\n            step_b_v2()"
+                    },
+                    {
+                        "old_text": "if ok:",
+                        "new_text": "if ok and ready:"
+                    }
+                ]
+            }),
+        ),
+    )
+    .await?;
+    assert_eq!(edited["changed"], true);
+    assert!(
+        edited["preview"].as_str().unwrap().contains("L3|        step_a_v2()"),
+        "unexpected preview: {edited}"
+    );
+    assert_eq!(
+        fs::read_to_string(remote_root.path().join("deploy/script.py")).await?,
+        "def run():\n    if ok and ready:\n        step_a_v2()\n        step_b_v2()\n"
+    );
+    assert_eq!(
+        fs::read_to_string(remote_root.path().join("deploy/script.py.bak")).await?,
+        "def run():\n    if ok:\n        step_a()\n        step_b()\n"
     );
 
     // 4. ssh__list_dir
@@ -864,7 +914,7 @@ async fn exercise_ai_tools() -> Result<()> {
     assert!(conflict.is_err());
 
     fs::write(workspace.path().join("dist/app.bin"), b"release-v2-bin").await?;
-    package::execute_tool(
+    let uploaded_v2 = package::execute_tool(
         cfg.clone(),
         ws.clone(),
         "ssh__upload",
@@ -880,6 +930,8 @@ async fn exercise_ai_tools() -> Result<()> {
         fs::read(remote_root.path().join("releases/v1/app.bin")).await?,
         b"release-v2-bin"
     );
+    let upload_sha = uploaded_v2["sha256"].as_str().unwrap().to_owned();
+    assert_eq!(upload_sha.len(), 64);
 
     for bad_path in [
         "../outside.txt".to_owned(),
@@ -906,6 +958,83 @@ async fn exercise_ai_tools() -> Result<()> {
         );
     }
 
+    // 7b. ssh__download (success, overwrite conflict/override, and workspace boundary rejections)
+    let dl = package::scoped(
+        "task-deploy-1".into(),
+        false,
+        package::execute_tool(
+            cfg.clone(),
+            ws.clone(),
+            "ssh__download",
+            json!({
+                "server_id": dev_id,
+                "remote_path": "/releases/v1/app.bin",
+                "local_path": "downloaded/nested/app.bin",
+            }),
+        ),
+    )
+    .await?;
+    assert_eq!(dl["bytes_downloaded"], 14);
+    assert_eq!(dl["sha256"].as_str().unwrap(), upload_sha);
+    assert_eq!(
+        fs::read(workspace.path().join("downloaded/nested/app.bin")).await?,
+        b"release-v2-bin"
+    );
+    let dl_conflict = package::execute_tool(
+        cfg.clone(),
+        ws.clone(),
+        "ssh__download",
+        json!({
+            "server_id": dev_id,
+            "remote_path": "/releases/v1/app.bin",
+            "local_path": "downloaded/nested/app.bin",
+            "overwrite": false,
+        }),
+    )
+    .await
+    .expect_err("overwrite=false must reject existing local file");
+    assert!(dl_conflict.to_string().contains("already exists"));
+    package::execute_tool(
+        cfg.clone(),
+        ws.clone(),
+        "ssh__download",
+        json!({
+            "server_id": dev_id,
+            "remote_path": "/deploy/config.toml",
+            "local_path": "downloaded/nested/app.bin",
+            "overwrite": true,
+        }),
+    )
+    .await?;
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("downloaded/nested/app.bin")).await?,
+        "alpha\nbeta\ngamma\ndelta\n"
+    );
+    for bad_path in [
+        "../outside-write.txt".to_owned(),
+        ".codex-workspace-mcp/evil.db".to_owned(),
+        outside_secret.to_string_lossy().into_owned(),
+        "dist/escape.link".to_owned(),
+    ] {
+        let err = package::execute_tool(
+            cfg.clone(),
+            ws.clone(),
+            "ssh__download",
+            json!({
+                "server_id": dev_id,
+                "remote_path": "/releases/v1/app.bin",
+                "local_path": bad_path,
+                "overwrite": true,
+            }),
+        )
+        .await
+        .expect_err("download boundary violation must fail");
+        assert!(
+            err.to_string().contains("WORKSPACE_BOUNDARY_DENIED"),
+            "unexpected download error for {bad_path}: {err:#}"
+        );
+    }
+
     // 8. prod mandatory approval defense-in-depth
     for (tool, args) in [
         (
@@ -915,6 +1044,10 @@ async fn exercise_ai_tools() -> Result<()> {
         (
             "ssh__write_file",
             json!({ "server_id": prod_id, "path": "/prod.txt", "content": "x" }),
+        ),
+        (
+            "ssh__edit_file",
+            json!({ "server_id": prod_id, "path": "/prod.txt", "old_text": "x", "new_text": "y" }),
         ),
         (
             "ssh__upload",

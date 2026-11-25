@@ -498,7 +498,10 @@ fn select_anchor(source: &str, anchor: &str, hint: Option<usize>) -> std::result
             second = second.min(distance);
         }
     }
-    if count == 1 || (hint.is_some_and(|hint| hint > 0) && best.0 <= 30 && second >= best.0 + 10) {
+    if count == 1
+        || (hint.is_some_and(|hint| hint > 0)
+            && ((best.0 == 0 && second > 0) || (best.0 <= 30 && second >= best.0 + 10)))
+    {
         return Ok(best.1);
     }
     let list = lines.iter().map(usize::to_string).collect::<Vec<_>>().join(", ");
@@ -558,6 +561,236 @@ fn find_trailing_ws_spans(source: &str, old_text: &str) -> Vec<(usize, usize)> {
     matches
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndentMode {
+    SameRelative,
+    SpacesToTabs(usize),
+    TabsToSpaces(usize),
+}
+
+#[derive(Clone, Debug)]
+struct IndentMatch {
+    span: (usize, usize),
+    file_base: String,
+    mode: IndentMode,
+}
+
+fn leading_ws(line: &str) -> &str {
+    let end = line
+        .bytes()
+        .take_while(|&b| b == b' ' || b == b'\t')
+        .count();
+    &line[..end]
+}
+
+fn common_ws_prefix<'a>(a: &'a str, b: &str) -> &'a str {
+    let n = a
+        .bytes()
+        .zip(b.bytes())
+        .take_while(|(x, y)| x == y)
+        .count();
+    &a[..n]
+}
+
+fn common_leading_ws<'a>(lines: impl Iterator<Item = &'a str>) -> &'a str {
+    let mut prefix: Option<&'a str> = None;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ws = leading_ws(line);
+        prefix = Some(match prefix {
+            None => ws,
+            Some(prev) => common_ws_prefix(prev, ws),
+        });
+    }
+    prefix.unwrap_or("")
+}
+
+/// Find full-line windows whose non-empty code and relative line-to-line indentation
+/// match `old_text` identically, differing only by a uniform leading indentation shift
+/// (e.g. Go `\t\t\t` vs `\t\t`, or spaces vs tabs).
+fn find_indent_shifted_spans(source: &str, old_text: &str) -> (String, Vec<IndentMatch>) {
+    let norm = normalize(old_text);
+    let ends_with_nl = norm.ends_with('\n');
+    let body = if ends_with_nl { &norm[..norm.len() - 1] } else { &norm };
+    if body.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    let old_lines: Vec<&str> = body
+        .split('\n')
+        .map(|l| l.trim_end_matches([' ', '\t']))
+        .collect();
+    if old_lines.iter().all(|l| l.is_empty()) {
+        return (String::new(), Vec::new());
+    }
+    let old_base = common_leading_ws(old_lines.iter().copied());
+    let old_parts: Vec<(bool, &str, &str)> = old_lines
+        .iter()
+        .map(|line| {
+            if line.is_empty() {
+                (true, "", "")
+            } else {
+                let rest = &line[old_base.len()..];
+                let rel = leading_ws(rest);
+                (false, rel, &rest[rel.len()..])
+            }
+        })
+        .collect();
+
+    let mut src_lines: Vec<(usize, usize, usize, &str)> = Vec::new();
+    let mut pos = 0usize;
+    for chunk in source.split_inclusive('\n') {
+        let end_with_eol = pos + chunk.len();
+        let trimmed_eol = chunk.trim_end_matches(['\r', '\n']);
+        let end_no_eol = pos + trimmed_eol.len();
+        let trimmed_ws = trimmed_eol.trim_end_matches([' ', '\t']);
+        src_lines.push((pos, end_no_eol, end_with_eol, trimmed_ws));
+        pos = end_with_eol;
+    }
+    if src_lines.len() < old_parts.len() {
+        return (old_base.to_owned(), Vec::new());
+    }
+
+    let mut matches = Vec::new();
+    for start_idx in 0..=src_lines.len() - old_parts.len() {
+        let window = &src_lines[start_idx..start_idx + old_parts.len()];
+        // Fast check: code content (ignoring leading/trailing ws) and blank-line positions must match 100%.
+        let code_matches = old_parts.iter().enumerate().all(|(k, &(blank, _, code))| {
+            let line = window[k].3;
+            if blank {
+                line.is_empty()
+            } else {
+                !line.is_empty() && line.trim_start_matches([' ', '\t']) == code
+            }
+        });
+        if !code_matches {
+            continue;
+        }
+        let file_base = common_leading_ws(window.iter().map(|l| l.3));
+        let rel_pairs: Vec<(&str, &str)> = old_parts
+            .iter()
+            .enumerate()
+            .filter_map(|(k, &(blank, old_rel, _))| {
+                if blank {
+                    None
+                } else {
+                    let file_rel = leading_ws(&window[k].3[file_base.len()..]);
+                    Some((old_rel, file_rel))
+                }
+            })
+            .collect();
+
+        let mode = if rel_pairs.iter().all(|(o, f)| o == f) {
+            let all_rel_empty = rel_pairs.iter().all(|(o, _)| o.is_empty());
+            if all_rel_empty
+                && !old_base.is_empty()
+                && !file_base.is_empty()
+                && old_base.bytes().all(|b| b == b' ')
+                && file_base.bytes().all(|b| b == b'\t')
+                && old_base.len() % file_base.len() == 0
+                && matches!(old_base.len() / file_base.len(), 2 | 4)
+            {
+                Some(IndentMode::SpacesToTabs(old_base.len() / file_base.len()))
+            } else if all_rel_empty
+                && !old_base.is_empty()
+                && !file_base.is_empty()
+                && old_base.bytes().all(|b| b == b'\t')
+                && file_base.bytes().all(|b| b == b' ')
+                && file_base.len() % old_base.len() == 0
+                && matches!(file_base.len() / old_base.len(), 2 | 4)
+            {
+                Some(IndentMode::TabsToSpaces(file_base.len() / old_base.len()))
+            } else {
+                Some(IndentMode::SameRelative)
+            }
+        } else if let Some(width) = [4usize, 2].into_iter().find(|&w| {
+            rel_pairs.iter().any(|(o, _)| !o.is_empty())
+                && rel_pairs.iter().all(|(o, f)| {
+                    o.bytes().all(|b| b == b' ')
+                        && f.bytes().all(|b| b == b'\t')
+                        && o.len() % w == 0
+                        && f.len() == o.len() / w
+                })
+        }) {
+            Some(IndentMode::SpacesToTabs(width))
+        } else if let Some(width) = [4usize, 2].into_iter().find(|&w| {
+            rel_pairs.iter().any(|(o, _)| !o.is_empty())
+                && rel_pairs.iter().all(|(o, f)| {
+                    o.bytes().all(|b| b == b'\t')
+                        && f.bytes().all(|b| b == b' ')
+                        && f.len() == o.len() * w
+                })
+        }) {
+            Some(IndentMode::TabsToSpaces(width))
+        } else {
+            None
+        };
+
+        if let Some(mode) = mode {
+            let byte_start = window[0].0;
+            let last = window[window.len() - 1];
+            let byte_end = if ends_with_nl { last.2 } else { last.1 };
+            matches.push(IndentMatch {
+                span: (byte_start, byte_end),
+                file_base: file_base.to_owned(),
+                mode,
+            });
+        }
+    }
+    (old_base.to_owned(), matches)
+}
+
+/// Uniformly shift `new_text` from `old_base` to `file_base` (and adapt relative
+/// spaces/tabs when `mode` detected a spaces<->tabs mismatch). Returns `None` if
+/// any non-empty line in `new_text` does not start with `old_base`, preventing
+/// unintended indentation changes on out-of-block edits.
+fn reindent_replacement(
+    new_text: &str,
+    old_base: &str,
+    file_base: &str,
+    mode: IndentMode,
+    ending: &str,
+) -> Option<String> {
+    if new_text.is_empty() {
+        return Some(String::new());
+    }
+    let norm = normalize(new_text);
+    let ends_with_nl = norm.ends_with('\n');
+    let body = if ends_with_nl { &norm[..norm.len() - 1] } else { &norm };
+    let mut out_lines = Vec::new();
+    for line in body.split('\n') {
+        if line.trim().is_empty() {
+            out_lines.push(String::new());
+            continue;
+        }
+        let rest = line.strip_prefix(old_base)?;
+        let rel = leading_ws(rest);
+        let code = &rest[rel.len()..];
+        let new_rel = match mode {
+            IndentMode::SameRelative => rel.to_owned(),
+            IndentMode::SpacesToTabs(w) => {
+                if !rel.bytes().all(|b| b == b' ') || rel.len() % w != 0 {
+                    return None;
+                }
+                "\t".repeat(rel.len() / w)
+            }
+            IndentMode::TabsToSpaces(w) => {
+                if !rel.bytes().all(|b| b == b'\t') {
+                    return None;
+                }
+                " ".repeat(rel.len() * w)
+            }
+        };
+        out_lines.push(format!("{file_base}{new_rel}{code}"));
+    }
+    let mut result = out_lines.join(ending);
+    if ends_with_nl {
+        result.push_str(ending);
+    }
+    Some(result)
+}
+
 fn select_span(source: &str, spans: &[(usize, usize)], hint: Option<usize>) -> std::result::Result<(usize, usize), String> {
     let count = spans.len();
     let mut lines = Vec::new();
@@ -576,7 +809,10 @@ fn select_span(source: &str, spans: &[(usize, usize)], hint: Option<usize>) -> s
             second = distance;
         }
     }
-    if count == 1 || (hint.is_some_and(|hint| hint > 0) && best.0 <= 30 && second >= best.0 + 10) {
+    if count == 1
+        || (hint.is_some_and(|hint| hint > 0)
+            && ((best.0 == 0 && second > 0) || (best.0 <= 30 && second >= best.0 + 10)))
+    {
         return Ok(best.1);
     }
     let list = lines.iter().map(usize::to_string).collect::<Vec<_>>().join(", ");
@@ -626,55 +862,96 @@ pub fn text_edits_with_ranges_replace_all(
             return Err(invalid("old_text must be a nonempty unique anchor; insert by retaining the anchor in new_text".into()));
         }
         // Model excerpts commonly use LF for a CRLF file. Match exact bytes first,
-        // then newline-normalized bytes, then trailing-whitespace-normalized full lines.
+        // then newline-normalized bytes, then trailing-whitespace-normalized full lines,
+        // then uniform leading-indentation-shifted full lines (auto-reindenting new_text).
         let normalized = normalize(&edit.old_text).replace('\n', ending);
         let replacement = normalize(&edit.new_text).replace('\n', ending);
-        let spans: Vec<(usize, usize)> = if output.contains(&edit.old_text) {
+        let not_found_error = |current: &str| {
+            invalid(match closest_lines(current, &edit.old_text) {
+                Some(lines) => format!("old_text not found; no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."),
+                None => "old_text not found, and no line of it appears in the file; no edits applied".into(),
+            })
+        };
+        let replacements: Vec<(usize, usize, String)> = if output.contains(&edit.old_text) {
             if replace_all || edit.replace_all {
                 output
                     .match_indices(&edit.old_text)
-                    .map(|(start, _)| (start, start + edit.old_text.len()))
+                    .map(|(start, _)| (start, start + edit.old_text.len(), replacement.clone()))
                     .collect()
             } else {
                 let start = select_anchor(&output, &edit.old_text, edit.line_hint).map_err(invalid)?;
-                vec![(start, start + edit.old_text.len())]
+                vec![(start, start + edit.old_text.len(), replacement.clone())]
             }
         } else if output.contains(&normalized) {
             if replace_all || edit.replace_all {
                 output
                     .match_indices(&normalized)
-                    .map(|(start, _)| (start, start + normalized.len()))
+                    .map(|(start, _)| (start, start + normalized.len(), replacement.clone()))
                     .collect()
             } else {
                 let start = select_anchor(&output, &normalized, edit.line_hint).map_err(invalid)?;
-                vec![(start, start + normalized.len())]
+                vec![(start, start + normalized.len(), replacement.clone())]
             }
         } else {
             let ws_matches = find_trailing_ws_spans(&output, &edit.old_text);
-            if ws_matches.is_empty() {
-                return Err(invalid(match closest_lines(&output, &edit.old_text) {
-                    Some(lines) => format!("old_text not found; no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."),
-                    None => "old_text not found, and no line of it appears in the file; no edits applied".into(),
-                }));
-            }
-            if replace_all || edit.replace_all {
-                // Keep non-overlapping spans in ascending order.
-                let mut filtered = Vec::new();
-                let mut cursor = 0usize;
-                for (s, e) in ws_matches {
-                    if s >= cursor {
-                        filtered.push((s, e));
-                        cursor = e;
+            if !ws_matches.is_empty() {
+                if replace_all || edit.replace_all {
+                    let mut filtered = Vec::new();
+                    let mut cursor = 0usize;
+                    for (s, e) in ws_matches {
+                        if s >= cursor {
+                            filtered.push((s, e, replacement.clone()));
+                            cursor = e;
+                        }
                     }
+                    filtered
+                } else {
+                    let (s, e) = select_span(&output, &ws_matches, edit.line_hint).map_err(invalid)?;
+                    vec![(s, e, replacement.clone())]
                 }
-                filtered
             } else {
-                vec![select_span(&output, &ws_matches, edit.line_hint).map_err(invalid)?]
+                let (old_base, indent_matches) = find_indent_shifted_spans(&output, &edit.old_text);
+                if indent_matches.is_empty() {
+                    return Err(not_found_error(&output));
+                }
+                let selected_matches: Vec<IndentMatch> = if replace_all || edit.replace_all {
+                    let mut filtered = Vec::new();
+                    let mut cursor = 0usize;
+                    for m in indent_matches {
+                        if m.span.0 >= cursor {
+                            cursor = m.span.1;
+                            filtered.push(m);
+                        }
+                    }
+                    filtered
+                } else {
+                    let raw_spans: Vec<(usize, usize)> = indent_matches.iter().map(|m| m.span).collect();
+                    let chosen = select_span(&output, &raw_spans, edit.line_hint).map_err(invalid)?;
+                    let matched = indent_matches
+                        .into_iter()
+                        .find(|m| m.span == chosen)
+                        .expect("selected span comes from indent_matches");
+                    vec![matched]
+                };
+                let mut reindented = Vec::with_capacity(selected_matches.len());
+                for m in selected_matches {
+                    let Some(new_body) = reindent_replacement(
+                        &edit.new_text,
+                        &old_base,
+                        &m.file_base,
+                        m.mode,
+                        ending,
+                    ) else {
+                        return Err(not_found_error(&output));
+                    };
+                    reindented.push((m.span.0, m.span.1, new_body));
+                }
+                reindented
             }
         };
-        for &(start, end) in spans.iter().rev() {
-            output.replace_range(start..end, &replacement);
-            adjust_ranges(&mut ranges, start, end, replacement.len());
+        for (start, end, body) in replacements.into_iter().rev() {
+            output.replace_range(start..end, &body);
+            adjust_ranges(&mut ranges, start, end, body.len());
         }
     }
     ranges.sort_by_key(|r| r.0);
@@ -727,6 +1004,19 @@ mod tests {
         change.line_hint = Some(usize::MAX);
         assert_eq!(text_edits("anchor", &[change]).unwrap(), "changed");
         assert!(error("aaa", "aa").contains("ambiguous"));
+
+        // Exact line_hint on a unique line disambiguates even when another match is <10 lines away.
+        let nearby = "a\ntarget\nc\nd\ne\nf\ng\nh\ntarget\nz\n";
+        let mut exact = edit("target");
+        exact.line_hint = Some(2);
+        let updated = text_edits(nearby, &[exact]).unwrap();
+        assert_eq!(updated, "a\nchanged\nc\nd\ne\nf\ng\nh\ntarget\nz\n");
+
+        // Two occurrences on the exact same line remain ambiguous even with exact line_hint.
+        let same_line = "target and target\n";
+        let mut dup_line = edit("target");
+        dup_line.line_hint = Some(1);
+        assert!(text_edits(same_line, &[dup_line]).unwrap_err().to_string().contains("ambiguous"));
     }
 
     #[test]
@@ -902,5 +1192,115 @@ mod tests {
             line_replacement("", 2, 1, "x", None).unwrap_err(),
             ToolError::InvalidLineRange { start: 2, end: 1 }
         ));
+    }
+
+    #[test]
+    fn indent_shifted_fallback_matches_go_tab_shift_and_reindents_new_text() {
+        let source = concat!(
+            "func run() {\n",
+            "\tfor index := range records {\n",
+            "\t\trecords[index].ChunkOrder = order\n",
+            "\t\textra[\"page_start\"] = *records[index].PageStart\n",
+            "\t\textra[\"page_end\"] = *records[index].PageEnd\n",
+            "\t}\n",
+            "}\n",
+        );
+        // Model miscounted 3 leading tabs instead of 2 on both old_text and new_text.
+        let edits = [crate::tools::TextEdit {
+            old_text: "\t\t\textra[\"page_start\"] = *records[index].PageStart\n\t\t\textra[\"page_end\"] = *records[index].PageEnd".into(),
+            new_text: concat!(
+                "\t\t\tif records[index].PageStart != nil {\n",
+                "\t\t\t\textra[\"page_start\"] = *records[index].PageStart\n",
+                "\t\t\t}\n",
+                "\t\t\tif records[index].PageEnd != nil {\n",
+                "\t\t\t\textra[\"page_end\"] = *records[index].PageEnd\n",
+                "\t\t\t}",
+            )
+            .into(),
+            line_hint: None,
+            replace_all: false,
+        }];
+        let updated = text_edits(source, &edits).unwrap();
+        let expected = concat!(
+            "func run() {\n",
+            "\tfor index := range records {\n",
+            "\t\trecords[index].ChunkOrder = order\n",
+            "\t\tif records[index].PageStart != nil {\n",
+            "\t\t\textra[\"page_start\"] = *records[index].PageStart\n",
+            "\t\t}\n",
+            "\t\tif records[index].PageEnd != nil {\n",
+            "\t\t\textra[\"page_end\"] = *records[index].PageEnd\n",
+            "\t\t}\n",
+            "\t}\n",
+            "}\n",
+        );
+        assert_eq!(updated, expected);
+    }
+
+    #[test]
+    fn indent_shifted_fallback_converts_spaces_to_tabs_and_preserves_safety_guards() {
+        let go_source = "func f() {\n\tfor i := 0; i < n; i++ {\n\t\tif ok {\n\t\t\tdoWork()\n\t\t}\n\t}\n}\n";
+        // Model wrote 8/12 spaces instead of 2/3 tabs.
+        let space_edit = [crate::tools::TextEdit {
+            old_text: "        if ok {\n            doWork()\n        }".into(),
+            new_text: "        if ok {\n            doWork()\n            logDone()\n        }".into(),
+            line_hint: None,
+            replace_all: false,
+        }];
+        let updated = text_edits(go_source, &space_edit).unwrap();
+        assert_eq!(
+            updated,
+            "func f() {\n\tfor i := 0; i < n; i++ {\n\t\tif ok {\n\t\t\tdoWork()\n\t\t\tlogDone()\n\t\t}\n\t}\n}\n"
+        );
+
+        // Safety 1: Ambiguous shifted matches still fail unless disambiguated by line_hint.
+        let dup_source = "fn f() {\n\ta()\n\tb()\n\ta()\n\tb()\n}\n";
+        let dup_edit = crate::tools::TextEdit {
+            old_text: "\t\ta()\n\t\tb()".into(),
+            new_text: "\t\tc()".into(),
+            line_hint: None,
+            replace_all: false,
+        };
+        assert!(
+            text_edits(dup_source, std::slice::from_ref(&dup_edit))
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
+        let mut hinted = dup_edit;
+        hinted.line_hint = Some(4);
+        assert_eq!(
+            text_edits(dup_source, &[hinted]).unwrap(),
+            "fn f() {\n\ta()\n\tb()\n\tc()\n}\n"
+        );
+
+        // Safety 2: Refuse if new_text un-indents below old_base (e.g. Python out-of-block edit).
+        let py_source = "def f():\n    if cond:\n        x = 1\n        y = 2\n";
+        let unsafe_py = [crate::tools::TextEdit {
+            old_text: "            x = 1\n            y = 2".into(),
+            new_text: "    return x + y".into(),
+            line_hint: None,
+            replace_all: false,
+        }];
+        assert!(
+            text_edits(py_source, &unsafe_py)
+                .unwrap_err()
+                .to_string()
+                .contains("old_text not found")
+        );
+
+        // Safety 3: Refuse if relative indentation between lines differs.
+        let bad_rel = [crate::tools::TextEdit {
+            old_text: "    if cond:\n    x = 1".into(),
+            new_text: "    if cond:\n    x = 2".into(),
+            line_hint: None,
+            replace_all: false,
+        }];
+        assert!(
+            text_edits(py_source, &bad_rel)
+                .unwrap_err()
+                .to_string()
+                .contains("old_text not found")
+        );
     }
 }

@@ -1285,6 +1285,75 @@
     }
 
     #[test]
+    fn search_text_supports_glob_patterns_inside_path_and_paths() {
+        let root = temp_workspace("search_glob_paths");
+        fs::create_dir_all(root.join("internal/server")).unwrap();
+        fs::create_dir_all(root.join("anydoc_service")).unwrap();
+        fs::write(root.join("internal/server/chunks.go"), "func chunkDocumentText() {}\n").unwrap();
+        fs::write(root.join("internal/server/chunks_test.go"), "func TestChunk() { chunkDocumentText() }\n").unwrap();
+        fs::write(root.join("internal/server/other_test.go"), "func TestOther() { chunkDocumentText() }\n").unwrap();
+        fs::write(root.join("anydoc_service/pdf_parser.py"), "def chunkDocumentText(): pass\n").unwrap();
+
+        let workspace = Workspace::new(&root).unwrap();
+
+        // 1. Glob inside `paths`: matches only `*_test.go` under `internal/server`
+        let only_tests = workspace
+            .search_text(SearchTextRequest {
+                query: "chunkDocumentText".to_string(),
+                paths: vec!["internal/server/*_test.go".to_string()],
+                max_matches: 20,
+                ..Default::default()
+            })
+            .unwrap();
+        let hit_paths: Vec<&str> = only_tests.matches.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(hit_paths.len(), 2, "{hit_paths:?}");
+        assert!(hit_paths.contains(&"internal/server/chunks_test.go"));
+        assert!(hit_paths.contains(&"internal/server/other_test.go"));
+
+        // 2. Mixed glob path + plain file path in `paths`
+        let mixed = workspace
+            .search_text(SearchTextRequest {
+                query: "chunkDocumentText".to_string(),
+                paths: vec![
+                    "internal/server/chunks_test.go".to_string(),
+                    "anydoc_service/*.py".to_string(),
+                ],
+                max_matches: 20,
+                ..Default::default()
+            })
+            .unwrap();
+        let mixed_paths: Vec<&str> = mixed.matches.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(mixed_paths.len(), 2, "{mixed_paths:?}");
+        assert!(mixed_paths.contains(&"internal/server/chunks_test.go"));
+        assert!(mixed_paths.contains(&"anydoc_service/pdf_parser.py"));
+
+        // 3. Glob path combined with explicit `exclude` still intersects cleanly
+        let filtered = workspace
+            .search_text(SearchTextRequest {
+                query: "chunkDocumentText".to_string(),
+                path: "internal/server/*_test.go".to_string(),
+                exclude: vec!["other_test.go".to_string()],
+                max_matches: 20,
+                ..Default::default()
+            })
+            .unwrap();
+        let filtered_paths: Vec<&str> = filtered.matches.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(filtered_paths, vec!["internal/server/chunks_test.go"]);
+
+        // 4. Nonexistent base directory before glob still fails with PathNotFound
+        let missing = workspace
+            .search_text(SearchTextRequest {
+                query: "chunkDocumentText".to_string(),
+                paths: vec!["internal/missing_dir/*_test.go".to_string()],
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(matches!(missing, ToolError::NotFound(_)), "{missing:?}");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn list_dir_and_search_text_support_pipe_globs_exclude_and_swarm_noise() {
         let root = temp_workspace("pipe_glob_exclude_swarm");
         fs::create_dir_all(root.join("src")).unwrap();

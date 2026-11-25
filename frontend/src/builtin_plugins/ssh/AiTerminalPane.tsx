@@ -12,6 +12,7 @@ import {
   feedTranscript,
 } from './transcript.ts'
 import { ScrollToBottom } from '../../components/ScrollToBottom.tsx'
+import { appConfirm } from '../../components/AppDialog.tsx'
 import css from './style.module.css'
 
 /** How one command reads in a card footer. */
@@ -227,9 +228,9 @@ export default function AiTerminalPane({ serverId, taskId, active, onOpenHuman, 
     if (text === '') return
     try { await navigator.clipboard.writeText(text); setCopyError('') } catch (error) { setCopyError(message(error)) }
   }
-  function addToDraft() {
+  async function addToDraft() {
     const text = picked().slice(0, 4000)
-    if (text !== '' && window.confirm('将选中的终端输出加入问答草稿？请先确认没有密钥、密码或其他敏感数据。')) diagnose?.(text)
+    if (text !== '' && await appConfirm({ title: '加入问答草稿', message: '将选中的终端输出加入问答草稿？请先确认没有密钥、密码或其他敏感数据。', confirmText: '加入草稿' })) diagnose?.(text)
   }
 
   const blocks = state.current.blocks
@@ -246,7 +247,7 @@ export default function AiTerminalPane({ serverId, taskId, active, onOpenHuman, 
       {(status === '已断开' || status === '连接失败') && <button onClick={() => setAttempt(value => value + 1)}>重新连接</button>}
       <button onClick={onOpenHuman}>＋ 打开人工终端</button>
       <button disabled={!selected} onClick={() => void copy()}>复制选区</button>
-      {diagnose && <button disabled={!selected} onClick={addToDraft}>加入问答草稿</button>}
+      {diagnose && <button disabled={!selected} onClick={() => void addToDraft()}>加入问答草稿</button>}
     </div>
     {copyError && <p role="alert" className={css.muted}>{copyError}</p>}
     <div className={css.transcriptArea}>

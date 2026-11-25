@@ -1,4 +1,5 @@
 import { createContext } from 'react'
+import { appConfirm } from '../../components/AppDialog.tsx'
 
 export type Auth = 'agent' | 'key_file' | 'password'
 export type Tier = 'dev' | 'staging' | 'prod'
@@ -12,7 +13,7 @@ export interface Access { task_id?: string; workspace_root?: string; approved?: 
 export interface Usage { id: number; task_id: string | null; action: string; summary: string; created_at: number }
 export interface Entry { name: string; kind: 'directory' | 'file' | 'symlink' | 'other'; size: number | null }
 export interface Failure { error?: string; code?: string; trusted?: string; received?: string }
-export const remoteTools = ['ssh__exec', 'ssh__list_dir', 'ssh__read_file', 'ssh__write_file', 'ssh__upload', 'ssh__tail_log'] as const
+export const remoteTools = ['ssh__exec', 'ssh__list_dir', 'ssh__read_file', 'ssh__write_file', 'ssh__edit_file', 'ssh__upload', 'ssh__download', 'ssh__tail_log'] as const
 export type RemoteTool = typeof remoteTools[number]
 export interface AiFocus { seq: number; taskId: string; serverId: string; tool: RemoteTool; remotePath?: string }
 export interface AiStreamSummary { task_id: string; server_id: string; touched: number; buffered_bytes: number }
@@ -93,7 +94,13 @@ export const ssh = {
 }
 
 export function message(error: unknown): string { return error instanceof Error ? error.message : String(error) }
-export function confirmAccess(server: Server, action: string): boolean {
-  return !server.require_approval || window.confirm(server.name + ' · ' + server.username + '@' + server.host + ':' + server.port + '\n\n' + action)
+export async function confirmAccess(server: Server, action: string): Promise<boolean> {
+  if (!server.require_approval) return true
+  return appConfirm({
+    title: '远程服务器确认',
+    message: server.name + ' · ' + server.username + '@' + server.host + ':' + server.port + '\n\n' + action,
+    confirmText: '确认继续',
+    danger: server.env_tier === 'prod',
+  })
 }
 export function joinRemote(dir: string, name: string): string { return dir === '/' ? '/' + name : dir.replace(/\/$/, '') + '/' + name }

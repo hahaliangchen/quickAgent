@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { type IconTheme, iconUrl, loadIconTheme } from '../git/icons.ts'
 import { type Access, type Entry, type Server, confirmAccess, joinRemote, ssh } from './api.ts'
+import { appConfirm, appPrompt } from '../../components/AppDialog.tsx'
 import css from './style.module.css'
 
 type Transfer = { id: number; name: string; progress: number; status: '等待' | '上传中' | '完成' | '已取消' | '失败'; controller: AbortController }
@@ -66,7 +67,7 @@ export default function SftpExplorer({ server, access, hidden, theme = 'light', 
   }
   async function upload(input: FileList | File[]) {
     const files = Array.from(input).filter(file => validName(file.name))
-    if (!result || busy || !files.length || !confirmAccess(server, '上传至 ' + target + '\n' + files.map(file => file.name).join('\n'))) return
+    if (!result || busy || !files.length || !await confirmAccess(server, '上传至 ' + target + '\n' + files.map(file => file.name).join('\n'))) return
     const rows = files.map(file => ({ id: ++seq.current, name: file.name, progress: 0, status: '等待' as const, controller: new AbortController() }))
     queue.current.push(...rows)
     setTransfers(items => [...items.filter(item => item.status === '等待' || item.status === '上传中'), ...rows])
@@ -90,13 +91,19 @@ export default function SftpExplorer({ server, access, hidden, theme = 'light', 
     const original = name ? joinRemote(target, name) : target
     let destination: string | undefined
     if (action === 'mkdir' || action === 'rename') {
-      const input = window.prompt(action === 'mkdir' ? '新文件夹名称' : '新名称', name ?? '')?.trim()
+      const raw = await appPrompt({
+        title: action === 'mkdir' ? '新建远程文件夹' : '重命名远程条目',
+        defaultValue: name ?? '',
+        placeholder: action === 'mkdir' ? '输入文件夹名称' : '输入新名称',
+        confirmText: action === 'mkdir' ? '创建' : '确定',
+      })
+      const input = raw?.trim()
       if (!input) return
       if (!validName(input)) { onError(new Error('请输入单个文件或文件夹名称')); return }
       destination = joinRemote(target, input)
     }
     const description = action === 'rename' ? '重命名 ' + original + ' → ' + destination : action === 'mkdir' ? '创建 ' + destination : '删除 ' + original
-    if (!confirmAccess(server, description) || (action.startsWith('remove') && !server.require_approval && !window.confirm(description + '？'))) return
+    if (!await confirmAccess(server, description) || (action.startsWith('remove') && !server.require_approval && !await appConfirm({ title: '确认删除', message: description + '？', confirmText: '删除', danger: true }))) return
     try {
       await ssh.mutate(server.id, action, action === 'mkdir' ? destination! : original, { ...access, approved: server.require_approval }, action === 'rename' ? destination : undefined)
       refresh(); onActivity()

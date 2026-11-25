@@ -398,10 +398,18 @@ impl Heap {
                 self.define_builtin(ns, method, VmValue::Reference(value))?;
             }
         }
+        let buffer_proto = self.allocate(HeapNode::Object(vec![]))?;
+        self.intrinsics.insert("Buffer.prototype".into(), buffer_proto);
+        let array_proto = self.intrinsics["Array.prototype"];
+        self.prototypes.insert(buffer_proto, Some(array_proto));
+        let buffer_to_str = self.native("Buffer.prototype.toString")?;
+        self.define_builtin(buffer_proto, "toString", VmValue::Reference(buffer_to_str))?;
+
         let buffer = self.allocate(HeapNode::Object(vec![]))?;
         self.intrinsics.insert("Buffer".into(), buffer);
         self.prototypes.insert(buffer, Some(object));
-        for method in ["from", "byteLength"] {
+        self.define_builtin(buffer, "prototype", VmValue::Reference(buffer_proto))?;
+        for method in ["from", "byteLength", "isBuffer"] {
             let value = self.native(&format!("Buffer.{method}"))?;
             self.define_builtin(buffer, method, VmValue::Reference(value))?;
         }
@@ -455,6 +463,24 @@ impl Heap {
     }
     pub(crate) fn prototype_of(&self, id: HeapId) -> Option<HeapId> {
         self.prototypes.get(&id).copied().flatten()
+    }
+    pub(crate) fn is_buffer(&self, id: HeapId) -> bool {
+        let Some(&proto) = self.intrinsics.get("Buffer.prototype") else {
+            return false;
+        };
+        let mut at = self.prototype_of(id);
+        let mut depth = 0usize;
+        while let Some(parent) = at {
+            if parent == proto {
+                return true;
+            }
+            depth += 1;
+            if depth > 16 {
+                break;
+            }
+            at = self.prototype_of(parent);
+        }
+        false
     }
     pub(crate) fn set_prototype(&mut self, id: HeapId, proto: Option<HeapId>) -> Result<()> {
         if self.prototype_of(id) == proto {

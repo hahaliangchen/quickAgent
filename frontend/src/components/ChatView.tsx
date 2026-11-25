@@ -16,6 +16,7 @@ import { useAgentApi } from '../cordis/react.tsx'
 import type { AgentEvent, Task, ChangesSummary } from '../api.ts'
 import { changeSummaries } from '../changes.ts'
 import { ChangesCard } from './ChangesCard.tsx'
+import { splitStudioViewContext } from '../plugins/studioContextText.ts'
 import chatCss from '../dsh/chat/ChatView.module.css'
 import actionsCss from '../dsh/chat/MessageIconActions.module.css'
 import messageCss from '../dsh/chat/MessageItem.module.css'
@@ -120,15 +121,27 @@ function Item({
   switch (item.kind) {
     case 'turn':
       return null
-    case 'user':
+    case 'user': {
+      const parsed = splitStudioViewContext(item.text)
       return (
         <div className={messageCss.userRow}>
           <div className={messageCss.userStack}>
             {item.attachments?.length ? <AttachmentCards items={item.attachments} onFilePreview={onFilePreview} /> : null}
-            {item.text&&<div className={messageCss.bubble}>{projectUserText(item.text, [], slashNames, 'skill', onFilePreview ? { openFile: onFilePreview } : undefined)}</div>}
+            {parsed.context && (
+              <details className={css.viewContextPill}>
+                <summary className={css.viewContextSummary}>
+                  <span className={css.viewContextDot} aria-hidden="true" />
+                  <span className={css.viewContextLabel}>{parsed.context.label}</span>
+                  <span className={css.viewContextTag}>视图上下文</span>
+                </summary>
+                <pre className={css.viewContextBody}>{parsed.context.text}</pre>
+              </details>
+            )}
+            {parsed.body && <div className={messageCss.bubble}>{projectUserText(parsed.body, [], slashNames, 'skill', onFilePreview ? { openFile: onFilePreview } : undefined)}</div>}
           </div>
         </div>
       )
+    }
     case 'assistant':
       return <AssistantMessage text={item.text} reasoning={item.reasoning} streaming={item.streaming} />
     case 'subagent': {
@@ -517,7 +530,8 @@ export function ChatView({ events, projectedItems, task, running, onOpenTask, on
             {nodes.map((node) => {
               if (node.kind === 'user') {
                 const canRewind = Boolean(task && !running && task.parent_task_id === null)
-                const hasText = node.item.text.trim() !== ''
+                const cleanUserText = splitStudioViewContext(node.item.text).body
+                const hasText = cleanUserText.trim() !== ''
                 return (
                   <div key={node.item.key} className={`${chatCss.flowItem} ${css.userWithRewind}`} data-chat-flow-kind="user" data-chat-turn-message={node.item.key} data-event-seq={node.item.key} data-turn={node.turn} tabIndex={-1}>
                     <Item
@@ -529,7 +543,7 @@ export function ChatView({ events, projectedItems, task, running, onOpenTask, on
                     />
                     {(hasText || canRewind) && (
                       <div className={clsx(actionsCss.actions, css.userActions)}>
-                        {hasText && <UserCopyButton text={node.item.text} />}
+                        {hasText && <UserCopyButton text={cleanUserText} />}
                         {canRewind && task && <RewindControl taskId={task.task_id} turn={node.turn} onRewound={() => onChangesUpdated?.()} />}
                       </div>
                     )}

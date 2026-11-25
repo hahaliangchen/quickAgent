@@ -13,6 +13,7 @@ import { CodexRightPanel } from './components/CodexRightPanel.tsx'
 import { SettingsModal } from './components/SettingsModal.tsx'
 import { WorkspaceModal } from './components/WorkspaceModal.tsx'
 import { ShellSetupDialog } from './components/ShellSetupDialog.tsx'
+import { AppDialogHost } from './components/AppDialog.tsx'
 import { isCodeShellContext } from './shellSetup.ts'
 import type { AgentSlotProps } from './cordis/slot-contract.ts'
 import { toggleTheme } from './theme.ts'
@@ -512,6 +513,7 @@ export function App({ renderSlot }: AgentSlotProps) {
         onClose={workspace.closeFolderDialog}
         onAddWorkspace={workspace.addWorkspace}
       />
+      <AppDialogHost />
     </div>
   )
 }

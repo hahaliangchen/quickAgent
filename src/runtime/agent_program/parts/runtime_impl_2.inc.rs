@@ -601,6 +601,11 @@ impl Runtime {
                     return self.invoke_method(receiver,method,args,destination,true);
                 }
                 if let Some((class,method))=name.split_once(".prototype.") {
+                    if class == "Buffer" && method == "toString" {
+                        let value = super::js_methods::buffer_to_string(&self.heap, &receiver, &args)?;
+                        self.store(destination, value)?;
+                        return Ok(None);
+                    }
                     if let VmValue::Reference(id)=&receiver {
                         let valid=match self.heap.get(*id)? {
                             HeapNode::Collection(c)=>c.kind.name()==class,

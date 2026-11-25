@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
-import type { PluginPageProps } from './protocol.ts'
+import { DB_SYNC_EVENT, EXCEL_SYNC_EVENT, type DbStudioSyncAction, type ExcelStudioSyncAction, type PluginPageProps } from './protocol.ts'
 import { createPluginHost } from './host.ts'
 import { useAgentApi } from '../cordis/react.tsx'
 import { studioUrl } from '../filePreview.ts'
@@ -26,6 +26,26 @@ export function HtmlPluginPage({ owner, workspaceRoot, pageId, pendingOpen, them
     sent.current = pendingOpen.seq
     frame.current?.contentWindow?.postMessage({ type: 'quickagent:open-file', file: pendingOpen.fileUrl, name: pendingOpen.filename }, location.origin)
   }, [loaded, owner.remote, pendingOpen])
+  useEffect(() => {
+    if (!loaded || owner.remote || owner.id !== 'db') return
+    const forward = (event: Event) => {
+      const detail = (event as CustomEvent<DbStudioSyncAction>).detail
+      if (!detail || typeof detail.action !== 'string') return
+      frame.current?.contentWindow?.postMessage({ type: DB_SYNC_EVENT, detail }, location.origin)
+    }
+    window.addEventListener(DB_SYNC_EVENT, forward)
+    return () => window.removeEventListener(DB_SYNC_EVENT, forward)
+  }, [loaded, owner.remote, owner.id])
+  useEffect(() => {
+    if (!loaded || owner.remote || owner.id !== 'excel') return
+    const forward = (event: Event) => {
+      const detail = (event as CustomEvent<ExcelStudioSyncAction>).detail
+      if (!detail || typeof detail !== 'object') return
+      frame.current?.contentWindow?.postMessage({ type: EXCEL_SYNC_EVENT, detail }, location.origin)
+    }
+    window.addEventListener(EXCEL_SYNC_EVENT, forward)
+    return () => window.removeEventListener(EXCEL_SYNC_EVENT, forward)
+  }, [loaded, owner.remote, owner.id])
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow) return

@@ -48,6 +48,7 @@ pub struct Package {
     remote: Option<Arc<remote::Connection>>,
     mcp: Option<Arc<mcp_client::Connection>>,
     local_service_port: Option<u16>,
+    local_service_child: Option<Arc<Mutex<Option<std::process::Child>>>>,
 }
 
 impl Package {
@@ -281,6 +282,7 @@ fn load_with(root: &Path, origin: Origin, native: Option<NativeBackend>) -> Resu
         remote: None,
         mcp: None,
         local_service_port: None,
+        local_service_child: None,
     })
 }
 #[derive(Default, Deserialize, Serialize)]
@@ -553,12 +555,55 @@ impl Registry {
     }
 
     pub fn local_service_port(&self, id: &str) -> Result<u16> {
-        let entries = self.entries.read().unwrap();
-        let package = entries.get(id).context("plugin not found")?;
-        ensure!(package.scope.is_some(), "plugin disabled");
-        package
-            .local_service_port
-            .context("plugin has no running local service")
+        let needs_respawn = {
+            let entries = self.entries.read().unwrap();
+            let package = entries.get(id).context("plugin not found")?;
+            ensure!(package.scope.is_some(), "plugin disabled");
+            if let Some(child_arc) = &package.local_service_child {
+                let mut guard = child_arc.lock().unwrap_or_else(|e| e.into_inner());
+                let exited = match guard.as_mut() {
+                    Some(child) => child.try_wait().ok().flatten().is_some(),
+                    None => true,
+                };
+                if !exited {
+                    return package
+                        .local_service_port
+                        .context("plugin has no running local service");
+                }
+                true
+            } else {
+                return package
+                    .local_service_port
+                    .context("plugin has no running local service");
+            }
+        };
+        if needs_respawn {
+            let mut entries = self.entries.write().unwrap();
+            let package = entries.get_mut(id).context("plugin not found")?;
+            ensure!(package.scope.is_some(), "plugin disabled");
+            if let Some(child_arc) = &package.local_service_child {
+                let mut guard = child_arc.lock().unwrap_or_else(|e| e.into_inner());
+                let exited = match guard.as_mut() {
+                    Some(child) => child.try_wait().ok().flatten().is_some(),
+                    None => true,
+                };
+                if exited {
+                    let service = package
+                        .manifest
+                        .local_service
+                        .as_ref()
+                        .context("plugin has no local service configuration")?;
+                    let (port, child) = spawn_local_service(&package.root, service)?;
+                    *guard = Some(child);
+                    package.local_service_port = Some(port);
+                    tracing::info!(plugin = id, port, "respawned exited plugin local service");
+                }
+            }
+            return package
+                .local_service_port
+                .context("plugin has no running local service");
+        }
+        unreachable!()
     }
     pub fn remote_page(
         &self,
@@ -884,6 +929,7 @@ impl Plugin for PackagePlugin {
             let (port, child) = spawn_local_service(&self.0.root, service)?;
             current.local_service_port = Some(port);
             let child = Arc::new(Mutex::new(Some(child)));
+            current.local_service_child = Some(Arc::clone(&child));
             ctx.effect(move || {
                 if let Some(mut process) = child.lock().unwrap().take() {
                     let _ = process.kill();
@@ -910,6 +956,7 @@ impl Plugin for PackagePlugin {
                 }
                 package.scope = None;
                 package.local_service_port = None;
+                package.local_service_child = None;
             }
             crate::server::mcp::notify_tools_changed();
         });

@@ -15,7 +15,8 @@ import { ModelSelect } from '../dsh/model-selection/ModelSelect.tsx'
 import { PermissionPicker } from './PermissionPicker.tsx'
 import { PREFILL_EVENT } from './RewindControl.tsx'
 import { ScrollToBottom, transcriptScroller, useScrollToBottom } from './ScrollToBottom.tsx'
-import type { StudioViewContext } from '../plugins/protocol.ts'
+import { DB_SYNC_EVENT, EXCEL_SYNC_EVENT, type DbStudioSyncAction, type ExcelStudioSyncAction, type StudioViewContext } from '../plugins/protocol.ts'
+import { formatStudioViewContext, stripStudioViewContext } from '../plugins/studioContextText.ts'
 import css from './CodeChatDock.module.css'
 
 type DockMode = 'code' | 'chat'
@@ -48,6 +49,109 @@ function savedModel(): ModelPick | undefined {
 }
 const mention = (path: string) => path.includes(' ') ? `@"${path}"` : `@${path}`
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1) || path
+
+function parseJsonRecord(raw: unknown): Record<string, unknown> | undefined {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
+  if (typeof raw !== 'string' || !raw.trim()) return undefined
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
+  } catch { return undefined }
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function asPositiveInt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : undefined
+}
+
+function extractDbSyncAction(
+  name: string,
+  args: Record<string, unknown>,
+  result: Record<string, unknown> | undefined,
+): DbStudioSyncAction | undefined {
+  const connObj = parseJsonRecord(result?.connection)
+  const connectionId = asNonEmptyString(args.connection_id) ?? asNonEmptyString(connObj?.id)
+  const sqlitePath = asNonEmptyString(args.sqlite_path) ?? asNonEmptyString(connObj?.file_path)
+  if (name === 'db__save_connection') {
+    return { action: 'save_connection', connectionId, sqlitePath }
+  }
+  if (name === 'db__inspect_schema') {
+    const schema = asNonEmptyString(args.schema)
+      ?? asNonEmptyString(result?.schema)
+      ?? asNonEmptyString(result?.default_schema)
+    const table = asNonEmptyString(args.table) ?? asNonEmptyString(result?.table)
+    return { action: 'inspect', connectionId, sqlitePath, schema, table }
+  }
+  if (name === 'db__query') {
+    const editable = parseJsonRecord(result?.editable_table)
+    return {
+      action: 'query',
+      connectionId,
+      sqlitePath,
+      sql: asNonEmptyString(args.sql),
+      schema: asNonEmptyString(editable?.schema),
+      table: asNonEmptyString(editable?.table),
+    }
+  }
+  if (name === 'db__explain') {
+    return { action: 'explain', connectionId, sqlitePath, sql: asNonEmptyString(args.sql) }
+  }
+  if (name === 'db__execute') {
+    return {
+      action: 'execute',
+      connectionId,
+      sqlitePath,
+      schema: asNonEmptyString(args.schema),
+      table: asNonEmptyString(args.table),
+    }
+  }
+  if (name === 'db__focus_view') {
+    return {
+      action: 'focus_view',
+      connectionId,
+      sqlitePath,
+      schema: asNonEmptyString(args.schema),
+      table: asNonEmptyString(args.table),
+      column: asNonEmptyString(args.column),
+      row: asPositiveInt(args.row),
+      range: asNonEmptyString(args.range),
+      findColumn: asNonEmptyString(args.find_column),
+      findValue: asNonEmptyString(args.find_value),
+    }
+  }
+  return undefined
+}
+
+function extractExcelSyncAction(
+  name: string,
+  args: Record<string, unknown>,
+): ExcelStudioSyncAction | undefined {
+  if (name === 'excel__focus_view') {
+    return {
+      path: asNonEmptyString(args.path),
+      sheet: asNonEmptyString(args.sheet),
+      range: asNonEmptyString(args.range),
+      column: asNonEmptyString(args.column),
+      row: asPositiveInt(args.row),
+      findColumn: asNonEmptyString(args.find_column),
+      findValue: asNonEmptyString(args.find_value),
+    }
+  }
+  if (name === 'excel__read_range' || name === 'excel__format_range') {
+    const range = asNonEmptyString(args.range)
+    if (!range) return undefined
+    return { path: asNonEmptyString(args.path), sheet: asNonEmptyString(args.sheet), range }
+  }
+  if (name === 'excel__search') {
+    const query = asNonEmptyString(args.query)
+    if (!query) return undefined
+    return { path: asNonEmptyString(args.path), sheet: asNonEmptyString(args.sheet), findValue: query }
+  }
+  return undefined
+}
 
 /** Chat docked beside a page, VS Code style: asks about the file in view and files dropped on it. */
 export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, viewContext, embeddedLauncher, linkedTaskId, linkedSession, openSignal }: {
@@ -152,7 +256,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
       if (panel.current === null || panel.current.offsetParent === null) return
       const text = (event as CustomEvent<string>).detail
       if (typeof text !== 'string' || !text) return
-      setDraft(text)
+      setDraft(stripStudioViewContext(text))
       window.requestAnimationFrame(() => input.current?.focus())
     }
     window.addEventListener(PREFILL_EVENT, onPrefill)
@@ -165,6 +269,63 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
   }, [diagnostic])
 
   const running = task?.status === 'running' || task?.status === 'cancelling'
+  const syncTaskId = linkedTaskId ?? taskId
+  const dbSyncRef = useRef<{ taskId: string | undefined; seq: number; seeded: boolean }>({ taskId: undefined, seq: 0, seeded: false })
+  useEffect(() => {
+    const events = session.events
+    if (dbSyncRef.current.taskId !== syncTaskId) {
+      dbSyncRef.current = { taskId: syncTaskId, seq: 0, seeded: false }
+    }
+    if (!syncTaskId || events.length === 0) return
+    if (!dbSyncRef.current.seeded) {
+      if (!running) {
+        dbSyncRef.current = { taskId: syncTaskId, seq: events[events.length - 1]?.seq ?? 0, seeded: true }
+        return
+      }
+      let turnBoundary = 0
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i]?.type === 'turn/start') { turnBoundary = events[i]?.seq ?? 0; break }
+      }
+      dbSyncRef.current = { taskId: syncTaskId, seq: turnBoundary, seeded: true }
+    }
+    if (panel.current === null || panel.current.offsetParent === null) return
+    const calls = new Map<string, { name: string; args: Record<string, unknown> }>()
+    for (const ev of events) {
+      if (ev.type !== 'tool/call') continue
+      const callId = asNonEmptyString(ev.data.callId)
+      const name = asNonEmptyString(ev.data.name)
+      if (!callId || !name || (!name.startsWith('db__') && !name.startsWith('excel__'))) continue
+      calls.set(callId, { name, args: parseJsonRecord(ev.data.arguments) ?? {} })
+    }
+    let high = dbSyncRef.current.seq
+    for (const ev of events) {
+      if (ev.seq <= dbSyncRef.current.seq) continue
+      if (ev.seq > high) high = ev.seq
+      if (ev.type !== 'tool/result') continue
+      const msg = parseJsonRecord(ev.data.message)
+      if (msg?.isError === true) continue
+      const callId = asNonEmptyString(msg?.toolCallId)
+      if (!callId) continue
+      const call = calls.get(callId)
+      if (!call) continue
+      const meta = parseJsonRecord(ev.data.meta)
+      const content = Array.isArray(msg?.content) ? msg.content[0] : undefined
+      const textPayload = content && typeof content === 'object' ? (content as Record<string, unknown>).text : undefined
+      const result = parseJsonRecord(meta?.result) ?? parseJsonRecord(textPayload)
+      if (call.name.startsWith('db__')) {
+        const action = extractDbSyncAction(call.name, call.args, result)
+        if (action) {
+          window.dispatchEvent(new CustomEvent<DbStudioSyncAction>(DB_SYNC_EVENT, { detail: action }))
+        }
+      } else if (call.name.startsWith('excel__')) {
+        const action = extractExcelSyncAction(call.name, call.args)
+        if (action) {
+          window.dispatchEvent(new CustomEvent<ExcelStudioSyncAction>(EXCEL_SYNC_EVENT, { detail: action }))
+        }
+      }
+    }
+    dbSyncRef.current.seq = high
+  }, [syncTaskId, running, session.events])
   // The choice on screen: what was picked here, else what the app or this chat already uses.
   const providerId = model?.providerId ?? settings?.orchestrator_provider ?? ''
   const modelId = model?.modelId ?? settings?.orchestrator_model ?? ''
@@ -220,7 +381,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
       }
       const promptParts: string[] = []
       if (activeViewContext) {
-        promptParts.push(`[当前工作台视图上下文 — ${activeViewContext.badge}${activeViewContext.detail ? `（${activeViewContext.detail}）` : ''}]\n${activeViewContext.text}`)
+        promptParts.push(formatStudioViewContext(activeViewContext))
       }
       if (tags.length) promptParts.push(tags.map(mention).join(' '))
       promptParts.push(text)

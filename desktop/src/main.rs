@@ -65,7 +65,30 @@ fn desktop_port(data: &std::path::Path) -> Result<u16, Box<dyn std::error::Error
     Ok(port)
 }
 
+#[cfg(target_os = "linux")]
+fn sanitize_linux_desktop_env() {
+    // Strip Snap confinement env vars inherited from Snap-packaged IDEs/terminals
+    // so Ubuntu 26.04's `libglycin-2` does not misdetect Snap confinement and
+    // abort inside `gly_loader_load` during GTK3 icon/image decoding.
+    let snap_keys: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .filter(|k| k == "SNAP" || k.starts_with("SNAP_"))
+        .collect();
+    for key in snap_keys {
+        std::env::remove_var(key);
+    }
+    // Prefer XDG Desktop Portal (e.g. KDE Portal) for native file/folder dialogs
+    // so icon/thumbnail loading stays out-of-process instead of running inside
+    // GTK3/tao's main thread.
+    if std::env::var_os("GTK_USE_PORTAL").is_none() {
+        std::env::set_var("GTK_USE_PORTAL", "1");
+    }
+}
+
 fn main() {
+    #[cfg(target_os = "linux")]
+    sanitize_linux_desktop_env();
+
     tauri::Builder::default()
         // The agent page asks the OS for a project folder through this plugin;
         // `capabilities/agent-page.json` limits it to that one command.

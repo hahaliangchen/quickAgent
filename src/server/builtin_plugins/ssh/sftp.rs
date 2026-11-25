@@ -21,6 +21,31 @@ pub(super) struct Entry {
     size: Option<u64>,
 }
 
+async fn copy_with_sha256(
+    mut reader: impl AsyncRead + Unpin,
+    mut writer: impl tokio::io::AsyncWrite + Unpin,
+) -> std::io::Result<(u64, String)> {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        writer.write_all(&buf[..n]).await?;
+        total += n as u64;
+    }
+    let hex = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    Ok((total, hex))
+}
+
 impl Sftp {
     pub(super) async fn open(connection: Connection) -> Result<Self> {
         tokio::time::timeout(Duration::from_secs(15), async {
@@ -185,7 +210,7 @@ impl Sftp {
         expected: u64,
         create_parents: bool,
         overwrite: bool,
-    ) -> Result<u64> {
+    ) -> Result<(u64, String)> {
         ensure!(
             !path.is_empty() && !path.contains('\0') && !path.ends_with('/'),
             "invalid remote file path"
@@ -213,8 +238,8 @@ impl Sftp {
             )
             .await?;
         let result = async {
-            let count = tokio::time::timeout(Duration::from_secs(1800), async {
-                tokio::io::copy(&mut input.take(expected + 1), &mut file).await
+            let (count, sha256) = tokio::time::timeout(Duration::from_secs(1800), async {
+                copy_with_sha256(input.take(expected + 1), &mut file).await
             })
             .await
             .context("SFTP upload timed out")??;
@@ -227,7 +252,7 @@ impl Sftp {
                 let _ = self.session.remove_file(path).await;
             }
             self.session.rename(&temporary, path).await?;
-            Ok(count)
+            Ok((count, sha256))
         }
         .await;
         drop(file);
@@ -235,6 +260,39 @@ impl Sftp {
             let _ = self.session.remove_file(&temporary).await;
         }
         result
+    }
+
+    pub(super) async fn download_to_writer(
+        &self,
+        remote_path: &str,
+        mut output: impl tokio::io::AsyncWrite + Unpin,
+        max_bytes: u64,
+    ) -> Result<(u64, String)> {
+        ensure!(
+            !remote_path.is_empty() && !remote_path.contains('\0') && !remote_path.ends_with('/'),
+            "invalid remote file path"
+        );
+        let meta = self.session.metadata(remote_path).await?;
+        if let Some(size) = meta.size {
+            ensure!(
+                size <= max_bytes,
+                "remote file exceeds {} MiB AI download limit",
+                max_bytes / (1024 * 1024)
+            );
+        }
+        let input = self.session.open(remote_path).await?.take(max_bytes + 1);
+        let (count, sha256) = tokio::time::timeout(Duration::from_secs(1800), async {
+            copy_with_sha256(input, &mut output).await
+        })
+        .await
+        .context("SFTP download timed out")??;
+        ensure!(
+            count <= max_bytes,
+            "remote file exceeds {} MiB AI download limit",
+            max_bytes / (1024 * 1024)
+        );
+        output.flush().await?;
+        Ok((count, sha256))
     }
 
     pub(super) async fn read_lines(
@@ -294,6 +352,19 @@ impl Sftp {
             "truncated": truncated,
             "content": out,
         }))
+    }
+
+    pub(super) async fn read_text_full(&self, path: &str) -> Result<String> {
+        const MAX_EDIT: u64 = 4 * 1024 * 1024;
+        let mut input = self.session.open(path).await?.take(MAX_EDIT + 1);
+        let mut bytes = Vec::new();
+        input.read_to_end(&mut bytes).await?;
+        ensure!(
+            bytes.len() as u64 <= MAX_EDIT,
+            "remote text file exceeds 4 MiB edit limit"
+        );
+        ensure!(!bytes.contains(&0), "This remote file is not UTF-8 text");
+        String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("This remote file is not UTF-8 text"))
     }
 
     pub(super) async fn tail_lines(
@@ -389,7 +460,9 @@ impl Sftp {
             )
             .await?;
         }
-        self.upload_with_options(path, content.as_bytes(), content.len() as u64, false, true)
-            .await
+        let (bytes, _) = self
+            .upload_with_options(path, content.as_bytes(), content.len() as u64, false, true)
+            .await?;
+        Ok(bytes)
     }
 }

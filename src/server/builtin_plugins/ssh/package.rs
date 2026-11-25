@@ -44,7 +44,9 @@ pub(crate) fn is_tool(name: &str) -> bool {
             | "ssh__list_dir"
             | "ssh__read_file"
             | "ssh__write_file"
+            | "ssh__edit_file"
             | "ssh__upload"
+            | "ssh__download"
             | "ssh__tail_log"
     )
 }
@@ -52,7 +54,7 @@ pub(crate) fn is_tool(name: &str) -> bool {
 pub(crate) fn is_mutating_tool(name: &str) -> bool {
     matches!(
         name,
-        "ssh__add_server" | "ssh__exec" | "ssh__write_file" | "ssh__upload"
+        "ssh__add_server" | "ssh__exec" | "ssh__write_file" | "ssh__edit_file" | "ssh__upload"
     )
 }
 
@@ -411,6 +413,63 @@ pub(super) async fn execute_tool(
                 "backup": backup,
             }))
         }
+        "ssh__edit_file" => {
+            let server = load_server(&config_dir, &args, true, ctx.approved_protected).await?;
+            let path = required_str(&args, "path")?;
+            let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+            let backup = args["backup"].as_bool().unwrap_or(false);
+            let edits = parse_remote_edits(&args)?;
+            let (connection, secret) = client::connect_for_tool(
+                config_dir.clone(),
+                server.id.clone(),
+                ctx.task_id.is_some(),
+            )
+            .await?;
+            let sftp = Sftp::open(connection).await?;
+            let original = sftp.read_text_full(&path).await?;
+            let (updated, ranges) = crate::tools::file_edit::text_edits_with_ranges_replace_all(
+                &original,
+                &edits,
+                replace_all,
+            )
+            .map_err(|error| anyhow::anyhow!("{path}: {error}"))?;
+            let changed = updated != original;
+            let bytes_written = if changed {
+                sftp.write_text_atomic(&path, &updated, false, backup)
+                    .await?
+            } else {
+                updated.len() as u64
+            };
+            let preview = crate::tools::file_edit::preview_for_byte_ranges(&updated, &ranges);
+            record_usage(
+                config_dir,
+                server.id.clone(),
+                Action::WriteFile,
+                ctx.task_id.clone(),
+                workspace_str,
+                Some(path.clone()),
+            )
+            .await?;
+            if ctx.task_id.is_some() {
+                let resolved = sftp.display_path(&path).await;
+                emit_sftp(
+                    &ctx,
+                    &server,
+                    secret.as_ref(),
+                    "edit_file",
+                    &resolved,
+                    |path| format!("edit {path} ({} edits)", edits.len()),
+                );
+            }
+            Ok(json!({
+                "server_id": server.id,
+                "path": path,
+                "changed": changed,
+                "bytes_written": bytes_written,
+                "backup": backup,
+                "preview": preview,
+            }))
+        }
         "ssh__upload" => {
             let server = load_server(&config_dir, &args, true, ctx.approved_protected).await?;
             let local_path = required_str(&args, "local_path")?;
@@ -429,7 +488,7 @@ pub(super) async fn execute_tool(
             )
             .await?;
             let sftp = Sftp::open(connection).await?;
-            let bytes_uploaded = sftp
+            let (bytes_uploaded, sha256) = sftp
                 .upload_with_options(&remote_path, file, size, create_parents, overwrite)
                 .await?;
             record_usage(
@@ -458,6 +517,85 @@ pub(super) async fn execute_tool(
                 "local_path": relative_display,
                 "remote_path": remote_path,
                 "bytes_uploaded": bytes_uploaded,
+                "sha256": sha256,
+            }))
+        }
+        "ssh__download" => {
+            let server = load_server(&config_dir, &args, false, ctx.approved_protected).await?;
+            let remote_path = required_str(&args, "remote_path")?;
+            let local_path = required_str(&args, "local_path")?;
+            let create_parents = args["create_parents"].as_bool().unwrap_or(true);
+            let overwrite = args["overwrite"].as_bool().unwrap_or(false);
+            let (dest, temp_path, relative_display) = tokio::task::spawn_blocking(move || {
+                prepare_workspace_download_target(
+                    &workspace_root,
+                    &local_path,
+                    create_parents,
+                    overwrite,
+                )
+            })
+            .await??;
+            let (connection, secret) = client::connect_for_tool(
+                config_dir.clone(),
+                server.id.clone(),
+                ctx.task_id.is_some(),
+            )
+            .await?;
+            let sftp = Sftp::open(connection).await?;
+            let temp_file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .await
+                .with_context(|| format!("failed to create temp file {}", temp_path.display()))?;
+            let download_result = async {
+                let mut temp_file = temp_file;
+                let (bytes, sha256) = sftp
+                    .download_to_writer(&remote_path, &mut temp_file, MAX_AI_UPLOAD_BYTES)
+                    .await?;
+                temp_file.sync_all().await?;
+                drop(temp_file);
+                if dest.exists() && !overwrite {
+                    anyhow::bail!("local file already exists; pass overwrite: true to replace it");
+                }
+                tokio::fs::rename(&temp_path, &dest).await?;
+                Ok::<(u64, String), anyhow::Error>((bytes, sha256))
+            }
+            .await;
+            let (bytes_downloaded, sha256) = match download_result {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+                    return Err(error);
+                }
+            };
+            record_usage(
+                config_dir,
+                server.id.clone(),
+                Action::Download,
+                ctx.task_id.clone(),
+                workspace_str,
+                Some(remote_path.clone()),
+            )
+            .await?;
+            if ctx.task_id.is_some() {
+                let resolved = sftp.display_path(&remote_path).await;
+                let local = live::redact_text(&relative_display, secret.as_ref().map(secret_bytes));
+                emit_sftp(
+                    &ctx,
+                    &server,
+                    secret.as_ref(),
+                    "download",
+                    &resolved,
+                    |path| format!("download {path} -> {local} ({bytes_downloaded} B)"),
+                );
+            }
+            Ok(json!({
+                "server_id": server.id,
+                "remote_path": remote_path,
+                "local_path": relative_display,
+                "bytes_downloaded": bytes_downloaded,
+                "sha256": sha256,
             }))
         }
         _ => anyhow::bail!("Unknown SSH tool: {name}"),
@@ -589,6 +727,96 @@ fn open_workspace_upload_file(
         "local file exceeds 512 MiB AI upload limit"
     );
     Ok((file, size, relative.to_string_lossy().into_owned()))
+}
+
+fn prepare_workspace_download_target(
+    workspace_root: &Path,
+    local_path: &str,
+    create_parents: bool,
+    overwrite: bool,
+) -> Result<(PathBuf, PathBuf, String)> {
+    ensure!(
+        !local_path.is_empty() && !local_path.contains('\0') && !local_path.ends_with('/'),
+        "WORKSPACE_BOUNDARY_DENIED: invalid local_path"
+    );
+    let raw = Path::new(local_path);
+    ensure!(
+        !raw.components()
+            .any(|component| matches!(component, Component::ParentDir)),
+        "WORKSPACE_BOUNDARY_DENIED: local_path cannot contain parent traversal (..)"
+    );
+    let canonical_root = workspace_root.canonicalize()?;
+    let relative = if raw.is_absolute() {
+        raw.strip_prefix(&canonical_root)
+            .or_else(|_| raw.strip_prefix(workspace_root))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "WORKSPACE_BOUNDARY_DENIED: local_path must be inside the active workspace"
+                )
+            })?
+    } else {
+        raw
+    };
+    ensure!(
+        !relative.as_os_str().is_empty()
+            && !relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::RootDir | Component::Prefix(_) | Component::ParentDir
+                )
+            }),
+        "WORKSPACE_BOUNDARY_DENIED: local_path must stay inside the active workspace"
+    );
+    ensure!(
+        !relative.components().any(|component| matches!(
+            component,
+            Component::Normal(name) if name.eq_ignore_ascii_case(".codex-workspace-mcp")
+        )),
+        "WORKSPACE_BOUNDARY_DENIED: cannot write into internal host state"
+    );
+    // Reject symlinks anywhere along the existing portion of the target path.
+    let mut cursor = canonical_root.clone();
+    for component in relative.components() {
+        cursor.push(component);
+        if let Ok(meta) = std::fs::symlink_metadata(&cursor) {
+            ensure!(
+                !meta.file_type().is_symlink(),
+                "WORKSPACE_BOUNDARY_DENIED: cannot write through symlink '{local_path}'"
+            );
+        }
+    }
+    let dest = crate::tools::file_edit::workspace_path(&canonical_root, local_path)
+        .map_err(|err| anyhow::anyhow!("WORKSPACE_BOUNDARY_DENIED: {err}"))?;
+    if let Ok(meta) = std::fs::symlink_metadata(&dest) {
+        ensure!(
+            !meta.file_type().is_symlink() && !meta.is_dir(),
+            "WORKSPACE_BOUNDARY_DENIED: destination is a directory or symlink"
+        );
+        ensure!(
+            overwrite,
+            "local file already exists; pass overwrite: true to replace it"
+        );
+    }
+    let parent = dest
+        .parent()
+        .context("WORKSPACE_BOUNDARY_DENIED: destination has no parent directory")?;
+    if !parent.exists() {
+        ensure!(
+            create_parents,
+            "local parent directory does not exist; pass create_parents: true"
+        );
+        std::fs::create_dir_all(parent)?;
+    }
+    let canonical_parent = parent.canonicalize()?;
+    ensure!(
+        canonical_parent.starts_with(&canonical_root),
+        "WORKSPACE_BOUNDARY_DENIED: destination escapes active workspace"
+    );
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("Cannot generate temp filename"))?;
+    let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let temp_path = canonical_parent.join(format!(".grow-download-{nonce}.tmp"));
+    Ok((dest, temp_path, relative.to_string_lossy().into_owned()))
 }
 
 fn list_servers(config_dir: &Path, workspace: &str) -> Result<Value> {
@@ -781,8 +1009,41 @@ fn add_server(config_dir: &Path, args: Value) -> Result<Value> {
     }))
 }
 
+fn parse_remote_edits(args: &Value) -> Result<Vec<crate::tools::TextEdit>> {
+    if let Some(list) = args.get("edits") {
+        ensure!(
+            args.get("old_text").is_none() && args.get("new_text").is_none(),
+            "provide either `edits` or `old_text`/`new_text`, not both"
+        );
+        let edits: Vec<crate::tools::TextEdit> =
+            serde_json::from_value(list.clone()).context("invalid `edits` array")?;
+        ensure!(
+            !edits.is_empty() && edits.len() <= 128,
+            "provide between 1 and 128 edits"
+        );
+        return Ok(edits);
+    }
+    let old_text = args["old_text"]
+        .as_str()
+        .context("missing `old_text` (or pass an `edits` array)")?;
+    let new_text = args["new_text"]
+        .as_str()
+        .context("missing `new_text` (or pass an `edits` array)")?;
+    let line_hint = args
+        .get("line_hint")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize);
+    let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+    Ok(vec![crate::tools::TextEdit {
+        old_text: old_text.to_owned(),
+        new_text: new_text.to_owned(),
+        line_hint,
+        replace_all,
+    }])
+}
+
 #[test]
-fn declares_all_nine_ssh_tools_with_expected_permissions() {
+fn declares_all_eleven_ssh_tools_with_expected_permissions() {
     package().expect("SSH package and tool definitions must agree");
     let tools: Vec<Value> = serde_json::from_str(include_str!("tools.json")).unwrap();
     let names: Vec<_> = tools
@@ -799,7 +1060,9 @@ fn declares_all_nine_ssh_tools_with_expected_permissions() {
             "ssh__list_dir",
             "ssh__read_file",
             "ssh__write_file",
+            "ssh__edit_file",
             "ssh__upload",
+            "ssh__download",
             "ssh__tail_log",
         ]
     );
@@ -808,6 +1071,7 @@ fn declares_all_nine_ssh_tools_with_expected_permissions() {
         "ssh__server_history",
         "ssh__list_dir",
         "ssh__read_file",
+        "ssh__download",
         "ssh__tail_log",
     ] {
         assert!(is_tool(read_tool));
@@ -817,9 +1081,43 @@ fn declares_all_nine_ssh_tools_with_expected_permissions() {
         "ssh__add_server",
         "ssh__exec",
         "ssh__write_file",
+        "ssh__edit_file",
         "ssh__upload",
     ] {
         assert!(is_tool(write_tool));
         assert!(is_mutating_tool(write_tool));
     }
+}
+
+#[test]
+fn parse_remote_edits_accepts_shorthand_and_array_and_rejects_mixing() {
+    let single = parse_remote_edits(&json!({
+        "old_text": "a",
+        "new_text": "b",
+        "line_hint": 12,
+        "replace_all": true
+    }))
+    .unwrap();
+    assert_eq!(single.len(), 1);
+    assert_eq!(single[0].old_text, "a");
+    assert_eq!(single[0].line_hint, Some(12));
+    assert!(single[0].replace_all);
+
+    let batch = parse_remote_edits(&json!({
+        "edits": [
+            { "old_text": "x", "new_text": "y" },
+            { "old_text": "y", "new_text": "z" }
+        ]
+    }))
+    .unwrap();
+    assert_eq!(batch.len(), 2);
+
+    assert!(
+        parse_remote_edits(&json!({
+            "old_text": "a",
+            "new_text": "b",
+            "edits": [{ "old_text": "x", "new_text": "y" }]
+        }))
+        .is_err()
+    );
 }

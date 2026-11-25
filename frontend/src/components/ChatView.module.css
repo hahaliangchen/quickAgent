@@ -263,3 +263,65 @@
 .userActions > button:not(:first-child):hover {
   background: var(--dsw-alias-interactive-bg-hover);
 }
+
+.viewContextPill {
+  max-width: 100%;
+  align-self: flex-end;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(120, 130, 145, 0.22));
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-secondary, rgba(127, 138, 154, 0.07));
+  color: var(--dsw-alias-label-secondary, #52525b);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow: hidden;
+}
+
+.viewContextSummary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.viewContextSummary::-webkit-details-marker {
+  display: none;
+}
+
+.viewContextDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  flex: none;
+}
+
+.viewContextLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+  font-weight: 500;
+}
+
+.viewContextTag {
+  flex: none;
+  font-size: 11px;
+  opacity: 0.72;
+}
+
+.viewContextBody {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  border-top: 1px solid var(--dsw-alias-border-l2, rgba(120, 130, 145, 0.18));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

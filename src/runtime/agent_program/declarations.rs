@@ -311,8 +311,7 @@ pub fn static_library_header(libraries: &Libraries) -> String {
          // PATHS: every io.* / git.* path is relative to the workspace root unless you pass an absolute one — write \"src/...\", \"frontend/...\" directly; calling io.workspace_info() first just to build absolute paths wastes a step.\n\
          // IMPORTANT: Pre-bound `io.*`, `git.*`, `process.*` methods are SYNCHRONOUS.\n\
          // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`) or `require(\"<lib>/promises\")`.\n\
-         // MANDATORY exact-text edit rule: for multi-line old_text/new_text in io.edit/io.apply_edits/io.replace/io.write, use real multi-line template literals (`...` or String.raw`...` when backslashes exist and there are NO backticks or `${`) instead of minifying into single-line single-quoted `'...\\n...'` strings (saves tokens and prevents quoting syntax errors).\n\
-         // NEVER wrap a whole file or multi-line block that contains backticks (`) or `${` (such as Rust doc comments, Markdown, or TS templates) in a single String.raw`...` — unescaped backticks terminate the template literal early. Use a quoted line array `[\"line 1\", String.raw`line 2`].join(\"\\n\")` instead.\n",
+         // MANDATORY exact-text edit rule: for multi-line old_text/new_text in io.edit/io.apply_edits/io.replace/io.write, or shell commands containing backticks/backslashes (`\\1`, `sed`, Go raw strings, Markdown, TS templates), use raw triple-double-quoted strings (`\"\"\"...\"\"\"`) — every character inside is verbatim with ZERO escaping of backticks, `${...}`, quotes, or backslashes — or use standard template literals (`...`) when interpolation is needed, instead of minifying into single-line `'...\\n...'` strings.\n",
     );
     out.push_str(&directory(libraries));
     let mcp = libraries.iter().filter(|(name, _)| name.starts_with("mcp_")).collect::<Vec<_>>();
@@ -388,7 +387,7 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "sys_which" => "args: { names: string[] }): { found: Record<string, string | null> }",
                 "sys_listening_ports" => "args?: { port?: number; loopback_only?: boolean }): { ports: Array<{ protocol: 'tcp' | 'tcp6'; address: string; port: number; pid?: number; process?: string }>; supported: boolean }",
                 "sys_processes" => "args?: { filter?: string; limit?: number }): { processes: Array<{ pid: number; ppid?: number; name: string; state?: string }>; truncated: boolean; supported: boolean }",
-                "apply_edits" => "args: { files: Array<{ path: string; expected_code_hash?: string; edits: Array<{ old_text: string; new_text: string; line_hint?: number; replace_all?: boolean }> }>; atomic?: boolean }): { atomic: boolean; changed: number; failed: number; files: Array<{ path: string; changed: boolean; bytes_written?: number; code_hash?: string; index_refresh?: Record<string, unknown>; error?: string; file_index?: number; edit_index?: number | null }> }",
+                "apply_edits" => "args: { files: Array<{ path: string; expected_code_hash?: string; replace_all?: boolean; edits: Array<{ old_text: string; new_text: string; line_hint?: number; replace_all?: boolean }> }>; atomic?: boolean }): { atomic: boolean; changed: number; failed: number; files: Array<{ path: string; changed: boolean; bytes_written?: number; code_hash?: string; index_refresh?: Record<string, unknown>; error?: string; file_index?: number; edit_index?: number | null }> }",
                 "workspace_info" => "args?: { workspace_root?: string }): { workspace_root: string; platform: string; allowed_scope: string; default_ignored_dirs: string[] }",
                 "read_tool_contracts" => "args?: { libraries?: string[]; library?: string; methods?: string[]; overview?: boolean }): { declarations?: string; overview?: string }",
                 "find_library_methods" => "args?: { query?: string; library?: string }): { methods: Array<{ library: string; method: string; tool?: string; orchestration?: boolean; description?: string }> }",
@@ -493,7 +492,7 @@ pub fn directory(libraries: &Libraries) -> String {
         ]),
         ("Run and inspect applications", &[
             ("process", process_purpose),
-            ("ssh", "Connect to saved remote servers, register new SSH profiles (`ssh.add_server`), run remote commands (`ssh.exec`), transfer files via SFTP, and tail remote logs; discover full schemas on demand with `host.contracts({ libraries: [\"ssh\"] })`."),
+            ("ssh", "Connect to saved remote servers, register new SSH profiles (`ssh.add_server`), run remote commands (`ssh.exec`), edit/transfer files via SFTP (`ssh.edit_file`, `ssh.read_file`, `ssh.write_file`, `ssh.upload`, `ssh.download`), and tail remote logs; discover full schemas on demand with `host.contracts({ libraries: [\"ssh\"] })`."),
             ("db", "Connect to saved or new SQLite/MySQL/PostgreSQL databases (`db.list_connections`, `db.save_connection`), inspect schemas/DDL (`db.inspect_schema`), run parameterized read-only queries (`db.query`), explain plans (`db.explain`), execute confirmed writes (`db.execute`), and import/export `.xlsx`; discover full schemas on demand with `host.contracts({ libraries: [\"db\"] })`."),
             ("http", "Probe HTTP endpoints."),
             ("browser", "Open, inspect, and interact with browser pages."),
@@ -983,7 +982,7 @@ mod tests {
         assert!(header.contains("snapshot_seq?: number"));
         assert!(header.contains("stream?: 'stdout' | 'stderr'"));
         assert!(header.contains("MANDATORY exact-text edit rule"));
-        assert!(header.contains("String.raw"));
+        assert!(header.contains("\"\"\"...\"\"\""));
         assert!(header.contains("query: string | RegExp"));
         assert!(header.contains("function generate_image"));
         assert!(header.contains("function register_image"));

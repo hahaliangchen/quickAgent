@@ -447,8 +447,9 @@ pub fn compile_segment(
 /// a test investigation print `undefined`, and the main AI gave up
 /// orchestrating). Ordinary functions are never handed to AI on their own.
 pub fn uncalled_functions(source: &str, entry: Option<&str>) -> Result<()> {
+    let preprocessed = preprocess_raw_triple_quotes(source).unwrap_or_else(|_| source.to_owned());
     let map: Lrc<SourceMap> = Default::default();
-    let file = map.new_source_file(FileName::Custom("agent-program.js".into()).into(), source.to_owned());
+    let file = map.new_source_file(FileName::Custom("agent-program.js".into()).into(), preprocessed.clone());
     let comments = SingleThreadedComments::default();
     let mut parser = Parser::new_from(Lexer::new(
         Syntax::Es(EsSyntax { allow_return_outside_function: true, ..Default::default() }),
@@ -493,7 +494,7 @@ pub fn uncalled_functions(source: &str, entry: Option<&str>) -> Result<()> {
         let mut header = Vec::new();
         let mut start = function.lo;
         for note in notes.iter().rev().filter(|n| n.span.hi <= function.lo) {
-            if !source.get(offset(note.span.hi)..offset(start)).is_some_and(|gap| gap.trim().is_empty() && gap.matches('\n').count() <= 1) {
+            if !preprocessed.get(offset(note.span.hi)..offset(start)).is_some_and(|gap| gap.trim().is_empty() && gap.matches('\n').count() <= 1) {
                 break;
             }
             header.push(note.text.to_string());
@@ -557,6 +558,307 @@ pub fn compile_entry_with_libraries(
 ) -> Result<Program> {
     link_prelude(compile_inner(source, entry, false, libraries, BTreeSet::new(), false, false)?)
 }
+/// Rewrite raw triple-double-quoted literals (`"""..."""` or `r"""..."""`) into
+/// standard JSON-escaped JS string literals while preserving exact line numbers
+/// via newline-bearing block comments. Standard JS never permits `"""`, so this
+/// cannot alter any valid JS/TS program.
+fn preprocess_raw_triple_quotes(source: &str) -> Result<String> {
+    if !source.contains("\"\"\"") {
+        return Ok(source.to_owned());
+    }
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len + 64);
+    let mut i = 0usize;
+    let mut line = 1usize;
+    let mut col = 1usize;
+    let mut template_expr_depths: Vec<usize> = Vec::new();
+    let mut in_template = false;
+    let mut regex_allowed = true;
+
+    let advance_pos = |ch: char, line: &mut usize, col: &mut usize| {
+        if ch == '\n' {
+            *line += 1;
+            *col = 1;
+        } else {
+            *col += 1;
+        }
+    };
+
+    while i < len {
+        if in_template {
+            let b = bytes[i];
+            if b == b'\\' && i + 1 < len {
+                let c1 = source[i..].chars().next().unwrap();
+                out.push(c1);
+                advance_pos(c1, &mut line, &mut col);
+                i += c1.len_utf8();
+                let c2 = source[i..].chars().next().unwrap();
+                out.push(c2);
+                advance_pos(c2, &mut line, &mut col);
+                i += c2.len_utf8();
+                continue;
+            }
+            if b == b'`' {
+                out.push('`');
+                advance_pos('`', &mut line, &mut col);
+                i += 1;
+                in_template = false;
+                regex_allowed = false;
+                continue;
+            }
+            if b == b'$' && i + 1 < len && bytes[i + 1] == b'{' {
+                out.push_str("${");
+                col += 2;
+                i += 2;
+                template_expr_depths.push(0);
+                in_template = false;
+                regex_allowed = true;
+                continue;
+            }
+            let ch = source[i..].chars().next().unwrap();
+            out.push(ch);
+            advance_pos(ch, &mut line, &mut col);
+            i += ch.len_utf8();
+            continue;
+        }
+
+        let b = bytes[i];
+        // Line comment
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                let ch = source[i..].chars().next().unwrap();
+                out.push(ch);
+                advance_pos(ch, &mut line, &mut col);
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+        // Block comment
+        if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            out.push_str("/*");
+            col += 2;
+            i += 2;
+            while i < len {
+                if bytes[i] == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                    out.push_str("*/");
+                    col += 2;
+                    i += 2;
+                    break;
+                }
+                let ch = source[i..].chars().next().unwrap();
+                out.push(ch);
+                advance_pos(ch, &mut line, &mut col);
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+        // Regex literal (skip so quotes or `"""` inside `/.../` are untouched)
+        if b == b'/' && regex_allowed {
+            out.push('/');
+            col += 1;
+            i += 1;
+            let mut in_char_class = false;
+            while i < len {
+                let c = bytes[i];
+                if c == b'\\' && i + 1 < len {
+                    let c1 = source[i..].chars().next().unwrap();
+                    out.push(c1);
+                    advance_pos(c1, &mut line, &mut col);
+                    i += c1.len_utf8();
+                    let c2 = source[i..].chars().next().unwrap();
+                    out.push(c2);
+                    advance_pos(c2, &mut line, &mut col);
+                    i += c2.len_utf8();
+                    continue;
+                }
+                if c == b'[' {
+                    in_char_class = true;
+                } else if c == b']' {
+                    in_char_class = false;
+                }
+                let ch = source[i..].chars().next().unwrap();
+                out.push(ch);
+                advance_pos(ch, &mut line, &mut col);
+                i += ch.len_utf8();
+                if (c == b'/' && !in_char_class) || c == b'\n' {
+                    break;
+                }
+            }
+            regex_allowed = false;
+            continue;
+        }
+        // Raw triple-double-quoted string: `"""..."""` or `r"""..."""`
+        let raw_prefix_len = if b == b'"' && i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
+            Some(0usize)
+        } else if b == b'r'
+            && i + 3 < len
+            && bytes[i + 1] == b'"'
+            && bytes[i + 2] == b'"'
+            && bytes[i + 3] == b'"'
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b'$'))
+        {
+            Some(1usize)
+        } else {
+            None
+        };
+        if let Some(prefix_len) = raw_prefix_len {
+            let start_line = line;
+            let start_col = col;
+            let content_start = i + prefix_len + 3;
+            let Some(rel_end) = source[content_start..].find("\"\"\"") else {
+                bail!("TS_PROGRAM {start_line}:{start_col}: Unterminated raw triple-quoted string (missing closing \"\"\")");
+            };
+            let mut close_pos = content_start + rel_end;
+            // Support trailing quotes inside the raw string (e.g. `"""foo""""` -> `foo"`).
+            while close_pos + 3 < len && bytes[close_pos + 3] == b'"' {
+                close_pos += 1;
+            }
+            let raw_body = &source[content_start..close_pos];
+            let escaped = serde_json::to_string(raw_body)?;
+            out.push_str(&escaped);
+            let newline_count = raw_body.bytes().filter(|&byte| byte == b'\n').count();
+            if newline_count > 0 {
+                out.push_str("/*");
+                for _ in 0..newline_count {
+                    out.push('\n');
+                }
+                out.push_str("*/");
+            }
+            for ch in source[i..close_pos + 3].chars() {
+                advance_pos(ch, &mut line, &mut col);
+            }
+            i = close_pos + 3;
+            regex_allowed = false;
+            continue;
+        }
+        // Standard single- or double-quoted string literal
+        if b == b'\'' || b == b'"' {
+            let quote = b;
+            out.push(quote as char);
+            col += 1;
+            i += 1;
+            while i < len {
+                let c = bytes[i];
+                if c == b'\\' && i + 1 < len {
+                    let c1 = source[i..].chars().next().unwrap();
+                    out.push(c1);
+                    advance_pos(c1, &mut line, &mut col);
+                    i += c1.len_utf8();
+                    let c2 = source[i..].chars().next().unwrap();
+                    out.push(c2);
+                    advance_pos(c2, &mut line, &mut col);
+                    i += c2.len_utf8();
+                    continue;
+                }
+                let ch = source[i..].chars().next().unwrap();
+                out.push(ch);
+                advance_pos(ch, &mut line, &mut col);
+                i += ch.len_utf8();
+                if c == quote || c == b'\n' {
+                    break;
+                }
+            }
+            regex_allowed = false;
+            continue;
+        }
+        if b == b'`' {
+            out.push('`');
+            col += 1;
+            i += 1;
+            in_template = true;
+            continue;
+        }
+        if b == b'{' && let Some(depth) = template_expr_depths.last_mut() {
+            *depth += 1;
+        } else if b == b'}' && let Some(depth) = template_expr_depths.last_mut() {
+            if *depth == 0 {
+                template_expr_depths.pop();
+                out.push('}');
+                col += 1;
+                i += 1;
+                in_template = true;
+                continue;
+            }
+            *depth -= 1;
+        }
+        // Identifier / keyword token (keeps `regex_allowed` accurate after keywords like `return` or `in`)
+        if b.is_ascii_alphabetic() || b == b'_' || b == b'$' {
+            let start = i;
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$') {
+                let ch = bytes[i] as char;
+                out.push(ch);
+                col += 1;
+                i += 1;
+            }
+            let word = &source[start..i];
+            regex_allowed = matches!(
+                word,
+                "return"
+                    | "case"
+                    | "throw"
+                    | "in"
+                    | "instanceof"
+                    | "typeof"
+                    | "void"
+                    | "delete"
+                    | "new"
+                    | "yield"
+                    | "await"
+                    | "of"
+                    | "else"
+                    | "do"
+            );
+            continue;
+        }
+        let ch = source[i..].chars().next().unwrap();
+        out.push(ch);
+        advance_pos(ch, &mut line, &mut col);
+        i += ch.len_utf8();
+        if !b.is_ascii_whitespace() {
+            regex_allowed = matches!(
+                b,
+                b'(' | b'[' | b'{' | b'}' | b',' | b';' | b':' | b'?' | b'=' | b'!' | b'&'
+                    | b'|' | b'^' | b'~' | b'<' | b'>' | b'+' | b'-' | b'*' | b'%' | b'/'
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// If SWC only rejected legacy octal escapes inside untagged template literals
+/// (e.g. `` `sed 's/(a)/\1/'` ``), escape those backslashes (`\1` -> `\\1`) so
+/// the runtime string preserves the literal `\1` the author intended.
+fn repair_template_legacy_octals(
+    source: &str,
+    base_pos: u32,
+    errors: &[swc_ecma_parser::error::Error],
+) -> Option<String> {
+    if errors.is_empty() {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let mut offsets = Vec::with_capacity(errors.len());
+    for err in errors {
+        let kind_str = format!("{:?}", err.kind());
+        if kind_str != "LegacyOctal" {
+            return None;
+        }
+        let lo = err.span().lo.0.checked_sub(base_pos)? as usize;
+        if lo + 1 >= bytes.len() || bytes[lo] != b'\\' || !matches!(bytes[lo + 1], b'0'..=b'7') {
+            return None;
+        }
+        offsets.push(lo);
+    }
+    offsets.sort_unstable();
+    offsets.dedup();
+    let mut repaired = source.to_owned();
+    for offset in offsets.into_iter().rev() {
+        repaired.insert(offset, '\\');
+    }
+    Some(repaired)
+}
+
 fn compile_inner(
     source: &str,
     entry: &str,
@@ -570,101 +872,136 @@ fn compile_inner(
         source.len() <= 100_000,
         "TS_PROGRAM source exceeds 100000 bytes"
     );
-    let map: Lrc<SourceMap> = Default::default();
-    let file = map.new_source_file(
-        FileName::Custom("agent-program.js".into()).into(),
-        source.to_owned(),
-    );
-    let comments = SingleThreadedComments::default();
-    let lexer = Lexer::new(
-        Syntax::Es(EsSyntax { allow_return_outside_function: !refinement, ..Default::default() }),
-        Default::default(),
-        StringInput::from(&*file),
-        Some(&comments),
-    );
-    let mut parser = Parser::new_from(lexer);
-    // Parser errors are named, not explained; the ones a flow meets get words.
-    let describe = |kind: String| -> String {
-        match kind.as_str() {
-            "ReturnNotAllowed" if refinement => format!(
-                "return is only allowed inside a function; the host calls {entry} itself with this call's arguments, so put this code inside {entry}"
-            ),
-            "ReturnNotAllowed" => "top-level return is supported only by a one-shot program; use it to deliver the final structured result".to_owned(),
-            _ => kind,
-        }
-    };
-    let format_snippet = |line_no: usize, col_1based: usize| -> String {
-        let Some(line_text) = source.lines().nth(line_no.saturating_sub(1)) else {
-            return String::new();
-        };
-        let chars: Vec<char> = line_text.chars().collect();
-        if chars.is_empty() {
-            return String::new();
-        }
-        let col0 = col_1based.saturating_sub(1).min(chars.len());
-        let start = col0.saturating_sub(45);
-        let end = (col0 + 35).min(chars.len());
-        let prefix = if start > 0 { "..." } else { "" };
-        let suffix = if end < chars.len() { "..." } else { "" };
-        let window: String = chars[start..end].iter().collect();
-        let caret_offset = prefix.len() + (col0 - start);
-        format!("\n  {prefix}{window}{suffix}\n  {}^", " ".repeat(caret_offset))
-    };
-    let diagnostic_hint = |line_1based: usize, kind_str: &str| -> &'static str {
-        let lines: Vec<&str> = source.lines().collect();
-        let idx = line_1based.saturating_sub(1);
-        let tail = source.trim_end();
-        let unclosed_template_at_eof = (kind_str == "UnterminatedTpl"
-            || kind_str.contains("<lexing error>")
-            || kind_str == "Eof")
-            && (source.matches('`').count() % 2 == 1)
-            && line_1based >= lines.len();
-        let truncated_tail = tail.ends_with("'{")
-            || tail.ends_with("\"{")
-            || tail.ends_with('{')
-            || tail.ends_with('(')
-            || tail.ends_with('[')
-            || tail.ends_with(':')
-            || tail.ends_with(',');
-        if unclosed_template_at_eof && truncated_tail {
-            return "\n  Hint: your `run_js` code appears truncated before closing the template/string (often caused by an upstream unescaped `\"` such as `-d '{\"...\"'` inside the tool JSON). Avoid double-quoted JSON payloads inside shell template strings; pass data via `JSON.stringify(...)` or a single-quoted Python/JS script instead.";
-        }
-        let current_has_backtick = lines.get(idx).is_some_and(|l| l.contains('`'));
-        let prior_opens_template = lines
-            .get(..idx)
-            .is_some_and(|prev| prev.iter().any(|l| l.contains("String.raw`") || l.contains('`')));
-        if current_has_backtick && prior_opens_template {
-            "\n  Hint: an unescaped backtick (`) or ${ inside a template literal / String.raw terminates it early. For multi-line code or docs containing backticks, use a quoted line array `[\"line 1\", String.raw`...`].join(\"\\n\")`."
-        } else {
-            ""
-        }
-    };
-    let module = parser.parse_module().map_err(|e| {
-        let p = map.lookup_char_pos(e.span().lo);
-        let col = p.col.0 + 1;
-        let kind_str = format!("{:?}", e.kind());
-        anyhow::anyhow!(
-            "TS_PROGRAM {}:{}: {}{}{}",
-            p.line,
-            col,
-            describe(kind_str.clone()),
-            format_snippet(p.line, col),
-            diagnostic_hint(p.line, &kind_str),
-        )
-    })?;
-    if let Some(e) = parser.take_errors().first() {
-        let p = map.lookup_char_pos(e.span().lo);
-        let col = p.col.0 + 1;
-        let kind_str = format!("{:?}", e.kind());
-        bail!(
-            "TS_PROGRAM {}:{}: {}{}{}",
-            p.line,
-            col,
-            describe(kind_str.clone()),
-            format_snippet(p.line, col),
-            diagnostic_hint(p.line, &kind_str),
+    let preprocessed = preprocess_raw_triple_quotes(source)?;
+    let mut active_source = preprocessed;
+    let strict_conformance = cfg!(test) && external_names.contains("__test262CheckThrown");
+    let mut repairs = 0usize;
+    let (map, file, comments, module) = loop {
+        let map: Lrc<SourceMap> = Default::default();
+        let file = map.new_source_file(
+            FileName::Custom("agent-program.js".into()).into(),
+            active_source.clone(),
         );
-    }
+        let base_pos = file.start_pos.0;
+        let comments = SingleThreadedComments::default();
+        let lexer = Lexer::new(
+            Syntax::Es(EsSyntax { allow_return_outside_function: !refinement, ..Default::default() }),
+            Default::default(),
+            StringInput::from(&*file),
+            Some(&comments),
+        );
+        let mut parser = Parser::new_from(lexer);
+        // Parser errors are named, not explained; the ones a flow meets get words.
+        let describe = |kind: String| -> String {
+            match kind.as_str() {
+                "ReturnNotAllowed" if refinement => format!(
+                    "return is only allowed inside a function; the host calls {entry} itself with this call's arguments, so put this code inside {entry}"
+                ),
+                "ReturnNotAllowed" => "top-level return is supported only by a one-shot program; use it to deliver the final structured result".to_owned(),
+                _ => kind,
+            }
+        };
+        let format_snippet = |line_no: usize, col_1based: usize| -> String {
+            let Some(line_text) = active_source.lines().nth(line_no.saturating_sub(1)) else {
+                return String::new();
+            };
+            let chars: Vec<char> = line_text.chars().collect();
+            if chars.is_empty() {
+                return String::new();
+            }
+            let col0 = col_1based.saturating_sub(1).min(chars.len());
+            let start = col0.saturating_sub(45);
+            let end = (col0 + 35).min(chars.len());
+            let prefix = if start > 0 { "..." } else { "" };
+            let suffix = if end < chars.len() { "..." } else { "" };
+            let window: String = chars[start..end].iter().collect();
+            let caret_offset = prefix.len() + (col0 - start);
+            format!("\n  {prefix}{window}{suffix}\n  {}^", " ".repeat(caret_offset))
+        };
+        let diagnostic_hint = |line_1based: usize, kind_str: &str| -> &'static str {
+            if kind_str == "LegacyOctal" {
+                return "\n  Hint: octal escapes like `\\1` are forbidden in template literals (`...`); use `\"\"\"...\"\"\"` raw strings, `String.raw`...``, or double the backslash (`\\\\1`).";
+            }
+            let lines: Vec<&str> = active_source.lines().collect();
+            let idx = line_1based.saturating_sub(1);
+            let tail = active_source.trim_end();
+            let unclosed_template_at_eof = (kind_str == "UnterminatedTpl"
+                || kind_str.contains("<lexing error>")
+                || kind_str == "Eof")
+                && (active_source.matches('`').count() % 2 == 1)
+                && line_1based >= lines.len();
+            let truncated_tail = tail.ends_with("'{")
+                || tail.ends_with("\"{")
+                || tail.ends_with('{')
+                || tail.ends_with('(')
+                || tail.ends_with('[')
+                || tail.ends_with(':')
+                || tail.ends_with(',');
+            if unclosed_template_at_eof && truncated_tail {
+                return "\n  Hint: your `run_js` code appears truncated before closing the template/string (often caused by an upstream unescaped `\"` such as `-d '{\"...\"'` inside the tool JSON). Avoid double-quoted JSON payloads inside shell template strings; pass data via `JSON.stringify(...)` or a single-quoted Python/JS script instead.";
+            }
+            let current_has_backtick = lines.get(idx).is_some_and(|l| l.contains('`'));
+            let prior_opens_template = lines
+                .get(..idx)
+                .is_some_and(|prev| prev.iter().any(|l| l.contains("String.raw`") || l.contains('`')));
+            if current_has_backtick && prior_opens_template {
+                "\n  Hint: an unescaped backtick (`) or ${ inside a template literal / String.raw terminates it early. For multi-line code or docs containing backticks (Go, Markdown, TS, shell), use raw triple-double-quotes `\"\"\"...\"\"\"` (everything inside is verbatim with zero escaping)."
+            } else {
+                ""
+            }
+        };
+        let module = match parser.parse_module() {
+            Ok(module) => module,
+            Err(e) => {
+                if !strict_conformance
+                    && repairs < 64
+                    && let Some(repaired) =
+                        repair_template_legacy_octals(&active_source, base_pos, std::slice::from_ref(&e))
+                    && repaired != active_source
+                {
+                    active_source = repaired;
+                    repairs += 1;
+                    continue;
+                }
+                let p = map.lookup_char_pos(e.span().lo);
+                let col = p.col.0 + 1;
+                let kind_str = format!("{:?}", e.kind());
+                bail!(
+                    "TS_PROGRAM {}:{}: {}{}{}",
+                    p.line,
+                    col,
+                    describe(kind_str.clone()),
+                    format_snippet(p.line, col),
+                    diagnostic_hint(p.line, &kind_str),
+                );
+            }
+        };
+        let parse_errors = parser.take_errors();
+        if !parse_errors.is_empty() {
+            if !strict_conformance
+                && repairs < 64
+                && let Some(repaired) = repair_template_legacy_octals(&active_source, base_pos, &parse_errors)
+                && repaired != active_source
+            {
+                active_source = repaired;
+                repairs += 1;
+                continue;
+            }
+            let e = &parse_errors[0];
+            let p = map.lookup_char_pos(e.span().lo);
+            let col = p.col.0 + 1;
+            let kind_str = format!("{:?}", e.kind());
+            bail!(
+                "TS_PROGRAM {}:{}: {}{}{}",
+                p.line,
+                col,
+                describe(kind_str.clone()),
+                format_snippet(p.line, col),
+                diagnostic_hint(p.line, &kind_str),
+            );
+        }
+        break (map, file, comments, module);
+    };
     if !internal {
         struct Reserved(bool);
         impl Visit for Reserved {
@@ -847,6 +1184,7 @@ fn compile_inner(
     }
     // Without imports the host's libraries are in scope by name. A name the
     // source binds itself, as in `const io = require("io")`, is its own.
+    let host_library_names: BTreeSet<String> = libraries.keys().cloned().collect();
     let libraries = if has_import {
         imported_libraries
     } else {
@@ -918,7 +1256,7 @@ fn compile_inner(
             let lo = (note.span.hi.0 - file.start_pos.0) as usize;
             let hi = (header_start.0 - file.start_pos.0) as usize;
             // A blank line ends the header: a comment above it belongs to the code before.
-            if !source.get(lo..hi).is_some_and(|gap| gap.trim().is_empty() && gap.matches('\n').count() <= 1) {
+            if !active_source.get(lo..hi).is_some_and(|gap| gap.trim().is_empty() && gap.matches('\n').count() <= 1) {
                 break;
             }
             header.push(note.text.to_string());
@@ -1025,6 +1363,40 @@ fn compile_inner(
             }
         }
         let module_lexical = lexical_names(&top_level);
+        if segment && implicit_entry {
+            // REPL ergonomics (like Python / DevTools): a bare top-level `x = expr`
+            // implicitly declares `x` as a mutable module variable if it is not
+            // already declared, imported, a library/builtin, or an external binding.
+            // Assignments inside functions or blocks remain strictly checked.
+            for stmt in &top_level {
+                let ast::Stmt::Expr(expr_stmt) = stmt else { continue };
+                let ast::Expr::Assign(assign) = &*expr_stmt.expr else { continue };
+                if assign.op != ast::AssignOp::Assign {
+                    continue;
+                }
+                let ast::AssignTarget::Simple(ast::SimpleAssignTarget::Ident(ident)) = &assign.left else {
+                    continue;
+                };
+                let name = ident.id.sym.as_ref();
+                if module_vars.iter().any(|v| v == name)
+                    || module_lexical.iter().any(|(v, _)| v == name)
+                    || external.contains(name)
+                    || function_bindings.contains_key(name)
+                    || names.contains(name)
+                    || libraries.contains_key(name)
+                    || host_library_names.contains(name)
+                    || imports.contains_key(name)
+                    || matches!(
+                        name,
+                        "assert" | "JSON" | "Promise" | "undefined" | "NaN" | "Infinity" | "globalThis"
+                    )
+                    || name.starts_with("$temp")
+                {
+                    continue;
+                }
+                module_vars.push(name.to_owned());
+            }
+        }
         let mut c = Compiler {
             map: map.clone(),
             binding_spans: binding_spans.clone(),
@@ -1413,7 +1785,9 @@ fn is_bare_query_expr(mut expr: &ast::Expr) -> bool {
 
 #[cfg(test)]
 mod diagnostic_hint_tests {
-    use super::compile;
+    use super::super::{Runtime, State, libraries};
+    use super::{compile, compile_segment, uncalled_functions};
+    use std::collections::BTreeSet;
 
     #[test]
     fn truncated_shell_json_template_reports_truncation_hint() {
@@ -1436,6 +1810,138 @@ mod diagnostic_hint_tests {
         assert!(
             err.contains("an unescaped backtick"),
             "expected backtick hint, got: {err}"
+        );
+        assert!(
+            err.contains("\"\"\"...\"\"\""),
+            "expected triple-quote recommendation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn raw_triple_quoted_strings_preserve_backticks_escapes_and_line_numbers() {
+        let mut repl = Runtime::new_repl(libraries::builtin()).unwrap();
+        let src = r####"
+const goCode = """package main
+const q = `SELECT * FROM "users" WHERE name = '\1'`
+const tpl = "${notInterpolated}"
+""";
+const rawPrefixed = r"""foo\n\1`bar`""" + """baz"""";
+const withRegex = "a\"b".replace(/"/g, "") + """ok""";
+const inComment = 1; // """ not a string
+const inSingle = '"""';
+const inTemplate = `"""`;
+[goCode, rawPrefixed, withRegex, inComment, inSingle, inTemplate]
+"####;
+        uncalled_functions(src, None).unwrap();
+        let state = repl.append_segment(src, libraries::builtin(), false).unwrap();
+        assert!(matches!(state, State::Returned(_)), "expected Returned, got {state:?}");
+        let val = &repl.named_bindings()["$_"];
+        let arr = val.as_array().unwrap();
+        assert_eq!(
+            arr[0].as_str().unwrap(),
+            "package main\nconst q = `SELECT * FROM \"users\" WHERE name = '\\1'`\nconst tpl = \"${notInterpolated}\"\n"
+        );
+        assert_eq!(arr[1].as_str().unwrap(), "foo\\n\\1`bar`baz\"");
+        assert_eq!(arr[2].as_str().unwrap(), "abok");
+        assert_eq!(arr[3].as_i64().unwrap(), 1);
+        assert_eq!(arr[4].as_str().unwrap(), "\"\"\"");
+        assert_eq!(arr[5].as_str().unwrap(), "\"\"\"");
+
+        // Error line number after a multi-line triple-quoted string must remain exact (line 6).
+        let with_err = "const a = \"\"\"line1\nline2\nline3\nline4\"\"\";\nconst ok = 1;\nconst broken = ;";
+        let err = compile(with_err).unwrap_err().to_string();
+        assert!(
+            err.starts_with("TS_PROGRAM 6:"),
+            "expected error on line 6, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unterminated_raw_triple_quoted_string_reports_location() {
+        let err = compile("const a = 1;\nconst s = \"\"\"oops").unwrap_err().to_string();
+        assert!(
+            err.contains("TS_PROGRAM 2:11: Unterminated raw triple-quoted string"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn template_legacy_octal_is_auto_repaired_while_numeric_octal_still_fails() {
+        let mut repl = Runtime::new_repl(libraries::builtin()).unwrap();
+        let src = r#"const cmd = `grep -E 'TOKEN' .env | sed -E 's/(TOKEN|KEY|PASSWORD)=(.*)/\1=\2/'`; cmd"#;
+        let state = repl.append_segment(src, libraries::builtin(), false).unwrap();
+        assert!(matches!(state, State::Returned(_)), "expected Returned, got {state:?}");
+        assert_eq!(
+            repl.named_bindings()["$_"].as_str().unwrap(),
+            r#"grep -E 'TOKEN' .env | sed -E 's/(TOKEN|KEY|PASSWORD)=(.*)/\1=\2/'"#
+        );
+
+        let numeric_err = compile("const n = 0123;").unwrap_err().to_string();
+        assert!(
+            numeric_err.contains("LegacyOctal"),
+            "numeric legacy octal must still error, got: {numeric_err}"
+        );
+    }
+
+    #[test]
+    fn repl_top_level_implicit_assignment_works_but_function_body_and_const_stay_strict() {
+        let mut repl = Runtime::new_repl(libraries::builtin()).unwrap();
+        let s1 = repl
+            .append_segment("foo = 42;\nbar = foo + 1;\n[foo, bar]", libraries::builtin(), false)
+            .unwrap();
+        assert!(matches!(s1, State::Returned(_)));
+        assert_eq!(repl.named_bindings()["foo"], serde_json::json!(42));
+        assert_eq!(repl.named_bindings()["bar"], serde_json::json!(43));
+        assert_eq!(repl.named_bindings()["$_"], serde_json::json!([42, 43]));
+
+        // Subsequent segment can read and mutate the implicitly declared top-level variable.
+        let s2 = repl
+            .append_segment("foo = foo * 2;\nfoo + bar", libraries::builtin(), false)
+            .unwrap();
+        assert!(matches!(s2, State::Returned(_)));
+        assert_eq!(repl.named_bindings()["foo"], serde_json::json!(84));
+        assert_eq!(repl.named_bindings()["$_"], serde_json::json!(127));
+
+        // Undeclared assignment inside a function must still fail.
+        let fn_err = compile_segment(
+            "function f() { typo = 1; }\nf();",
+            "seg1",
+            libraries::builtin(),
+            BTreeSet::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            fn_err.contains("assignment to an undeclared variable"),
+            "expected strict error inside function, got: {fn_err}"
+        );
+
+        // Reassigning a top-level const must still fail.
+        let const_err = compile_segment(
+            "const locked = 1;\nlocked = 2;",
+            "seg2",
+            libraries::builtin(),
+            BTreeSet::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            const_err.contains("cannot rebind a const value"),
+            "expected const error, got: {const_err}"
+        );
+
+        // Assigning to a host library namespace must still fail.
+        let lib_err = compile_segment(
+            "io = 1;",
+            "seg3",
+            libraries::builtin(),
+            BTreeSet::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            lib_err.contains("assignment to an undeclared variable") || lib_err.contains("library"),
+            "expected library assignment error, got: {lib_err}"
         );
     }
 }

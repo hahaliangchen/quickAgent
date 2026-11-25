@@ -403,6 +403,7 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
         remote: Some(remote),
         mcp: None,
         local_service_port: None,
+        local_service_child: None,
     })
 }
 /// An administrator may register just a service address. User credentials are

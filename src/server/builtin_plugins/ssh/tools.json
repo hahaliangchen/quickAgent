@@ -220,8 +220,67 @@
     }
   },
   {
+    "name": "ssh__edit_file",
+    "description": "对远程 UTF-8 文本文件执行局部精确编辑（支持单条 old_text/new_text 或多条 edits 顺序原子应用、行尾空白与均匀缩进偏移自动对齐、以及可选 .bak 备份），返回带行号的改动预览。修改远程已有脚本/配置时优先使用本工具，不要先 read_file 再手拼链式 .replace() + write_file；prod 或需审批服务器强制人工审批。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_id": {
+          "type": "string",
+          "description": "服务器档案 ID"
+        },
+        "path": {
+          "type": "string",
+          "description": "远程目标文件路径"
+        },
+        "old_text": {
+          "type": "string",
+          "description": "单条编辑快捷模式：待替换的原文片段（可配合 line_hint / replace_all 使用；与 edits 二选一）"
+        },
+        "new_text": {
+          "type": "string",
+          "description": "单条编辑快捷模式：替换后的新文本（与 old_text 成对使用）"
+        },
+        "line_hint": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "可选 1-based 行号提示，用于消除重复片段歧义"
+        },
+        "replace_all": {
+          "type": "boolean",
+          "default": false,
+          "description": "为 true 时替换文件中所有匹配的 old_text"
+        },
+        "edits": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "description": "多条顺序原子编辑列表（与 old_text/new_text 二选一）",
+          "items": {
+            "type": "object",
+            "properties": {
+              "old_text": { "type": "string" },
+              "new_text": { "type": "string" },
+              "line_hint": { "type": "integer", "minimum": 1 },
+              "replace_all": { "type": "boolean", "default": false }
+            },
+            "required": ["old_text", "new_text"],
+            "additionalProperties": false
+          }
+        },
+        "backup": {
+          "type": "boolean",
+          "default": false,
+          "description": "写入前先保存同名 .bak 备份"
+        }
+      },
+      "required": ["server_id", "path"],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "ssh__upload",
-    "description": "将当前本地工作区内的文件流式 SFTP 上传到远程服务器（严禁上传工作区外或符号链接逃逸文件）；prod 或需审批服务器强制人工审批。",
+    "description": "将当前本地工作区内的文件流式 SFTP 上传到远程服务器并返回 bytes_uploaded 与 sha256（严禁上传工作区外或符号链接逃逸文件）；prod 或需审批服务器强制人工审批。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -246,6 +305,39 @@
         }
       },
       "required": ["server_id", "local_path", "remote_path"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ssh__download",
+    "description": "将远程服务器上的文件流式 SFTP 下载并原子写入当前本地工作区，同时返回 bytes_downloaded 与 sha256 便于一步校验完整性（严禁写到工作区外、内部状态目录或经符号链接逃逸，上限 512 MiB）。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "server_id": {
+          "type": "string",
+          "description": "服务器档案 ID"
+        },
+        "remote_path": {
+          "type": "string",
+          "description": "远程源文件完整路径"
+        },
+        "local_path": {
+          "type": "string",
+          "description": "当前本地工作区内的目标相对路径（不得越出工作区或经符号链接逃逸）"
+        },
+        "create_parents": {
+          "type": "boolean",
+          "default": true,
+          "description": "本地父目录不存在时是否自动创建（默认 true）"
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false,
+          "description": "本地目标文件已存在时是否允许覆盖（默认 false）"
+        }
+      },
+      "required": ["server_id", "remote_path", "local_path"],
       "additionalProperties": false
     }
   },

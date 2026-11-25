@@ -22,6 +22,8 @@ struct FileEdit {
     path: String,
     edits: Vec<TextEdit>,
     expected_code_hash: Option<String>,
+    #[serde(default)]
+    replace_all: bool,
 }
 
 pub fn paths(root: &Path, args: &Value) -> Result<Vec<PathBuf>> {
@@ -176,7 +178,12 @@ pub fn apply(workspace: &Workspace, args: &Value) -> Result<Value> {
     let mut merged: Vec<(PathBuf, FileEdit)> = Vec::with_capacity(targets.len());
     let mut index_by_path: std::collections::BTreeMap<_, usize> = std::collections::BTreeMap::new();
     for file in files {
-        let request = serde_json::from_value::<FileEdit>(file.clone()).context("invalid file edit")?;
+        let mut request = serde_json::from_value::<FileEdit>(file.clone()).context("invalid file edit")?;
+        if request.replace_all {
+            for edit in &mut request.edits {
+                edit.replace_all = true;
+            }
+        }
         let path = file_edit::workspace_path(&root, &request.path)?;
         #[cfg(windows)]
         let identity = path.to_string_lossy().to_lowercase();
@@ -260,7 +267,7 @@ pub fn definitions() -> Vec<Value> {
     vec![
         json!({"name":NAME,"description":"Apply exact text edits across files. By default preflight every file before writing and roll back prior writes if publishing fails. For independent files, atomic=false enables per-file atomic commits without rolling back successful files.","inputSchema":{"type":"object","required":["files"],"properties":{
         "atomic":{"type":"boolean","default":true},"files":{"type":"array","minItems":1,"maxItems":MAX_FILES,"items":{
-            "type":"object","required":["path","edits"],"properties":{"path":{"type":"string"},"expected_code_hash":{"type":"string"},"edits":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","required":["old_text","new_text"],"properties":{"old_text":{"type":"string"},"new_text":{"type":"string"},"line_hint":{"type":"integer","minimum":1,"description":"Disambiguate nearby exact old_text matches using a 1-based start line"}}}}}}}}}}),
+            "type":"object","required":["path","edits"],"properties":{"path":{"type":"string"},"expected_code_hash":{"type":"string"},"replace_all":{"type":"boolean","default":false,"description":"Replace all occurrences of every edit's old_text in this file"},"edits":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","required":["old_text","new_text"],"properties":{"old_text":{"type":"string"},"new_text":{"type":"string"},"line_hint":{"type":"integer","minimum":1,"description":"Disambiguate nearby exact old_text matches using a 1-based start line"},"replace_all":{"type":"boolean","default":false}}}}}}}}}}),
     ]
 }
 
@@ -336,6 +343,21 @@ mod tests {
         assert_eq!(value["failed"], 0);
         assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "LINE 1\nLINE 2\nLINE 3\n");
         assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "new B\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_level_replace_all_updates_every_match() {
+        let (root, work) = fixture();
+        fs::write(root.join("a.txt"), "dup\nmid\ndup\n").unwrap();
+        let args = json!({
+            "files": [
+                {"path": "a.txt", "replace_all": true, "edits": [{"old_text": "dup", "new_text": "DUP"}]}
+            ]
+        });
+        let value = apply(&work, &args).unwrap();
+        assert_eq!(value["changed"], 1);
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "DUP\nmid\nDUP\n");
         fs::remove_dir_all(root).unwrap();
     }
 }

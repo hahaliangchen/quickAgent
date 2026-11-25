@@ -1174,8 +1174,45 @@ function main() {
         assert!(error.contains("UTF-8 decoding from byte arrays is unavailable"), "{source}: {error}");
     }
     assert_eq!(returned(runtime("function main(){return [Buffer.from('x','utf8').length, path.isAbsolute('/tmp')];}")), json!([1, true]));
-    let other = returned(runtime("function main(){try{return Buffer.byteLength('x','base64');}catch(error){return error.message;}}"));
-    assert!(other.as_str().unwrap().contains("only the utf8"), "{other}");
+    let buffer_roundtrip = returned(runtime(r#"
+function main() {
+  const b64 = Buffer.from("hello 中文🙂", "utf8").toString("base64");
+  const decoded = Buffer.from("  " + b64.slice(0, 6) + "\n" + b64.slice(6), "base64").toString("utf8");
+  const hex = Buffer.from("hello", "utf8").toString("hex");
+  const fromHex = Buffer.from(hex, "hex").toString();
+  const fromBytes = Buffer.from([0xe4, 0xb8, 0xad]).toString("utf8");
+  const b64url = Buffer.from("++//AA==", "base64").toString("base64url");
+  return {
+    decoded,
+    hex,
+    fromHex,
+    fromBytes,
+    b64url,
+    b64urlLen: Buffer.from(b64url, "base64url").length,
+    b64ByteLen: Buffer.byteLength("aGVsbG8=", "base64"),
+    hexByteLen: Buffer.byteLength("68656c6c6f", "hex"),
+    isBuf: Buffer.isBuffer(Buffer.from("x")),
+    isNotBuf: Buffer.isBuffer([1, 2, 3]),
+  };
+}
+"#));
+    assert_eq!(
+        buffer_roundtrip,
+        json!({
+            "decoded": "hello 中文🙂",
+            "hex": "68656c6c6f",
+            "fromHex": "hello",
+            "fromBytes": "中",
+            "b64url": "--__AA",
+            "b64urlLen": 4,
+            "b64ByteLen": 5,
+            "hexByteLen": 5,
+            "isBuf": true,
+            "isNotBuf": false
+        })
+    );
+    let other = returned(runtime("function main(){try{return Buffer.byteLength('x','utf16le');}catch(error){return error.message;}}"));
+    assert!(other.as_str().unwrap().contains("supports utf8, base64, base64url, hex, and latin1"), "{other}");
     // A local TextEncoder is the program's own.
     assert_eq!(
         returned(runtime("function main(){function TextEncoder(){this.tag='mine';} return new TextEncoder().tag;}")),

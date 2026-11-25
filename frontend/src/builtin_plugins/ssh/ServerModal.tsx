@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { type Auth, type Details, type Server, type SshError, type Tier, message, ssh } from './api.ts'
+import { appConfirm } from '../../components/AppDialog.tsx'
 import css from './style.module.css'
 
 export default function ServerModal({ server, keyError, onSaved, onClose }: { server?: Server | undefined; keyError?: SshError | undefined; onSaved: (server: Server) => void; onClose: () => void }) {
@@ -34,7 +35,7 @@ export default function ServerModal({ server, keyError, onSaved, onClose }: { se
     } catch (error) { setError(message(error)) } finally { setSaving(false) }
   }
   async function trust() {
-    if (!server || !keyError?.keyChanged || !window.confirm('请通过独立渠道核对新指纹。要替换已信任的主机指纹吗？')) return
+    if (!server || !keyError?.keyChanged || !await appConfirm({ title: '信任新的主机指纹', message: '请通过独立渠道核对新指纹。要替换已信任的主机指纹吗？', confirmText: '信任并替换', danger: true })) return
     setSaving(true); setError('')
     try { await ssh.trust(server.id, keyError.detail); onSaved(await ssh.test(server.id)) } catch (error) { setError(message(error)) } finally { setSaving(false) }
   }

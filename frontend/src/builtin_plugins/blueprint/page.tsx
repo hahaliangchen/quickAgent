@@ -8,6 +8,7 @@ import { BlueprintEdge, type Wire } from './BlueprintEdge.tsx'
 import { Choices, Drawer, EdgeEditor, EntityEditor, Field, ImpactPanel, newEntity } from './InspectorDrawer.tsx'
 import { layout } from './layout.ts'
 import { entryKinds, entryLabels, kindColors, projectKinds, type BlueprintProjectStatus, type BlueprintState, type Entity, type EntryKind, type Graph, type GraphEdge, type GraphNode, type GraphView, type Impact, type ProjectKind } from './types.ts'
+import { appConfirm } from '../../components/AppDialog.tsx'
 import css from './style.module.css'
 
 const nodeTypes = { blueprint: BlueprintNode }
@@ -336,7 +337,7 @@ function Workbench({ root, dark }: { root: string; dark: boolean }) {
       </div>
       {drawer && <Drawer title={drawer.type === 'create' ? '新建画布' : drawer.type === 'meta' ? '画布与红线' : drawer.type === 'edge' ? '连线检查器' : drawer.type === 'impact' ? '影响面' : drawer.type === 'scope' ? '分析范围' : '实体检查器'} close={() => setDrawer(undefined)}>
         {drawer.type === 'create' && <GraphForm project={state?.manifest?.project_kind} busy={busy} save={(title, entry_kind, entry_summary, project_kind) => void act(async () => { const created = await api.create({ id: idOf('canvas'), title, entry_kind, entry_summary, ...(state?.exists ? {} : { project_kind }) }); choose(created.id) })} />}
-        {drawer.type === 'meta' && graph && <GraphForm key={graph.id} graph={graph} busy={busy} save={(title, entry_kind, entry_summary, _, invariants) => saveGraph({ title, entry_kind, entry_summary, invariants })} remove={() => { if (window.confirm('删除画布「' + graph.title + '」？共享实体不会删除。')) void act(() => api.deleteGraph(graph.id)) }} />}
+        {drawer.type === 'meta' && graph && <GraphForm key={graph.id} graph={graph} busy={busy} save={(title, entry_kind, entry_summary, _, invariants) => saveGraph({ title, entry_kind, entry_summary, invariants })} remove={() => { void appConfirm({ title: '删除画布', message: '删除画布「' + graph.title + '」？共享实体不会删除。', confirmText: '删除', danger: true }).then(ok => { if (ok) void act(() => api.deleteGraph(graph.id)) }) }} />}
         {drawer.type === 'scope' && <AnalysisScope run={scope => { sendToAi?.(scope ? firstAnalysis + '\n\n本次只分析模块或页面：' + scope : firstAnalysis); setDrawer(undefined) }} />}
         {drawer.type === 'entity' && inspectedEntity && <EntityEditor key={drawer.id + '/' + (drawer.port ?? '') + '/' + !!drawer.addPort} initial={inspectedEntity} isNew={!!drawer.draft} initialPort={drawer.port} addingPort={drawer.addPort} api={api} busy={busy}
           anchor={drawer.port ? view?.statuses[drawer.id]?.ports[drawer.port] : undefined}
@@ -346,7 +347,7 @@ function Workbench({ root, dark }: { root: string; dark: boolean }) {
             await api.putEntity(entity)
             if (drawer.draft && graph) await api.save(graph.id, { nodes: [...nodesOnly(graph.nodes), { entity_id: entity.id }] })
           })}
-          remove={() => { if (window.confirm('删除此共享实体及其所有画布引用？')) void act(() => api.deleteEntity(drawer.id)) }}
+          remove={() => { void appConfirm({ title: '删除共享实体', message: '删除此共享实体及其所有画布引用？', confirmText: '删除', danger: true }).then(ok => { if (ok) void act(() => api.deleteEntity(drawer.id)) }) }}
           removeNode={graph?.nodes.some(n => n.entity_id === drawer.id) ? () => saveGraph({ nodes: nodesOnly(graph.nodes.filter(n => n.entity_id !== drawer.id)) }) : undefined} />}
         {drawer.type === 'edge' && inspectedEdge && graph && <EdgeEditor key={inspectedEdge.id} initial={inspectedEdge} busy={busy}
           save={edge => saveGraph({ edges: [...graph.edges.filter(e => e.id !== edge.id), edge] })}

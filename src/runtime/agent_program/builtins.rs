@@ -22,6 +22,7 @@ pub(super) fn arity(name: &str) -> Option<(usize, usize)> {
         "TextEncoder.encode" => (0, 1),
         "Buffer.byteLength" => (1, 2),
         "Buffer.from" => (1, 2),
+        "Buffer.isBuffer" => (1, 1),
         "new URL" => (1, 2),
         "yaml.parse" | "yaml.load" => (1, 2),
         "yaml.stringify" | "yaml.dump" => (1, 3),
@@ -276,10 +277,86 @@ fn yaml_to_json(value: serde_yaml::Value) -> Value {
     }
 }
 
+fn decode_base64_bytes(input: &str) -> Result<Vec<u8>> {
+    use base64::Engine as _;
+    let cleaned: String = input
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .collect();
+    let padded = match cleaned.len() % 4 {
+        0 => cleaned,
+        2 => format!("{cleaned}=="),
+        3 => format!("{cleaned}="),
+        _ => bail!("InvalidCharacterError: Invalid base64 string length"),
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(padded.as_bytes())
+        .map_err(|_| anyhow::anyhow!("InvalidCharacterError: Invalid base64 string"))
+}
+
+fn decode_hex_bytes(input: &str) -> Result<Vec<u8>> {
+    let bytes = input.as_bytes();
+    ensure!(bytes.len() % 2 == 0, "TypeError: Invalid hex string length");
+    let hex_val = |b: u8| -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = hex_val(pair[0]).context("TypeError: Invalid hex character")?;
+        let lo = hex_val(pair[1]).context("TypeError: Invalid hex character")?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+pub(super) fn encode_bytes(bytes: &[u8], encoding: &str) -> Result<String> {
+    use base64::Engine as _;
+    match encoding.to_ascii_lowercase().as_str() {
+        "utf8" | "utf-8" => Ok(String::from_utf8_lossy(bytes).into_owned()),
+        "base64" => Ok(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        "base64url" => Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)),
+        "hex" => {
+            let mut out = String::with_capacity(bytes.len() * 2);
+            for &b in bytes {
+                use std::fmt::Write as _;
+                let _ = write!(out, "{b:02x}");
+            }
+            Ok(out)
+        }
+        "latin1" | "binary" | "ascii" => Ok(bytes.iter().map(|&b| char::from(b)).collect()),
+        other => bail!("TypeError: Buffer.toString supports utf8, base64, base64url, hex, and latin1, not {other}"),
+    }
+}
+
+fn decode_string_with_encoding(text: &str, encoding: Option<&Value>, api: &str) -> Result<Vec<u8>> {
+    match encoding {
+        None | Some(Value::Null) => Ok(text.as_bytes().to_vec()),
+        Some(Value::String(enc)) => match enc.to_ascii_lowercase().as_str() {
+            "utf8" | "utf-8" => Ok(text.as_bytes().to_vec()),
+            "base64" | "base64url" => decode_base64_bytes(text),
+            "hex" => decode_hex_bytes(text),
+            "latin1" | "binary" | "ascii" => Ok(text.chars().map(|c| (u32::from(c) & 0xff) as u8).collect()),
+            other => bail!("{api} supports utf8, base64, base64url, hex, and latin1, not \"{other}\""),
+        },
+        Some(other) => bail!("{api} supports utf8, base64, base64url, hex, and latin1, not {other}"),
+    }
+}
+
 /// UTF-8 sizes and bytes, so code never counts them in a per-character loop
 /// that exhausts its instruction budget.
 fn text_encoding(name: &str, args: &[Value]) -> Result<Option<Value>> {
     const ENCODE_LIMIT: usize = 256 * 1024;
+    const BUFFER_LIMIT: usize = 2 * 1024 * 1024;
     Ok(Some(match name {
         // Like the web API, encode() and encode(undefined) give no bytes.
         "TextEncoder.encode" => {
@@ -296,21 +373,37 @@ fn text_encoding(name: &str, args: &[Value]) -> Result<Option<Value>> {
         }
         "Buffer.byteLength" => {
             let text = args[0].as_str().context("TypeError: Buffer.byteLength takes a string")?;
-            match args.get(1) {
-                None | Some(Value::Null) => {}
-                Some(Value::String(encoding)) if matches!(encoding.to_ascii_lowercase().as_str(), "utf8" | "utf-8") => {}
-                Some(other) => bail!("Buffer.byteLength supports only the utf8 encoding here, not {other}"),
-            }
-            json!(text.len())
+            ensure!(
+                text.len() <= BUFFER_LIMIT,
+                "RangeError: Buffer.byteLength input exceeds 2 MiB"
+            );
+            let bytes = decode_string_with_encoding(text, args.get(1), "Buffer.byteLength")?;
+            json!(bytes.len())
         }
         "Buffer.from" => {
-            let text = args[0].as_str().context("TypeError: Buffer.from currently accepts a string")?;
-            match args.get(1) {
-                None | Some(Value::Null) => {}
-                Some(Value::String(encoding)) if matches!(encoding.to_ascii_lowercase().as_str(), "utf8" | "utf-8") => {}
-                Some(other) => bail!("Buffer.from supports only utf8 strings here, not {other}"),
+            if let Some(arr) = args[0].as_array() {
+                ensure!(
+                    arr.len() <= BUFFER_LIMIT,
+                    "RangeError: Buffer.from input exceeds 2 MiB"
+                );
+                let mut bytes = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let n = item
+                        .as_f64()
+                        .context("TypeError: Buffer.from byte array elements must be numbers")?;
+                    bytes.push((n as i64 & 0xff) as u8);
+                }
+                return Ok(Some(json!(bytes)));
             }
-            json!(text.as_bytes())
+            let text = args[0]
+                .as_str()
+                .context("TypeError: Buffer.from accepts a string or byte array")?;
+            ensure!(
+                text.len() <= BUFFER_LIMIT,
+                "RangeError: Buffer.from input exceeds 2 MiB"
+            );
+            let bytes = decode_string_with_encoding(text, args.get(1), "Buffer.from")?;
+            json!(bytes)
         }
         _ => return Ok(None),
     }))

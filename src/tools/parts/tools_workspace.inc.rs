@@ -185,7 +185,7 @@ impl Workspace {
         let workspace = self.with_root(request.workspace_root.as_deref())?;
         let root = workspace.resolve_existing(&request.path)?;
 
-        let globs = search_globs(&workspace.root, &request.glob, &request.exclude)?;
+        let globs = search_globs(&workspace.root, &request.glob, &request.exclude, &[])?;
         let allowed_noise = allowed_noise_dirs(&request.glob);
         let modified_after = request
             .modified_after
@@ -473,10 +473,12 @@ impl Workspace {
             }
         };
         let workspace = self.with_root(request.workspace_root.as_deref())?;
-        let roots = workspace.resolve_search_roots(&request)?;
+        let (roots, path_globs) = workspace.resolve_search_roots(&request)?;
         let root_filters = workspace.search_root_filters(&roots)?;
-        let globs = search_globs(&workspace.root, &request.glob, &request.exclude)?;
-        let allowed_noise = allowed_noise_dirs(&request.glob);
+        let globs = search_globs(&workspace.root, &request.glob, &request.exclude, &path_globs)?;
+        let mut glob_for_noise = request.glob.clone();
+        glob_for_noise.extend(path_globs.iter().cloned());
+        let allowed_noise = allowed_noise_dirs(&glob_for_noise);
         let max_matches = request.max_matches.max(1);
         let scan = ScanOptions {
             mode: request.output_mode,
@@ -652,7 +654,55 @@ impl Workspace {
         })
     }
 
-    fn resolve_search_roots(&self, request: &SearchTextRequest) -> Result<Vec<PathBuf>> {
+    fn resolve_search_entry(&self, raw: &str) -> Result<(PathBuf, Option<String>)> {
+        let trimmed = raw.trim();
+        if let Ok(existing) = self.resolve_existing(trimmed) {
+            return Ok((existing, None));
+        }
+        let has_glob = trimmed.chars().any(|c| matches!(c, '*' | '?' | '[' | '{'));
+        if !has_glob {
+            return Ok((self.resolve_existing(trimmed)?, None));
+        }
+        let normalized = trimmed.replace('\\', "/");
+        if normalized.split('/').any(|seg| seg == "..") {
+            return Err(ToolError::ParentTraversal(trimmed.to_owned()));
+        }
+        let mut prefix_segments = Vec::new();
+        let mut tail_segments = Vec::new();
+        let mut seen_glob = false;
+        let is_abs = normalized.starts_with('/');
+        for seg in normalized.split('/') {
+            if seg.is_empty() || (!is_abs && seg == "." && prefix_segments.is_empty() && !seen_glob) {
+                continue;
+            }
+            if !seen_glob && !seg.chars().any(|c| matches!(c, '*' | '?' | '[' | '{')) {
+                prefix_segments.push(seg);
+            } else {
+                seen_glob = true;
+                tail_segments.push(seg);
+            }
+        }
+        let base_raw = if prefix_segments.is_empty() {
+            if is_abs { "/".to_owned() } else { ".".to_owned() }
+        } else if is_abs {
+            format!("/{}", prefix_segments.join("/"))
+        } else {
+            prefix_segments.join("/")
+        };
+        let base_dir = self.resolve_existing(&base_raw)?;
+        let rel_base = normalize_rel_path(&self.relative_display(&base_dir)?);
+        let tail = tail_segments.join("/");
+        let pattern = if rel_base.is_empty() || rel_base == "." {
+            tail
+        } else if tail.is_empty() {
+            format!("{rel_base}/**")
+        } else {
+            format!("{rel_base}/{tail}")
+        };
+        Ok((base_dir, Some(pattern)))
+    }
+
+    fn resolve_search_roots(&self, request: &SearchTextRequest) -> Result<(Vec<PathBuf>, Vec<String>)> {
         let mut requested_paths = if request.paths.is_empty() {
             vec![request.path.clone()]
         } else {
@@ -661,7 +711,7 @@ impl Workspace {
 
         if requested_paths.len() == 1 {
             let single = requested_paths[0].trim();
-            if self.resolve_existing(single).is_err() {
+            if self.resolve_search_entry(single).is_err() {
                 let split_paths: Vec<String> = single
                     .split_whitespace()
                     .map(str::trim)
@@ -671,17 +721,45 @@ impl Workspace {
                 if split_paths.len() > 1
                     && split_paths
                         .iter()
-                        .all(|path| self.resolve_existing(path).is_ok())
+                        .all(|path| self.resolve_search_entry(path).is_ok())
                 {
                     requested_paths = split_paths;
                 }
             }
         }
 
-        requested_paths
-            .iter()
-            .map(|path| self.resolve_existing(path))
-            .collect()
+        let mut resolved = Vec::with_capacity(requested_paths.len());
+        let mut any_glob = false;
+        for raw in &requested_paths {
+            let (root, glob) = self.resolve_search_entry(raw)?;
+            if glob.is_some() {
+                any_glob = true;
+            }
+            resolved.push((root, glob));
+        }
+
+        let mut roots = Vec::new();
+        let mut path_globs = Vec::new();
+        for (root, glob) in resolved {
+            if any_glob {
+                if let Some(pat) = glob {
+                    path_globs.push(pat);
+                } else {
+                    let rel = normalize_rel_path(&self.relative_display(&root)?);
+                    if rel.is_empty() || rel == "." {
+                        path_globs.push("**".to_owned());
+                    } else if root.is_dir() {
+                        path_globs.push(format!("{rel}/**"));
+                    } else {
+                        path_globs.push(rel);
+                    }
+                }
+            }
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        Ok((roots, path_globs))
     }
 
     fn search_root_filters(&self, roots: &[PathBuf]) -> Result<Vec<String>> {

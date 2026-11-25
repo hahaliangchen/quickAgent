@@ -435,6 +435,7 @@ fn package(
         remote: None,
         mcp: Some(connection),
         local_service_port: None,
+        local_service_child: None,
     })
 }
 

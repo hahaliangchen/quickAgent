@@ -15,6 +15,30 @@ export interface StudioAskAiRequest {
   readonly plugin: string
   readonly prompt?: string | undefined
 }
+export const DB_SYNC_EVENT = 'quickagent:db-sync'
+export interface DbStudioSyncAction {
+  readonly action: 'save_connection' | 'inspect' | 'query' | 'explain' | 'execute' | 'focus_view'
+  readonly connectionId?: string | undefined
+  readonly sqlitePath?: string | undefined
+  readonly schema?: string | undefined
+  readonly table?: string | undefined
+  readonly sql?: string | undefined
+  readonly column?: string | undefined
+  readonly row?: number | undefined
+  readonly range?: string | undefined
+  readonly findColumn?: string | undefined
+  readonly findValue?: string | undefined
+}
+export const EXCEL_SYNC_EVENT = 'quickagent:excel-sync'
+export interface ExcelStudioSyncAction {
+  readonly path?: string | undefined
+  readonly sheet?: string | undefined
+  readonly range?: string | undefined
+  readonly column?: string | undefined
+  readonly row?: number | undefined
+  readonly findColumn?: string | undefined
+  readonly findValue?: string | undefined
+}
 export interface PluginPageProps {
   workspaceRoot: string
   owner: SkillPackage

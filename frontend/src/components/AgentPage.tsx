@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import clsx from 'clsx'
 import { BrandMark } from './BrandMark.tsx'
 import { PlanProgress } from './PlanProgress.tsx'
+import { stripStudioViewContext } from '../plugins/studioContextText.ts'
 import { ScrollToBottom, useScrollToBottom } from './ScrollToBottom.tsx'
 import { ChatHistoryModal, flashCss, type HistoryJump } from './ChatHistoryModal.tsx'
 import { taskTitle, workspaceName } from './Sidebar.tsx'
@@ -215,7 +216,7 @@ export function ConversationPage({
   const items = useMemo(() => chatItems(session.events, task), [session.events, task])
   const recentTurns = useMemo(() => items.filter(item => item.kind === 'user').slice(-2).map(item => ({
     key: item.key,
-    text: item.text.trim().replace(/\s+/g, ' ') || item.attachments?.map(file => file.name).join('、') || '附件消息',
+    text: stripStudioViewContext(item.text).trim().replace(/\s+/g, ' ') || item.attachments?.map(file => file.name).join('、') || '附件消息',
   })), [items])
 
   // Ctrl+F or Cmd+F opens the history dialog, the way it opens "find chat

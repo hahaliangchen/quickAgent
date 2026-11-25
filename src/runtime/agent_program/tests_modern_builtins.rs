@@ -196,9 +196,9 @@ fn unsupported_builtin_diagnostics_are_scoped() {
 }
 
 #[test]
-fn string_raw_inner_backtick_parse_error_emits_line_array_hint() {
+fn string_raw_inner_backtick_parse_error_emits_triple_quote_hint() {
     let source = "const s = String.raw`//! doc\n//! uses (`attachments.read_attachment`)\n`;";
     let error = compile(source).unwrap_err().to_string();
     assert!(error.contains("TS1005"), "{error}");
-    assert!(error.contains("quoted line array"), "{error}");
+    assert!(error.contains("\"\"\"...\"\"\""), "{error}");
 }
