@@ -1644,12 +1644,6 @@ async fn launch(visible: bool, persistent: Option<std::path::PathBuf>) -> Result
     if !visible {
         child.arg("--headless=new").arg("--disable-gpu");
     }
-    // Inside the host's command sandbox Chrome cannot set up its own and
-    // crashed at start (2026-11-13: twelve crash reports from one test run).
-    // The sandbox it runs in already confines it.
-    if crate::tools::process_sandbox::inside_sandbox() {
-        child.arg("--no-sandbox");
-    }
     child
         .args([
             "--disable-extensions",

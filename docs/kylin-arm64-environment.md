@@ -66,7 +66,7 @@ shell 将项目挂载到 `/work/agent`、`/work/ai-ppt-server`、`/work/ai-ppt-v
 
 检查会编译并执行小型 C/Rust/Go 样例，编译 WASM 并由 Node 调用导出函数，验证 Python PPTX 读写、Cairo/SVG 转 PNG、原生 Canvas、中文字体和模块加载。浏览器检查使用本地 HTML 并截图。小型工具探针不等于应用或业务链路验收。
 
-`bwrap` 已安装；QEMU/容器内的用户命名空间不等同于原生麒麟上的命令沙箱，目标机需另行验证其内核策略。
+命令由宿主进程按统一的能力入口规则与会话审批启动，不依赖 Bubblewrap。
 
 ## 修复 exec format error
 

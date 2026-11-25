@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type DragEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type DragEvent } from 'react'
 import clsx from 'clsx'
 import type { PermissionMode, SettingsData } from '../api.ts'
-import { resolvePermissionMode } from '../permissionMode.ts'
+import { useChatPermissionMode } from '../permissionMode.ts'
 import { AttachmentRail, useAttachmentDraft } from './Attachments.tsx'
 import { WORKSPACE_PATH_TYPE } from '../codeChat.ts'
 import { useAgentApi, useCordis } from '../cordis/react.tsx'
@@ -12,7 +12,9 @@ import { useSession, type Session } from '../useSession.ts'
 import { Icon } from './WorkbenchIcon.tsx'
 import { ShellSetupDialog } from './ShellSetupDialog.tsx'
 import { ModelSelect } from '../dsh/model-selection/ModelSelect.tsx'
+import { PermissionPicker } from './PermissionPicker.tsx'
 import { ScrollToBottom, transcriptScroller, useScrollToBottom } from './ScrollToBottom.tsx'
+import type { StudioViewContext } from '../plugins/protocol.ts'
 import css from './CodeChatDock.module.css'
 
 /** One conversation per repository, remembered on this device. */
@@ -38,21 +40,14 @@ function savedModel(): ModelPick | undefined {
 }
 const mention = (path: string) => path.includes(' ') ? `@"${path}"` : `@${path}`
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1) || path
-/** The main composer's names, so both places label a level the same way. */
-const PERMISSION_LABELS: Readonly<Record<PermissionMode, string>> = {
-  read_only: '仅可查看',
-  workspace_write: '工作区内修改',
-  ask: '执行前询问',
-  auto_review: '自动审批',
-  full_access: '完全权限',
-}
 
 /** Chat docked beside a page, VS Code style: asks about the file in view and files dropped on it. */
-export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, embeddedLauncher, linkedTaskId, linkedSession, openSignal }: {
+export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, viewContext, embeddedLauncher, linkedTaskId, linkedSession, openSignal }: {
   workspace: string
   renderSlot: AgentSlotProps['renderSlot']
   onOpenInChat: (taskId: string) => void
   diagnostic?: { text: string; kind?: 'prompt' } | undefined
+  viewContext?: StudioViewContext | null | undefined
   embeddedLauncher?: boolean
   linkedTaskId?: string | undefined
   linkedSession?: Session | undefined
@@ -71,6 +66,9 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
   const [dropping, setDropping] = useState(false)
   // The current file is offered again whenever it changes.
   const [skipped, setSkipped] = useState<string>()
+  // Live studio view context (e.g. DB connection + active SQL + selected rows) is re-offered whenever the view changes.
+  const [dismissedViewId, setDismissedViewId] = useState<string>()
+  const activeViewContext = viewContext && viewContext.id !== dismissedViewId ? viewContext : undefined
   const ownSession = useSession(linkedTaskId && linkedSession ? undefined : taskId, () => {})
   const session = linkedTaskId && linkedSession ? linkedSession : ownSession
   const task = session.task?.task_id === taskId ? session.task : undefined
@@ -156,7 +154,12 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
     try { localStorage.setItem(MODEL_KEY, provider + '/' + id) } catch {}
   }
   // This chat keeps its own level, the same one the main input shows and saves.
-  const permissionMode = resolvePermissionMode(task?.permission_mode)
+  const savePermissionMode = useCallback(async (id: string, mode: PermissionMode) => {
+    const updated = await api.updateTask(id, { permission_mode: mode })
+    session.reload()
+    return updated
+  }, [api, session.reload])
+  const { mode: permissionMode, select: selectPermissionMode } = useChatPermissionMode(task, savePermissionMode)
   const current = context.current && context.current !== skipped && !context.tags.includes(context.current) ? context.current : undefined
   const tags = current ? [current, ...context.tags] : context.tags
 
@@ -183,7 +186,13 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
         try { localStorage.setItem(taskKey(workspace), id) } catch {}
         void api.updateSession(id, { title: `代码问答 · ${baseName(workspace)}` }).catch(() => {})
       }
-      const prompt = tags.length ? `${tags.map(mention).join(' ')}\n\n${text}` : text
+      const promptParts: string[] = []
+      if (activeViewContext) {
+        promptParts.push(`[当前工作台视图上下文 — ${activeViewContext.badge}${activeViewContext.detail ? `（${activeViewContext.detail}）` : ''}]\n${activeViewContext.text}`)
+      }
+      if (tags.length) promptParts.push(tags.map(mention).join(' '))
+      promptParts.push(text)
+      const prompt = promptParts.join('\n\n')
       const content = []
       for (const item of attachments.items) content.push({ type: 'file', receiptId: (await api.upload(id, item.file, new AbortController().signal, () => {})).receiptId })
       await api.prompt(id, prompt, {
@@ -254,7 +263,12 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
     </div>
     {dropping && <div className={css.dropMask}>松开即添加为上下文</div>}
     <footer className={css.composer}>
-      {tags.length > 0 && <div className={css.tags}>
+      {(activeViewContext || tags.length > 0) && <div className={css.tags}>
+        {activeViewContext && <span className={clsx(css.tag, css.tagCurrent)} title={`发送时将自动附带以下视图上下文：\n${activeViewContext.text}`}>
+          <Icon name="plug" size={13} />
+          <span className={css.tagName}>{activeViewContext.badge}{activeViewContext.detail ? ` · ${activeViewContext.detail}` : ''}</span>
+          <button type="button" aria-label={`移除视图上下文 ${activeViewContext.badge}`} onClick={() => setDismissedViewId(activeViewContext.id)}><Icon name="close" size={12} /></button>
+        </span>}
         {tags.map(path => <span key={path} className={clsx(css.tag, path === current && css.tagCurrent)} title={path === current ? `当前文件：${path}` : path}>
           <Icon name="file" size={13} /><span className={css.tagName}>{baseName(path)}</span>
           <button type="button" aria-label={`移除 ${path}`} onClick={() => { if (path === current) setSkipped(path); else chat.remove(path) }}><Icon name="close" size={12} /></button>
@@ -262,7 +276,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
       </div>}
       <AttachmentRail items={attachments.items} onRemove={attachments.remove} disabled={sending} />
       <div className={css.inputCard}>
-        <textarea ref={input} rows={2} value={draft} placeholder={tags.length ? '问问这些代码…' : '描述你的需求或提出代码问题…'} disabled={sending}
+        <textarea ref={input} rows={2} value={draft} placeholder={activeViewContext ? '直接针对当前视图数据提问…' : tags.length ? '问问这些代码…' : '描述你的需求或提出代码问题…'} disabled={sending}
           title="Enter 发送 · Shift+Enter 换行"
           onChange={event => setDraft(event.target.value)}
           onPaste={event => {
@@ -312,9 +326,12 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
             onSelect={pickModel}
             onSetGenerationOptions={(nextEffort, nextFast) => { setEffort(nextEffort); setFast(nextFast) }}
           />
-          <span className={css.permission} title="这个对话的权限级别，和主输入框里的是同一个；在主窗口的输入框里修改">
-            <Icon name={permissionMode === 'full_access' ? 'alert' : 'ok'} size={14} />{PERMISSION_LABELS[permissionMode]}
-          </span>
+          <PermissionPicker
+            mode={permissionMode}
+            disabled={sending}
+            className={css.permission}
+            onSelect={selectPermissionMode}
+          />
           <span className={css.grow} />
           {running && linkedTaskId && <button type="button" className={css.send} title="插话" aria-label="插话" disabled={!draft.trim() || sending || attachments.items.length > 0} onClick={() => { void send() }}><Icon name="send" size={16} /></button>}
           {running

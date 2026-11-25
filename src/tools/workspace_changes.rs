@@ -61,11 +61,12 @@ pub(crate) fn mutation_paths(workspace: &Path, name: &str, args: &Value) -> Resu
     if name == crate::tools::batch_edits::NAME {
         return crate::tools::batch_edits::paths(workspace, args);
     }
-    if !matches!(name, "write_file" | "edit_file" | "replace_range" | "delete_path" | "rename_path" | "create_dir") {
+    if !matches!(name, "write_file" | "edit_file" | "replace_range" | "delete_path" | "rename_path" | "create_dir" | "copy_path") {
         return Ok(Vec::new());
     }
-    let path = safe_path(workspace, args["path"].as_str().context("missing file path")?)?;
-    let mut paths = vec![path];
+    let mut paths = if name == "copy_path" {
+        vec![safe_path(workspace,args["to"].as_str().context("missing destination path")?)?]
+    } else { vec![safe_path(workspace,args["path"].as_str().context("missing file path")?)?] };
     if name == "rename_path" {
         paths.push(safe_path(workspace, args["to"].as_str().context("missing destination path")?)?);
     }
@@ -486,6 +487,15 @@ fn capture(root: &Path, name: &str, args: &Value) -> Result<Snapshot> {
         for dir in path.ancestors().take_while(|dir| *dir != root) {
             capture_directory(&root, dir, &mut snapshot)?;
         }
+        return Ok(snapshot);
+    }
+    if name == "copy_path" {
+        let canonical_root = fs::canonicalize(root)?;
+        let to = safe_path(root, args["to"].as_str().context("missing destination path")?)?;
+        for dir in to.parent().into_iter().flat_map(Path::ancestors).take_while(|dir| *dir != canonical_root) {
+            capture_directory(&canonical_root, dir, &mut snapshot)?;
+        }
+        capture_path_or_tree(&canonical_root, &to, &mut snapshot, &mut budget)?;
         return Ok(snapshot);
     }
     if matches!(name, "delete_path" | "rename_path") {
@@ -1131,7 +1141,11 @@ pub async fn execute_tracked(
         invalidate_snapshot_cache(&files);
     } else if !crate::tools::project_process::may_change_files(&name) {
         // Boundary checks are mandatory even if optional snapshot capture fails.
-        safe_path(&files, args["path"].as_str().context("missing file path")?)?;
+        if name == "copy_path" {
+            safe_path(&files, args["to"].as_str().context("missing destination path")?)?;
+        } else {
+            safe_path(&files, args["path"].as_str().context("missing file path")?)?;
+        }
         if name == "rename_path" {
             safe_path(&files, args["to"].as_str().context("missing destination path")?)?;
         }

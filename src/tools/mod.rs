@@ -13,6 +13,7 @@ pub(crate) mod program_execution;
 pub(crate) mod project_process;
 pub(crate) mod shell_environment;
 pub(crate) mod shell_process;
+pub(crate) mod sys_info;
 pub(crate) mod tool_approvals;
 pub(crate) mod tool_registry;
 pub(crate) mod workspace;

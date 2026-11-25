@@ -19,7 +19,6 @@ use crate::{server::agent_service::AgentServiceState, tools::process_sandbox::Ex
 pub const TOOLS: &[&str] = &["exec_command", "write_stdin", "kill_session"];
 pub const PROGRAM_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const DEFAULT_YIELD_MS: u64 = 10_000;
-const READ_ONLY_PREVIEW_CHARS: usize = 48 * 1024;
 #[derive(Debug)]
 pub struct OutputCapacityError(pub Value);
 impl std::fmt::Display for OutputCapacityError {
@@ -213,11 +212,6 @@ async fn owned(host: &Path, task: &str, id: &str) -> Result<Arc<Session>> {
     Ok(s)
 }
 
-pub fn boundary(mode: crate::server::agent_service::PermissionMode, ban_execution: bool) -> ExecutionBoundary {
-    if cfg!(target_os = "linux") && ban_execution { ExecutionBoundary::ReadOnly }
-    else { ExecutionBoundary::for_mode(mode) }
-}
-
 /// Native shell calls and flow-library calls enter the same session implementation.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
@@ -242,6 +236,8 @@ async fn execute_with_delivery(
     owner:Option<&str>,name:&str,args:&Value,cancel:&CancellationToken,ban_execution:bool,program:bool,
 ) -> Result<Value> {
     ensure!(args.is_object(), "shell arguments must be an object");
+    ensure!(!ban_execution && ExecutionBoundary::for_mode(state.permission_mode) != ExecutionBoundary::ReadOnly,
+        "permission_denied: process tools are unavailable in read-only sessions");
     ensure!(!cancel.is_cancelled(), "shell task cancelled");
     let mut request_lease = StartupLease(None);
     let s = match name {
@@ -257,7 +253,7 @@ async fn execute_with_delivery(
             let result = tokio::spawn(async move {
                 crate::tools::process_sandbox::scope_optional_tool_sandbox(
                     sandbox_ctx,
-                    launch(&state,&workspace,&task,turn,owner.as_deref(),&args,&child_cancel,ban_execution),
+                    launch(&state,&workspace,&task,turn,owner.as_deref(),&args,&child_cancel),
                 ).await
             }).await.context("shell startup task failed")??;
             result
@@ -310,22 +306,20 @@ async fn wait_finished(s: &Session, duration: Duration) {
 #[allow(clippy::too_many_arguments)]
 async fn launch(
     state: &AgentServiceState, workspace: &crate::tools::Workspace, task: &str,
-    turn: usize, owner: Option<&str>, args: &Value, cancel: &CancellationToken, ban: bool,
+    turn: usize, owner: Option<&str>, args: &Value, cancel: &CancellationToken,
 ) -> Result<Arc<Session>> {
     let cmd_text = args["cmd"].as_str().filter(|s| !s.trim().is_empty()).context("cmd is required")?;
     crate::tools::process_sandbox::check_secret_reference(cmd_text)?;
     let root = workspace.root().canonicalize()?;
-    let cwd_raw = args["workdir"].as_str().unwrap_or(".");
-    let cwd = if Path::new(cwd_raw).is_absolute() { PathBuf::from(cwd_raw) } else { root.join(cwd_raw) };
-    let cwd = cwd.canonicalize().context("shell workdir does not exist")?;
+    let cwd_raw = args["workdir"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(".");
+    let cwd = root.join(cwd_raw).canonicalize().context("shell workdir does not exist")?;
     ensure!(cwd.is_dir(), "shell workdir must be a directory");
-    let boundary = boundary(state.permission_mode, ban);
+    let boundary = ExecutionBoundary::for_mode(state.permission_mode);
     ensure!(
         boundary == ExecutionBoundary::Host
             || cwd.starts_with(&root)
-            || (boundary == ExecutionBoundary::Workspace
-                && crate::tools::process_sandbox::is_extra_writable_dir(&cwd)),
-        "sandbox workdir is outside the workspace"
+            || crate::tools::process_sandbox::is_extra_writable_dir(&cwd),
+        "OUTSIDE_WORKSPACE_DENIED: shell workdir requires directory approval"
     );
     let environment = crate::tools::shell_environment::resolve()?;
     let tracking_workspace = crate::tools::Workspace::new(workspace.root())?;
@@ -360,11 +354,7 @@ async fn launch(
         return Err(launch_failure(&host, task, turn, owner, command_bytes, limit));
     }
     // Finish the tracking interval even when process startup fails.
-    let interval = if boundary == ExecutionBoundary::ReadOnly {
-        None
-    } else {
-        Some(begin_interval(state, workspace, task, turn, owner, cancel).await?)
-    };
+    let interval = Some(begin_interval(state, workspace, task, turn, owner, cancel).await?);
     if cancel.is_cancelled() {
         finish_interval(state, workspace, interval.as_deref()).await?;
         anyhow::bail!("shell task cancelled");
@@ -391,7 +381,7 @@ async fn launch(
     let (stop, mut stopped) = mpsc::unbounded_channel();
     let record = match crate::tools::project_process::ShellRecord::register(
         &root, &cwd, &id, child.id().unwrap_or_default(), cmd_text,
-        boundary != ExecutionBoundary::Host, stop.clone(),
+        stop.clone(),
     ).await {
         Ok(record) => Arc::new(record),
         Err(error) => {
@@ -824,143 +814,6 @@ pub fn definitions() -> Vec<Value> {
     ]
 }
 
-/// The main AI's own read-only command (design guide §4). One-shot, no
-/// session or change tracking: the whole filesystem is mounted read-only and
-/// the network is cut, so there is nothing to track. Linux only, where that
-/// sandbox exists; elsewhere the tool is not published.
-pub const READ_ONLY: &str = "run_readonly_command";
-const READ_ONLY_DEFAULT_MS: u64 = 30_000;
-const READ_ONLY_MAX_MS: u64 = 900_000;
-
-pub fn read_only_available() -> bool {
-    crate::tools::process_sandbox::bwrap_installed() && crate::tools::shell_environment::resolve().is_ok()
-}
-
-
-/// The project's build-output folders: directories git ignores, except git's
-/// own data, the host's state and nested checkouts such as other agents'
-/// worktrees. Outside a git repository there are none.
-fn build_outputs(root: &Path) -> Vec<PathBuf> {
-    let Ok(output) = std::process::Command::new("git")
-        .args(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"])
-        .current_dir(root).stdin(Stdio::null()).stderr(Stdio::null()).output()
-    else { return Vec::new() };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.strip_suffix('/'))
-        .filter(|dir| {
-            let first = dir.split('/').next().unwrap_or_default();
-            !matches!(first, ".git" | ".codex-workspace-mcp" | ".claude")
-        })
-        .map(|dir| root.join(dir))
-        .filter(|dir| !dir.join(".git").exists())
-        .collect()
-}
-
-pub async fn run_read_only(workspace: &crate::tools::Workspace, args: &Value, cancel: &CancellationToken) -> Result<Value> {
-    ensure!(cfg!(target_os = "linux"), "READ_ONLY_SHELL_UNAVAILABLE: the read-only sandbox exists only on Linux; use the file tools, or module code");
-    let cmd = args["cmd"].as_str().filter(|s| !s.trim().is_empty()).context("cmd is required")?;
-    crate::tools::process_sandbox::check_secret_reference(cmd)?;
-    let root = workspace.root().canonicalize()?;
-    let cwd = root.join(args["workdir"].as_str().unwrap_or(".")).canonicalize().context("workdir does not exist")?;
-    ensure!(cwd.is_dir() && cwd.starts_with(&root), "workdir must be a directory inside the project");
-    let timeout = Duration::from_millis(args["timeout_ms"].as_u64().unwrap_or(READ_ONLY_DEFAULT_MS).clamp(1000, READ_ONLY_MAX_MS));
-    let environment = crate::tools::shell_environment::resolve()?;
-    let outputs = build_outputs(&root);
-    let mut command = crate::tools::process_sandbox::read_only_offline_command(&environment.executable, &root, &cwd, &outputs)?;
-    command.args(["--noprofile", "--norc", "-c", cmd]);
-    command.current_dir(&cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    environment.apply_environment(&mut command)?;
-    command.env_remove("BASH_ENV").env_remove("ENV")
-        .env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8")
-        .env("GIT_TERMINAL_PROMPT", "0").env("GIT_OPTIONAL_LOCKS", "0").env("NO_COLOR", "1")
-        .env("LANG", "C.UTF-8").env("PAGER", "cat")
-        // There is no network: package managers use what is already cached.
-        .env("CARGO_NET_OFFLINE", "true").env("npm_config_offline", "true")
-        .env("PIP_NO_INDEX", "1").env("PYTHONDONTWRITEBYTECODE", "1");
-    crate::tools::project_process::prepare_process_group(&mut command);
-    let started = Instant::now();
-    let mut child = command.spawn().context("could not launch the read-only shell")?;
-    let group = crate::tools::project_process::ProcessGroup::attach(&child)?;
-    let total = Arc::new(AtomicUsize::new(0));
-    let over = CancellationToken::new();
-    let collect = |reader: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>| {
-        let (total, over) = (total.clone(), over.clone());
-        tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            let Some(mut reader) = reader else { return bytes };
-            let mut buffer = [0u8; 16_384];
-            while let Ok(n) = reader.read(&mut buffer).await {
-                if n == 0 { break; }
-                if total.fetch_add(n, Ordering::AcqRel) + n > PROGRAM_OUTPUT_LIMIT { over.cancel(); break; }
-                bytes.extend_from_slice(&buffer[..n]);
-            }
-            bytes
-        })
-    };
-    let out = collect(child.stdout.take().map(|r| Box::new(r) as _));
-    let err = collect(child.stderr.take().map(|r| Box::new(r) as _));
-    let stopped = tokio::select! {
-        status = child.wait() => {
-            let _ = group.terminate();
-            let code = status?.code();
-            let delivered = finish(code, None, out, err, started).await?;
-            // The sandbox itself did not start (inside another sandbox, or a
-            // kernel that refuses its namespaces): say so, not "command failed".
-            if code != Some(0) && delivered["stdout"] == "" && delivered["stderr"].as_str().is_some_and(|e| e.starts_with("bwrap:")) {
-                anyhow::bail!("SANDBOX_UNAVAILABLE: {}", delivered["stderr"].as_str().unwrap_or_default().trim());
-            }
-            ensure!(!over.is_cancelled(), "SHELL_OUTPUT_OVER_CAPACITY: the command wrote more than {} bytes; nothing is delivered. Narrow it: scope the path, filter with grep, or count first with wc -l.", PROGRAM_OUTPUT_LIMIT);
-            return Ok(delivered);
-        }
-        _ = tokio::time::sleep(timeout) => "timeout",
-        _ = over.cancelled() => "output_over_capacity",
-        _ = cancel.cancelled() => "task_cancelled",
-    };
-    let _ = group.terminate();
-    let _ = child.wait().await;
-    ensure!(stopped != "task_cancelled", "task cancelled");
-    ensure!(stopped != "output_over_capacity",
-        "SHELL_OUTPUT_OVER_CAPACITY: the command wrote more than {} bytes and was stopped; nothing is delivered. Narrow it: scope the path, filter with grep, or count first with wc -l.", PROGRAM_OUTPUT_LIMIT);
-    finish(None, Some(stopped), out, err, started).await
-}
-
-async fn finish(exit_code: Option<i32>, stopped: Option<&str>, out: tokio::task::JoinHandle<Vec<u8>>,
-    err: tokio::task::JoinHandle<Vec<u8>>, started: Instant) -> Result<Value> {
-    let decode = |bytes: Vec<u8>| Decoder::default().decode(&bytes, true);
-    let (stdout, stderr) = (decode(out.await?), decode(err.await?));
-    let (stdout_preview, stdout_truncated) = preview_read_only(&stdout);
-    let (stderr_preview, stderr_truncated) = preview_read_only(&stderr);
-    let truncated = stdout_truncated || stderr_truncated;
-    let mut result = json!({"exit_code":exit_code,"stdout":stdout_preview,"stderr":stderr_preview,"duration_ms":started.elapsed().as_millis() as u64,
-        "stdout_bytes":stdout.len(),"stderr_bytes":stderr.len(),"truncated":truncated});
-    if truncated {
-        result["__full_stdout"] = json!(stdout);
-        result["__full_stderr"] = json!(stderr);
-        result["preview_limit_chars"] = json!(READ_ONLY_PREVIEW_CHARS);
-        result["preview_note"] = json!("stdout/stderr is a head/tail preview; the complete output is available through output_asset and read_asset.");
-    }
-    if let Some(reason) = stopped {
-        result["termination_reason"] = json!(reason);
-        result["note"] = json!("The command did not finish within timeout_ms and was stopped; stdout/stderr hold what it wrote before that. Narrow the command or raise timeout_ms.");
-    }
-    Ok(result)
-}
-
-fn preview_read_only(text: &str) -> (String, bool) {
-    if text.chars().count() <= READ_ONLY_PREVIEW_CHARS {
-        return (text.to_owned(), false);
-    }
-    let head_chars = READ_ONLY_PREVIEW_CHARS / 2;
-    let tail_chars = READ_ONLY_PREVIEW_CHARS - head_chars;
-    let head = text.chars().take(head_chars).collect::<String>();
-    let tail = text.chars().rev().take(tail_chars).collect::<String>().chars().rev().collect::<String>();
-    (format!("{head}\n[… output truncated: {} chars total …]\n{tail}", text.chars().count()), true)
-}
-
 pub fn output_schema() -> Value {
     json!({"type":"object","description":"Fields are returned directly at the top level, never nested under data or result. Append stdout/stderr chunks when polling a long session.",
         "required":["session_id","running","exit_code","stdout","stderr","truncated","duration_ms","encoding","capture_error","termination_reason","delivery","output_limit_bytes","stdout_bytes","stderr_bytes","changes_pending","change_interval"],
@@ -1028,128 +881,6 @@ mod tests {
         let ended = f.call("write_stdin", json!({"session_id":started["session_id"],"chars":"go\n"})).await?;
         assert_eq!(ended["running"], false, "{ended}");
         assert_eq!(ended["exit_code"], 0, "{ended}");
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn read_only_session_takes_no_mutation_lock_or_interval() -> Result<()> {
-        use crate::tools::workspace_changes;
-        let f = Fixture::new()?;
-        let guard = workspace_changes::mutation_guard(&f.root, "git_restore", &json!({}), &f.cancel).await?;
-        let args = json!({"cmd":"read -r line; printf '%s' \"$line\"","stdin":true,"yield_time_ms":0});
-        let started = tokio::time::timeout(Duration::from_secs(5), execute(&f.state, &f.state.workspace,
-            "shell-test", 1, None, "exec_command", &args, &f.cancel, true)).await?;
-        let started = match started {
-            Ok(value) => value,
-            Err(error) if format!("{error:#}").contains("SANDBOX_UNAVAILABLE") => {
-                eprintln!("skipped: read-only sandbox unavailable: {error:#}");
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-        assert_eq!(started["running"], true, "{started}");
-        assert_eq!(started["change_interval"], Value::Null, "{started}");
-        assert_eq!(started["changes_pending"], false);
-        let conn = crate::server::agent_service::open_db(&f.root)?;
-        let intervals = || conn.query_row("SELECT COUNT(*) FROM agent_shell_change_intervals", [], |row| row.get::<_, usize>(0));
-        assert_eq!(intervals()?, 0);
-        drop(guard);
-        let file_args = json!({"path":"tool.txt","content":"after"});
-        let _file = tokio::time::timeout(Duration::from_secs(3),
-            workspace_changes::mutation_guard(&f.root, "write_file", &file_args, &f.cancel)).await??;
-        workspace_changes::execute_tracked(f.state.clone(), f.state.workspace.clone(), "shell-test".into(), 1,
-            "write_file".into(), file_args, f.cancel.clone()).await?;
-        assert_eq!(std::fs::read_to_string(f.root.join("tool.txt"))?, "after");
-        let ended = f.call("write_stdin", json!({"session_id":started["session_id"],"chars":"ready\n"})).await?;
-        assert_eq!(ended["running"], false, "{ended}");
-        assert_eq!(ended["stdout"], "ready", "{ended}");
-        assert_eq!(intervals()?, 0);
-        let shell_rows: usize = conn.query_row("SELECT COUNT(*) FROM agent_change_ledger WHERE source='shell'", [], |row| row.get(0))?;
-        assert_eq!(shell_rows, 0);
-        Ok(())
-    }
-
-    /// The main AI's own command looks without changing anything: reads and
-    /// git work, a write fails and leaves no file, there is no network
-    /// interface but loopback, a hung command is stopped at its timeout, and
-    /// output past the budget fails without a prefix.
-    #[tokio::test]
-    async fn a_read_only_command_reads_and_cannot_write_or_reach_the_network() -> Result<()> {
-        let f = Fixture::new()?;
-        std::fs::write(f.root.join("seed.txt"), "seed-content\n")?;
-        let workspace = crate::tools::Workspace::new(&f.root)?;
-        let (workspace, cancel) = (&workspace, &f.cancel);
-        let run = |cmd: &str, timeout: u64| {
-            let args = json!({"cmd":cmd,"timeout_ms":timeout});
-            async move { run_read_only(workspace, &args, cancel).await }
-        };
-        let first = match run("cat seed.txt", 10_000).await {
-            Ok(value) => value,
-            Err(error) if !cfg!(target_os = "linux") || format!("{error:#}").contains("SANDBOX_UNAVAILABLE") => {
-                eprintln!("skipped: read-only sandbox unavailable: {error:#}");
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-        assert_eq!(first["exit_code"], 0, "{first}");
-        assert_eq!(first["stdout"], "seed-content\n");
-        let wrote = run("printf x > made.txt; echo status=$?", 10_000).await?;
-        assert!(wrote["stdout"].as_str().unwrap().contains("status=1"), "{wrote}");
-        assert!(!f.root.join("made.txt").exists(), "the workspace is read-only");
-        let net = run("grep -c : /proc/net/dev", 10_000).await?;
-        assert_eq!(net["stdout"].as_str().unwrap().trim(), "1", "only loopback: {net}");
-        let slow = run("echo started; sleep 30", 1000).await?;
-        assert_eq!(slow["termination_reason"], "timeout", "{slow}");
-        assert_eq!(slow["stdout"], "started\n");
-        assert!(slow["duration_ms"].as_u64().unwrap() < 10_000, "{slow}");
-        let preview = run("head -c 60000 /dev/zero", 30_000).await?;
-        assert_eq!(preview["truncated"], true, "{preview}");
-        assert!(preview["stdout"].as_str().unwrap().contains("output truncated"), "{preview}");
-        assert_eq!(preview["__full_stdout"].as_str().unwrap().len(), 60000);
-        let flood = run("head -c 9000000 /dev/zero", 30_000).await.unwrap_err();
-        assert!(format!("{flood:#}").contains("SHELL_OUTPUT_OVER_CAPACITY"), "{flood:#}");
-        let outside = run_read_only(workspace, &json!({"cmd":"pwd","workdir":".."}), cancel).await.unwrap_err();
-        assert!(format!("{outside:#}").contains("inside the project"), "{outside:#}");
-        Ok(())
-    }
-
-    /// Builds and tests run from the main AI's own command: what git ignores
-    /// (target/) and a private /tmp are writable, sources are not.
-    #[tokio::test]
-    async fn builds_and_tests_write_only_their_outputs() -> Result<()> {
-        let f = Fixture::new()?;
-        let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&f.root).output();
-        if git(&["init", "-q"]).is_err() { eprintln!("skipped: git missing"); return Ok(()); }
-        std::fs::write(f.root.join(".gitignore"), "target/\n")?;
-        std::fs::create_dir_all(f.root.join("target"))?;
-        std::fs::create_dir_all(f.root.join("src"))?;
-        // One registry dependency: cargo reads its cache, which stays read-only.
-        std::fs::write(f.root.join("Cargo.toml"), "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nitoa = \"1\"\n")?;
-        std::fs::write(f.root.join("src/lib.rs"), "#[test]\nfn adds() { assert_eq!(itoa::Buffer::new().format(2), \"2\"); }\n")?;
-        let workspace = crate::tools::Workspace::new(&f.root)?;
-        let run = |cmd: &str| { let args = json!({"cmd":cmd,"timeout_ms":300_000}); let (w, c) = (&workspace, &f.cancel); async move { run_read_only(w, &args, c).await } };
-        let first = match run("echo out > target/made && cat target/made && echo tmp > /tmp/x && cat /tmp/x").await {
-            Ok(value) => value,
-            Err(error) if format!("{error:#}").contains("SANDBOX_UNAVAILABLE") || !cfg!(target_os = "linux") => {
-                eprintln!("skipped: {error:#}"); return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-        assert_eq!(first["stdout"], "out\ntmp\n", "{first}");
-        let source = run("printf x >> src/lib.rs; echo status=$?").await?;
-        assert!(source["stdout"].as_str().unwrap().contains("status=1"), "sources stay read-only: {source}");
-        if std::process::Command::new("cargo").arg("--version").output().is_ok() {
-            // A checked-out project has its lockfile; cargo does not rewrite it.
-            let locked = std::process::Command::new("cargo").args(["generate-lockfile", "--offline"]).current_dir(&f.root).output()?;
-            assert!(locked.status.success(), "{}", String::from_utf8_lossy(&locked.stderr));
-            // The parent suite may have its own CARGO_TARGET_DIR outside this sandbox.
-            let tested = run("CARGO_TARGET_DIR=\"$PWD/target\" cargo test --offline --quiet").await?;
-            assert_eq!(tested["exit_code"], 0, "{tested}");
-            assert!(tested["stdout"].as_str().unwrap().contains("1 passed"), "{tested}");
-        }
-        assert!(!std::path::Path::new("/tmp/x").exists() || std::fs::read_to_string("/tmp/x").map(|x| x != "tmp\n").unwrap_or(true),
-            "the command's /tmp is its own");
         Ok(())
     }
 

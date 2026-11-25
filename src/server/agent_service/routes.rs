@@ -928,6 +928,7 @@ fn spawn_supervised_task(
     program_resource: Option<String>,
 ) {
     tokio::spawn(async move {
+        let cancel_check = cancel.clone();
         let worker = tokio::spawn(crate::runtime::single_agent::run_task_with_resource(
             state.clone(),
             task_id.clone(),
@@ -946,14 +947,31 @@ fn spawn_supervised_task(
             Err(error) => Some(format!("task worker stopped unexpectedly: {error}")),
         };
         if let Some(message) = failure {
-            tracing::error!(task_id = %task_id, error = %message, "agent task failed");
             let root = state.workspace.root();
-            if let Err(error) = emit(root, &task_id, "turn/end",
-                json!({"turn":turn,"reason":{"kind":"error","error":{"message":message,"code":"WORKER_FAILED"}}})).await {
-                tracing::error!(task_id = %task_id, error = %error, "could not record task failure");
-            }
-            if let Err(error) = finish(&state, &task_id, "failed").await {
-                tracing::error!(task_id = %task_id, error = %error, "could not finish failed task");
+            if cancel_check.is_cancelled() {
+                tracing::info!(task_id = %task_id, "agent task cancelled by user");
+                if let Err(error) = emit(
+                    root,
+                    &task_id,
+                    "turn/end",
+                    json!({"turn":turn,"reason":{"kind":"aborted"}}),
+                )
+                .await
+                {
+                    tracing::error!(task_id = %task_id, error = %error, "could not record task cancellation");
+                }
+                if let Err(error) = finish(&state, &task_id, "cancelled").await {
+                    tracing::error!(task_id = %task_id, error = %error, "could not finish cancelled task");
+                }
+            } else {
+                tracing::error!(task_id = %task_id, error = %message, "agent task failed");
+                if let Err(error) = emit(root, &task_id, "turn/end",
+                    json!({"turn":turn,"reason":{"kind":"error","error":{"message":message,"code":"WORKER_FAILED"}}})).await {
+                    tracing::error!(task_id = %task_id, error = %error, "could not record task failure");
+                }
+                if let Err(error) = finish(&state, &task_id, "failed").await {
+                    tracing::error!(task_id = %task_id, error = %error, "could not finish failed task");
+                }
             }
         }
         if let Err(error) = cleanup_finished_task_data(state.workspace.root(), &task_id).await {

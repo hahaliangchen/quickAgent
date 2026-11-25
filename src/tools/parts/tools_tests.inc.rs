@@ -1001,6 +1001,13 @@
         let bounded = workspace.git_status(GitStatusRequest { max_entries: Some(1), ..Default::default() }).unwrap();
         assert_eq!(bounded.total_entries, 2, "rename's old path must not be counted as a second entry");
         assert!(bounded.truncated);
+        fs::write(root.join("renamed.txt"), "bad \n").unwrap();
+        let whitespace = workspace.git_diff(GitDiffRequest { check: true, ..Default::default() }).unwrap();
+        assert_eq!(whitespace.check_ok, Some(false));
+        assert_eq!(whitespace.check_issues.first().and_then(|issue| issue.line), Some(1));
+        fs::write(root.join("renamed.txt"), "good\n").unwrap();
+        let clean = workspace.git_diff(GitDiffRequest { check: true, ..Default::default() }).unwrap();
+        assert_eq!(clean.check_ok, Some(true));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1410,4 +1417,66 @@
         assert!(root.join(".git/objects").is_dir());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stat_and_copy_paths_are_bounded_and_type_safe() {
+        let root=temp_workspace("stat_copy");
+        fs::create_dir_all(root.join("source-dir/nested")).unwrap();
+        fs::write(root.join("source.txt"),"source bytes").unwrap();
+        fs::write(root.join("source-dir/nested/child.txt"),"child bytes").unwrap();
+        let workspace=Workspace::new(&root).unwrap();
+        let absolute=root.join("source.txt").to_string_lossy().into_owned();
+        let stat=workspace.stat_paths(StatRequest{path:None,paths:vec!["source.txt".into(),"source-dir".into(),"missing.txt".into(),absolute]}).unwrap();
+        assert_eq!(stat.entries.len(),4);
+        assert!(stat.entries[0].exists);
+        assert_eq!(stat.entries[0].kind,Some(EntryKind::File));
+        assert_eq!(stat.entries[1].kind,Some(EntryKind::Directory));
+        assert!(!stat.entries[2].exists);
+        assert!(stat.entries[3].exists);
+        assert!(workspace.stat_paths(StatRequest{path:None,paths:vec!["../escape".into()]}).is_err());
+        assert!(workspace.stat_paths(StatRequest{path:None,paths:(0..201).map(|_|".".into()).collect()}).is_err());
+
+        let copied=workspace.copy_path(CopyPathRequest{from:"source.txt".into(),to:"nested/copy.txt".into(),recursive:false,overwrite:false,create_parent_dirs:true}).unwrap();
+        assert_eq!(copied.files_copied,1);
+        assert_eq!(fs::read(root.join("nested/copy.txt")).unwrap(),b"source bytes");
+        let conflict=workspace.copy_path(CopyPathRequest{from:"source.txt".into(),to:"nested/copy.txt".into(),recursive:false,overwrite:false,create_parent_dirs:true}).unwrap_err().to_string();
+        assert!(conflict.contains("overwrite: true"));
+        fs::write(root.join("source.txt"),"replacement").unwrap();
+        let copied=workspace.copy_path(CopyPathRequest{from:"source.txt".into(),to:"nested/copy.txt".into(),recursive:false,overwrite:true,create_parent_dirs:true}).unwrap();
+        assert!(copied.overwritten);
+        assert_eq!(fs::read(root.join("nested/copy.txt")).unwrap(),b"replacement");
+
+        let recursive=workspace.copy_path(CopyPathRequest{from:"source-dir".into(),to:"dir-copy".into(),recursive:true,overwrite:false,create_parent_dirs:true}).unwrap();
+        assert_eq!(recursive.kind,"directory");
+        assert_eq!(recursive.files_copied,1);
+        assert_eq!(fs::read(root.join("dir-copy/nested/child.txt")).unwrap(),b"child bytes");
+        assert!(workspace.copy_path(CopyPathRequest{from:"source-dir".into(),to:"dir-copy-2".into(),recursive:false,overwrite:false,create_parent_dirs:true}).is_err());
+        assert_eq!(crate::tools::workspace_changes::mutation_paths(&root,"copy_path",&serde_json::json!({"to":"nested/copy.txt"})).unwrap(),vec![root.join("nested/copy.txt")]);
+
+        fs::create_dir_all(root.join("secret-source")).unwrap();
+        fs::write(root.join("secret-source/public.txt"),"staged first").unwrap();
+        fs::write(root.join("secret-source/.env"),"token=hidden").unwrap();
+        fs::create_dir_all(root.join("protected-destination")).unwrap();
+        fs::write(root.join("protected-destination/keep.txt"),"keep me").unwrap();
+        assert!(workspace.copy_path(CopyPathRequest{from:"secret-source".into(),to:"protected-destination".into(),recursive:true,overwrite:true,create_parent_dirs:true}).is_err());
+        assert_eq!(fs::read(root.join("protected-destination/keep.txt")).unwrap(),b"keep me");
+        assert!(!root.join("protected-destination/public.txt").exists());
+        assert!(workspace.stat_paths(StatRequest{path:Some(root.join("secret-source/.env").to_string_lossy().into_owned()),paths:vec![]}).is_err());
+
+        #[cfg(unix)] {
+            use std::os::unix::fs::symlink;
+            symlink(root.join("source.txt"),root.join("linked-source.txt")).unwrap();
+            let external=root.with_extension("outside");
+            fs::create_dir_all(&external).unwrap();
+            symlink(&external,root.join("linked-dir")).unwrap();
+            assert!(workspace.stat_paths(StatRequest{path:Some("linked-source.txt".into()),paths:vec![]}).is_err());
+            assert!(workspace.stat_paths(StatRequest{path:Some("linked-dir/missing.txt".into()),paths:vec![]}).is_err());
+            let _=fs::remove_dir_all(external);
+            assert!(workspace.copy_path(CopyPathRequest{from:"linked-source.txt".into(),to:"linked-copy.txt".into(),recursive:false,overwrite:false,create_parent_dirs:true}).is_err());
+        }
+
+        fs::write(root.join("large.bin"),vec![0u8;2*1024*1024+1]).unwrap();
+        assert!(workspace.copy_path(CopyPathRequest{from:"large.bin".into(),to:"large-copy.bin".into(),recursive:false,overwrite:false,create_parent_dirs:true}).is_err());
+        let _=fs::remove_dir_all(root);
     }

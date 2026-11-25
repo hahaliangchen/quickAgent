@@ -310,7 +310,16 @@ impl Runtime {
         self.invoke_receiver(callee,VmValue::Undefined,args,destination)
     }
     fn get_property(&mut self,target:VmValue,key:VmValue,receiver:VmValue,destination:Option<String>)->Result<Option<PreparedAction>> {
-        ensure!(!matches!(target,VmValue::Null|VmValue::Undefined),"TypeError: Cannot read properties of null or undefined");
+        if matches!(target, VmValue::Null | VmValue::Undefined) {
+            let kind = if matches!(target, VmValue::Null) { "null" } else { "undefined" };
+            let prop = self
+                .heap
+                .property_key(&key)
+                .ok()
+                .map(|s| format!(" (reading '{s}')"))
+                .unwrap_or_default();
+            bail!("TypeError: Cannot read properties of {kind}{prop}");
+        }
         if matches!(key,VmValue::Reference(_)){let frame=Self::vm_frame(&self.program,&mut self.heap,self.module_env,"$$keyedGet",vec![target,key,receiver],destination)?;self.push_frame(frame);return Ok(None);}
         let original_key=key.clone();
         let key=self.heap.property_key(&key)?;

@@ -22,7 +22,7 @@ RUN test "$TARGETARCH" = arm64 \
         gcc gcc-c++ make cmake pkgconf binutils glibc-devel \
         openssl-devel bzip2-devel libffi-devel zlib-devel xz-devel readline-devel sqlite-devel \
         cairo-devel pango-devel gdk-pixbuf2 librsvg2 fontconfig freetype-devel \
-        bubblewrap poppler-utils \
+        poppler-utils \
     && yum clean all
 
 COPY artifacts/ /tmp/environment/artifacts/

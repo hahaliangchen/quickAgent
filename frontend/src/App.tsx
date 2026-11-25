@@ -3,6 +3,7 @@ import { ConversationPage, HeroPage, SkillPackagesPage, type Tab } from './compo
 import { SkillWorkbench } from './components/SkillWorkbench.tsx'
 import { PluginPageHost } from './components/PluginPageHost.tsx'
 import { OfficeStudioView } from './components/OfficeStudioView.tsx'
+import type { StudioAskAiRequest, StudioViewContext } from './plugins/protocol.ts'
 import { BlueprintContext } from './builtin_plugins/blueprint/api.ts'
 import { CodeChatDock } from './components/CodeChatDock.tsx'
 import { type AiFocus, type RemoteTool, remoteTools, SshContext } from './builtin_plugins/ssh/api.ts'
@@ -66,6 +67,13 @@ export function App({ renderSlot }: AgentSlotProps) {
   const [office, setOffice] = useState(false)
   const [officeMounted, setOfficeMounted] = useState(false)
   const [officeResetSignal, setOfficeResetSignal] = useState(0)
+  const [officeViewContext, setOfficeViewContext] = useState<StudioViewContext | null>(null)
+  const [officeDraft, setOfficeDraft] = useState<{ text: string; kind: 'prompt' }>()
+  const [officeChatOpenSignal, setOfficeChatOpenSignal] = useState(0)
+  const handleOfficeAskAi = useCallback((req: StudioAskAiRequest) => {
+    if (req.prompt && req.prompt.trim()) setOfficeDraft({ text: req.prompt, kind: 'prompt' })
+    setOfficeChatOpenSignal(value => value + 1)
+  }, [])
   const [dark, setDark] = useState(() => document.body.hasAttribute('data-ds-dark-theme'))
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
@@ -351,19 +359,37 @@ export function App({ renderSlot }: AgentSlotProps) {
       {/* 3. Center Main Column (Header + Conversation + Floating Composer) */}
       <div className={css.centerCol}>
         {officeMounted && (
-          <div style={{ display: office ? 'flex' : 'none', flex: 1, minHeight: 0, minWidth: 0 }}>
-            <OfficeStudioView
-              workspaceRoot={gitWorkspace}
-              resetSignal={officeResetSignal}
-              pendingOpen={pendingOpen}
-              theme={dark ? 'dark' : 'light'}
-              onManagePlugins={() => {
-                setOffice(false)
-                setWorkbench(false)
-                setGit(false)
-                setTab('skill-pages')
-              }}
-            />
+          <div className={css.dockedView} style={{ display: office ? 'flex' : 'none' }}>
+            <div className={css.dockedPage}>
+              <OfficeStudioView
+                workspaceRoot={gitWorkspace}
+                resetSignal={officeResetSignal}
+                pendingOpen={pendingOpen}
+                theme={dark ? 'dark' : 'light'}
+                onStudioContext={setOfficeViewContext}
+                onAskAi={handleOfficeAskAi}
+                onManagePlugins={() => {
+                  setOffice(false)
+                  setWorkbench(false)
+                  setGit(false)
+                  setTab('skill-pages')
+                }}
+              />
+            </div>
+            <HiddenFreeze hidden={!office}>
+              {gitWorkspace && (
+                <CodeChatDock
+                  key="office"
+                  workspace={gitWorkspace}
+                  renderSlot={renderSlot}
+                  onOpenInChat={id => { setOffice(false); setOfficeDraft(undefined); setWorkbench(false); setTab('chat'); workspace.openTask(id) }}
+                  diagnostic={officeDraft}
+                  viewContext={officeViewContext}
+                  embeddedLauncher
+                  openSignal={officeChatOpenSignal}
+                />
+              )}
+            </HiddenFreeze>
           </div>
         )}
         {sshMounted && <div className={css.dockedView} style={{ display: ssh ? 'flex' : 'none' }}>

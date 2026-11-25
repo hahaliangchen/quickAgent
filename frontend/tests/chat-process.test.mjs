@@ -519,6 +519,17 @@ test('a pick still becomes the next chat default while a chat is running', () =>
   assert.deepEqual(picked.providers[0].models, ['model-a', 'model-b'])
 })
 
+test('cross-platform native tool summaries name their targets', () => {
+  assert.equal(summaryFor('http_request', { method: 'POST', url: 'http://localhost:3000/api' }), 'POST · http://localhost:3000/api')
+  assert.equal(summaryFor('stat_paths', { paths: ['a', 'b'] }), '2 个路径')
+  assert.equal(summaryFor('copy_path', { from: 'a.txt', to: 'b.txt' }), 'a.txt → b.txt')
+  assert.equal(summaryFor('git_diff', { repo: '../other', check: true }), '../other · 空白检查 · 工作区变更')
+  assert.equal(summaryFor('sys_disk_space', {}), '系统盘空间')
+  assert.equal(summaryFor('sys_which', { names: ['git', 'cargo'] }), 'git、cargo')
+  assert.equal(summaryFor('sys_listening_ports', { port: 8080 }), '端口 8080')
+  assert.equal(summaryFor('sys_processes', { filter: 'node' }), 'node')
+})
+
 test('a level-only change keeps the saved model instead of clearing it', () => {
   const levels = defaultsPayload(settingsDocument(), { reasoning_effort: 'low', fast_mode: false })
   assert.equal(levels.orchestrator_model, 'model-a')
@@ -527,4 +538,40 @@ test('a level-only change keeps the saved model instead of clearing it', () => {
   const blank = defaultsPayload(settingsDocument(), { provider: '', model: '', reasoning_effort: '', fast_mode: false })
   assert.equal(blank.orchestrator_model, 'model-a')
   assert.equal(blank.orchestrator_provider, 'primary')
+})
+
+test('failedToolNames ignores normal ask_user NEEDS_USER pauses while keeping real failures', () => {
+  seq = 0
+  const paused = chatItems([
+    call('main', 'c1', 'ask_user', { question: '请确认工作区路径？' }),
+    result('main', 'c1', JSON.stringify({ code: 'NEEDS_USER', question: '请确认工作区路径？', message: '请确认工作区路径？' }), true),
+  ])
+  assert.deepEqual(failedToolNames(paused), [])
+
+  const mixed = chatItems([
+    call('main', 'c2', 'ask_user', {}),
+    result('main', 'c2', JSON.stringify({ error: 'ask_user requires a non-empty `question` string' }), true),
+    call('main', 'c3', 'read_file', { path: 'missing.txt' }),
+    result('main', 'c3', JSON.stringify({ error: 'path does not exist' }), true),
+  ])
+  assert.deepEqual(failedToolNames(mixed), ['ask_user', 'read_file'])
+})
+
+test('intermediate write_stdin polls are flagged so only the terminal poll displays exit_code error', () => {
+  seq = 0
+  const events = [
+    call('main', 'exec', 'exec_command', { cmd: 'cargo test' }),
+    result('main', 'exec', JSON.stringify({ session_id: 's1', running: true, stdout: 'compiling' })),
+    call('main', 'poll1', 'write_stdin', { session_id: 's1', yield_time_ms: 15000 }),
+    result('main', 'poll1', JSON.stringify({ session_id: 's1', running: true, stdout: 'running 100 tests' })),
+    call('main', 'poll2', 'write_stdin', { session_id: 's1', yield_time_ms: 15000 }),
+    event('shell/end', { session_id: 's1', exit_code: 101 }),
+    result('main', 'poll2', JSON.stringify({ session_id: 's1', running: false, exit_code: 101, stdout: '1 failed' })),
+  ]
+  const rows = flattenItems(chatItems(events)).filter(item => item.kind === 'tool')
+  assert.equal(rows.length, 3)
+  assert.equal(rows[0].result.intermediatePoll, undefined)
+  assert.equal(rows[1].result.intermediatePoll, true)
+  assert.equal(rows[2].result.intermediatePoll, undefined)
+  assert.equal(JSON.parse(rows[2].result.text).exit_code, 101)
 })

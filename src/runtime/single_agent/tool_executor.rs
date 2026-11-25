@@ -68,16 +68,13 @@ pub(crate) fn library_compile_scope(
 ) -> agent_program::libraries::Libraries {
     let allow_shell = s.plugin.is_none()
         && !s.ban_execution
+        && s.state.permission_mode != crate::server::agent_service::PermissionMode::ReadOnly
         && w.program_task
             .as_ref()
             .is_none_or(|t| t["role"].as_str() != Some("leaf"));
     let mut libs = agent_program::libraries::builtin();
     if !allow_shell {
         libs.remove("process");
-    } else if !crate::tools::shell_process::read_only_available()
-        && let Some(process_lib) = libs.get_mut("process")
-    {
-        process_lib.remove("run_readonly");
     }
     if s.plugin.is_some() {
         for methods in libs.values_mut() {

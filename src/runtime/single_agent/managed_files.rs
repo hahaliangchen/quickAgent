@@ -281,6 +281,64 @@ pub(super) fn forget(root: &Path, task: &str, workspace: &Path, raw: &str) -> Re
     Ok(())
 }
 
+pub(super) fn guard_copy(root: &Path, task: &str, workspace: &Path, raw: &str) -> Result<()> {
+    let (work, relative, target) = key(workspace, raw)?;
+    let prefix = format!("{relative}/");
+    let conn = connection(root)?;
+    let mut statement = conn.prepare("SELECT path,exists_at_baseline,bytes FROM agent_file_baselines WHERE task_id=?1 AND workspace=?2 AND (path=?3 OR (length(path)>length(?3) AND substr(path,1,length(?3)+1)=?4))")?;
+    let rows = statement.query_map(params![task,work,relative,prefix], |row| {
+        Ok((row.get::<_,String>(0)?,row.get::<_,bool>(1)?,row.get::<_,Option<Vec<u8>>>(2)?))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (path, existed, bytes) in rows {
+        let expected = if existed { Some(bytes.context("write_conflict: copied destination has no saved content baseline")?) } else { None };
+        let current = crate::tools::file_edit::snapshot(&Path::new(&work).join(&path))?;
+        anyhow::ensure!(current == expected,"write_conflict: {path} changed outside this task; read it again before copying");
+    }
+    if target.is_dir() {
+        for entry in fs::read_dir(&target)? {
+            anyhow::ensure!(entry?.file_name() != ".git", "refusing to copy over repository metadata");
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn adopt_copy(root: &Path, task: &str, workspace: &Path, raw: &str, owner: &str, turn: usize) -> Result<()> {
+    forget(root, task, workspace, raw)?;
+    let (work, relative, target) = key(workspace, raw)?;
+    let mut files = Vec::new();
+    if target.is_file() { files.push((relative,target)); }
+    else if target.is_dir() {
+        let mut stack=vec![target.clone()];
+        let mut entries=0usize;
+        while let Some(dir)=stack.pop() {
+            for item in fs::read_dir(&dir)? {
+                entries+=1;
+                anyhow::ensure!(entries<=10_000,"copied directory exceeds managed-baseline entry limit");
+                let entry=item?;
+                if entry.file_name()==".git" { continue; }
+                let path=entry.path(); let meta=fs::symlink_metadata(&path)?;
+                if meta.file_type().is_symlink() { continue; }
+                if meta.is_dir() { stack.push(path); }
+                else if meta.is_file() {
+                    let relative=path.strip_prefix(workspace)?.to_string_lossy().replace('\\',"/");
+                    files.push((relative,path));
+                    anyhow::ensure!(files.len()<=5000,"copied directory exceeds managed-baseline file limit");
+                }
+            }
+        }
+    } else { anyhow::bail!("copied destination is not a regular file or directory"); }
+    let mut bytes=0usize;
+    for (path,absolute) in files {
+        let snapshot=crate::tools::file_edit::snapshot(&absolute)?;
+        let content=snapshot.context("copied file exceeds the managed baseline size limit")?;
+        bytes=bytes.saturating_add(content.len());
+        anyhow::ensure!(bytes<=128*1024*1024,"copied directory exceeds the managed baseline byte limit");
+        save(root,task,&work,&path,Some(&content),true)?;
+        record_writer(root,task,&work,&path,owner,turn)?;
+    }
+    Ok(())
+}
+
 /// Record a file a read or a shell command produced, so a later write compares
 /// against what the task itself last saw. Only a snapshot that matches the
 /// actual version delivered by the tool is saved.

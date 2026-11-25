@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { usePluginPages } from '../plugins/react.tsx'
+import type { StudioAskAiRequest, StudioViewContext } from '../plugins/protocol.ts'
 import { buildStudioCatalog, type StudioModuleCard, type StudioModuleIcon } from '../officeStudio.ts'
 import type { PendingOpen, PreviewTheme } from '../filePreview.ts'
 import { PluginPageHost } from './PluginPageHost.tsx'
@@ -94,6 +95,8 @@ export interface OfficeStudioViewProps {
   readonly pendingOpen?: PendingOpen | undefined
   readonly theme?: PreviewTheme | undefined
   readonly onManagePlugins: () => void
+  readonly onStudioContext?: ((context: StudioViewContext | null) => void) | undefined
+  readonly onAskAi?: ((request: StudioAskAiRequest) => void) | undefined
 }
 
 /**
@@ -102,12 +105,22 @@ export interface OfficeStudioViewProps {
  * - Clicking a ready module opens it inside a keep-alive workspace with a slim top switcher bar so switching
  *   between modules or returning to Hub/Chat preserves live editing state without reloading.
  */
-export function OfficeStudioView({ workspaceRoot, resetSignal, pendingOpen, theme, onManagePlugins }: OfficeStudioViewProps) {
+export function OfficeStudioView({ workspaceRoot, resetSignal, pendingOpen, theme, onManagePlugins, onStudioContext, onAskAi }: OfficeStudioViewProps) {
   const { packages } = usePluginPages()
   const catalog = useMemo(() => buildStudioCatalog(packages), [packages])
   const readyCards = useMemo(() => catalog.filter(item => item.ready && item.owner && item.page), [catalog])
   const [opened, setOpened] = useState<OpenedModule[]>([])
   const [activeKey, setActiveKey] = useState<string | null>(null)
+  const moduleContexts = useRef<Map<string, StudioViewContext | null>>(new Map())
+
+  useEffect(() => {
+    onStudioContext?.(activeKey ? (moduleContexts.current.get(activeKey) ?? null) : null)
+  }, [activeKey, onStudioContext])
+
+  const handleModuleContext = useCallback((key: string, ctx: StudioViewContext | null) => {
+    moduleContexts.current.set(key, ctx)
+    if (key === activeKey) onStudioContext?.(ctx)
+  }, [activeKey, onStudioContext])
 
   // Clicking the left Dock "Office" icon while already inside a module returns to Hub overview.
   useEffect(() => {
@@ -145,6 +158,7 @@ export function OfficeStudioView({ workspaceRoot, resetSignal, pendingOpen, them
   }
 
   const closeModule = (key: string) => {
+    moduleContexts.current.delete(key)
     setOpened(prev => prev.filter(item => item.key !== key))
     setActiveKey(prev => (prev === key ? null : prev))
   }
@@ -334,6 +348,8 @@ export function OfficeStudioView({ workspaceRoot, resetSignal, pendingOpen, them
                 workspaceRoot={workspaceRoot}
                 pendingOpen={item.request}
                 theme={theme}
+                onStudioContext={ctx => handleModuleContext(item.key, ctx)}
+                onAskAi={onAskAi}
               />
             </div>
           ))}

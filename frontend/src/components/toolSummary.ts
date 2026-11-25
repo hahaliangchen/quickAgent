@@ -59,9 +59,16 @@ export function summaryFor(name: string, args: Record<string, unknown>, result?:
     case 'git_commit': return [String(count(args.paths)) + ' 个文件', text(args.message)].filter(Boolean).join(' · ')
     case 'git_restore': return String(count(args.paths)) + ' 个文件 · ' + (args.staged === true ? '暂存区' : '工作区')
     case 'apply_edits': return String(count(args.files)) + ' 个文件' + (args.atomic === false ? ' · 逐文件尝试' : '')
-    case 'git_status': return Array.isArray(args.paths) && args.paths.length > 0 ? `路径：${args.paths.map(value => text(value)).filter(Boolean).join('、')}` : '工作区状态'
-    case 'git_diff': return args.stat_only === true ? '变更统计' : [text(args.rev_range), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '工作区变更'].filter(Boolean).join(' · ')
-    case 'git_log': return [text(args.rev), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '提交历史'].filter(Boolean).join(' · ')
+    case 'git_status': return [text(args.repo), Array.isArray(args.paths) && args.paths.length > 0 ? '路径：' + args.paths.map(value => text(value)).filter(Boolean).join('、') : '工作区状态'].filter(Boolean).join(' · ')
+    case 'git_diff': return [text(args.repo), args.check === true ? '空白检查' : '', args.stat_only === true ? '变更统计' : [text(args.rev_range), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '工作区变更'].filter(Boolean).join(' · ')].filter(Boolean).join(' · ')
+    case 'git_log': return [text(args.repo), text(args.rev), Array.isArray(args.paths) && args.paths.length > 0 ? args.paths.map(value => text(value)).filter(Boolean).join('、') : '提交历史'].filter(Boolean).join(' · ')
+    case 'http_request': return [text(args.method) || 'GET', text(args.url)].filter(Boolean).join(' · ')
+    case 'stat_paths': return Array.isArray(args.paths) ? String(args.paths.length) + ' 个路径' : text(args.path)
+    case 'copy_path': return [text(args.from), text(args.to) && '→ ' + text(args.to)].filter(Boolean).join(' ')
+    case 'sys_disk_space': return text(args.path) || '系统盘空间'
+    case 'sys_which': return Array.isArray(args.names) ? args.names.map(value => text(value)).filter(Boolean).join('、') : ''
+    case 'sys_listening_ports': return typeof args.port === 'number' ? '端口 ' + args.port : '监听端口'
+    case 'sys_processes': return text(args.filter) || '进程列表'
     case 'read_git': return [text(args.view), text(args.path ?? args.file ?? args.ref)].filter(Boolean).join(' · ') || 'Git 证据'
     // A finished session is reported by the right-hand exit status; calling it
     // "waiting for output" beside that status contradicts it.

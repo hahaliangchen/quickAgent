@@ -9,6 +9,32 @@ fn root() -> PathBuf {
 }
 
 #[test]
+fn copy_checks_existing_baselines_and_adopts_the_copied_tree() -> Result<()> {
+    let root=root();
+    let state=crate::server::agent_service::tests::test_state(&root,"127.0.0.1:1".parse()?);
+    let workspace=state.workspace.root();
+    let work=workspace.to_string_lossy().into_owned();
+    fs::write(workspace.join("source.txt"),b"copied")?;
+    fs::write(workspace.join("target.txt"),b"baseline")?;
+    save(&root,"task",&work,"target.txt",Some(b"baseline"),true)?;
+    fs::write(workspace.join("target.txt"),b"outside edit")?;
+    assert!(guard_copy(&root,"task",workspace,"target.txt").unwrap_err().to_string().contains("write_conflict"));
+    fs::write(workspace.join("target.txt"),b"baseline")?;
+    crate::tools::Workspace::new(workspace)?.copy_path(crate::tools::CopyPathRequest{from:"source.txt".into(),to:"target.txt".into(),recursive:false,overwrite:true,create_parent_dirs:true})?;
+    adopt_copy(&root,"task",workspace,"target.txt","@main",1)?;
+    assert_eq!(baseline(&root,"task",&work,"target.txt")?.flatten().as_deref(),Some(b"copied".as_slice()));
+
+    fs::create_dir_all(workspace.join("source-tree/nested"))?;
+    fs::write(workspace.join("source-tree/nested/child.txt"),b"child")?;
+    crate::tools::Workspace::new(workspace)?.copy_path(crate::tools::CopyPathRequest{from:"source-tree".into(),to:"copied-tree".into(),recursive:true,overwrite:false,create_parent_dirs:true})?;
+    adopt_copy(&root,"task",workspace,"copied-tree","@main",1)?;
+    assert_eq!(baseline(&root,"task",&work,"copied-tree/nested/child.txt")?.flatten().as_deref(),Some(b"child".as_slice()));
+    drop(state);
+    let _=fs::remove_dir_all(root);
+    Ok(())
+}
+
+#[test]
 fn shell_takeover_preserves_a_baseline_replaced_during_the_interval() -> Result<()> {
     let root = root();
     let state = crate::server::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);

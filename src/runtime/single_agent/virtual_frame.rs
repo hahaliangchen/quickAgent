@@ -69,12 +69,11 @@ impl VirtualCallReceipt {
     }
 }
 
-/// Build the child library catalog. The child keeps the parent's regular tools,
-/// including process and plugin libraries, while session state and delegation
-/// are reserved for the parent frame.
+/// Child frames only receive non-process capabilities; session state and delegation stay in the parent.
 pub(super) fn leaf_libraries(parent_libs: &Libraries) -> Libraries {
     let mut libs = parent_libs.clone();
     libs.remove("session");
+    libs.remove("process");
     libs.remove("previous");
     libs
 }
@@ -455,7 +454,7 @@ async fn drive_leaf_vm(
                             &action.id,
                             &name,
                             args,
-                            !s.ban_execution,
+                            false,
                         )
                         .await?
                     };
@@ -480,7 +479,7 @@ async fn drive_leaf_vm(
                                 &call_id,
                                 &name,
                                 args,
-                                !s.ban_execution,
+                                false,
                             )
                             .await
                         }

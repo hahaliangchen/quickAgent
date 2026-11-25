@@ -11,7 +11,7 @@ go version
 python --version
 wasm-pack --version
 rg --version | head -n 1
-command -v gcc g++ make cmake pkg-config git bwrap pdftotext pdftoppm
+command -v gcc g++ make cmake pkg-config git pdftotext pdftoppm
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
 printf 'int main(void) { return 0; }\n' > "$work/hello.c"

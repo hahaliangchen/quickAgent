@@ -21,7 +21,6 @@ pub(crate) enum CatalogKind {
 enum AllowPolicy {
     All,
     WorkspaceWrite,
-    LinuxWorkspaceExecution,
     Interactive,
 }
 
@@ -32,7 +31,6 @@ impl AllowPolicy {
         match (self, mode) {
             (_, Ask | AutoReview | FullAccess) | (Self::All, _) => true,
             (Self::WorkspaceWrite, WorkspaceWrite) => true,
-            (Self::LinuxWorkspaceExecution, WorkspaceWrite) => cfg!(target_os = "linux"),
             _ => false,
         }
     }
@@ -77,11 +75,6 @@ impl ToolSpec {
         self
     }
 
-    const fn linux_workspace_execution(mut self) -> Self {
-        self.allow = AllowPolicy::LinuxWorkspaceExecution;
-        self.approval()
-    }
-
     const fn interactive(mut self) -> Self {
         self.allow = AllowPolicy::Interactive;
         self.approval()
@@ -124,14 +117,20 @@ macro_rules! tool_specs {
 const SPECS: &[ToolSpec] = tool_specs! {
     File {
         // Managed shell sessions track their own changes. Killing one never needs approval.
-        process.exec_command, approval;
-        process.write_stdin, approval;
-        process.kill_session;
+        process.exec_command, workspace_write, approval;
+        process.write_stdin, workspace_write, approval;
+        process.kill_session, workspace_write;
         io.workspace_info;
+        sys.disk_space => sys_disk_space;
+        sys.which => sys_which;
+        sys.listening_ports => sys_listening_ports;
+        sys.processes => sys_processes;
         git.status => git_status;
         git.diff => git_diff;
         git.log => git_log;
         io.list => list_dir;
+        io.stat => stat_paths;
+        io.copy => copy_path, workspace_write, tracked, written_path("已复制");
         io.read => read_file;
         io.read_lines => read_file_lines;
         io.read_chunk => read_file_chunk;
@@ -155,11 +154,11 @@ const SPECS: &[ToolSpec] = tool_specs! {
         memory.search_symbol_business_context;
     }
     Process {
-        process.install_dependencies, linux_workspace_execution, tracked;
-        process.run_project_script, linux_workspace_execution, tracked;
-        process.get_project_process;
-        process.stop_project_process, linux_workspace_execution;
-        process.run_program, linux_workspace_execution, tracked;
+        process.install_dependencies, workspace_write, approval, tracked;
+        process.run_project_script, workspace_write, approval, tracked;
+        process.get_project_process, workspace_write;
+        process.stop_project_process, workspace_write, approval;
+        process.run_program, workspace_write, approval, tracked;
     }
     Verify {
         verify.check => verify_check, workspace_write, approval, tracked;
@@ -177,6 +176,7 @@ const SPECS: &[ToolSpec] = tool_specs! {
     }
     Http {
         http.probe => http_probe;
+        http.request => http_request;
     }
     Browser {
         browser.open => browser_open, interactive;
@@ -200,7 +200,6 @@ const SPECS: &[ToolSpec] = tool_specs! {
         io.apply_edits, workspace_write, tracked;
     }
     Dedicated {
-        process.run_readonly => run_readonly_command;
         vision.view_image, fallback_visible;
         vision.analyze_images;
         vision.image_analysis_results;
@@ -341,6 +340,7 @@ mod tests {
             ("delete_path", "已删除"),
             ("rename_path", "已移动"),
             ("create_dir", "已创建目录"),
+            ("copy_path", "已复制"),
         ];
         for spec in ToolRegistry::all() {
             let label = writes

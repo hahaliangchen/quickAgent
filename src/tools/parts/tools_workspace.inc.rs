@@ -1,3 +1,15 @@
+fn copy_regular_file(from: &Path, to: &Path, files: &mut usize, bytes: &mut u64) -> Result<()> {
+    if *files >= 5000 { return Err(ToolError::InvalidParameter("recursive copy exceeds 5000 files".into())); }
+    let size = fs::symlink_metadata(from)?.len();
+    if size > 2 * 1024 * 1024 { return Err(ToolError::InvalidParameter("a copied file exceeds the 2 MiB per-file undo snapshot limit".into())); }
+    if bytes.saturating_add(size) > 128 * 1024 * 1024 { return Err(ToolError::InvalidParameter("copy exceeds the 128 MiB undo snapshot limit".into())); }
+    crate::context::database::check_source_access(&from.canonicalize()?)?;
+    fs::copy(from, to)?;
+    *files += 1;
+    *bytes += size;
+    Ok(())
+}
+
 impl Workspace {
     pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
@@ -132,7 +144,23 @@ impl Workspace {
         if let Some(range) = request.rev_range.as_deref() { file_args.push(range); }
         if !paths.is_empty() { file_args.push("--"); file_args.extend(paths.iter().map(String::as_str)); }
         let files = run_git(&workspace.root, &file_args)?.stdout.lines().map(str::to_owned).filter(|line| !line.is_empty()).collect();
-        Ok(GitDiffResponse { diff, files, truncated, stat_only: request.stat_only })
+        let (check_ok, check_issues) = if request.check {
+            let mut check_args = vec!["diff", "--check"];
+            if request.staged { check_args.push("--cached"); }
+            if let Some(range) = request.rev_range.as_deref() { check_args.push(range); }
+            if !paths.is_empty() { check_args.push("--"); check_args.extend(paths.iter().map(String::as_str)); }
+            let output = Command::new("git").args(["-c", "core.fsmonitor=false", "-c", "color.ui=never"]).args(&check_args)
+                .current_dir(&workspace.root).env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0")
+                .output().map_err(ToolError::from)?;
+            let diagnostics = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            let issues = diagnostics.lines().filter_map(|line| {
+                let (location, message) = line.split_once(": ")?;
+                let (path, line_number) = location.rsplit_once(':').map_or((location, None), |(path, n)| (path, n.parse().ok()));
+                Some(GitDiffIssue { path: Some(path.to_owned()), line: line_number, message: message.to_owned() })
+            }).collect::<Vec<_>>();
+            (Some(output.status.success() && issues.is_empty()), issues)
+        } else { (None, Vec::new()) };
+        Ok(GitDiffResponse { diff, files, truncated, stat_only: request.stat_only, check_ok, check_issues })
     }
 
     pub fn git_log(&self, request: GitLogRequest) -> Result<GitLogResponse> {
@@ -665,6 +693,153 @@ impl Workspace {
             })
             .collect()
     }
+
+    pub fn stat_paths(&self, request: StatRequest) -> Result<StatResponse> {
+        let mut paths = request.paths;
+        if let Some(path) = request.path { paths.insert(0, path); }
+        if paths.len() > 200 { return Err(ToolError::InvalidParameter("io.stat accepts at most 200 paths".into())); }
+        let mut entries = Vec::with_capacity(paths.len());
+        for raw in paths {
+            let input = Path::new(&raw);
+            if !input.is_absolute() && input.components().any(|part| matches!(part, Component::ParentDir | Component::Prefix(_) | Component::RootDir)) {
+                return Err(ToolError::ParentTraversal(raw));
+            }
+            let candidate = if input.is_absolute() { input.to_path_buf() } else { self.root.join(input) };
+            if !input.is_absolute() {
+                let mut ancestor=candidate.as_path();
+                while !ancestor.exists() && fs::symlink_metadata(ancestor).is_err() {
+                    ancestor=ancestor.parent().ok_or_else(||ToolError::OutsideWorkspace(raw.clone()))?;
+                }
+                if !ancestor.canonicalize()?.starts_with(&self.root) { return Err(ToolError::OutsideWorkspace(raw)); }
+            }
+            let metadata = match fs::symlink_metadata(&candidate) {
+                Ok(meta) => Some(meta),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            if let Some(meta) = &metadata {
+                if meta.file_type().is_symlink() { return Err(ToolError::InvalidParameter(format!("io.stat does not follow symbolic links: {raw}"))); }
+                crate::context::database::check_source_access(&candidate.canonicalize()?)?;
+            } else if let Some(parent) = candidate.parent().and_then(|p| p.canonicalize().ok()) {
+                crate::context::database::check_source_access(&parent)?;
+            }
+            let (kind,size,modified,modified_ms,readonly,executable) = if let Some(meta) = metadata {
+                let kind = if meta.file_type().is_symlink() { EntryKind::Symlink } else if meta.is_file() { EntryKind::File } else if meta.is_dir() { EntryKind::Directory } else { EntryKind::Other };
+                let modified = meta.modified().ok();
+                let modified_ms = modified.and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|duration| duration.as_millis().min(i64::MAX as u128) as i64);
+                let modified_at = modified.map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339());
+                #[cfg(unix)]
+                use std::os::unix::fs::PermissionsExt;
+                #[cfg(unix)]
+                let executable = meta.is_file().then(|| meta.permissions().mode() & 0o111 != 0);
+                #[cfg(not(unix))]
+                let executable = None;
+                (Some(kind),Some(meta.len()),modified_at,modified_ms,Some(meta.permissions().readonly()),executable)
+            } else { (None,None,None,None,None,None) };
+            let display = if candidate.starts_with(&self.root) { candidate.strip_prefix(&self.root).unwrap_or(&candidate).to_string_lossy().replace('\\', "/") } else { candidate.to_string_lossy().into_owned() };
+            entries.push(StatEntry {path:display,exists:kind.is_some(),kind,size_bytes:size,modified_at:modified,modified_ms,readonly,executable});
+        }
+        Ok(StatResponse { entries })
+    }
+
+    pub fn copy_path(&self, request: CopyPathRequest) -> Result<CopyPathResponse> {
+        let from_input = Path::new(&request.from);
+        let source_candidate = if from_input.is_absolute() { from_input.to_path_buf() } else { self.root.join(from_input) };
+        let mut component_path = PathBuf::new();
+        for component in source_candidate.components() {
+            component_path.push(component.as_os_str());
+            if fs::symlink_metadata(&component_path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+                return Err(ToolError::InvalidParameter("copy does not follow symbolic links".into()));
+            }
+        }
+        let from = if from_input.is_absolute() && !from_input.starts_with(&self.root) {
+            let source = from_input.canonicalize()?;
+            crate::context::database::check_source_access(&source)?;
+            source
+        } else {
+            crate::tools::file_edit::workspace_path(&self.root, &request.from)?
+        };
+        let to = crate::tools::file_edit::workspace_path(&self.root, &request.to)?;
+        if from == self.root || to == self.root || in_repository_metadata(&self.root, &from) || in_repository_metadata(&self.root, &to)
+            || from.components().any(|part| part.as_os_str() == ".git")
+        {
+            return Err(ToolError::InvalidParameter("refusing to copy the workspace root or repository metadata".into()));
+        }
+        if from == to { return Err(ToolError::InvalidParameter("source and destination must differ".into())); }
+        let source = fs::symlink_metadata(&from)?;
+        if source.file_type().is_symlink() { return Err(ToolError::InvalidParameter("copy does not follow symbolic links".into())); }
+        if source.is_dir() && !request.recursive { return Err(ToolError::InvalidParameter("directory copy requires recursive: true".into())); }
+        if source.is_dir() && to.starts_with(&from) { return Err(ToolError::InvalidParameter("cannot copy a directory into itself".into())); }
+        let lock_a = crate::tools::file_edit::file_lock(&from);
+        let lock_b = crate::tools::file_edit::file_lock(&to);
+        let (_guard_a, _guard_b) = if from < to {
+            (lock_a.lock().unwrap_or_else(|e|e.into_inner()), lock_b.lock().unwrap_or_else(|e|e.into_inner()))
+        } else {
+            (lock_b.lock().unwrap_or_else(|e|e.into_inner()), lock_a.lock().unwrap_or_else(|e|e.into_inner()))
+        };
+        if (!from_input.is_absolute() && from != crate::tools::file_edit::workspace_path(&self.root, &request.from)?)
+            || to != crate::tools::file_edit::workspace_path(&self.root, &request.to)?
+        { return Err(ToolError::WriteConflict("copy path changed while waiting".into())); }
+        let existing = fs::symlink_metadata(&to).ok();
+        if existing.is_some() && !request.overwrite {
+            return Err(ToolError::WritePreconditionRequired(format!("destination exists: pass overwrite: true to replace {}",request.to)));
+        }
+        if existing.as_ref().is_some_and(|meta| meta.is_dir() != source.is_dir()) {
+            return Err(ToolError::InvalidParameter("source and destination kinds must match when overwriting".into()));
+        }
+        if existing.is_some() && source.is_dir() {
+            let mut dirs=vec![to.clone()];
+            while let Some(dir)=dirs.pop() {
+                for item in fs::read_dir(&dir)? {
+                    let entry=item?;
+                    let path=entry.path();
+                    if entry.file_name()==".git" { return Err(ToolError::InvalidParameter("refusing to replace a directory containing repository metadata".into())); }
+                    let metadata=fs::symlink_metadata(&path)?;
+                    if metadata.is_dir() && !metadata.file_type().is_symlink() { dirs.push(path); }
+                }
+            }
+        }
+        let parent = to.parent().ok_or_else(||ToolError::OutsideWorkspace(request.to.clone()))?;
+        if request.create_parent_dirs { fs::create_dir_all(parent)?; }
+        else if !parent.is_dir() { return Err(ToolError::NotFound(parent.display().to_string())); }
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let file_name = to.file_name().ok_or_else(||ToolError::InvalidParameter("destination must have a file name".into()))?;
+        let stage = parent.join(format!(".{}.copy-stage-{}-{stamp}",file_name.to_string_lossy(),std::process::id()));
+        let backup = parent.join(format!(".{}.copy-backup-{}-{stamp}",file_name.to_string_lossy(),std::process::id()));
+        let mut count=0usize; let mut bytes=0u64;
+        let staged = (|| -> Result<()> {
+            if source.is_file() { copy_regular_file(&from,&stage,&mut count,&mut bytes)?; }
+            else {
+                fs::create_dir(&stage)?;
+                let mut stack=vec![(from.clone(),stage.clone())];
+                let mut visited=0usize;
+                while let Some((src,dst))=stack.pop() {
+                    for item in fs::read_dir(&src)? {
+                        visited+=1;
+                        if visited>10_000 { return Err(ToolError::InvalidParameter("recursive copy exceeds 10000 directory entries".into())); }
+                        let entry=item?; let source_path=entry.path();
+                        if entry.file_name()==".git" { continue; }
+                        let target_path=dst.join(entry.file_name()); let metadata=fs::symlink_metadata(&source_path)?;
+                        if metadata.file_type().is_symlink() { continue; }
+                        if metadata.is_dir() { fs::create_dir(&target_path)?; stack.push((source_path,target_path)); }
+                        else if metadata.is_file() { copy_regular_file(&source_path,&target_path,&mut count,&mut bytes)?; }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error)=staged { let _=if stage.is_dir(){fs::remove_dir_all(&stage)}else{fs::remove_file(&stage)}; return Err(error); }
+        if existing.is_some() { fs::rename(&to,&backup)?; }
+        if let Err(error)=fs::rename(&stage,&to) {
+            if existing.is_some() { let _=fs::rename(&backup,&to); }
+            let _=if stage.is_dir(){fs::remove_dir_all(&stage)}else{fs::remove_file(&stage)};
+            return Err(error.into());
+        }
+        if existing.is_some() { let _=if backup.is_dir(){fs::remove_dir_all(&backup)}else{fs::remove_file(&backup)}; }
+        let kind=if source.is_dir(){"directory"}else{"file"};
+        Ok(CopyPathResponse{from:self.relative_display(&from)?,to:self.relative_display(&to)?,kind:kind.into(),files_copied:count,bytes_copied:bytes,overwritten:existing.is_some()})
+    }
+
 
     pub fn write_file(&self, request: WriteFileRequest) -> Result<WriteFileResponse> {
         check_write_size(request.content.len())?;

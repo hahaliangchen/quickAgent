@@ -98,6 +98,10 @@ pub(crate) fn check_source_access(path: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
             "SQLITE_STATE_FILE: host database files are accessed through SQLite, not source-file tools"));
     }
+    if is_generic_secret_path(&resolved) {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+            "SECRET_FILE: environment and credential files are not accessible through source-file tools"));
+    }
     if is_secret_file(&resolved, &crate::server::ai_proxy::secret_files()) {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
             "SECRET_FILE: this file holds API keys and is never readable by tools; the host applies the credentials itself. Model settings are in providers.yml and agent-generation.yml beside it"));
@@ -107,6 +111,24 @@ pub(crate) fn check_source_access(path: &Path) -> std::io::Result<()> {
 
 /// Whether a resolved path is one of the secret files, compared after links
 /// resolve so another spelling or a symlink reaches the same answer.
+fn is_generic_secret_path(path: &Path) -> bool {
+    let is_secret_component = |component: &std::ffi::OsStr| {
+        let value = component.to_string_lossy();
+        let value = if cfg!(windows) { value.to_ascii_lowercase() } else { value.into_owned() };
+        value == ".ssh"
+    };
+    if path.components().any(|part| is_secret_component(part.as_os_str())) {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(std::ffi::OsStr::to_str) else { return false; };
+    let name = if cfg!(windows) { name.to_ascii_lowercase() } else { name.to_owned() };
+    if name == ".env" || (name.starts_with(".env.") && !["example", "sample", "template"].iter().any(|suffix| name.ends_with(suffix))) {
+        return true;
+    }
+    matches!(name.as_str(), "credentials" | "credentials.json" | "service-account.json" | "id_rsa" | "id_ecdsa" | "id_ed25519" | "id_dsa")
+        || [".pem", ".key", ".p12", ".pfx"].iter().any(|suffix| name.ends_with(suffix))
+}
+
 fn is_secret_file(resolved: &Path, secrets: &[std::path::PathBuf]) -> bool {
     secrets.iter().any(|secret| {
         let secret = secret.canonicalize().unwrap_or_else(|_| secret.clone());

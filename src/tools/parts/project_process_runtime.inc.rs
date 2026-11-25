@@ -296,7 +296,6 @@ async fn launch_with_boundary(
             let meta = existing.meta.lock().await.clone();
             if meta.running
                 && meta.root == root
-                && meta.sandboxed == (boundary != crate::tools::process_sandbox::ExecutionBoundary::Host)
                 && meta.project_path == relative
                 && meta.script == script
                 && meta.args == extra
@@ -473,7 +472,6 @@ async fn launch_with_boundary(
             exit_code: None,
             termination_reason: None,
             background,
-            sandboxed: boundary != crate::tools::process_sandbox::ExecutionBoundary::Host,
         }),
         logs: Mutex::new(Logs::default()),
         persist_guard: Mutex::new(()),

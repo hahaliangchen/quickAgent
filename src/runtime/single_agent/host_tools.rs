@@ -1,4 +1,4 @@
-//! Host-side tool execution backend (permissions, approvals, sandbox, managed
+//! Host-side tool execution backend (permissions, approvals, entry rules, managed
 //! file baselines, workspace change tracking, and plugin/page tool dispatch).
 //!
 //! Kept strictly decoupled from the agent driver loop so the Context-as-Code v2
@@ -16,7 +16,10 @@ const SHELL_MODULE_ONLY_MESSAGE: &str = "SHELL_MODULE_ONLY: Shell execution is d
 /// Which host capabilities a plugin-owned session may reach. `register_image`
 /// is deliberately missing: it reads local files, and a plugin page owns none
 /// outside its own workspace.
+fn sys_probe_page_allows(plugin_owned: bool) -> bool { !plugin_owned }
+
 pub(super) fn page_allows(s: &Session<'_>, name: &str) -> bool {
+    if crate::tools::sys_info::is_tool(name) { return sys_probe_page_allows(s.plugin.is_some()); }
     let Some(owner) = &s.plugin else {
         return true;
     };
@@ -183,7 +186,7 @@ pub(super) async fn business_tool(
     business_tool_inner(s, node, name, args, call_id, false, false).await
 }
 
-/// Execute one host capability call with full permission, approval, sandbox,
+/// Execute one host capability call with full permission, approval, entry rules,
 /// file-baseline, and plugin routing enforcement.
 #[allow(dead_code)]
 pub(super) async fn business_tool_inner(
@@ -195,11 +198,16 @@ pub(super) async fn business_tool_inner(
     allow_shell: bool,
     program_read: bool,
 ) -> Result<Value> {
+    let process_tool = crate::tools::project_process::is_execution(name) || name == "get_project_process";
+    ensure!(!process_tool || (allow_shell && s.plugin.is_none()), SHELL_MODULE_ONLY_MESSAGE);
     ensure!(
-        !crate::tools::project_process::is_execution(name) || allow_shell,
-        SHELL_MODULE_ONLY_MESSAGE
+        !process_tool || (!s.ban_execution && s.state.permission_mode != agent_service::PermissionMode::ReadOnly),
+        "permission_denied: {name}"
     );
     ensure!(page_allows(s, name), "PLUGIN_SCOPE_DENIED: {name}");
+    if name == "http_request" && s.state.permission_mode == agent_service::PermissionMode::ReadOnly {
+        ensure!(matches!(args["method"].as_str().unwrap_or("GET").to_ascii_uppercase().as_str(), "GET" | "HEAD"), "permission_denied: HTTP write method in read-only mode");
+    }
     if name == "read_session_history" {
         let mut args = args;
         if s.delegate_id().is_some() || s.plugin.is_some() {
@@ -268,42 +276,6 @@ pub(super) async fn business_tool_inner(
                 )),
         "permission_denied: {name}"
     );
-    if crate::tools::process_sandbox::ExecutionBoundary::for_mode(s.state.permission_mode)
-        != crate::tools::process_sandbox::ExecutionBoundary::Host
-        && s.state
-            .tool_catalog
-            .as_ref()
-            .is_some_and(|catalog| catalog.packages.is_command_tool(name))
-    {
-        anyhow::bail!(
-            "SANDBOX_UNSUPPORTED: package command tools cannot yet run under the workspace sandbox"
-        );
-    }
-    let ssh_protected = crate::server::builtin_plugins::ssh::requires_approval(name, &args);
-    // A report submission leaves the machine, so it is time-boxed to one card.
-    let guarded = ssh_protected
-        || crate::server::builtin_plugins::daily_report_requires_approval(name, &args);
-    if guarded
-        || (!(name == "write_stdin" && args["chars"].as_str().is_none_or(str::is_empty))
-            && crate::tools::tool_approvals::needs_approval(
-                s.state.permission_mode,
-                name,
-                s.state.tool_catalog.as_deref(),
-                s.ban_execution,
-            ))
-    {
-        crate::tools::tool_approvals::wait(
-            s.state,
-            s.task,
-            s.model,
-            s.delegate_id(),
-            call_id,
-            name,
-            &args,
-            s.cancel,
-        )
-        .await?;
-    }
     if crate::tools::plan_tools::is_tool(name) {
         let work = s.state.workspace.clone();
         return crate::tools::plan_tools::scoped(work.root().to_path_buf(), s.task.to_owned(), s.turn, async {
@@ -350,6 +322,41 @@ pub(super) async fn business_tool_inner(
         .await?;
     }
     let outside_exec = outside_exec_or_index_paths(tool_workspace.root(), name, &args);
+    // A directory approval covers the same command with its explicit external target.
+    // Never reuse a general shell approval as an outside-write decision.
+    let directory_approval = (process_tool || matches!(name, "git_commit" | "git_restore")) && !outside_exec.is_empty();
+    let ssh_protected = crate::server::builtin_plugins::ssh::requires_approval(name, &args);
+    // A report submission leaves the machine, so it is time-boxed to one card.
+    let http_external = if name == "http_request" {
+        let method = args["method"].as_str().unwrap_or("GET").to_ascii_uppercase();
+        let host = reqwest::Url::parse(args["url"].as_str().unwrap_or("" )).ok().and_then(|url| url.host_str().map(str::to_owned));
+        !matches!(method.as_str(), "GET" | "HEAD") || !host.as_deref().is_some_and(|host| host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()))
+    } else { false };
+    let guarded = ssh_protected
+        || crate::server::builtin_plugins::daily_report_requires_approval(name, &args)
+        || (http_external && s.state.permission_mode != agent_service::PermissionMode::FullAccess);
+    if guarded
+        || (!directory_approval
+            && !(name == "write_stdin" && args["chars"].as_str().is_none_or(str::is_empty))
+            && crate::tools::tool_approvals::needs_approval(
+                s.state.permission_mode,
+                name,
+                s.state.tool_catalog.as_deref(),
+                s.ban_execution,
+            ))
+    {
+        crate::tools::tool_approvals::wait(
+            s.state,
+            s.task,
+            s.model,
+            s.delegate_id(),
+            call_id,
+            name,
+            &args,
+            s.cancel,
+        )
+        .await?;
+    }
     if !outside_exec.is_empty() {
         ensure!(
             !matches!(
@@ -423,7 +430,12 @@ pub(super) async fn business_tool_inner(
             }
         }
         let mut normalized = args.clone();
-        normalized["path"] = json!(edit_target.rel_path);
+        if name == "copy_path" {
+            let source = args["from"].as_str().context("missing copy source")?;
+            let source = std::path::Path::new(source);
+            normalized["from"] = json!(if source.is_absolute() { source.to_string_lossy().into_owned() } else { tool_workspace.root().join(source).to_string_lossy().into_owned() });
+            normalized["to"] = json!(edit_target.rel_path);
+        } else { normalized["path"] = json!(edit_target.rel_path); }
         normalized["workspace_root"] = json!(edit_target.work_root.to_string_lossy());
         (
             std::sync::Arc::new(crate::tools::Workspace::new(&edit_target.work_root)?),
@@ -446,12 +458,9 @@ pub(super) async fn business_tool_inner(
     } else {
         (tool_workspace, args, false)
     };
-    if name == crate::tools::shell_process::READ_ONLY {
-        return crate::tools::shell_process::run_read_only(&tool_workspace, &args, s.cancel).await;
-    }
-    let sandbox_boundary = crate::tools::shell_process::boundary(s.state.permission_mode, s.ban_execution);
+    let sandbox_boundary = crate::tools::process_sandbox::ExecutionBoundary::for_mode(s.state.permission_mode);
     if crate::tools::shell_process::is_tool(name) {
-        return Box::pin(execute_sandboxed_shell_tool(
+        return Box::pin(execute_shell_with_context(
             sandbox_boundary,
             extra_roots,
             s.state,
@@ -481,6 +490,7 @@ pub(super) async fn business_tool_inner(
             );
         }
         let _mutation_guard = if destructive || (crate::tools::workspace_changes::is_mutation(name)
+            && outside_exec.is_empty()
             && s.delegate_id().is_none()
             && s.plugin.is_none())
         {
@@ -499,10 +509,12 @@ pub(super) async fn business_tool_inner(
         if destructive {
             crate::tools::workspace_changes::ensure_no_shell(s.state.workspace.root(), tool_workspace.root())?;
         }
-        let _claims = crate::tools::workspace_changes::resource_keys(tool_workspace.root(), name, &args)?
-            .into_iter().map(|resource| crate::tools::workspace_changes::claim_resource(
-                s.state.workspace.root(), s.task, call_id, resource,
-            )).collect::<Result<Vec<_>>>()?;
+        let _claims = if outside_exec.is_empty() {
+            crate::tools::workspace_changes::resource_keys(tool_workspace.root(), name, &args)?
+                .into_iter().map(|resource| crate::tools::workspace_changes::claim_resource(
+                    s.state.workspace.root(), s.task, call_id, resource,
+                )).collect::<Result<Vec<_>>>()?
+        } else { Vec::new() };
         let parallel_owner = s.task_node_id.as_deref().and_then(|id| {
             let conn = agent_service::open_db(s.state.workspace.root()).ok()?;
             let node = crate::runtime::function_frames::get(&conn, s.task, id).ok()?;
@@ -538,7 +550,7 @@ pub(super) async fn business_tool_inner(
         } else {
             None
         };
-        let untouched = if crate::tools::project_process::may_change_files(name) || crate::tools::git_tools::mutates(name) || name == crate::tools::batch_edits::NAME {
+        let untouched = if (crate::tools::project_process::may_change_files(name) || crate::tools::git_tools::mutates(name) || name == crate::tools::batch_edits::NAME) && outside_exec.is_empty() {
             Some(managed_files::untouched(
                 s.state.workspace.root(),
                 s.task,
@@ -552,11 +564,14 @@ pub(super) async fn business_tool_inner(
             crate::tools::batch_edits::paths(tool_workspace.root(), &args)?;
             managed_files::guard_batch(s.state.workspace.root(),s.task,tool_workspace.root(),&mut args)?;
         }
+        if name == "copy_path" {
+            managed_files::guard_copy(s.state.workspace.root(),s.task,tool_workspace.root(),args["to"].as_str().context("missing copy destination")?)?;
+        }
         let targets_external_project = is_outside_edit || !outside_exec.is_empty();
         let result = if crate::tools::workspace_changes::is_mutation(name)
             && s.delegate_id().is_none()
             && s.plugin.is_none()
-            && !targets_external_project
+            && (!targets_external_project || name == "copy_path")
         {
             crate::tools::workspace_changes::execute_tracked(
                 s.state.clone(),
@@ -569,8 +584,7 @@ pub(super) async fn business_tool_inner(
             )
             .await
         } else if crate::tools::workspace_changes::is_mutation(name) {
-            let boundary =
-                crate::tools::process_sandbox::ExecutionBoundary::for_mode(s.state.permission_mode);
+            let boundary = sandbox_boundary;
             if crate::tools::project_process::is_tool(name) {
                 crate::tools::project_process::execute_with_boundary(
                     &tool_workspace,
@@ -602,10 +616,7 @@ pub(super) async fn business_tool_inner(
                 .await
             }
         } else if crate::tools::git_tools::is_tool(name) {
-            let boundary = if cfg!(target_os = "linux") && s.state.permission_mode == crate::server::agent_service::PermissionMode::ReadOnly {
-                crate::tools::process_sandbox::ExecutionBoundary::ReadOnly
-            } else { crate::tools::process_sandbox::ExecutionBoundary::for_mode(s.state.permission_mode) };
-            crate::tools::git_tools::execute(&tool_workspace,name,&args,boundary,s.cancel).await
+            crate::tools::git_tools::execute(&tool_workspace, name, &args, sandbox_boundary, s.cancel).await
         } else if crate::tools::browser_control::is_tool(name) {
             let mut visual = visual_context(s, node)?;
             visual.source_tool_call_id = call_id.to_owned();
@@ -726,6 +737,13 @@ pub(super) async fn business_tool_inner(
             )
             .await
         };
+        if name == "copy_path" && result.is_ok() {
+            managed_files::adopt_copy(
+                s.state.workspace.root(),s.task,tool_workspace.root(),
+                args["to"].as_str().context("missing copy destination")?,
+                parallel_owner.as_deref().unwrap_or("@main"),s.turn,
+            )?;
+        }
         if let Some(untouched) = untouched
             && !result.as_ref().is_ok_and(|value| value["running"] == true)
         {
@@ -790,7 +808,7 @@ pub(super) async fn business_tool_inner(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
-async fn execute_sandboxed_shell_tool(
+async fn execute_shell_with_context(
     sandbox_boundary: crate::tools::process_sandbox::ExecutionBoundary,
     extra_roots: Vec<std::path::PathBuf>,
     state: &AgentServiceState,
@@ -836,11 +854,12 @@ pub(super) fn detect_outside_edit(
     use std::path::{Component, Path, PathBuf};
     if !matches!(
         name,
-        "write_file" | "edit_file" | "replace_range" | "delete_path" | "create_dir"
+        "write_file" | "edit_file" | "replace_range" | "delete_path" | "create_dir" | "copy_path"
     ) {
         return Ok(None);
     }
-    let Some(raw_path) = args["path"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+    let target_key = if name == "copy_path" { "to" } else { "path" };
+    let Some(raw_path) = args[target_key].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
     let explicit_ws = args["workspace_root"]
@@ -999,6 +1018,13 @@ pub(super) fn outside_exec_or_index_paths(
             }
         }
         "git_commit" | "git_restore" => {
+            if let Some(w) = args["repo"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                raw_candidates.push(w);
+            }
             if let Some(w) = args["workspace_root"]
                 .as_str()
                 .map(str::trim)
@@ -1049,6 +1075,20 @@ pub(super) fn outside_exec_or_index_paths(
     found
 }
 
+fn resolve_existing_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    let mut probe=path.as_path();
+    let mut suffix=Vec::new();
+    while !probe.exists() && std::fs::symlink_metadata(probe).is_err() {
+        let Some(name)=probe.file_name() else { return path; };
+        suffix.push(name.to_os_string());
+        let Some(parent)=probe.parent() else { return path; };
+        probe=parent;
+    }
+    let mut resolved=probe.canonicalize().unwrap_or_else(|_|probe.to_path_buf());
+    for name in suffix.iter().rev() { resolved.push(name); }
+    resolved
+}
+
 pub(super) fn outside_read_paths(
     workspace: &std::path::Path,
     extra_roots: &[std::path::PathBuf],
@@ -1059,6 +1099,8 @@ pub(super) fn outside_read_paths(
         name,
         "list_dir"
             | "search_text"
+            | "stat_paths"
+            | "copy_path"
             | "read_git"
             | "blueprint__overview"
             | "blueprint__read_graph"
@@ -1100,7 +1142,7 @@ pub(super) fn outside_read_paths(
             if name.starts_with("blueprint__") && path.is_relative() { root.join(path) } else { path }
         });
     let outside = |path: std::path::PathBuf| {
-        let resolved = path.canonicalize().unwrap_or(path);
+        let resolved = resolve_existing_prefix(path);
         !resolved.starts_with(&root)
             && !extra_roots.iter().any(|extra| resolved.starts_with(extra))
     };
@@ -1111,7 +1153,7 @@ pub(super) fn outside_read_paths(
         found.push(base.to_string_lossy().into_owned());
     }
     if name != "read_git" {
-        for raw in args["path"].as_str().into_iter().chain(
+        for raw in args["path"].as_str().into_iter().chain(args["from"].as_str()).chain((name != "copy_path").then(|| args["to"].as_str()).flatten()).chain(
             (name == "blueprint__impact").then(|| args["file_path"].as_str()).flatten(),
         ).chain(
             args["paths"]
@@ -1143,4 +1185,33 @@ mod tests {
         assert!(SHELL_MODULE_ONLY_MESSAGE.contains("allow_shell=false"));
         assert!(!SHELL_MODULE_ONLY_MESSAGE.contains("@virtual helpers cannot run shell"));
     }
+
+    #[test]
+    fn sys_probes_are_not_available_to_plugin_owned_pages() {
+        assert!(super::sys_probe_page_allows(false));
+        assert!(!super::sys_probe_page_allows(true));
+    }
+
+    #[test]
+    fn external_stat_and_copy_sources_require_read_scoping() {
+        use serde_json::json;
+        let root=std::env::temp_dir().join(format!("host-tools-read-scope-{}",crate::server::agent_service::uuid_like()));
+        let outside=root.with_extension("external");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let workspace=crate::tools::Workspace::new(&root).unwrap();
+        let file=outside.join("source.txt");
+        std::fs::write(&file,"source").unwrap();
+        let stat=super::outside_read_paths(&root,&[],"stat_paths",&json!({"paths":[file]}));
+        assert_eq!(stat.len(),1);
+        let source=outside.join("source.txt");
+        let copy=super::outside_read_paths(&root,&[],"copy_path",&json!({"from":source,"to":"copy.txt"}));
+        assert_eq!(copy.len(),1);
+        let target=outside.join("new-copy.txt");
+        let edit=super::detect_outside_edit(&workspace,"copy_path",&json!({"from":"source.txt","to":target})).unwrap().unwrap();
+        assert!(edit.display_path.contains("new-copy.txt"));
+        let _=std::fs::remove_dir_all(root);
+        let _=std::fs::remove_dir_all(outside);
+    }
+
 }

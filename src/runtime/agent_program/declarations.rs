@@ -290,7 +290,7 @@ pub fn headers(libraries: &Libraries, definitions: &[Value]) -> String {
 pub(crate) fn lazy_contract_library(name: &str) -> bool {
     !matches!(
         name,
-        "io" | "git"
+        "io" | "git" | "sys"
             | "process"
             | "verify"
             | "plan"
@@ -310,8 +310,8 @@ pub fn static_library_header(libraries: &Libraries) -> String {
         "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n\
          // PATHS: every io.* / git.* path is relative to the workspace root unless you pass an absolute one — write \"src/...\", \"frontend/...\" directly; calling io.workspace_info() first just to build absolute paths wastes a step.\n\
          // IMPORTANT: Pre-bound `io.*`, `git.*`, `process.*` methods are SYNCHRONOUS.\n\
-         // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`, `process.promises.run_readonly`) or `require(\"<lib>/promises\")`.\n\
-         // MANDATORY exact-text edit rule: for io.edit/io.replace/io.write, use String.raw tagged templates for snippets containing backslashes that have NO backticks (`) or `${` (put real line breaks directly because `\\n` stays literal).\n\
+         // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`) or `require(\"<lib>/promises\")`.\n\
+         // MANDATORY exact-text edit rule: for multi-line old_text/new_text in io.edit/io.apply_edits/io.replace/io.write, use real multi-line template literals (`...` or String.raw`...` when backslashes exist and there are NO backticks or `${`) instead of minifying into single-line single-quoted `'...\\n...'` strings (saves tokens and prevents quoting syntax errors).\n\
          // NEVER wrap a whole file or multi-line block that contains backticks (`) or `${` (such as Rust doc comments, Markdown, or TS templates) in a single String.raw`...` — unescaped backticks terminate the template literal early. Use a quoted line array `[\"line 1\", String.raw`line 2`].join(\"\\n\")` instead.\n",
     );
     out.push_str(&directory(libraries));
@@ -382,21 +382,23 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "delete_path" => "args: { path: string; recursive?: boolean }): { path: string; deleted: boolean; kind: 'file' | 'directory' }",
                 "rename_path" => "args: { path: string; to: string; overwrite?: boolean; create_parent_dirs?: boolean }): { path: string; to: string; overwritten: boolean; index_refresh: unknown }",
                 "create_dir" => "args?: { path: string; recursive?: boolean }): { path: string; created: boolean }",
-                "workspace_info" => "args?: { workspace_root?: string }): { workspace_root: string; platform: string; allowed_scope: string; default_ignored_dirs: string[] }",
-                "git_blame" => "args: { path: string; start_line: number; end_line: number }): Array<{ line: number; commit: string; author: string; date: string | null; summary: string }>",
-                "git_commit" => "args: { paths: string[]; message: string }): { commit: string; files_count: number; summary: string; git_metadata_changed: boolean }",
-                "git_restore" => "args: { paths: string[]; staged?: boolean }): { paths: string[]; files_count: number; staged: boolean; git_metadata_changed: boolean }",
+                "stat_paths" => "args: { path?: string; paths?: string[] }): { entries: Array<{ path: string; exists: boolean; kind?: 'file' | 'directory' | 'symlink' | 'other'; size_bytes?: number; modified_at?: string; modified_ms?: number; readonly?: boolean; executable?: boolean }> }",
+                "copy_path" => "args: { from: string; to: string; recursive?: boolean; overwrite?: boolean; create_parent_dirs?: boolean }): { from: string; to: string; kind: 'file' | 'directory'; files_copied: number; bytes_copied: number; overwritten: boolean }",
+                "sys_disk_space" => "args?: { path?: string }): { path: string; total_bytes: number; available_bytes: number; free_bytes: number; available_gb: number; used_percent: number }",
+                "sys_which" => "args: { names: string[] }): { found: Record<string, string | null> }",
+                "sys_listening_ports" => "args?: { port?: number; loopback_only?: boolean }): { ports: Array<{ protocol: 'tcp' | 'tcp6'; address: string; port: number; pid?: number; process?: string }>; supported: boolean }",
+                "sys_processes" => "args?: { filter?: string; limit?: number }): { processes: Array<{ pid: number; ppid?: number; name: string; state?: string }>; truncated: boolean; supported: boolean }",
                 "apply_edits" => "args: { files: Array<{ path: string; expected_code_hash?: string; edits: Array<{ old_text: string; new_text: string; line_hint?: number; replace_all?: boolean }> }>; atomic?: boolean }): { atomic: boolean; changed: number; failed: number; files: Array<{ path: string; changed: boolean; bytes_written?: number; code_hash?: string; index_refresh?: Record<string, unknown>; error?: string; file_index?: number; edit_index?: number | null }> }",
-                "git_status" => "args?: { paths?: string[]; include_untracked?: boolean; max_entries?: number }): { head: string | null; branch: string | null; clean: boolean; staged: string[]; modified: string[]; untracked: string[]; total_entries: number; truncated: boolean }",
-                "git_diff" => "args?: { rev_range?: string; staged?: boolean; paths?: string[]; stat_only?: boolean; unified?: number; max_lines?: number; max_chars?: number }): { diff: string; files: string[]; truncated: boolean; stat_only: boolean }",
-                "git_log" => "args?: { rev?: string; limit?: number; paths?: string[] }): { commits: unknown[]; truncated: boolean }",
-                "run_readonly_command" => "args: { cmd: string; workdir?: string; timeout_ms?: number }): { exit_code: number | null; stdout: string; stderr: string }",
-                "exec_command" => "args: { cmd: string; workdir?: string; yield_time_ms?: number; max_output_tokens?: number; stdin?: boolean }): { exit_code: number | null; running: boolean; session_id?: string; stdout: string; stderr: string }",
-                "write_stdin" => "args: { session_id: string; chars?: string; yield_time_ms?: number; max_output_tokens?: number; stream?: 'stdout' | 'stderr'; char_offset?: number }): { exit_code: number | null; running: boolean; session_id?: string; stdout: string; stderr: string; output?: string; next_char_offset?: number | null; total_chars?: number }",
-                "kill_session" => "args: { session_id: string }): { exit_code: number | null; running: boolean; session_id?: string }",
+                "workspace_info" => "args?: { workspace_root?: string }): { workspace_root: string; platform: string; allowed_scope: string; default_ignored_dirs: string[] }",
                 "read_tool_contracts" => "args?: { libraries?: string[]; library?: string; methods?: string[]; overview?: boolean }): { declarations?: string; overview?: string }",
-                "find_library_methods" => "args: { query?: string; library?: string }): { methods: Array<{ library: string; method: string; tool?: string; orchestration?: boolean; description?: string }> }",
+                "find_library_methods" => "args?: { query?: string; library?: string }): { methods: Array<{ library: string; method: string; tool?: string; orchestration?: boolean; description?: string }> }",
                 "read_program_guide" => "args?: { section?: string }): { guide: string; builtin_contracts: string }",
+                "git_blame" => "args: { path: string; start_line: number; end_line: number }): Array<{ line: number; commit: string; author: string; date: string | null; summary: string }>",
+                "git_commit" => "args: { repo?: string; paths: string[]; message: string }): { commit: string; files_count: number; summary: string; git_metadata_changed: boolean }",
+                "git_restore" => "args: { repo?: string; paths: string[]; staged?: boolean }): { paths: string[]; files_count: number; staged: boolean; git_metadata_changed: boolean }",
+                "git_status" => "args?: { repo?: string; paths?: string[]; include_untracked?: boolean; max_entries?: number }): { head: string | null; branch: string | null; clean: boolean; staged: string[]; modified: string[]; untracked: string[]; total_entries: number; truncated: boolean }",
+                "git_diff" => "args?: { repo?: string; rev_range?: string; staged?: boolean; paths?: string[]; stat_only?: boolean; check?: boolean; unified?: number; max_lines?: number; max_chars?: number }): { diff: string; files: string[]; truncated: boolean; stat_only: boolean; check_ok?: boolean; check_issues?: Array<{ path?: string; line?: number; message: string }> }",
+                "git_log" => "args?: { repo?: string; rev?: string; limit?: number; paths?: string[] }): { commits: unknown[]; truncated: boolean }",
                 "list_skills" => "args?: {}): Array<{ name: string; description: string }>",
                 "read_skill" => "args: { name: string }): { name: string; content: string }",
                 "ask_user" => "args: { question: string }): { code: string; question: string; message: string }",
@@ -410,6 +412,10 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "plan_update" => "args: { id: string; status: 'pending' | 'in_progress' | 'done' | 'blocked'; note?: string; complete_children?: boolean }): { step: { id: string; title: string; status: 'pending' | 'in_progress' | 'done' | 'blocked'; note?: string; parent_id?: string }; completed: number; total: number }",
                 "plan_add_substeps" => "args: { parent_id: string; steps: Array<{ id: string; title: string; status: 'pending' | 'in_progress' | 'done' | 'blocked'; note?: string; parent_id?: string }> }): { steps: Array<{ id: string; title: string; status: 'pending' | 'in_progress' | 'done' | 'blocked'; note?: string; parent_id?: string }>; added: number; completed: number; total: number }",
                 "http_probe" => "args: { url: string; timeout_ms?: number; reason?: string }): { reachable: boolean; http_status: number | null; check_passed: boolean; elapsed_ms: number; reused?: boolean }",
+                "http_request" => "args: { url: string; method?: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; headers?: Record<string, string>; body?: string | Record<string, unknown> | unknown[]; timeout_ms?: number; max_bytes?: number; follow_redirects?: boolean }): { url: string; method: string; status: number; ok: boolean; elapsed_ms: number; headers: Record<string, string>; content_type?: string; body: string; json?: unknown; truncated: boolean; bytes: number }",
+                "exec_command" => "args: { cmd: string; workdir?: string; yield_time_ms?: number; max_output_tokens?: number; stdin?: boolean }): { exit_code: number | null; running: boolean; session_id?: string; stdout: string; stderr: string }",
+                "write_stdin" => "args: { session_id: string; chars?: string; yield_time_ms?: number; max_output_tokens?: number; stream?: 'stdout' | 'stderr'; char_offset?: number }): { exit_code: number | null; running: boolean; session_id?: string; stdout: string; stderr: string; output?: string; next_char_offset?: number | null; total_chars?: number }",
+                "kill_session" => "args: { session_id: string }): { exit_code: number | null; running: boolean; session_id?: string }",
                 "run_program" => "args: { program: 'cargo' | 'git' | 'node' | 'python'; args: string[]; project_path?: string; timeout_seconds?: number; max_output_bytes?: number }): unknown",
                 "install_dependencies" => "args?: { project_path?: string; mode?: 'auto' | 'install' | 'ci'; background?: boolean; timeout_seconds?: number; max_chars?: number }): unknown",
                 "run_project_script" => "args: { project_path?: string; script: string; args?: string[]; background?: boolean; timeout_seconds?: number; ready_url?: string; ready_port?: number; wait_seconds?: number; max_chars?: number }): unknown",
@@ -448,9 +454,6 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "search_symbol_business_context" => "args: { query: string; limit?: number }): { memory_path: string; query: string; matches: unknown[] }",
                 _ => "args?: Record<string, unknown>): unknown",
             };
-            if target == "run_readonly_command" {
-                out.push_str("  /** Run strictly read-only CLI diagnostics in a read-only sandbox — prefer `io.list`/`io.read`/`io.search` and `git.*` for file/git work, and use `process.exec_command` for builds/tests that write artifacts or spawn nested sandboxes. */\n");
-            }
             out.push_str(&format!("  function {method}({sig};\n"));
         }
         if library == "host" {
@@ -474,9 +477,9 @@ pub fn static_library_header(libraries: &Libraries) -> String {
 pub fn directory(libraries: &Libraries) -> String {
     let process_purpose = if libraries
         .get("process")
-        .is_some_and(|m| m.contains_key("exec_command") || m.contains_key("run_readonly"))
+        .is_some_and(|m| m.contains_key("exec_command"))
     {
-        "Run project commands and inspect their processes."
+        "Run project builds, tests, and CLI diagnostics under session permissions. For file, Git, database, and remote access use io.*, git.*, db.*, and ssh.*."
     } else {
         "Inspect Agent-managed project processes."
     };
@@ -486,10 +489,12 @@ pub fn directory(libraries: &Libraries) -> String {
         ]),
         ("Inspect repository history", &[
             ("git", "Read bounded structured status, diffs, and commit history without shell parsing."),
+            ("sys", "Read-only cross-platform disk, executable, TCP listener, and process probes; process results never include command lines."),
         ]),
         ("Run and inspect applications", &[
             ("process", process_purpose),
             ("ssh", "Connect to saved remote servers, register new SSH profiles (`ssh.add_server`), run remote commands (`ssh.exec`), transfer files via SFTP, and tail remote logs; discover full schemas on demand with `host.contracts({ libraries: [\"ssh\"] })`."),
+            ("db", "Connect to saved or new SQLite/MySQL/PostgreSQL databases (`db.list_connections`, `db.save_connection`), inspect schemas/DDL (`db.inspect_schema`), run parameterized read-only queries (`db.query`), explain plans (`db.explain`), execute confirmed writes (`db.execute`), and import/export `.xlsx`; discover full schemas on demand with `host.contracts({ libraries: [\"db\"] })`."),
             ("http", "Probe HTTP endpoints."),
             ("browser", "Open, inspect, and interact with browser pages."),
             ("desktop", "Inspect and operate the local desktop; discover contracts on demand."),
@@ -497,6 +502,12 @@ pub fn directory(libraries: &Libraries) -> String {
             ("blueprint", "Inspect or maintain this project's trigger-first architecture blueprint (.quickagent/blueprint), trace cross-layer impact/invariants, and verify sync against git diff; discover full schemas on demand with `host.contracts({ libraries: [\"blueprint\"] })`."),
             ("code_index", "Query indexed code symbols and call graphs; discover contracts on demand."),
             ("vision", "View and analyze images."),
+        ]),
+        ("Documents and office workflows", &[
+            ("excel", "Inspect, read, edit, format, search, and create `.xlsx` spreadsheets; discover full schemas on demand with `host.contracts({ libraries: [\"excel\"] })`."),
+            ("word", "Inspect outlines, read, edit, replace, and create `.docx` documents; discover full schemas on demand with `host.contracts({ libraries: [\"word\"] })`."),
+            ("pdf", "Inspect, read, search, merge, split, annotate, and render PDF pages; discover full schemas on demand with `host.contracts({ libraries: [\"pdf\"] })`."),
+            ("daily_report", "Read/update daily-report guides, inspect today's activity, list past reports, and prepare or submit drafts; discover full schemas on demand with `host.contracts({ libraries: [\"daily_report\"] })`."),
         ]),
         ("Conversation and saved material", &[
             ("host", "Inspect library/tool contracts, search methods, read language guide, load skills, or ask the user."),
@@ -509,6 +520,7 @@ pub fn directory(libraries: &Libraries) -> String {
     let mut result = String::from(
         "Library documentation by task. Use read_tool_contracts with a library name and overview:true to browse its methods. Pass only qualified method names for exact signatures and return fields.\n",
     );
+    let mut listed = BTreeSet::new();
     for (title, entries) in sections {
         let entries = entries.iter().filter(|(name, _)| libraries.contains_key(*name)).collect::<Vec<_>>();
         if entries.is_empty() {
@@ -516,7 +528,26 @@ pub fn directory(libraries: &Libraries) -> String {
         }
         result.push_str(&format!("\n{title}\n"));
         for (name, purpose) in entries {
+            listed.insert(*name);
             result.push_str(&format!("- {name} — {purpose}\n"));
+        }
+    }
+    let extra_plugins = libraries
+        .iter()
+        .filter(|(name, methods)| {
+            !methods.is_empty() && !name.starts_with("mcp_") && !listed.contains(name.as_str())
+        })
+        .collect::<Vec<_>>();
+    if !extra_plugins.is_empty() {
+        result.push_str("\nInstalled plugin libraries\n");
+        for (name, methods) in extra_plugins {
+            let sample = methods.keys().take(6).map(String::as_str).collect::<Vec<_>>();
+            let suffix = if methods.len() > sample.len() { ", ..." } else { "" };
+            result.push_str(&format!(
+                "- {name} — Plugin library ({} methods: {}{suffix}); discover full schemas on demand with `host.contracts({{ libraries: [\"{name}\"] }})`.\n",
+                methods.len(),
+                sample.join(", ")
+            ));
         }
     }
     result
@@ -559,23 +590,20 @@ pub fn core_methods(libraries: &Libraries, definitions: &[Value]) -> String {
                     "Find text or patterns (glob/exclude support | pipes; output capped at ~48 KiB inline budget); list matching files or count them.",
                 ),
                 "git_status" => (
-                    &["paths", "include_untracked", "max_entries"],
+                    &["repo", "paths", "include_untracked", "max_entries"],
                     &["head", "branch", "clean", "staged", "modified", "untracked", "total_entries", "truncated"],
                     "Read bounded structured working-tree status; use paths to scope a large repository.",
                 ),
                 "git_diff" => (
-                    &["rev_range", "staged", "paths", "stat_only", "unified", "max_lines", "max_chars"],
+                    &["repo", "rev_range", "staged", "paths", "stat_only", "check", "unified", "max_lines", "max_chars"],
                     &["diff", "files", "truncated", "stat_only"],
                     "Read a bounded diff; start with stat_only and request a limited patch preview when needed.",
                 ),
                 "git_log" => (
-                    &["limit", "paths", "rev"],
+                    &["repo", "limit", "paths", "rev"],
                     &["commits", "truncated"],
                     "Read a bounded structured commit history.",
                 ),
-                "run_readonly_command" => (&["cmd", "workdir", "timeout_ms"],
-                    &["exit_code", "stdout", "stderr", "duration_ms", "truncated"],
-                    "Run a read-only sandboxed Bash check/build/test (source/.git read-only; gitignored target/ and private /tmp writable)."),
                 "exec_command" => (&["cmd", "workdir", "yield_time_ms", "max_output_tokens", "stdin"],
                     &["session_id", "running", "exit_code", "stdout", "stderr", "duration_ms", "encoding", "truncated"],
                     "Program/module code: run a platform-shell command; output enters JS heap, not AI context."),
@@ -742,6 +770,9 @@ mod tests {
     #[test]
     #[cfg(not(feature="vm-measurements"))]
     fn shell_library_contracts_expose_fixed_returns_instead_of_unknown() {
+        let declarations = static_library_header(&libraries::builtin());
+        assert!(!declarations.contains("run_readonly"));
+        assert!(!libraries::builtin()["process"].contains_key("run_readonly"));
         let root = std::env::temp_dir();
         let workspace = crate::tools::Workspace::new(root).unwrap();
         let definitions = crate::server::agent_service::local_tools(&workspace,None,false);
@@ -972,8 +1003,56 @@ mod tests {
     }
 
     #[test]
+    fn cross_platform_io_and_sys_libraries_have_static_contracts() {
+        let libs=libraries::builtin();
+        let header=static_library_header(&libs);
+        assert!(header.contains("declare namespace io"));
+        assert!(header.contains("function stat("));
+        assert!(header.contains("function copy("));
+        assert!(header.contains("declare namespace sys"));
+        for method in ["disk_space","which","listening_ports","processes"] {
+            assert!(header.contains(&format!("function {method}(")),"missing static sys.{method} signature");
+        }
+        let directory=directory(&libs);
+        assert!(directory.contains("- sys — Read-only cross-platform disk, executable, TCP listener, and process probes"));
+    }
+
+    #[test]
     fn edit_declarations_advertise_line_preview() {
         let header = static_library_header(&libraries::builtin());
         assert!(header.contains("index_refresh: unknown; preview?: string"));
+    }
+
+    #[test]
+    fn directory_exposes_bundled_and_custom_plugin_libraries() {
+        let libs = BTreeMap::from([
+            (
+                "db".to_owned(),
+                BTreeMap::from([
+                    ("list_connections".to_owned(), "db__list_connections".to_owned()),
+                    ("save_connection".to_owned(), "db__save_connection".to_owned()),
+                    ("query".to_owned(), "db__query".to_owned()),
+                ]),
+            ),
+            (
+                "excel".to_owned(),
+                BTreeMap::from([("inspect".to_owned(), "excel__inspect".to_owned())]),
+            ),
+            (
+                "custom_crm".to_owned(),
+                BTreeMap::from([
+                    ("find_deal".to_owned(), "custom_crm__find_deal".to_owned()),
+                    ("list_accounts".to_owned(), "custom_crm__list_accounts".to_owned()),
+                ]),
+            ),
+        ]);
+        let header = static_library_header(&libs);
+        assert!(header.contains("- db — "), "db missing from header: {header}");
+        assert!(header.contains("db.save_connection"), "db hint missing: {header}");
+        assert!(header.contains("- excel — "), "excel missing from header: {header}");
+        assert!(
+            header.contains("- custom_crm — Plugin library (2 methods: find_deal, list_accounts)"),
+            "dynamic plugin library missing from header: {header}"
+        );
     }
 }

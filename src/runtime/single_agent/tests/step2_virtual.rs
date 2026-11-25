@@ -83,8 +83,8 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
                 let user = all_messages_text(&body);
                 // 1. Strict isolation assertions:
                 assert!(
-                    sys.contains("declare namespace process"),
-                    "@virtual .d.ts must expose the inherited process capability: {sys}"
+                    !sys.contains("declare namespace process"),
+                    "@virtual must not expose process capabilities: {sys}"
                 );
                 assert!(
                     !sys.contains("executeTask"),
@@ -103,18 +103,16 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
 
                 let l_idx = leaf_seq.fetch_add(1, Ordering::SeqCst);
                 Json(match l_idx {
-                    // Attempt 0: parent permission allows a synchronous read-only process call.
-                    0 => run_js("process.run_readonly({ cmd: \"printf virtual-readonly\" });"),
-                    // Attempt 1: async process calls remain available inside Promise.all.
+                    // Sync and async process access both fail without dispatch.
+                    0 => run_js("process.exec_command({ cmd: \"printf denied\" });"),
                     1 => {
                         let output = last_tool_output(&body);
-                        assert!(output.contains("virtual-readonly"), "synchronous process output must reach the worker: {output}");
-                        assert!(!output.contains("VIRTUAL_SHELL_FORBIDDEN"), "shell must follow the inherited permission boundary: {output}");
-                        run_js("const [result] = await Promise.all([process.promises.run_readonly({ cmd: \"printf virtual-async\" })]); result;")
+                        assert!(output.contains("COMPILE_ERROR") || output.contains("ReferenceError") || output.contains("RUNTIME ERROR"), "process must not reach host dispatch: {output}");
+                        run_js("await process.promises.get_project_process({});")
                     }
-                    // Attempt 2: verify nested @virtual is still blocked with VIRTUAL_LAYER_LIMIT!
                     2 => {
-                        assert!(last_tool_output(&body).contains("virtual-async"), "async process output must reach the worker: {user}");
+                        let output = last_tool_output(&body);
+                        assert!(output.contains("COMPILE_ERROR") || output.contains("ReferenceError") || output.contains("RUNTIME ERROR"), "process must not reach host dispatch: {output}");
                         run_js("/** @virtual nested */\nasync function sub() {}")
                     }
                     // Attempt 3: nested @virtual is rejected, then ordinary file work continues.
@@ -170,6 +168,9 @@ async fn step2_virtual_frame_strict_isolation_security_gc_and_factual_receipt() 
         )
         .unwrap();
     assert_eq!(node_done, 1);
+    for name in ["exec_command", "get_project_process"] {
+        assert_eq!(tool_call_count(ws.path(), "step2-iso", name), 0, "leaf dispatched {name}");
+    }
 }
 
 #[tokio::test]
@@ -191,7 +192,7 @@ async fn step2_virtual_worker_inherits_ban_execution_for_process_tools() {
                     let leaf_round = leaf_seq.fetch_add(1, Ordering::SeqCst);
                     assert!(!sys.contains("declare namespace process"), "parent ban_execution must remove process from the child surface: {sys}");
                     if leaf_round == 0 {
-                        return Json(run_js("process.run_readonly({ cmd: \"printf denied\" });"));
+                        return Json(run_js("process.exec_command({ cmd: \"printf denied\" });"));
                     }
                     let user = all_messages_text(&body);
                     assert!(
@@ -204,7 +205,7 @@ async fn step2_virtual_worker_inherits_ban_execution_for_process_tools() {
                 }
                 let index = main_seq.fetch_add(1, Ordering::SeqCst);
                 Json(match index {
-                    0 => run_js("const result = await host.delegate({ task: \"Run a read-only process probe\" }); return { result };"),
+                    0 => run_js("const result = await host.delegate({ task: \"Run a process capability probe\" }); return { result };"),
                     1 => {
                         let output = last_tool_output(&body);
                         assert!(output.contains("execution boundary inherited"), "child must inherit execution denial and finish: {output}");
@@ -600,7 +601,7 @@ async fn step2_host_delegate_parallel_partial_pass_by_handle_and_no_nesting() {
                            inspect(\"fast\"),\n\
                            inspect(\"delegate-a\"),\n\
                            inspect(\"delegate-b\"),\n\
-                           process.promises.run_readonly({ cmd: \"printf delegate-check\" })\n\
+                           io.promises.workspace_info()\n\
                          ]);\n\
                          return { fast, a, b, check };",
                     ),
@@ -608,7 +609,7 @@ async fn step2_host_delegate_parallel_partial_pass_by_handle_and_no_nesting() {
                         let output = last_tool_output(&body);
                         assert!(output.contains("delegate-a") && output.contains("delegate-b"), "both delegate receipts must return: {output}");
                         assert!(output.contains("target-files"), "ordinary context key `tools` must be bound in the child: {output}");
-                        assert!(output.contains("delegate-check"), "mixed process promise must return: {output}");
+                        assert!(output.contains("workspace_root"), "mixed structured promise must return: {output}");
                         completion("host.delegate 并发、部分实现快路径和句柄传递通过。")
                     }
                     other => panic!("unexpected main round {other}"),
@@ -629,7 +630,7 @@ async fn step2_host_delegate_parallel_partial_pass_by_handle_and_no_nesting() {
             state,
             "step2-delegate".into(),
             "fake".into(),
-            "Audit audit.rs with two concurrent host.delegate workers and a read-only check".into(),
+            "Audit audit.rs with two concurrent host.delegate workers and a structured workspace query".into(),
             6,
             CancellationToken::new(),
             1,

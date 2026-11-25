@@ -158,6 +158,13 @@ pub async fn execute(
     boundary: ExecutionBoundary,
     cancel: &CancellationToken,
 ) -> Result<Value> {
+    let selected_repo = args["repo"].as_str();
+    if let Some(repo) = selected_repo {
+        ensure!(!repo.trim().is_empty() && repo.len() <= 4096, "repo must be a valid directory path");
+        ensure!(!repo.split(['/', '\\']).any(|part| matches!(part, ".codex-workspace-mcp" | ".ssh" | ".aws" | ".gnupg" | ".kube")), "sensitive directories are not valid Git repositories");
+    }
+    let selected_workspace = selected_repo.map(Workspace::new).transpose()?;
+    let workspace = selected_workspace.as_ref().unwrap_or(workspace);
     ensure!(
         !mutates(name) || boundary != ExecutionBoundary::ReadOnly,
         "Git metadata writes are not allowed in read-only mode"
@@ -172,7 +179,7 @@ pub async fn execute(
     let root = workspace.root().canonicalize()?;
     ensure!(
         Path::new(top.trim_end()).canonicalize()? == root,
-        "workspace must be the repository root"
+        "repo must point to the repository root"
     );
     if name == "git_blame" {
         let (path, _) = literal_path(&root, args["path"].as_str().context("path is required")?)?;
@@ -373,9 +380,9 @@ fn parse_blame(output: &str) -> Vec<Value> {
 pub fn definitions() -> Vec<Value> {
     let paths = json!({"type":"array","minItems":1,"maxItems":32,"items":{"type":"string"}});
     vec![
-        json!({"name":"git_blame","description":"Read line authorship for an inclusive range of up to 200 lines in one file.","inputSchema":{"type":"object","required":["path","start_line","end_line"],"properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}}}),
-        json!({"name":"git_commit","description":"Stage and commit only explicit file paths, never other staged entries. On failure the requested files may remain staged. Git history cannot be undone by workspace undo.","inputSchema":{"type":"object","required":["paths","message"],"properties":{"paths":paths,"message":{"type":"string","minLength":1,"maxLength":4096}}}}),
-        json!({"name":"git_restore","description":"Restore specified files from the index; staged=true instead restores those index entries from HEAD without changing the worktree.","inputSchema":{"type":"object","required":["paths"],"properties":{"paths":paths,"staged":{"type":"boolean","default":false}}}}),
+        json!({"name":"git_blame","description":"Read line authorship for an inclusive range of up to 200 lines in one file.","inputSchema":{"type":"object","required":["path","start_line","end_line"],"properties":{"repo":{"type":"string"},"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}}}}),
+        json!({"name":"git_commit","description":"Stage and commit only explicit file paths, never other staged entries. On failure the requested files may remain staged. Git history cannot be undone by workspace undo.","inputSchema":{"type":"object","required":["paths","message"],"properties":{"repo":{"type":"string"},"paths":paths,"message":{"type":"string","minLength":1,"maxLength":4096}}}}),
+        json!({"name":"git_restore","description":"Restore specified files from the index; staged=true instead restores those index entries from HEAD without changing the worktree.","inputSchema":{"type":"object","required":["paths"],"properties":{"repo":{"type":"string"},"paths":paths,"staged":{"type":"boolean","default":false}}}}),
     ]
 }
 

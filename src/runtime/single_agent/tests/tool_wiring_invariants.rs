@@ -39,7 +39,7 @@ fn catalog() -> (
 }
 
 fn dedicated_dispatch(name: &str) -> bool {
-    // Session/visual context or a special sandbox is required; these calls
+    // These calls require session or visual context.
     // are dispatched by tool_proxy/host_tools rather than the local catalog.
     matches!(
         name,
@@ -59,7 +59,6 @@ fn dedicated_dispatch(name: &str) -> bool {
             | "read_program_guide"
             | "list_skills"
             | "read_skill"
-            | "run_readonly_command"
     )
 }
 
@@ -275,6 +274,12 @@ fn new_tool_contracts_cover_cross_layer_wiring() {
             false,
             false,
         ),
+        ("io", "stat", "stat_paths", PermissionMode::ReadOnly, false, false),
+        ("io", "copy", "copy_path", PermissionMode::WorkspaceWrite, false, true),
+        ("sys", "disk_space", "sys_disk_space", PermissionMode::ReadOnly, false, false),
+        ("sys", "which", "sys_which", PermissionMode::ReadOnly, false, false),
+        ("sys", "listening_ports", "sys_listening_ports", PermissionMode::ReadOnly, false, false),
+        ("sys", "processes", "sys_processes", PermissionMode::ReadOnly, false, false),
         // New phase entries above this marker.
     ];
     for (lib, method, tool, minimum, approval, tracked) in tools {
@@ -358,6 +363,7 @@ const LEGACY_FILE_WRITES: &[&str] = &[
     "delete_path",
     "rename_path",
     "create_dir",
+    "copy_path",
 ];
 const LEGACY_GIT_WRITES: &[&str] = &["git_commit", "git_restore"];
 const LEGACY_VERIFY: &[&str] = &["verify_check", "verify_test"];
@@ -417,8 +423,8 @@ fn builtin_permissions_approvals_and_tracking_match_legacy_behavior() {
             let interactive = asks || mode == FullAccess;
             let allowed = if file_write || git_write || verify || batch_edit {
                 mode != ReadOnly
-            } else if project_execution {
-                interactive || (cfg!(target_os = "linux") && mode == WorkspaceWrite)
+            } else if spec.library == "process" {
+                mode != ReadOnly
             } else if browser {
                 interactive
             } else {
@@ -430,9 +436,6 @@ fn builtin_permissions_approvals_and_tracking_match_legacy_behavior() {
                 // The name-only check is used after the caller exempts empty stdin.
                 let approval = match name {
                     "kill_session" => false,
-                    "exec_command" | "write_stdin" if cfg!(windows) => {
-                        ban_execution || mode != FullAccess
-                    }
                     "exec_command" | "write_stdin" => asks,
                     _ => asks && (project_execution || browser || verify || git_write),
                 };
@@ -496,4 +499,140 @@ fn package_tools_still_use_dynamic_approval_policy() {
         }
     }
     runtime.shutdown().unwrap();
+}
+
+fn host_session<'a>(state: &'a agent_service::AgentServiceState, cancel: &'a tokio_util::sync::CancellationToken) -> super::super::Session<'a> {
+    super::super::Session {
+        agent_id: None, task_node_id: None, plugin: None,
+        state, task: "entry-policy", model: "fake", turn: 1, cancel,
+        ban_execution: false, scope: "main".into(), parent: None, input_budget: 100_000,
+    }
+}
+
+fn init_entry_policy_task(root: &std::path::Path) -> anyhow::Result<()> {
+    agent_service::open_db(root)?.execute(
+        "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('entry-policy','','fake','running',0,0)",
+        [],
+    )?;
+    Ok(())
+}
+
+async fn await_entry_approval(root: &std::path::Path, call: &str) -> anyhow::Result<Value> {
+    use rusqlite::OptionalExtension;
+    Ok(tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let data: Option<String> = agent_service::open_db(root)?.query_row(
+                "SELECT data FROM agent_task_events WHERE task_id='entry-policy' AND kind='approval/request' AND json_extract(data, '$.call_id')=?1",
+                [call], |row| row.get(0),
+            ).optional()?;
+            if let Some(data) = data {
+                return serde_json::from_str(&data).map_err(anyhow::Error::from);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await??)
+}
+
+#[tokio::test]
+async fn external_exec_requires_its_own_directory_approval_unless_full_access() -> anyhow::Result<()> {
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+    let workspace = TestWorkspace::new("entry-policy-workspace");
+    let external = TestWorkspace::new("entry-policy-external");
+    let marker = external.path().join("started.txt");
+    let mut state = agent_service::tests::test_state(workspace.path(), "127.0.0.1:9".parse()?);
+    init_entry_policy_task(workspace.path())?;
+    let db = agent_service::open_db(workspace.path())?;
+    db.execute("CREATE TABLE IF NOT EXISTS tool_approval_grants(scope TEXT PRIMARY KEY)", [])?;
+    db.execute("INSERT INTO tool_approval_grants VALUES ('shell:task:entry-policy')", [])?;
+    let cancel = CancellationToken::new();
+    let args = json!({"cmd":"echo started > started.txt", "workdir":external.path()});
+    state.permission_mode = PermissionMode::Ask;
+    for (call, decision) in [("external-denied", "deny"), ("external-approved", "once")] {
+        let session = host_session(&state, &cancel);
+        let execute = super::super::host_tools::business_tool_inner(&session, "node", "exec_command", args.clone(), call, true, false);
+        let decide = async {
+            let event = await_entry_approval(workspace.path(), call).await?;
+            assert_eq!(event["outside_write"], true, "a general shell grant must not cover this directory: {event}");
+            assert_eq!(event["outside_paths"], json!([external.path().canonicalize()?]));
+            assert!(!marker.exists(), "command ran before directory approval");
+            db.execute("INSERT INTO tool_approvals VALUES ('entry-policy',?1,?2)", [call, decision])?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let (result, replied) = tokio::time::timeout(std::time::Duration::from_secs(15), async { tokio::join!(execute, decide) }).await?;
+        replied?;
+        if decision == "deny" {
+            assert!(result.unwrap_err().to_string().contains("USER_DENIED"));
+            assert!(!marker.exists());
+        } else {
+            assert_eq!(result?["exit_code"], 0);
+            assert!(marker.is_file());
+            std::fs::remove_file(&marker)?;
+        }
+    }
+    state.permission_mode = PermissionMode::FullAccess;
+    let session = host_session(&state, &cancel);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), super::super::host_tools::business_tool_inner(
+        &session, "node", "exec_command", args, "full-access", true, false,
+    )).await??;
+    assert_eq!(result["exit_code"], 0);
+    assert!(marker.is_file());
+    let approvals: usize = db.query_row("SELECT COUNT(*) FROM agent_task_events WHERE kind='approval/request' AND json_extract(data, '$.call_id')='full-access'", [], |row| row.get(0))?;
+    assert_eq!(approvals, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn approved_package_command_tool_runs_in_ask_mode() -> anyhow::Result<()> {
+    use crate::server::skill_packages::{mount_test_package, test_runtime};
+    use serde_json::json;
+    let workspace = TestWorkspace::new("package-command-workspace");
+    let package = TestWorkspace::new("package-command-manifest");
+    std::fs::write(package.path().join("SKILL.md"), "---\nname: approval-fixture\ndescription: Approval test\n---\nEcho structured arguments.")?;
+    std::fs::write(package.path().join("tool.py"), "import json, sys\nr = json.load(sys.stdin)\nprint(json.dumps({'jsonrpc': '2.0', 'id': r['id'], 'result': r['params']['arguments']}))\n")?;
+    std::fs::write(package.path().join("plugin.json"), json!({
+        "version": 1, "id": "approval-fixture", "title": "Approval fixture", "skill": "SKILL.md",
+        "tools": ["package_echo"], "command_tools": [{"name":"package_echo", "description":"Echo structured arguments", "input_schema":{"type":"object"}, "program":"python3", "args":["tool.py"]}]
+    }).to_string())?;
+    let (runtime, catalog) = test_runtime();
+    mount_test_package(&runtime, package.path())?;
+    let mut state = agent_service::tests::test_state(workspace.path(), "127.0.0.1:9".parse()?);
+    init_entry_policy_task(workspace.path())?;
+    state.tool_catalog = Some(catalog);
+    state.permission_mode = PermissionMode::Ask;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let session = host_session(&state, &cancel);
+    let args = json!({"message":"package command reached"});
+    let execute = super::super::host_tools::business_tool_inner(&session, "node", "package_echo", args.clone(), "package-call", false, false);
+    let decide = async {
+        let event = await_entry_approval(workspace.path(), "package-call").await?;
+        assert_eq!(event["tool"], "package_echo");
+        agent_service::open_db(workspace.path())?.execute("INSERT INTO tool_approvals VALUES ('entry-policy','package-call','once')", [])?;
+        Ok::<_, anyhow::Error>(())
+    };
+    let (result, replied) = tokio::time::timeout(std::time::Duration::from_secs(15), async { tokio::join!(execute, decide) }).await?;
+    replied?;
+    assert_eq!(result?, args);
+    runtime.shutdown()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_and_plugin_sessions_reject_all_process_dispatch() -> anyhow::Result<()> {
+    let workspace = TestWorkspace::new("restricted-process-workspace");
+    let mut state = agent_service::tests::test_state(workspace.path(), "127.0.0.1:9".parse()?);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    for (mode, plugin, expected) in [
+        (PermissionMode::ReadOnly, None, "permission_denied"),
+        (PermissionMode::FullAccess, Some("approval-fixture"), "SHELL_MODULE_ONLY"),
+    ] {
+        state.permission_mode = mode;
+        let mut session = host_session(&state, &cancel);
+        session.plugin = plugin.map(str::to_owned);
+        for name in libraries::builtin()["process"].values() {
+            let error = super::super::host_tools::business_tool_inner(&session, "node", name, serde_json::json!({}), "blocked", true, false).await.unwrap_err();
+            assert!(error.to_string().contains(expected), "{name}: {error:#}");
+        }
+    }
+    Ok(())
 }

@@ -15,7 +15,7 @@
 每个模型步（Step）只允许以下两种输出形态之一（[src/model_stream.rs](../src/model_stream.rs)）：
 
 1. **执行纯 JS 代码段**（无 Markdown 代码块围栏、无 XML 标签、无伪造 `// =>`）
-   - 宿主通过 SWC 编译并执行在当前轮活体 `Runtime` 中，所有 `io.*` / `git.*` / `process.*` / `host.*` / `session.*` 调用在 VM 中挂起为 `ActionKind::Tool` 并代理到 Rust [host_tools.rs](../src/single_agent/host_tools.rs)（完整复用权限、沙箱与文件基线校验）。
+   - 宿主通过 SWC 编译并执行在当前轮活体 `Runtime` 中，所有 `io.*` / `git.*` / `process.*` / `host.*` / `session.*` 调用在 VM 中挂起为 `ActionKind::Tool` 并代理到 Rust [host_tools.rs](../src/runtime/single_agent/host_tools.rs)（复用权限、跨目录审批与文件基线校验；命令无 OS 沙箱）。
    - 非 JS Markdown 围栏（如直接输出 ```` ```rust ... ``` ````）在编译前即被拦截为 `MARKDOWN_NOT_JS`，避免被 JS 语法误解析为标签模板字面量。
 2. **向用户交付最终 Markdown 回复（`return <<<`）**
    - 以 `return <<<` 开头，其后直至 EOF 的全部原始内容作为用户 Markdown 原样直出，**绝不作为 JS 执行**（因此展示 ```` ```js ```` / ```` ```rust ```` 示例代码无需任何转义）。

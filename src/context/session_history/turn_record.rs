@@ -267,8 +267,13 @@ fn literal(key: Option<&str>, value: &Value) -> String {
 
 /// The call as a program writes it: its library method where it has one.
 fn call_line(name: &str, arguments: Option<&str>) -> String {
-    let method = crate::runtime::agent_program::libraries::public_name(&crate::runtime::agent_program::libraries::builtin(), name)
-        .unwrap_or_else(|| name.to_owned());
+    // Historical display only: the retired tool is no longer in the callable registry.
+    let method = if name == "run_readonly_command" {
+        "process.run_readonly".to_owned()
+    } else {
+        crate::runtime::agent_program::libraries::public_name(&crate::runtime::agent_program::libraries::builtin(), name)
+            .unwrap_or_else(|| name.to_owned())
+    };
     let arguments = match arguments.map(|raw| serde_json::from_str::<Value>(raw)) {
         None => String::new(),
         Some(Ok(Value::Object(map))) if map.is_empty() => String::new(),

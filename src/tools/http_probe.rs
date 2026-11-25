@@ -5,14 +5,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{SecondsFormat, Utc};
 use reqwest::{Url, redirect::Policy};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::lookup_host;
 
-pub const TOOLS: &[&str] = &["http_probe"];
+pub const TOOLS: &[&str] = &["http_probe", "http_request"];
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const MAX_TIMEOUT_MS: u64 = 30_000;
 pub const REUSE_WINDOW_MS: u64 = 30_000;
@@ -338,18 +338,90 @@ fn request_failure(error: &reqwest::Error) -> ProbeFailure {
     }
 }
 
-pub fn definitions() -> Vec<Value> {
-    vec![json!({
-        "name":"http_probe",
-        "description":"Probe a local HTTP(S) URL directly from the Rust host, independent of Agent-managed process state. Only loopback addresses are allowed; proxies are disabled and redirects are not followed. A 3xx Location is reported in redirect_target when available. Any received HTTP response sets reachable=true and reports its actual http_status (including 404); connection failures use http_status=null plus error_kind/error_message. check_passed is true only for HTTP 2xx. sampled_at is UTC RFC3339 and elapsed_ms is host-measured. reuse_window_ms is 30000: reuse a sample within that age for the same URL while service state is unchanged; an eligible repeat returns reused=true without a network request. Probe again only if state may have changed or the old sample cannot answer the new question; explain a necessary repeat in reason. A short text response summary is limited to 2048 bytes.",
-        "inputSchema":{
-            "type":"object",
-            "required":["url"],
-            "properties":{
-                "url":{"type":"string","maxLength":4096,"description":"Local HTTP(S) URL using a loopback address or a hostname that resolves exclusively to loopback addresses."},
-                "timeout_ms":{"type":"integer","minimum":100,"maximum":30000,"default":5000},
-                "reason":{"type":"string","maxLength":300,"description":"When rechecking a URL that already has a recent result, state why its status may have changed or why that result is insufficient."}
-            }
+pub async fn execute_request(args: &Value) -> Result<Value> {
+    use reqwest::{Method, header::{HeaderMap, HeaderName, HeaderValue}};
+    let url_text = args["url"].as_str().context("url is required")?;
+    anyhow::ensure!(url_text.len() <= 4096, "url must be at most 4096 bytes");
+    let method_text = args["method"].as_str().unwrap_or("GET").to_ascii_uppercase();
+    anyhow::ensure!(matches!(method_text.as_str(), "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE"), "unsupported HTTP method");
+    let method = Method::from_bytes(method_text.as_bytes())?;
+    let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(15_000).clamp(100, 60_000);
+    let max_bytes = args["max_bytes"].as_u64().unwrap_or(65_536).clamp(1, 524_288) as usize;
+    let follow_redirects = args["follow_redirects"].as_bool().unwrap_or(false);
+    let started = Instant::now();
+    let mut url = Url::parse(url_text)?;
+    anyhow::ensure!(matches!(url.scheme(), "http" | "https"), "only http and https URLs are allowed");
+    anyhow::ensure!(url.username().is_empty() && url.password().is_none(), "URL credentials are not allowed");
+    let mut headers = HeaderMap::new();
+    if let Some(values) = args["headers"].as_object() {
+        anyhow::ensure!(values.len() <= 100, "too many request headers");
+        for (key, value) in values {
+            let name = HeaderName::from_bytes(key.as_bytes())?;
+            let value = value.as_str().context("header values must be strings")?;
+            headers.insert(name, HeaderValue::from_str(value)?);
         }
+    }
+    let body = match &args["body"] {
+        Value::Null => None,
+        Value::String(value) => Some(value.clone()),
+        value => Some(serde_json::to_string(value)?),
+    };
+    if body.as_ref().is_some_and(|value| value.len() > 1_048_576) { anyhow::bail!("request body exceeds 1 MiB"); }
+    let client = reqwest::Client::builder().no_proxy().redirect(Policy::none()).timeout(Duration::from_millis(timeout_ms)).build()?;
+    let original_host = url.host_str().map(str::to_owned);
+    let mut redirect_count = 0;
+    let mut response = loop {
+        crate::tools::process_sandbox::check_not_host_control_url_async(url.as_str()).await?;
+        let mut request = client.request(method.clone(), url.clone()).headers(headers.clone());
+        if let Some(ref payload) = body {
+            if args["body"].is_object() || args["body"].is_array() {
+                request = request.header(reqwest::header::CONTENT_TYPE, "application/json");
+            }
+            request = request.body(payload.clone());
+        }
+        let response = request.send().await?;
+        if !follow_redirects || !response.status().is_redirection() || redirect_count >= 10 { break response; }
+        let Some(location) = response.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()) else { break response; };
+        let next = url.join(location)?;
+        anyhow::ensure!(next.host_str() == original_host.as_deref(), "cross-host redirects are blocked");
+        redirect_count += 1;
+        anyhow::ensure!(next.scheme() == "http" || next.scheme() == "https", "redirect to unsupported scheme blocked");
+        anyhow::ensure!(next.username().is_empty() && next.password().is_none(), "redirect URL credentials are not allowed");
+        url = next;
+    };
+    let status = response.status().as_u16();
+    let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let safe_headers = response.headers().iter().filter_map(|(name, value)| {
+        let key = name.as_str();
+        if matches!(key, "set-cookie" | "authorization" | "proxy-authorization" | "www-authenticate") { return None; }
+        value.to_str().ok().map(|value| (key.to_owned(), json!(value)))
+    }).collect::<serde_json::Map<String, Value>>();
+    let mut bytes = Vec::with_capacity(max_bytes.min(16_384));
+    let mut truncated = false;
+    while let Some(chunk) = response.chunk().await? {
+        let take = max_bytes.saturating_sub(bytes.len()).min(chunk.len());
+        bytes.extend_from_slice(&chunk[..take]);
+        if take < chunk.len() { truncated = true; break; }
+        if bytes.len() == max_bytes { truncated = response.chunk().await?.is_some(); break; }
+    }
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let json_value = if !truncated && content_type.as_deref().is_some_and(|v| v.contains("json")) { serde_json::from_str::<Value>(&text).ok() } else { None };
+    let mut result = json!({"url":url.to_string(),"method":method_text,"status":status,"ok":(200..300).contains(&status),"elapsed_ms":started.elapsed().as_millis().min(u64::MAX as u128) as u64,"headers":safe_headers,"body":text,"truncated":truncated,"bytes":bytes.len()});
+    if let Some(content_type) = content_type { result["content_type"] = json!(content_type); }
+    if let Some(json_value) = json_value { result["json"] = json_value; }
+    Ok(result)
+}
+
+pub fn definitions() -> Vec<Value> {
+    vec![
+        json!({"name":"http_probe","description":"Probe local HTTP(S) endpoint reachability without following redirects.","inputSchema":{"type":"object","required":["url"],"properties":{"url":{"type":"string"},"timeout_ms":{"type":"integer"},"reason":{"type":"string"}}}}),
+        json!({
+        "name":"http_request",
+        "description":"Send a bounded HTTP request. Control-plane URLs are blocked; redirects are disabled unless explicitly enabled and each hop is checked. External hosts and write methods require approval.",
+        "inputSchema":{"type":"object","required":["url"],"properties":{
+            "url":{"type":"string","maxLength":4096},"method":{"type":"string","enum":["GET","HEAD","POST","PUT","PATCH","DELETE"],"default":"GET"},
+            "headers":{"type":"object","additionalProperties":{"type":"string"}},"body":{"oneOf":[{"type":"string"},{"type":"object"},{"type":"array"}]},
+            "timeout_ms":{"type":"integer","minimum":100,"maximum":60000,"default":15000},"max_bytes":{"type":"integer","minimum":1,"maximum":524288,"default":65536},"follow_redirects":{"type":"boolean","default":false}
+        }}
     })]
 }

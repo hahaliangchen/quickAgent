@@ -484,65 +484,169 @@ pub fn text_edits_with_ranges(source: &str, edits: &[crate::tools::TextEdit]) ->
     text_edits_with_ranges_replace_all(source, edits, false)
 }
 
-/// Apply every matching anchor when requested; the default remains unique-anchor editing.
+fn find_trailing_ws_spans(source: &str, old_text: &str) -> Vec<(usize, usize)> {
+    let norm = normalize(old_text);
+    let ends_with_nl = norm.ends_with('\n');
+    let body = if ends_with_nl { &norm[..norm.len() - 1] } else { &norm };
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let needle: Vec<&str> = body
+        .split('\n')
+        .map(|l| l.trim_end_matches([' ', '\t']))
+        .collect();
+    if needle.iter().all(|l| l.is_empty()) {
+        return Vec::new();
+    }
+    let mut lines: Vec<(usize, usize, usize, &str)> = Vec::new();
+    let mut pos = 0usize;
+    for chunk in source.split_inclusive('\n') {
+        let end_with_eol = pos + chunk.len();
+        let trimmed_eol = chunk.trim_end_matches(['\r', '\n']);
+        let end_no_eol = pos + trimmed_eol.len();
+        let trimmed_ws = trimmed_eol.trim_end_matches([' ', '\t']);
+        lines.push((pos, end_no_eol, end_with_eol, trimmed_ws));
+        pos = end_with_eol;
+    }
+    if lines.len() < needle.len() {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    for start_idx in 0..=lines.len() - needle.len() {
+        if needle
+            .iter()
+            .enumerate()
+            .all(|(offset, expected)| lines[start_idx + offset].3 == *expected)
+        {
+            let byte_start = lines[start_idx].0;
+            let last = lines[start_idx + needle.len() - 1];
+            let byte_end = if ends_with_nl { last.2 } else { last.1 };
+            matches.push((byte_start, byte_end));
+        }
+    }
+    matches
+}
+
+fn select_span(source: &str, spans: &[(usize, usize)], hint: Option<usize>) -> std::result::Result<(usize, usize), String> {
+    let count = spans.len();
+    let mut lines = Vec::new();
+    let mut best = (usize::MAX, spans[0]);
+    let mut second = usize::MAX;
+    for &(start, end) in spans {
+        let line = source[..start].bytes().filter(|&b| b == b'\n').count() + 1;
+        if lines.len() < 10 {
+            lines.push(line);
+        }
+        let distance = hint.map_or(0, |target| line.abs_diff(target));
+        if distance < best.0 {
+            second = best.0;
+            best = (distance, (start, end));
+        } else if distance < second {
+            second = distance;
+        }
+    }
+    if count == 1 || (hint.is_some_and(|hint| hint > 0) && best.0 <= 30 && second >= best.0 + 10) {
+        return Ok(best.1);
+    }
+    let list = lines.iter().map(usize::to_string).collect::<Vec<_>>().join(", ");
+    let suffix = if count > 10 && lines.len() == 10 { ", ..." } else { "" };
+    Err(format!(
+        "old_text is ambiguous: it occurs {count} times, at {} {list}{suffix}; supply more surrounding text or a 1-based line_hint near a clearly separated match; no edits applied",
+        if lines.len() == 1 { "line" } else { "lines" }
+    ))
+}
+
+fn adjust_ranges(ranges: &mut Vec<(usize, usize)>, start: usize, end: usize, new_len: usize) {
+    let new_end = start + new_len;
+    let delta = new_len as isize - (end - start) as isize;
+    for (b, e) in ranges.iter_mut() {
+        if *e <= start {
+            continue;
+        } else if *b >= end {
+            *b = (*b as isize + delta).max(0) as usize;
+            *e = (*e as isize + delta).max(0) as usize;
+        } else {
+            *b = (*b).min(start);
+            *e = ((*e as isize + delta).max(new_end as isize)).max(0) as usize;
+        }
+    }
+    ranges.push((start, new_end));
+}
+
+/// Apply text edits sequentially in memory (atomic all-or-nothing on error).
+/// Sequential application supports both disjoint edits and adjacent/chained edits
+/// without spurious anchor-overlap failures.
 pub fn text_edits_with_ranges_replace_all(
     source: &str,
     edits: &[crate::tools::TextEdit],
     replace_all: bool,
 ) -> Result<(String, Vec<(usize, usize)>)> {
-    if edits.is_empty() || edits.len() > 100 {
+    if edits.is_empty() || edits.len() > 128 {
         return Err(ToolError::InvalidEdit(
-            "provide between 1 and 100 edits".into(),
+            "provide between 1 and 128 edits".into(),
         ));
     }
     let ending = newline(source);
-    let mut replacements = Vec::new();
+    let mut output = source.to_owned();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
     for (index, edit) in edits.iter().enumerate() {
         let invalid = |message| ToolError::IndexedEdit { index, message };
         if edit.old_text.is_empty() {
             return Err(invalid("old_text must be a nonempty unique anchor; insert by retaining the anchor in new_text".into()));
         }
-        // Model excerpts commonly use LF for a CRLF file. Match either the
-        // literal bytes or that exact newline-normalized anchor, never regex.
+        // Model excerpts commonly use LF for a CRLF file. Match exact bytes first,
+        // then newline-normalized bytes, then trailing-whitespace-normalized full lines.
         let normalized = normalize(&edit.old_text).replace('\n', ending);
-        let anchor = if source.contains(&edit.old_text) {
-            &edit.old_text
-        } else {
-            &normalized
-        };
-        if !source.contains(anchor) {
-            return Err(invalid(match closest_lines(source, &edit.old_text) {
-                Some(lines) => format!("old_text not found; no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."),
-                None => "old_text not found, and no line of it appears in the file; no edits applied".into(),
-            }));
-        }
         let replacement = normalize(&edit.new_text).replace('\n', ending);
-        if replace_all || edit.replace_all {
-            for (start, _) in source.match_indices(anchor) {
-                replacements.push((start, start + anchor.len(), replacement.clone()));
+        let spans: Vec<(usize, usize)> = if output.contains(&edit.old_text) {
+            if replace_all || edit.replace_all {
+                output
+                    .match_indices(&edit.old_text)
+                    .map(|(start, _)| (start, start + edit.old_text.len()))
+                    .collect()
+            } else {
+                let start = select_anchor(&output, &edit.old_text, edit.line_hint).map_err(invalid)?;
+                vec![(start, start + edit.old_text.len())]
+            }
+        } else if output.contains(&normalized) {
+            if replace_all || edit.replace_all {
+                output
+                    .match_indices(&normalized)
+                    .map(|(start, _)| (start, start + normalized.len()))
+                    .collect()
+            } else {
+                let start = select_anchor(&output, &normalized, edit.line_hint).map_err(invalid)?;
+                vec![(start, start + normalized.len())]
             }
         } else {
-            let start = select_anchor(source, anchor, edit.line_hint).map_err(invalid)?;
-            replacements.push((start, start + anchor.len(), replacement));
+            let ws_matches = find_trailing_ws_spans(&output, &edit.old_text);
+            if ws_matches.is_empty() {
+                return Err(invalid(match closest_lines(&output, &edit.old_text) {
+                    Some(lines) => format!("old_text not found; no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."),
+                    None => "old_text not found, and no line of it appears in the file; no edits applied".into(),
+                }));
+            }
+            if replace_all || edit.replace_all {
+                // Keep non-overlapping spans in ascending order.
+                let mut filtered = Vec::new();
+                let mut cursor = 0usize;
+                for (s, e) in ws_matches {
+                    if s >= cursor {
+                        filtered.push((s, e));
+                        cursor = e;
+                    }
+                }
+                filtered
+            } else {
+                vec![select_span(&output, &ws_matches, edit.line_hint).map_err(invalid)?]
+            }
+        };
+        for &(start, end) in spans.iter().rev() {
+            output.replace_range(start..end, &replacement);
+            adjust_ranges(&mut ranges, start, end, replacement.len());
         }
     }
-    replacements.sort_by_key(|edit| edit.0);
-    if replacements.windows(2).any(|pair| pair[0].1 > pair[1].0) {
-        return Err(ToolError::InvalidEdit(
-            "edit anchors overlap; no edits applied".into(),
-        ));
-    }
-    let mut ranges = Vec::with_capacity(replacements.len());
-    let mut delta: i64 = 0;
-    for (begin, end, text) in &replacements {
-        let final_begin = (*begin as i64 + delta).max(0) as usize;
-        ranges.push((final_begin, final_begin + text.len()));
-        delta += text.len() as i64 - (*end - *begin) as i64;
-    }
-    let mut output = source.to_owned();
-    for (begin, end, text) in replacements.into_iter().rev() {
-        output.replace_range(begin..end, &text);
-    }
+    ranges.sort_by_key(|r| r.0);
     Ok((output, ranges))
 }
 
@@ -669,5 +773,46 @@ mod tests {
             .to_string();
         assert!(missing.contains("2|beta") && missing.contains("3|gamma"), "{missing}");
         assert!(!missing.contains("exact expected_old_text is now at"), "{missing}");
+    }
+
+    #[test]
+    fn sequential_edits_allow_adjacent_shared_anchors_and_chained_changes() {
+        let source = "fn a() {\n    let x = 1;\n}\n";
+        let edits = [
+            crate::tools::TextEdit {
+                old_text: "    let x = 1;\n}".into(),
+                new_text: "    let x = 2;\n    let y = 3;\n}".into(),
+                line_hint: None,
+                replace_all: false,
+            },
+            crate::tools::TextEdit {
+                old_text: "    let y = 3;\n}".into(),
+                new_text: "    let y = 4;\n    let z = 5;\n}".into(),
+                line_hint: None,
+                replace_all: false,
+            },
+        ];
+        let (updated, ranges) = text_edits_with_ranges(source, &edits).unwrap();
+        assert_eq!(updated, "fn a() {\n    let x = 2;\n    let y = 4;\n    let z = 5;\n}\n");
+        let preview = preview_for_byte_ranges(&updated, &ranges);
+        assert!(preview.contains("L2|    let x = 2;"), "{preview}");
+        assert!(preview.contains("L4|    let z = 5;"), "{preview}");
+    }
+
+    #[test]
+    fn trailing_whitespace_fallback_matches_unique_lines_without_masking_ambiguity() {
+        let source = "fn run() {   \n    let a = 1;  \n}\n";
+        let edits = [crate::tools::TextEdit {
+            old_text: "fn run() {\n    let a = 1;\n}".into(),
+            new_text: "fn run() {\n    let a = 2;\n}".into(),
+            line_hint: None,
+            replace_all: false,
+        }];
+        let updated = text_edits(source, &edits).unwrap();
+        assert_eq!(updated, "fn run() {\n    let a = 2;\n}\n");
+
+        let dup = "let x = 1;  \nlet x = 1;\t\n";
+        let err = text_edits(dup, &[edit("let x = 1;")]).unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
     }
 }

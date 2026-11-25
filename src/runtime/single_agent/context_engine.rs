@@ -459,8 +459,9 @@ impl<'s, 'a> ContextEngine<'s, 'a> {
             let Some(turn) = w.context_doc.active_turn() else {
                 break;
             };
-            let cutoff = active_prefix_cutoff(turn, 5);
             let existing_cutoff = turn.folded_prefix.as_ref().map_or(0, |fold| fold.cutoff);
+            let target = hard.saturating_mul(60) / 100;
+            let cutoff = self.choose_active_prefix_cutoff(w, libs, &route, existing_cutoff, hard, target);
             if cutoff == 0 || cutoff <= existing_cutoff {
                 break;
             }
@@ -523,7 +524,7 @@ impl<'s, 'a> ContextEngine<'s, 'a> {
         }
         if let Some(turn) = w.context_doc.active_turn() {
             let existing_cutoff = turn.folded_prefix.as_ref().map_or(0, |fold| fold.cutoff);
-            let cutoff = [5usize, 2, 1]
+            let cutoff = [12usize, 8, 5, 2, 1]
                 .into_iter()
                 .map(|keep| active_prefix_cutoff(turn, keep))
                 .find(|&candidate| candidate > existing_cutoff)
@@ -878,6 +879,101 @@ impl<'s, 'a> ContextEngine<'s, 'a> {
             "notes":notes,
             "frozen":true,
         }).to_string())
+    }
+
+    /// Pick the smallest valid `cutoff > existing_cutoff` (retaining as many recent
+    /// steps as possible) whose folded request stays at or below `target` tokens.
+    /// Falls back to the smallest cutoff below `hard`, or the largest available
+    /// cutoff that still preserves at least one recent step.
+    fn choose_active_prefix_cutoff(
+        &self,
+        w: &Window,
+        libs: &crate::runtime::agent_program::libraries::Libraries,
+        route: &str,
+        existing_cutoff: usize,
+        hard: usize,
+        target: usize,
+    ) -> usize {
+        let Some(turn) = w.context_doc.active_turn() else {
+            return 0;
+        };
+        let meaningful: Vec<usize> = turn
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, seg)| {
+                (!seg.is_rejection && !seg.source.trim().is_empty()).then_some(idx)
+            })
+            .collect();
+        // Candidate cutoffs fold `segments[..cutoff]`, keeping `segments[cutoff..]`.
+        // Always keep at least the latest meaningful segment (never fold past the last one).
+        let candidates: Vec<usize> = meaningful
+            .iter()
+            .copied()
+            .skip(1)
+            .filter(|&idx| idx > existing_cutoff)
+            .collect();
+        if candidates.is_empty() {
+            return 0;
+        }
+        let estimate_after = |cutoff: usize| -> usize {
+            let mut probe = Window {
+                context_doc: w.context_doc.clone(),
+                program: None,
+                program_task: w.program_task.clone(),
+                task_node_id: w.task_node_id.clone(),
+                next_ref_id: w.next_ref_id,
+                token_calibration: w.token_calibration.clone(),
+                pinned_system_prompt: w.pinned_system_prompt.clone(),
+                last_model_request_at_ms: w.last_model_request_at_ms,
+            };
+            let placeholder_manifest = json!({
+                "kind": "frozen_prefix_snapshots",
+                "turn": self.session.turn,
+                "frozen": true,
+                "live_vm": true,
+            })
+            .to_string();
+            if !probe
+                .context_doc
+                .fold_active_prefix(self.session.turn, cutoff, placeholder_manifest, None)
+            {
+                return usize::MAX;
+            }
+            let body = model_call::build_request_body(self.session, &probe, libs);
+            probe.token_calibration.estimate(&body, route)
+        };
+        // Binary search for the smallest cutoff (maximum recent segments kept)
+        // whose estimated tokens <= target.
+        let mut lo = 0usize;
+        let mut hi = candidates.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if estimate_after(candidates[mid]) <= target {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        if lo < candidates.len() {
+            return candidates[lo];
+        }
+        // Even keeping only 1 recent step exceeds `target`; find the smallest cutoff < `hard`.
+        let mut lo = 0usize;
+        let mut hi = candidates.len();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if estimate_after(candidates[mid]) < hard {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        if lo < candidates.len() {
+            candidates[lo]
+        } else {
+            *candidates.last().unwrap()
+        }
     }
 }
 

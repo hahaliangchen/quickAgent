@@ -984,10 +984,7 @@ fn compile_inner(
                 .iter()
                 .filter(|(lib, _)| !matches!(lib.as_str(), "process" | "session" | "previous"))
                 .flat_map(|(_, methods)| methods.values().cloned())
-                .filter(|tool| {
-                    !crate::tools::project_process::is_execution(tool)
-                        && tool != crate::tools::shell_process::READ_ONLY
-                })
+                .filter(|tool| !crate::tools::project_process::is_execution(tool))
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect(),

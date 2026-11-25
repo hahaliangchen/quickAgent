@@ -369,8 +369,6 @@ struct Meta {
     exit_code: Option<i32>,
     termination_reason: Option<String>,
     background: bool,
-    #[serde(default)]
-    sandboxed: bool,
 }
 #[derive(Default)]
 struct Logs {
@@ -394,7 +392,7 @@ struct Record {
 pub(crate) struct ShellRecord(Arc<Record>);
 impl ShellRecord {
     pub(crate) async fn register(root: &Path, cwd: &Path, id: &str, pid: u32, command: &str,
-        sandboxed: bool, stop: mpsc::UnboundedSender<String>) -> Result<Self> {
+        stop: mpsc::UnboundedSender<String>) -> Result<Self> {
         let root = root.canonicalize()?;
         let dir = root.join(".codex-workspace-mcp/project-processes");
         tokio::fs::create_dir_all(&dir).await?;
@@ -407,7 +405,7 @@ impl ShellRecord {
                 readiness_detail:String::new(), script_command:command.into(),
                 node_executable:String::new(), npm_cli:String::new(), ready_url:None, ready_port:None,
                 started_at:now(), ended_at:None, exit_code:None, termination_reason:None,
-                background:true, sandboxed,
+                background:true,
             }),
             logs:Mutex::new(Logs::default()), persist_guard:Mutex::new(()),
             dir, stop, ended:Notify::new(),
@@ -561,7 +559,7 @@ impl Record {
             recent_stderr.clone()
         };
         json!({"process_id":meta.process_id,"pid":meta.pid,"project_path":meta.project_path,"script":meta.script,"args":meta.args,"operation":meta.operation,
-            "sandbox": if meta.sandboxed { "workspace-write" } else { "none" },
+            "sandbox": "none",
             "state":if meta.running{"running"}else{"exited"},"running":meta.running,"process_running":meta.running,
             "ready":meta.running&&meta.ready,"listener_owned":meta.listener_owned,"page_ready":meta.page_ready,
             "readiness_detail":meta.readiness_detail,"script_command":meta.script_command,
@@ -815,8 +813,7 @@ async fn effective_npm_script_shell(
     };
     ensure!(
         output.status.success(),
-        "{}runtime_bootstrap: could not verify effective npm script-shell; refusing to start package scripts ({} {})",
-        if boundary != crate::tools::process_sandbox::ExecutionBoundary::Host && String::from_utf8_lossy(&output.stderr).lines().any(|line| line.starts_with("bwrap:")) { "SANDBOX_UNAVAILABLE: " } else { "" },
+        "runtime_bootstrap: could not verify effective npm script-shell; refusing to start package scripts ({} {})",
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );

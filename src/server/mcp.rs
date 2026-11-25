@@ -27,7 +27,7 @@ use crate::index::rust_index::{
     SearchRustSymbolsRequest,
 };
 use crate::tools::{
-    CreateDirRequest, DeletePathRequest, EditFileRequest, GitDiffRequest, GitLogRequest,
+    CopyPathRequest, CreateDirRequest, DeletePathRequest, EditFileRequest, GitDiffRequest, GitLogRequest,
     GitStatusRequest, ListDirRequest, ReadFileChunkRequest, ReadFileLinesRequest, ReadFileRequest,
     RenamePathRequest, ReplaceRangeRequest, SearchTextRequest, Workspace, WorkspaceInfoRequest,
     WriteFileRequest,
@@ -872,6 +872,10 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
         return Ok(json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value}));
     }
 
+    if name == "http_request" {
+        let value = crate::tools::http_probe::execute_request(&arguments).await?;
+        return Ok(json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value)?}],"structuredContent":value}));
+    }
     if crate::tools::http_probe::is_tool(name) {
         let value = crate::tools::http_probe::execute(&arguments).await?;
         return Ok(
@@ -1037,6 +1041,7 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
     }
 
     let value = match name {
+        "sys_disk_space" | "sys_which" | "sys_listening_ports" | "sys_processes" => crate::tools::sys_info::execute(name, &arguments)?,
         "workspace_info" => serde_json::to_value(
             workspace.workspace_info(serde_json::from_value::<WorkspaceInfoRequest>(arguments)?)?,
         )?,
@@ -1052,7 +1057,7 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
                 })
             }).await??
         },
-        "list_dir" | "read_file" | "read_file_lines" | "read_file_chunk" | "search_text" => {
+        "list_dir" | "read_file" | "read_file_lines" | "read_file_chunk" | "search_text" | "stat_paths" => {
             let workspace = Workspace::new(workspace.root())?;
             let name = name.to_owned();
             tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
@@ -1062,10 +1067,17 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
                     "read_file_lines" => serde_json::to_value(workspace.read_file_lines(serde_json::from_value::<ReadFileLinesRequest>(arguments)?)?)?,
                     "read_file_chunk" => serde_json::to_value(workspace.read_file_chunk(serde_json::from_value::<ReadFileChunkRequest>(arguments)?)?)?,
                     "search_text" => serde_json::to_value(workspace.search_text(serde_json::from_value::<SearchTextRequest>(arguments)?)?)?,
+                    "stat_paths" => serde_json::to_value(workspace.stat_paths(serde_json::from_value::<crate::tools::StatRequest>(arguments)?)?)?,
                     _ => unreachable!(),
                 })
             }).await??
         },
+        "copy_path" => {
+            let workspace = Workspace::new(workspace.root())?;
+            tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+                Ok(serde_json::to_value(workspace.copy_path(serde_json::from_value::<CopyPathRequest>(arguments)?)?)?)
+            }).await??
+        }
         "write_file" => {
             let workspace = Workspace::new(workspace.root())?;
             tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
@@ -1185,6 +1197,13 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
         ],
         "structuredContent": value
     }))
+}
+
+fn io_metadata_definitions() -> Vec<Value> {
+    vec![
+        json!({"name":"stat_paths","description":"Return bounded filesystem metadata without reading file contents. Accepts paths inside or outside the workspace and refuses protected host secrets/state files.","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"paths":{"type":"array","items":{"type":"string","maxLength":4096},"maxItems":200}}},"outputSchema":{"type":"object","required":["entries"],"properties":{"entries":{"type":"array","items":{"type":"object","required":["path","exists"],"properties":{"path":{"type":"string"},"exists":{"type":"boolean"},"kind":{"enum":["file","directory","symlink","other"]},"size_bytes":{"type":"integer"},"modified_at":{"type":"string"},"modified_ms":{"type":"integer"},"readonly":{"type":"boolean"},"executable":{"type":"boolean"}}}}}}}),
+        json!({"name":"copy_path","description":"Copy a regular file or an explicitly recursive directory without following symlinks. The destination may be outside the selected workspace; outside writes require approval unless full access is enabled. Existing destinations require overwrite:true. The operation is tracked for undo.","inputSchema":{"type":"object","required":["from","to"],"properties":{"from":{"type":"string"},"to":{"type":"string"},"recursive":{"type":"boolean","default":false},"overwrite":{"type":"boolean","default":false},"create_parent_dirs":{"type":"boolean","default":true}}},"outputSchema":{"type":"object","required":["from","to","kind","files_copied","bytes_copied","overwritten"],"properties":{"from":{"type":"string"},"to":{"type":"string"},"kind":{"enum":["file","directory"]},"files_copied":{"type":"integer"},"bytes_copied":{"type":"integer"},"overwritten":{"type":"boolean"}}}})
+    ]
 }
 
 /// Complete native schemas for registration; callers filter their visible catalog.
@@ -1453,7 +1472,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "edit_file",
-            "description": "Apply 1-100 exact text edits to ONE existing UTF-8 file inside the selected workspace. Each old_text must match uniquely in the original file; use enough surrounding code. All anchors refer to the same original snapshot and may not overlap. All edits are validated before one atomic commit. For insertion keep the anchor in new_text; for deletion set new_text empty. LF anchors may match CRLF source; untouched bytes stay unchanged. Prefer this over line-number edits. Returns changed, code_hash and index_refresh; mismatches apply no changes.",
+            "description": "Apply 1-128 exact text edits to ONE existing UTF-8 file inside the selected workspace. Edits are applied sequentially in order and validated in memory before one atomic commit (mismatches apply no changes). Each old_text must match uniquely (use surrounding lines or line_hint). For insertion keep the anchor in new_text; for deletion set new_text empty. LF anchors may match CRLF source; untouched bytes stay unchanged. Prefer this over line-number edits. Returns changed, code_hash and index_refresh.",
             "inputSchema": {
                 "type":"object", "required":["path","edits"],
                 "properties": {
@@ -1632,6 +1651,8 @@ pub fn tool_definitions() -> Value {
             "inputSchema": {"type":"object","properties":{}}
         },
     ]);
+    definitions.as_array_mut().unwrap().extend(io_metadata_definitions());
+    definitions.as_array_mut().unwrap().extend(crate::tools::sys_info::definitions());
     definitions
         .as_array_mut()
         .unwrap()

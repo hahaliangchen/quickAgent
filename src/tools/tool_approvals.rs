@@ -32,8 +32,7 @@ fn open(root: &FsPath) -> Result<Connection> {
     Ok(conn)
 }
 
-/// The static approval policy, plus platform rules for managed shell sessions
-/// and the dynamic workspace-write policy for package tools.
+/// The platform-independent approval policy, including dynamic package capabilities.
 pub fn needs_approval(
     mode: PermissionMode,
     name: &str,
@@ -43,13 +42,6 @@ pub fn needs_approval(
     let builtin_approval = crate::tools::tool_registry::ToolRegistry::find(name)
         .is_some_and(|spec| spec.needs_approval_in_ask);
     let asks = matches!(mode, PermissionMode::Ask | PermissionMode::AutoReview);
-    if crate::tools::shell_process::is_tool(name) {
-        return builtin_approval && if cfg!(windows) {
-            ban_execution || mode != PermissionMode::FullAccess
-        } else {
-            asks
-        };
-    }
     asks && (builtin_approval || catalog.is_some_and(|c| {
         !c.packages.allows(name, PermissionMode::WorkspaceWrite, ban_execution)
     }))
@@ -193,7 +185,7 @@ fn outside_all_granted(
 }
 
 /// Returns canonical directories granted `outside-write` for this task or project,
-/// so `bwrap` can bind-mount approved related repositories without opening the host.
+/// used by entry checks to authorize related project directories.
 pub fn approved_writable_roots(host_root: &FsPath, task: &str) -> Result<Vec<PathBuf>> {
     let conn = open(host_root)?;
     let project = crate::context::project_notes::task_project(host_root, task)?;
@@ -400,7 +392,7 @@ async fn wait_with(
         &json!({"call_id":call_id,"tool":name,"arguments":detail,"agent_id":agent_id,
         "project":project,"once_only":force_once,
         "full_arguments":crate::tools::shell_process::is_tool(name).then_some(args),
-        "unsandboxed":crate::tools::shell_process::is_tool(name) && cfg!(windows),
+        "unsandboxed":crate::tools::shell_process::is_tool(name),
         "shell":crate::tools::shell_process::is_tool(name).then_some(if cfg!(windows) {"PowerShell 7"} else {"Bash"}),
         "outside_paths":outside_paths,
         "outside_write":outside_kind == Some(OutsideKind::Write),
@@ -564,13 +556,12 @@ mod tests {
     }
 
     #[test]
-    fn shell_approvals_reflect_missing_windows_sandbox_and_keep_cleanup_free() {
-        for mode in [PermissionMode::ReadOnly, PermissionMode::WorkspaceWrite, PermissionMode::Ask, PermissionMode::FullAccess] {
-            assert!(mode.allows("exec_command"));
-            assert_eq!(needs_approval(mode,"exec_command",None,false), if cfg!(windows) {
-                !matches!(mode,PermissionMode::FullAccess)
-            } else { matches!(mode,PermissionMode::Ask) });
-            assert_eq!(needs_approval(mode,"exec_command",None,true), cfg!(windows) || matches!(mode,PermissionMode::Ask));
+    fn shell_approvals_are_platform_independent_and_keep_cleanup_free() {
+        for mode in [PermissionMode::ReadOnly, PermissionMode::WorkspaceWrite, PermissionMode::Ask, PermissionMode::AutoReview, PermissionMode::FullAccess] {
+            assert_eq!(mode.allows("exec_command"), mode != PermissionMode::ReadOnly);
+            for ban_execution in [false, true] {
+                assert_eq!(needs_approval(mode,"exec_command",None,ban_execution), matches!(mode,PermissionMode::Ask | PermissionMode::AutoReview));
+            }
             assert!(!needs_approval(mode,"kill_session",None,true));
         }
     }
@@ -593,7 +584,7 @@ mod tests {
                 if let Some(raw) = pending {
                     let event:Value = serde_json::from_str(&raw)?;
                     assert_eq!(event["full_arguments"]["cmd"],command);
-                    assert_eq!(event["unsandboxed"],cfg!(windows));
+                    assert_eq!(event["unsandboxed"],true);
                     conn.execute("INSERT INTO tool_approvals VALUES ('t','shell-call','session')",[])?;
                     return Ok::<_,anyhow::Error>(());
                 }
@@ -640,7 +631,7 @@ mod tests {
             false
         ));
         assert!(PermissionMode::Ask.allows("run_program"));
-        assert_eq!(PermissionMode::WorkspaceWrite.allows("run_program"), cfg!(target_os = "linux"));
+        assert!(PermissionMode::WorkspaceWrite.allows("run_program"));
     }
 
     #[tokio::test]

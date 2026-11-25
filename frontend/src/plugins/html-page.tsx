@@ -7,7 +7,7 @@ import { studioUrl } from '../filePreview.ts'
 import css from './html-page.module.css'
 
 /** HTML is one implementation adapter for the common page contribution. */
-export function HtmlPluginPage({ owner, workspaceRoot, pageId, pendingOpen, theme }: PluginPageProps) {
+export function HtmlPluginPage({ owner, workspaceRoot, pageId, pendingOpen, theme, onStudioContext, onAskAi }: PluginPageProps) {
   const frame = useRef<HTMLIFrameElement>(null)
   const api = useAgentApi()
   const host = useMemo(() => createPluginHost(api, owner), [api, owner])
@@ -28,7 +28,30 @@ export function HtmlPluginPage({ owner, workspaceRoot, pageId, pendingOpen, them
   }, [loaded, owner.remote, pendingOpen])
   useEffect(() => {
     const receive = (event: MessageEvent) => {
-      if (event.source !== frame.current?.contentWindow || event.data?.type !== 'skill-package/request') return
+      if (event.source !== frame.current?.contentWindow) return
+      if (!owner.remote && event.origin === location.origin && event.data?.type === 'quickagent:studio-context') {
+        const raw = event.data.context as Record<string, unknown> | null | undefined
+        if (!raw) {
+          onStudioContext?.(null)
+        } else if (typeof raw.badge === 'string' && typeof raw.text === 'string' && raw.text.trim()) {
+          onStudioContext?.({
+            plugin: typeof raw.plugin === 'string' ? raw.plugin : owner.id,
+            id: typeof raw.id === 'string' ? raw.id : `${owner.id}:${raw.badge}`,
+            badge: raw.badge,
+            detail: typeof raw.detail === 'string' ? raw.detail : '',
+            text: raw.text,
+          })
+        }
+        return
+      }
+      if (!owner.remote && event.origin === location.origin && event.data?.type === 'quickagent:ask-ai') {
+        onAskAi?.({
+          plugin: owner.id,
+          prompt: typeof event.data.prompt === 'string' ? event.data.prompt : undefined,
+        })
+        return
+      }
+      if (event.data?.type !== 'skill-package/request') return
       const { id, method, name, arguments: args } = event.data as Record<string, unknown>
       if (typeof id !== 'string' || id.length > 128) return
       const source = event.source as Window
@@ -47,7 +70,7 @@ export function HtmlPluginPage({ owner, workspaceRoot, pageId, pendingOpen, them
     }
     window.addEventListener('message', receive)
     return () => window.removeEventListener('message', receive)
-  }, [owner, host, workspaceRoot])
+  }, [owner, host, workspaceRoot, onStudioContext, onAskAi])
   const sandbox = owner.remote
     ? 'allow-scripts'
     : 'allow-scripts allow-same-origin allow-downloads allow-modals allow-popups'

@@ -114,8 +114,8 @@ export function ApprovalCards({ taskId, events, className }: { taskId: string; e
     const chosen = sent[item.callId]
     return <div key={item.callId} className={css.card} role="alertdialog" aria-label={`是否允许${TOOL_LABELS[item.tool] ?? item.tool}`}>
       <div className={css.title}>要{TOOL_LABELS[item.tool] ?? `调用 ${item.tool}`}吗？</div>
-      {item.unsandboxed && <p className={css.warning}>警告：此命令将在沙箱外执行（无沙箱隔离），可访问当前用户权限范围内的文件和系统资源。</p>}
-      {item.outsideWrite && <p className={css.warning}>跨项目修改审批：允许后将授权在当前工作区外的目标目录写入或执行（沙箱仅按目录开放该关联路径，其余系统目录保持只读）。</p>}
+      {item.unsandboxed && <p className={css.warning}>命令以当前系统用户的权限运行，可访问该用户有权限使用的文件和系统资源。</p>}
+      {item.outsideWrite && <p className={css.warning}>跨项目目录审批：允许后，此工具可在下列工作区外的目标目录写入或执行。</p>}
       {item.reviewReason && <p className={css.hint}>AI 审查拿不准：{item.reviewReason}</p>}
       {item.outside.length > 0 && <p className={css.hint}>这些路径在当前工作区之外：{item.outside.join('、')}</p>}
       {item.shell && <p className={css.hint}>Shell：{item.shell}</p>}

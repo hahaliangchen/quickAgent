@@ -170,7 +170,6 @@ impl Runtime {
                                     | "git_status"
                                     | "git_diff"
                                     | "git_log"
-                                    | "run_readonly_command"
                             )
                     );
                     if read(&pending.action) && self.async_actions.front().is_some_and(|item| read(&item.action)) {

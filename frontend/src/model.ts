@@ -9,6 +9,8 @@ export interface ToolResult {
   readonly detailSeq?: number | undefined
   readonly fullBytes?: number | undefined
   readonly summary?: unknown
+  /** True when a `write_stdin` poll originally observed `running: true` and was later settled by `shell/end` or a subsequent poll. */
+  readonly intermediatePoll?: boolean | undefined
 }
 
 /** Turn structured tool failures into the short message shown in a row. */
@@ -149,8 +151,12 @@ export function splitTurnItems(items: readonly ChatItem[]): {
 
 /** Failures are historical facts, even if the agent may have recovered later. */
 export function failedToolNames(items: readonly ChatItem[]): string[] {
-  return [...new Set(flattenItems(items).flatMap(item =>
-    item.kind === 'tool' && item.result?.isError ? [item.name] : []))]
+  return [...new Set(flattenItems(items).flatMap(item => {
+    if (item.kind !== 'tool' || !item.result?.isError) return []
+    // `ask_user` pauses the step with NEEDS_USER to request user input, not a tool failure.
+    if (item.name === 'ask_user' && item.result.text.includes('"NEEDS_USER"')) return []
+    return [item.name]
+  }))]
 }
 
 /** A step of the process: one model reply with the tools it called, or calls nobody's reply made. */
@@ -430,16 +436,16 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
   }
   const deliveredInterjections = new Set(events.filter(event => event.type === 'user/interjection_delivered').map(event => Number(event.data.interjection_seq)))
   const results = new Map<string, ToolResult>()
-  const shellCalls = new Map<string, { sessionId: ShellSessionId | undefined }>()
+  const shellCalls = new Map<string, { name: string; sessionId: ShellSessionId | undefined }>()
   for (const event of events) {
     if (event.type !== 'tool/call' || !['exec_command', 'write_stdin', 'kill_session'].includes(String(event.data.name))) continue
     const id = stringOf(event.data.callId)
     if (id === undefined) continue
     const args = recordOf(typeof event.data.arguments === 'string' ? parsed(event.data.arguments) : event.data.arguments)
-    shellCalls.set(id, { sessionId: shellSessionId(args.session_id) })
+    shellCalls.set(id, { name: String(event.data.name), sessionId: shellSessionId(args.session_id) })
   }
   const completedShells = new Map<ShellSessionId, Record<string, unknown>>()
-  const shellResults = new Map<string, { sessionId: ShellSessionId; value: Record<string, unknown> }>()
+  const shellResults = new Map<string, { name: string; sessionId: ShellSessionId; value: Record<string, unknown> }>()
   for (const event of events) {
     if (event.type === 'shell/end') {
       const sessionId = shellSessionId(event.data.session_id)
@@ -458,14 +464,15 @@ export function chatItems(events: readonly AgentEvent[], task?: Task): ChatItem[
     const value = decoded as Record<string, unknown>
     const sessionId = shellSessionId(value.session_id) ?? shell.sessionId
     if (sessionId === undefined) continue
-    shellResults.set(id, { sessionId, value })
+    shellResults.set(id, { name: shell.name, sessionId, value })
     if (value.running === false) completedShells.set(sessionId, { ...completedShells.get(sessionId), ...shellCompletion(value) })
   }
-  for (const [id, { sessionId, value }] of shellResults) {
+  for (const [id, { name, sessionId, value }] of shellResults) {
     const completion = completedShells.get(sessionId)
     const result = results.get(id)
     if (completion !== undefined && result !== undefined) {
-      results.set(id, { ...result, text: JSON.stringify({ ...value, ...completion }) })
+      const intermediatePoll = name === 'write_stdin' && value.running === true
+      results.set(id, { ...result, text: JSON.stringify({ ...value, ...completion }), ...(intermediatePoll ? { intermediatePoll: true } : {}) })
     }
   }
   const reviews = new Map<string, { decision: string; reason: string }>()

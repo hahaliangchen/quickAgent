@@ -760,7 +760,7 @@ impl Compiler {
             }
             ast::Expr::Member(m) => {
                 // Support Node-style `<lib>.promises.<method>` (e.g. `io.promises.read`,
-                // `process.promises.run_readonly`, `git.promises.status`) for Promise.all.
+                // `io.promises.read`, `git.promises.status`) for Promise.all.
                 if let (ast::Expr::Member(inner), ast::MemberProp::Ident(method)) = (&*m.obj, &m.prop)
                     && let (ast::Expr::Ident(namespace), ast::MemberProp::Ident(sub)) = (&*inner.obj, &inner.prop)
                     && sub.sym.as_ref() == "promises"

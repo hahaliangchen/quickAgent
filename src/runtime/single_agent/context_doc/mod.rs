@@ -401,8 +401,19 @@ impl ContextDocument {
             .or_else(|| error["error"].as_str())
             .map(|s| s.lines().next().unwrap_or(s).to_owned())
             .unwrap_or_else(|| compact_single_line(&error.to_string(), 200));
+        let source_line_note = error["location"]["line"]
+            .as_u64()
+            .and_then(|line| usize::try_from(line).ok())
+            .filter(|&line| line >= 1)
+            .and_then(|line| {
+                source
+                    .lines()
+                    .nth(line - 1)
+                    .map(|text| format!("\n// at line {line}: {}", compact_single_line(text.trim(), 200)))
+            })
+            .unwrap_or_default();
         let err_detail = format!(
-            "// [RUNTIME ERROR — completed side effects remain applied; do NOT replay writes]\n// [aborted: {err_summary}]\n// detail: {}",
+            "// [RUNTIME ERROR — completed side effects remain applied; do NOT replay writes]\n// [aborted: {err_summary}]{source_line_note}\n// detail: {}",
             compact_single_line(&error.to_string(), 600)
         );
         let live_handles = collect_live_handles(runtime);
@@ -524,10 +535,16 @@ impl ContextDocument {
                 code.push_str("\n");
             }
         }
-        if code.chars().count() > 16 * 1024 {
+        let total_chars = code.chars().count();
+        if total_chars > 16 * 1024 {
             if let Some(asset_id) = code_asset_id.as_deref() {
-                let prefix: String = code.chars().take(12 * 1024).collect();
-                code = format!("{prefix}\n// [full folded code snapshot: {asset_id}]\n");
+                let head_len = 2 * 1024;
+                let tail_len = 10 * 1024;
+                let head: String = code.chars().take(head_len).collect();
+                let tail: String = code.chars().skip(total_chars.saturating_sub(tail_len)).collect();
+                code = format!(
+                    "{head}\n// [... middle folded code omitted; full folded code snapshot: {asset_id}]\n{tail}"
+                );
             }
         }
         let (assistant_message, tool_call_id) = fold_message(turn, turn_number);
@@ -595,10 +612,16 @@ impl ContextDocument {
                 code.push_str("\n");
             }
         }
-        if code.chars().count() > 16 * 1024 {
+        let total_chars = code.chars().count();
+        if total_chars > 16 * 1024 {
             if let Some(asset_id) = code_asset_id.as_deref() {
-                let prefix: String = code.chars().take(12 * 1024).collect();
-                code = format!("{prefix}\n// [full folded code snapshot: {asset_id}]\n");
+                let head_len = 2 * 1024;
+                let tail_len = 10 * 1024;
+                let head: String = code.chars().take(head_len).collect();
+                let tail: String = code.chars().skip(total_chars.saturating_sub(tail_len)).collect();
+                code = format!(
+                    "{head}\n// [... middle folded code omitted; full folded code snapshot: {asset_id}]\n{tail}"
+                );
             }
         }
         let assistant_message = turn
@@ -1329,5 +1352,35 @@ mod tests {
             seg5.contains("Ref#2") && seg5.contains("1|fn alpha_v2() {}"),
             "{seg5}"
         );
+    }
+
+    #[test]
+    fn folded_prefix_retains_both_opening_head_and_most_recent_tail_when_oversized() {
+        let mut doc = ContextDocument::default();
+        doc.begin_turn(1, "long refactor");
+        let head_marker = "const OPENING_HEAD_BINDING = 1;";
+        let middle_pad = format!("const MID = \"{}\";", "m".repeat(18 * 1024));
+        let tail_marker = "const MOST_RECENT_TAIL_BINDING = 99;";
+        for (idx, src) in [head_marker, middle_pad.as_str(), tail_marker, "const ACTIVE = 1;"].iter().enumerate() {
+            doc.active_turn_mut().unwrap().segments.push(TraceSegment {
+                source: (*src).to_owned(),
+                inline_receipts: vec![],
+                error_note: None,
+                assistant_message: Some(assistant(&format!("c{idx}"), false)),
+                tool_call_id: Some(format!("c{idx}")),
+                is_rejection: false,
+                interjection: None,
+            });
+        }
+        assert!(doc.fold_active_prefix(
+            1,
+            3,
+            "{\"folded\":true}",
+            Some("asset-oversized-code".into())
+        ));
+        let folded = doc.active_turn().unwrap().folded_prefix.as_ref().unwrap();
+        assert!(folded.code.contains(head_marker), "opening head missing: {}", folded.code);
+        assert!(folded.code.contains(tail_marker), "most recent tail missing: {}", folded.code);
+        assert!(folded.code.contains("asset-oversized-code"), "asset ref missing: {}", folded.code);
     }
 }

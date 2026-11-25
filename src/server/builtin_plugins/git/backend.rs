@@ -4,7 +4,6 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, sync::LazyLock, time::Duration};
-use tokio::process::Command;
 
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MAX_PATCH: usize = 400 * 1024;
@@ -55,17 +54,9 @@ async fn run_with_mode(
     timeout: Duration,
     mutating: bool,
 ) -> Result<Output> {
-    let sandbox_boundary = crate::tools::process_sandbox::current_tool_sandbox().and_then(|ctx| {
-        (ctx.boundary != crate::tools::process_sandbox::ExecutionBoundary::Host).then_some(if mutating {
-            ctx.boundary
-        } else {
-            crate::tools::process_sandbox::ExecutionBoundary::ReadOnly
-        })
-    });
-    let mut command = match sandbox_boundary {
-        Some(boundary) => crate::tools::process_sandbox::command("git", root, root, boundary)?,
-        None => Command::new("git"),
-    };
+    use crate::tools::process_sandbox::{self, ExecutionBoundary};
+    let boundary = process_sandbox::current_tool_sandbox().map_or(ExecutionBoundary::Host, |ctx| ctx.boundary);
+    let mut command = process_sandbox::command("git", root, root, boundary)?;
     command.args([
         "-c",
         "core.quotepath=off",
@@ -74,7 +65,7 @@ async fn run_with_mode(
         "-c",
         "core.fsmonitor=false",
     ]);
-    if sandbox_boundary.is_some() {
+    if boundary != ExecutionBoundary::Host {
         command.args(["-c", "core.hooksPath=/dev/null"]);
     }
     let child = command

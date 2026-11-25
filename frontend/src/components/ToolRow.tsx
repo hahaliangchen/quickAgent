@@ -237,13 +237,16 @@ export const ToolRow = memo(function ToolRow({ name, rawArguments, result: previ
   const shellResult = typeof shellParsed === 'object' && shellParsed !== null && !Array.isArray(shellParsed)
     ? shellParsed as Record<string, unknown> : undefined
   const shellExitCode = typeof shellResult?.exit_code === 'number' ? shellResult.exit_code : null
+  const intermediatePoll = result?.intermediatePoll === true
   const state = result === undefined ? (stopped ? 'stopped' : 'running')
     : result.isError ? 'error'
     : shellResult?.running === true ? 'running'
+    : intermediatePoll ? 'ok'
     : isShellSession && shellExitCode !== null && shellExitCode !== 0 ? 'error' : 'ok'
   const running = state === 'running'
   const shellTermination = typeof shellResult?.termination_reason === 'string' ? shellResult.termination_reason : undefined
   const shellStatus = running ? '运行中' : state === 'stopped' ? '已中断'
+    : intermediatePoll ? '已拉取输出'
     : shellExitCode !== null ? `退出码 ${shellExitCode}`
     : shellTermination !== undefined ? `已停止 · ${shellTermination}`
     : state === 'error' ? '失败' : '已结束（无退出码）'

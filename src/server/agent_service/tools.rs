@@ -87,7 +87,8 @@ fn local_output_schema(name: &str) -> Option<Value> {
         }
         "git_diff" => {
             json!({"type":"object","required":["diff","files","truncated","stat_only"],"properties":{
-            "diff":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"truncated":{"type":"boolean"},"stat_only":{"type":"boolean"}}})
+            "diff":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"truncated":{"type":"boolean"},"stat_only":{"type":"boolean"},
+            "check_ok":{"type":"boolean"},"check_issues":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer"},"message":{"type":"string"}},"required":["message"]}}}})
         }
         "git_log" => json!({"type":"object","required":["commits","truncated"],"properties":{
             "commits":{"type":"array","items":{"type":"object","required":["commit","short_commit","author","date","subject"],"properties":{
@@ -146,6 +147,11 @@ fn local_output_schema(name: &str) -> Option<Value> {
         "write_file" | "edit_file" => written(json!({"created":{"type":"boolean"}})),
         "replace_range" => {
             written(json!({"start_line":{"type":"integer"},"end_line":{"type":"integer"}}))
+        }
+        "stat_paths" => json!({"type":"object","required":["entries"],"properties":{"entries":{"type":"array","items":{"type":"object","required":["path","exists"],"properties":{"path":{"type":"string"},"exists":{"type":"boolean"},"kind":{"enum":["file","directory","symlink","other"]},"size_bytes":{"type":"integer"},"modified_at":{"type":"string"},"modified_ms":{"type":"integer"},"readonly":{"type":"boolean"},"executable":{"type":"boolean"}}}}}}),
+        "copy_path" => json!({"type":"object","required":["from","to","kind","files_copied","bytes_copied","overwritten"],"properties":{"from":{"type":"string"},"to":{"type":"string"},"kind":{"enum":["file","directory"]},"files_copied":{"type":"integer"},"bytes_copied":{"type":"integer"},"overwritten":{"type":"boolean"}}}),
+        "sys_disk_space" | "sys_which" | "sys_listening_ports" | "sys_processes" => {
+            return crate::tools::sys_info::definitions().into_iter().find(|tool| tool["name"] == name).map(|tool| tool["outputSchema"].clone());
         }
         "delete_path" => json!({"type":"object","required":["path","deleted","kind"],"properties":{
             "path":{"type":"string"},
@@ -212,6 +218,9 @@ pub(crate) async fn execute_tool(
     }
     if crate::tools::browser_control::is_tool(name) {
         return crate::tools::browser_control::execute(&workspace, name, &args).await;
+    }
+    if name == "http_request" {
+        return crate::tools::http_probe::execute_request(&args).await;
     }
     if crate::tools::http_probe::is_tool(name) {
         return crate::tools::http_probe::execute(&args).await;

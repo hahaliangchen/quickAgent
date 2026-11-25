@@ -782,7 +782,7 @@ export function Composer({
               <span className={codexCss.permOptionIcon}>{ASK_ICON}</span>
               <div className={codexCss.permOptionBody}>
                 <span className={codexCss.permOptionTitle}>执行前询问</span>
-                <span className={codexCss.permOptionDesc}>运行命令或打开浏览器前先询问。Linux 的命令使用工作区写入沙箱，浏览器不受该沙箱约束。</span>
+                <span className={codexCss.permOptionDesc}>运行命令、访问跨项目目录或打开浏览器前先询问；敏感凭据与宿主保护规则始终生效。</span>
               </div>
               {permissionMode === 'ask' && (
                 <span className={codexCss.permOptionCheck}>
@@ -797,7 +797,7 @@ export function Composer({
               <span className={codexCss.permOptionIcon}>{AUTO_REVIEW_ICON}</span>
               <div className={codexCss.permOptionBody}>
                 <span className={codexCss.permOptionTitle}>自动审批</span>
-                <span className={codexCss.permOptionDesc}>需要确认的操作先由 AI 对照你的要求审查：明确该做的直接放行，明确不该做的拒绝，拿不准时再问你。命令的沙箱与执行前询问相同。</span>
+                <span className={codexCss.permOptionDesc}>需要确认的操作先由 AI 对照你的要求审查：明确该做的直接放行，明确不该做的拒绝，拿不准时再问你。</span>
               </div>
               {permissionMode === 'auto_review' && (
                 <span className={codexCss.permOptionCheck}>
@@ -837,7 +837,7 @@ export function Composer({
         <RiskConfirmation
           open={showRiskConfirm}
           title="切换到完全权限？"
-          description="之后 agent 会直接运行命令、打开浏览器，不再逐条询问。命令以你的系统账户运行，不受工作区目录限制。只需要确认这一次。"
+          description="之后 agent 会直接运行命令、打开浏览器，不再逐条询问。命令以你的系统账户运行；敏感凭据与宿主保护规则仍然生效。只需要确认这一次。"
           acknowledgeLabel="我了解，之后不用再问"
           cancelLabel="取消"
           closeLabel="关闭"

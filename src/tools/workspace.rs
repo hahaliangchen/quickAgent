@@ -133,7 +133,7 @@ pub struct WorkspaceInfoRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct GitStatusRequest {
-    #[serde(default)]
+    #[serde(default, alias = "repo")]
     pub workspace_root: Option<String>,
     #[serde(default)]
     pub paths: Vec<String>,
@@ -163,7 +163,7 @@ pub struct GitStatusResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct GitDiffRequest {
-    #[serde(default)]
+    #[serde(default, alias = "repo")]
     pub workspace_root: Option<String>,
     #[serde(default)]
     pub rev_range: Option<String>,
@@ -173,6 +173,8 @@ pub struct GitDiffRequest {
     pub paths: Vec<String>,
     #[serde(default)]
     pub stat_only: bool,
+    #[serde(default)]
+    pub check: bool,
     #[serde(default = "default_git_unified")]
     pub unified: usize,
     #[serde(default)]
@@ -183,8 +185,15 @@ pub struct GitDiffRequest {
 
 impl Default for GitDiffRequest {
     fn default() -> Self {
-        Self { workspace_root: None, rev_range: None, staged: false, paths: Vec::new(), stat_only: false, unified: 3, max_lines: None, max_chars: None }
+        Self { workspace_root: None, rev_range: None, staged: false, paths: Vec::new(), stat_only: false, check: false, unified: 3, max_lines: None, max_chars: None }
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitDiffIssue {
+    pub path: Option<String>,
+    pub line: Option<usize>,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,11 +202,15 @@ pub struct GitDiffResponse {
     pub files: Vec<String>,
     pub truncated: bool,
     pub stat_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_ok: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub check_issues: Vec<GitDiffIssue>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 pub struct GitLogRequest {
-    #[serde(default)]
+    #[serde(default, alias = "repo")]
     pub workspace_root: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
@@ -592,6 +605,57 @@ pub struct TextMatch {
     pub before: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StatRequest {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatResponse { pub entries: Vec<StatEntry> }
+
+#[derive(Debug, Serialize)]
+pub struct StatEntry {
+    pub path: String,
+    pub exists: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<EntryKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CopyPathRequest {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub recursive: bool,
+    #[serde(default)]
+    pub overwrite: bool,
+    #[serde(default = "default_true")]
+    pub create_parent_dirs: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CopyPathResponse {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub files_copied: usize,
+    pub bytes_copied: u64,
+    pub overwritten: bool,
 }
 
 #[derive(Debug, Deserialize)]

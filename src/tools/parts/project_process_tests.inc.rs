@@ -219,7 +219,6 @@
             exit_code: None,
             termination_reason: None,
             background: true,
-            sandboxed: false,
         };
         std::sync::Arc::new(super::Record {
             meta: tokio::sync::Mutex::new(meta),

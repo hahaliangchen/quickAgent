@@ -9,7 +9,7 @@
 > - **惰性资源句柄（`ResourceHandle`）**：文件读取与大命令输出自带 `Ref#N` 与 `.slice()`（支持多区间）、`.grep()`、`.outline()`、`.head()`、`.tail()`；传给 `@virtual` 时外层零展开、子帧自动解引用。
 > - **内外同构隔离 `@virtual` 帧**：子帧使用同一套纯 JS + `.d.ts` + `// =>` + `EPHEMERAL_PEEK` 引擎，剥离 `process`/`session`/`ask_user`、禁止嵌套 `@virtual`，支持 `Promise.all` 真并发与 `delegate_agent_settings` 异构模型路由，返回即 GC 并在父轨迹留 `[virtual ...]` 事实回执。
 > - **跨会话复用与优雅交互**：支持 `require("<lib>")` / `require("<lib>/promises")` 加载内置预设与 `.agents/skills/<name>/modules/*.js`，支持 `host.ask_user` 优雅挂起（`NEEDS_USER`）、`host_folder` `turn-NN.js` 归档与 `rewind` 回滚。
-> - 下文关于权限审批、沙箱边界、技能目录结构与管理文件基线等通用原则继续有效。
+> - **现状：跨平台 Capability Security 与原生库。** 文件元数据/受控复制走 `io.stat` / `io.copy`，环境探针走只读 `sys.*`；磁盘、PATH 与进程信息使用原生平台 API，macOS TCP listener enumeration 明确返回 `supported: false`。Linux `bwrap` 进程沙箱与 `run_readonly_command` 已退场；Linux、Windows、macOS 的命令统一采用入口规则与三档审批（执行前询问、自动审批、完全权限），不做 OS 级进程隔离。旧事件仍可回放。历史章节如有冲突，以此处与第 9 节为准。
 
 ## 1. 出发点
 
@@ -51,7 +51,7 @@ async function designPage(shared, page) {}
 ### 3.1 `@virtual` 虚函数：隔离的朴素 AI 循环
 
 - `@virtual` 只承担清晰、聚焦的 AI 理解、判断、生成或局部编辑职责；数据读取、命令执行、循环与汇总写在调用它的 JS 函数里。
-- 它能用的工具默认来自声明代码 `import` 和 `require` 的库方法（**严禁任何 shell 执行与只读命令工具，包括 `run_readonly_command`**），加上固定的 `find_library_methods` 和 `ask_user`（第 5 节）；若编排显式传入 `host.context()` 的收窄工具列表，宿主仍强制剥除 `write_program`、`handoff_step` 与所有 shell 工具。
+- 它能用的工具默认来自声明代码 `import` 和 `require` 的库方法（**严禁调用任何 `process.*` 工具**），加上固定的 `find_library_methods` 和 `ask_user`（第 5 节）；若编排显式传入 `host.context()` 的收窄工具列表，宿主仍强制剥除 `write_program`、`handoff_step` 与所有 shell 工具。
 - 它要看的材料最好由 JS 代码读好后作为参数传进去，不让它自己绕圈去搜；内容太大时由 JS 拆批并发调用。
 - **可以只改工作区，不返回内容。** 改代码类虚函数直接改好文件回复 `null` 即可；要返回文本再写入的则不要自己写文件。**一个文件在一步里只有一个写入者**，验收看实际文件与测试，不看转述。
 - 说做不到时回复 `{"$task_error":…}`，作为异常抛给 JS 调用方。
@@ -76,7 +76,7 @@ async function designPage(shared, page) {}
 
 **串联顶层虚函数 + 可选 JS/`@virtual` 函数分割，宽容量、自然消融、不强加仪式。** 最外层会话本身等价于在共享不可变前缀 `mainContext` 之上串联调用的顶层虚函数（`(function(){ /* 朴素循环或 write_program */; mainContext += selfContext.slice(...); })() → continueInspection() → 下一轮 analysisIssue()`）：每个顶层虚函数在自己的局部 `selfContext` 里自由运行朴素 ReAct 循环——既可以直接调用工具完成任务（不设“只能探 1–4 步、必须写程序”的硬门槛），也可以在遇到批处理、多命令构建测试、长日志过滤或并发分片判断时通过 `write_program` 用普通 JS 函数和单层 `@virtual` 提前隔离并释放中间大输出（不在未知路径/目标时盲写大程序）。即便主 AI 全程跑朴素循环或连续运行多段程序，只有在窗口真正逼近物理上限时，宿主才会通过顶层 `handoff_step` 自动收尾当前顶层虚函数、提取精华切片并释放旧 `selfContext`，切入下一个串联顶层虚函数：
 
-- **代码会话可以直接做轻量读写、跑 `run_readonly_command`，编排程序内可直接调用 `process` 库。** 主 AI 可直接使用允许的读写、搜索、Git、看图、附件与历史查询方法，也可以用 `run_readonly_command` 跑单次只读查看或单个窄测试（Linux `bwrap` 只读挂载工作区与 `.git`、断网、仅 git 忽略的构建目录与私有 `/tmp` 可写，不需要审批）。多步命令、批处理或需要修改/构建的工作，主 AI 直接在顶层 `write_program` 里调用 `process.run_readonly`（完整 stdout/stderr 直接进入 JS heap，不占主对话上下文）或按会话权限调用 `process.exec_command` / `run_program` 等方法；`@virtual` 虚函数叶子依然严禁任何 shell 执行（含 `run_readonly_command`）。
+- **读取和检索走结构化工具，项目构建、测试、诊断走 `process.exec_command`。** 主程序按会话权限运行命令，输出进入 JS heap；`@virtual` 叶子和插件会话不暴露 `process.*`。
 - **写具体调用的一层查接口。** 主 AI 可用 `find_library_methods` 查找在权限范围内的库方法供程序调用，主窗口工具列表本身固定不变（第 11 节第 32 条）；虚函数找到的方法只作用于这一次调用。
 - **宽松容量边界，高水位兜底，绝不低门槛打断。** 直接工具投喂保持充裕上限（单次 `clamp(32k, 128k)` tokens、单轮 `clamp(64k, 256k)` tokens），`program_result` / `module_probe_result` 的交付软上限按当前会话上下文预算的 `1/4` 计算（`soft_tokens = (input_budget / 4).max(1)`，`soft_chars = soft_tokens * 3`，同时保留 `required + 4096 <= input_budget` 剩余窗口硬边界；不设 `host.digest` 与宿主自动摘要折叠），超出即归档完整输出为 `program_output_asset` 并返回显式 `MATERIAL_OVER_CAPACITY` / `OUTPUT_OVER_CAPACITY`（附 `result_field_chars` 顶层字段字符分布）引导按需 `read_asset` 或收窄字段。无论直接 ReAct 还是 `write_program` 交付 `program_result`（首行带 `[event_seq: N]`）回到主循环，均仅在真正逼近容量上限时（常规 `current_tokens >= input_budget * 4 / 5` 且 `step_rounds_in_scope >= 3` 且可回收增量 `>= input_budget / 12`，或紧急 `current_tokens >= input_budget * 7 / 8` 且存在可回收增量）才发出一次 `step_wrap_requested`（`virtual_step_wrap_required`），要求选择：(1) 调用 `handoff_step`——遵循 `mainContext += selfContext.slice(...)`，给出 `next_goal` 与坐标 **`slices`**（`[{seq, lines?, grep?, context_lines?, head?, tail?, keys?, label?}]`），由宿主按 `event_seq` 原文截取并追加不可变的 `virtual_step_handoff` 消息（总预算 192 KiB FIFO 淘汰），清空已完成顶层作用域的探索工具输出并将旧 `program_result` 压为一行带 `event_seq` 的轻量 `program_record`；或 (2) 直接纯文本答复。未近 80% 水位前绝不打断；不设每轮 `set_next_step` 或 `workspace_ledger`。
 - **交出一段程序。** 主 AI 调用 `write_program({source})` 交出主脚本，这次回复里只调用它；宿主写入文件并编译，编译通过就在这次回复结束后运行，编译不过的诊断是这次调用的结果，AI 改好再交。回复正文里的代码一律是回答，宿主不解析、不运行。
@@ -160,7 +160,7 @@ async function designPage(shared, page) {}
   - 程序挂起后恢复时，宿主重新链接已经加载的库；库已经不在，或者用到的方法已经没有了，就在调用处明确报错，不拿旧的契约去调用。
   - 方法可以由插件的原生代码、远程服务或命令实现，也可以是项目技能里的 JS 模块，在宿主的虚拟机里运行。
 - 宿主**不在每次请求里发送完整工具列表**，以减少工具定义带来的上下文开销：写代码的请求只附简要索引，业务工具的完整定义不随请求发送。简要索引列出静态库的方法，以及可以 require 的库的名字和用途。
-- 写代码的 AI（主 AI，以及写模块、修复模块的 AI）拿到简要索引和本聊天已有模块的列表，需要时用 `read_tool_contracts` 查方法契约、用 `read_program_guide` 查语言细节。主 AI 另外能直接调用几个读取、编辑和看图的方法和只读命令工具 `run_readonly_command`；需要补充的程序方法用 `find_library_methods` 查（第 4 节）。写模块的 AI 只能调用这两个工具，以及读技能说明的 `read_skill`（第 5.1 节），其余都要写进代码；修复模块的 AI 另外能用 `edit_file`，只能改它负责的那个模块文件（第 8 节）。
+- 写代码的 AI（主 AI，以及写模块、修复模块的 AI）拿到简要索引和本聊天已有模块的列表，需要时用 `read_tool_contracts` 查方法契约、用 `read_program_guide` 查语言细节。主 AI 另外能直接调用几个读取、编辑和看图的方法；需要补充的程序方法用 `find_library_methods` 查（第 4 节）。写模块的 AI 只能调用这两个工具，以及读技能说明的 `read_skill`（第 5.1 节），其余都要写进代码；修复模块的 AI 另外能用 `edit_file`，只能改它负责的那个模块文件（第 8 节）。
 - **虚函数的工具范围 = 声明它的模块代码 import 和 require 的库方法，排除 shell。** 写代码时引入什么，本身就是对这些虚函数需要哪些能力的预期，所以库要按能力拆开（第 5.2 节）。
 - 虚函数的循环里固定保留 `find_library_methods` 和 `ask_user`。`find_library_methods` 按关键词查找方法，查找范围包括可以 require 的库，命中的词越多越靠前；找到的方法只加到**这一次循环**的范围里（由这次循环自己的消息推出），随函数返回消失，不写入持久状态；只能搜索，不提供「列出全部」。`ask_user` 见第 7.1 节。
 - 查找、import 和 require 都不扩大权限，权限检查发生在实际调用时。
@@ -194,9 +194,11 @@ async function designPage(shared, page) {}
 
 | 库 | 方法 |
 | --- | --- |
-| `io` | 文件：`read`、`read_lines`、`list`、`search`、`write`、`edit`、`replace`，以及工作区信息 `workspace_info` |
-| `process` | 平台 shell 命令与只读沙箱：`run_readonly`（即 `run_readonly_command`）、`exec_command`、`write_stdin`、`kill_session`；以及 `run_program`、`run_project_script`、`install_dependencies`、`get_project_process`、`stop_project_process` |
-| `http` | `probe` |
+| `io` | 文件：`read`、`read_lines`、`list`、`search`、`stat`、`copy`、`write`、`edit`、`replace`，以及工作区信息 `workspace_info` |
+| `sys` | 只读跨平台探针：`disk_space`、`which`、`listening_ports`、`processes`；进程结果不包含命令行，部分平台的端口枚举会返回 `supported: false` |
+| `process` | 按会话权限运行项目命令和管理进程：`exec_command`、`write_stdin`、`kill_session`、`run_program`、`run_project_script`、`install_dependencies`、`get_project_process`、`stop_project_process` |
+| `http` | `probe`、`request`；请求有响应体限长与控制面 URL 检查，外部请求或写方法需审批 |
+| `git` | `status`、`diff`、`log`、`blame`、`commit`、`restore` 支持 `repo`；`diff` 支持 `check` |
 | `browser` | `open`、`read`、`wait`、`diagnostics`、`click`、`press_key`、`upload`、`screenshot`、`close` |
 | `memory` | 工作记忆、架构记忆、符号的业务上下文，各有 `record_*`、`list_*`、`search_*` |
 | `vision` | `view_image`、`analyze_images`、`image_analysis_results` |
@@ -205,9 +207,9 @@ async function designPage(shared, page) {}
 
 - **不设兜底的库。** 每个宿主工具都属于一个有名字的库，新增工具时同时定下它归哪个库。测试按工具目录逐个检查，有一个没有归属就失败。
 - **方法名**去掉和库名重复的前缀，比如 `browser_open` 成为 `browser.open`，`http_probe` 成为 `http.probe`；其余沿用原工具名，`io` 保留现在的短名。
-- **按实际请求验收。** `@virtual` 虚函数只拿声明代码所引用且当前允许的非 shell 方法，以及固定的 `find_library_methods` 和 `ask_user`；即使调用代码引入了 `process`，所有 shell 方法与 `run_readonly_command` 也绝不暴露给虚函数叶子。主程序与模块代码在有执行权限的会话中可按权限调用 `process.run_readonly` / `process.*`，输出进入 JS heap、不自动进入 AI 上下文；主 AI 直接调用只读命令仍走 `run_readonly_command`。
+- **按实际请求验收。** `@virtual` 叶子只拿当前允许的非 `process` 方法，声明代码即使导入 `process` 也不会向子帧暴露。主程序与模块代码按会话权限调用 `process.*`，输出进入 JS heap、不自动进入 AI 上下文。
 
-Shell stage 1 的三个方法属于 `process`，旧方法保留；只有模块的确定性代码能用它们，主 AI、主程序和虚函数均不直接运行；主 AI 另有只读的 `run_readonly_command`（第 4 节）。需要 shell 的主流程用 `@virtual` 声明职责，第一层实现读取、运行、解析和检查；AI 钩子保持小而专一。Windows 用 PowerShell 7、Linux 用 Bash，路径和能力由 system 动态注入；每条 cmd 启动新进程，变量和 cd 不持久化，长进程保留 session，无 PTY。同 task、同 turn 的 shell 共用 `change_interval`，重叠改动合并跟踪到最后退出；别的 task/turn 与宿主编辑、写入、undo 等待全部停止。程序收到真实 stdout/stderr 和退出码，默认合计 8 MiB 输出堆预算；超限以 `SHELL_OUTPUT_OVER_CAPACITY` 明确失败，不交付成功前缀，保留完整 asset 和会话读取引用，后续模块可用 stream 分页处理。模块返回值先进入 JS heap，不能统称 AI 上下文；AI 只看打印、诊断、显式虚函数输入和成果摘要。详见[手册](agent-program.md#shell-stage-1process-库)与[shell 模块示例](../skills/task-program/examples/shell-in-module.js)。定位源代码优先 scoped `rg --files`／`rg -n`，默认遵守 `.gitignore`；不要递归 Get-ChildItem 扫遍 target 等产物。
+需要项目构建、测试或诊断时，主程序与模块按会话权限调用 `process.exec_command`、`write_stdin`、`kill_session`；文件、检索、Git、数据库和远程操作分别走 `io.*`、`git.*`、`db.*`、`ssh.*`。Windows 用 PowerShell 7、Linux 用 Bash，路径和能力由 system 动态注入；每条 cmd 启动新进程，变量和 cd 不持久化，长进程保留 session，无 PTY。同 task、同 turn 的 shell 共用 `change_interval`，重叠改动合并跟踪到最后退出；别的 task/turn 与宿主编辑、写入、undo 等待全部停止。程序收到真实 stdout/stderr 和退出码，默认合计 8 MiB 输出堆预算；超限以 `SHELL_OUTPUT_OVER_CAPACITY` 明确失败，不交付成功前缀，保留完整 asset 和会话读取引用，后续模块可用 stream 分页处理。模块返回值先进入 JS heap，不能统称 AI 上下文；AI 只看打印、诊断、显式虚函数输入和成果摘要。详见[手册](agent-program.md#shell-stage-1process-库)与[shell 模块示例](../skills/task-program/examples/shell-in-module.js)。定位源代码优先 scoped `rg --files`／`rg -n`，默认遵守 `.gitignore`；不要递归 Get-ChildItem 扫遍 target 等产物。
 
 ### 5.3 插件提供能力与业务流程
 
@@ -296,7 +298,9 @@ Agent 的核心提示词始终保留；插件 Skill 是本插件业务如何做�
 
 作用域隔离的是上下文，不是外部世界。并发的虚函数和模块可能写同一个文件，所以宿主为 Agent 的写入保留按文件的基线；遇到外部修改或并发冲突时不覆盖，保留双方内容，把发生了什么交给 AI 决定，这一轮不因此结束（`managed_files`，第 11 节第 37 条）。基线按任务记，看的是谁改的，不是用什么改的：任务自己运行的命令改了它管理的文件，和受管写入一样算它自己的改动，命令结束后基线跟上；命令开始前文件就已经和基线不同，基线不动，下一次写入照样停下；仍在后台运行的进程之后还会写，它的改动不算。命令运行时宿主里的其他写入都要等它，分不清的只有这段时间里宿主之外（用户的编辑器、其他进程）改了同一个文件，这种情况算作任务自己的改动。外部修改只在一轮之内算：每轮开始时，和基线不同的文件把基线改成现在的内容，因为两轮之间是用户在掌控，那时的改动就是新一轮要面对的现状（2026-11-11，任务第 1 轮读过的文件下午被另一个会话改了，第 7 轮重新读过后再改，仍按六小时前的基线判成冲突，整轮失败）。代价是：上一轮停下保留的程序，若在下一轮恢复后整份写一个两轮之间被改过的文件，不再被拦。
 
-非只读模式下，写入、编辑以及指定目录的命令/脚本也可以通过绝对路径操作当前工作区之外的关联项目或配置文件：非完全访问模式（`ask`、`auto_review`、`workspace_write`）按目标仓库/目录粒度弹出用户确认（可允许单次、本会话或本项目），完全访问模式直接放行；获批后的外部目录会动态加入 `bwrap` 沙箱的可写绑定列表（其余系统目录与主目录敏感凭据仍保持只读/遮蔽）。跨项目写入以目标目录为根，哈希校验和基线照常，凭据文件和宿主状态库照样拦住；它不进当前项目这一轮的改动记录，也不能随当前项目整轮撤销。只读模式下拒绝外部写入。起因：2026-11-11 改外部配置或关联仓库时，既不应要求用户开启无沙箱的完全权限，也不应让模型绕道写模块解析重建文件。
+**权限边界（现状）。** Linux、Windows、macOS 统一按工具入口规则和三档权限审批执行：执行前询问（`ask`）、自动审批（`auto_review`）、完全权限（`full_access`）。保留旧会话的 `read_only` / `workspace_write` 行为：只读会话不执行命令；`ask`、`auto_review` 和 `workspace_write` 下，工具显式指定的跨项目写入或执行目录仍按目标目录获得人工审批（单次、本会话或本项目）；`full_access` 不要求目录审批。跨项目写入仍有基线与哈希校验，不进当前项目本轮改动记录。
+
+所有命令都以当前系统用户身份运行，不使用 `bwrap`，原 `run_readonly_command` 不再可调用。入口仍剥离父进程内部环境变量、拦截显式敏感凭据和宿主状态引用，网络能力保留控制面 URL 拦截和 HTTP 防护。这些规则不限制命令启动后实际读写的文件或网络访问，也不等同于 OS 沙箱。
 
 同一个任务里的函数共用这份基线，所以函数之间另有一条规则。每次写入，不管是受管写入还是命令的改动，都记一个写入版本和写入者：并行的 async 函数记它自己，主程序和它的同步调用记 `@main`。async 函数开始时记下当时的版本号，被插嘴暂停的程序记暂停那一刻的版本号。async 函数用 `io.write` 整份写一个文件时，如果它开始之后有别的写入者写过这个文件，它手里的内容可能是旧的，宿主就停下，保留当前文件和待写内容。它开始之前的写入不算，所以按顺序调用的函数、后面几轮的函数都不受影响。宿主不记函数读到的是哪个版本，同时运行的函数即使重新读过文件，也照样会被拦；提示词里"一个文件一步只有一个写入者"，就是引导模型避开这种写法。局部修改（`io.edit`、`io.replace`）是在文件当前内容上替换，抹不掉别人的改动，不检查；主程序自己的整份写入也不检查。
 

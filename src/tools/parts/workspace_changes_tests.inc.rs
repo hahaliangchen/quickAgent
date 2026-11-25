@@ -692,6 +692,29 @@
         Ok(())
     }
 
+    #[tokio::test]
+    async fn copied_files_are_recorded_and_can_be_undone() -> Result<()> {
+        let (root, mut state)=shell_state()?;
+        state.permission_mode=crate::server::agent_service::PermissionMode::FullAccess;
+        let conn=connection(&root)?;
+        conn.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('copy-task','','fake','completed',0,0)",[])?;
+        fs::write(root.join("copy-source.txt"),b"copy source")?;
+        let args=json!({"from":"copy-source.txt","to":"copy-result.txt","recursive":false,"overwrite":false,"create_parent_dirs":true});
+        let cancel=CancellationToken::new();
+        let _guard=mutation_guard(&root,"copy_path",&args,&cancel).await?;
+        execute_tracked(state.clone(),state.workspace.clone(),"copy-task".into(),1,"copy_path".into(),args,cancel).await?;
+        drop(_guard);
+        assert_eq!(fs::read(root.join("copy-result.txt"))?,b"copy source");
+        assert!(summary(&root,"copy-task",1)?["undo_available"].as_bool().unwrap());
+        conn.execute("UPDATE agent_tasks SET status='completed' WHERE id='t'",[])?;
+        undo(&root,"copy-task",1)?;
+        assert!(!root.join("copy-result.txt").exists());
+        assert_eq!(fs::read(root.join("copy-source.txt"))?,b"copy source");
+        let _=fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+
     #[test]
     fn ledger_schema_migrates_legacy_workspace_primary_key_without_dropping_intervals() -> Result<()> {
         let mut conn = Connection::open_in_memory()?;

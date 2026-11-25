@@ -493,10 +493,6 @@ impl Registry {
         }
         mode.allows(name)
     }
-    pub fn is_command_tool(&self, name: &str) -> bool {
-        self.entries.read().unwrap().values().any(|package|
-            package.manifest.command_tools.iter().any(|tool| tool.name == name))
-    }
     pub fn scopes(&self, active: &std::collections::BTreeSet<String>) -> BTreeMap<String, ScopeId> {
         let entries = self.entries.read().unwrap();
         active
@@ -1132,6 +1128,12 @@ pub async fn call_tool(
         )
             .into_response(),
     }
+}
+#[cfg(test)]
+pub(crate) fn mount_test_package(runtime: &PluginRuntime, root: &Path) -> Result<ScopeId> {
+    let parent = runtime.snapshot().into_iter().find(|p| p.id == "skill-packages")
+        .context("package service unavailable")?.scope;
+    runtime.mount(parent, PackagePlugin(load(root)?))
 }
 
 #[cfg(test)]

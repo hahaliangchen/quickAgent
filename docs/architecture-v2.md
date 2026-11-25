@@ -134,7 +134,7 @@ QuickAgent 将“缓存命中率”视为一等架构指标：
 | `vision` | `register_image / analyze_images / view_image / generate_image / image_analysis_results` | 本地或 `/tmp` 截图一步入库并预算压缩，与前端 `VisualEvidenceStrip` + `ImageLightbox` 联动 |
 | `plan` | `set / update` | 宿主 `task_local!` 绑定会话与轮次，单 SQLite 事务落盘并推 `plan/updated` SSE，支持 `rewind` 恢复，前端输入框上方实时展示进度面板 |
 | `code_index` / `blueprint` | 符号查询 / `overview`, `read_graph`, `impact`, `verify_sync` | 四语言符号索引与入口驱动的架构蓝图 |
-| `process` | `exec_command / write_stdin / kill_session / run_readonly / run_program / run_project_script` | 托管 PTY 后台会话、Linux `bubblewrap` 写隔离、超时与进程组清理 |
+| `process` | `exec_command / write_stdin / kill_session / run_program / run_project_script` | 跨平台入口权限与审批、托管进程会话、超时与进程组清理 |
 
 ### 纵深安全与可恢复性
 - **五档权限模型**（`ReadOnly / WorkspaceWrite / Ask / AutoReview / FullAccess`）：由 `ToolRegistry` 统一裁决；`ReadOnly` 拦截全部 `tracks_mutation == true` 的工具；`Ask / AutoReview` 对命令、浏览器、校验与 Git 写操作触发用户审批；

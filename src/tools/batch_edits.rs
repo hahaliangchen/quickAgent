@@ -32,34 +32,30 @@ pub fn paths(root: &Path, args: &Value) -> Result<Vec<PathBuf>> {
     );
     let root = root.canonicalize()?;
     let mut seen = BTreeSet::new();
-    files
-        .iter()
-        .map(|f| {
-            let p = file_edit::workspace_path(
-                &root,
-                f["path"].as_str().context("edit path is required")?,
-            )?;
-            let rel = p.strip_prefix(&root)?;
-            ensure!(
-                !rel.components().any(|c| c
-                    .as_os_str()
-                    .to_str()
-                    .is_some_and(|s| s.eq_ignore_ascii_case(".git")
-                        || s.eq_ignore_ascii_case(".codex-workspace-mcp"))),
-                "cannot edit Git metadata or agent state"
-            );
-            #[cfg(windows)]
-            let identity = p.to_string_lossy().to_lowercase();
-            #[cfg(not(windows))]
-            let identity = p.clone();
-            ensure!(
-                seen.insert(identity),
-                "duplicate edit file: {}",
-                p.display()
-            );
-            Ok(p)
-        })
-        .collect()
+    let mut unique = Vec::with_capacity(files.len());
+    for f in files {
+        let p = file_edit::workspace_path(
+            &root,
+            f["path"].as_str().context("edit path is required")?,
+        )?;
+        let rel = p.strip_prefix(&root)?;
+        ensure!(
+            !rel.components().any(|c| c
+                .as_os_str()
+                .to_str()
+                .is_some_and(|s| s.eq_ignore_ascii_case(".git")
+                    || s.eq_ignore_ascii_case(".codex-workspace-mcp"))),
+            "cannot edit Git metadata or agent state"
+        );
+        #[cfg(windows)]
+        let identity = p.to_string_lossy().to_lowercase();
+        #[cfg(not(windows))]
+        let identity = p.clone();
+        if seen.insert(identity) {
+            unique.push(p);
+        }
+    }
+    Ok(unique)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -177,13 +173,36 @@ pub fn apply(workspace: &Workspace, args: &Value) -> Result<Value> {
         targets == paths(&root, args)?,
         "batch file location changed while waiting for locks"
     );
+    let mut merged: Vec<(PathBuf, FileEdit)> = Vec::with_capacity(targets.len());
+    let mut index_by_path: std::collections::BTreeMap<_, usize> = std::collections::BTreeMap::new();
+    for file in files {
+        let request = serde_json::from_value::<FileEdit>(file.clone()).context("invalid file edit")?;
+        let path = file_edit::workspace_path(&root, &request.path)?;
+        #[cfg(windows)]
+        let identity = path.to_string_lossy().to_lowercase();
+        #[cfg(not(windows))]
+        let identity = path.clone();
+        if let Some(&slot) = index_by_path.get(&identity) {
+            let existing = &mut merged[slot].1;
+            match (&existing.expected_code_hash, &request.expected_code_hash) {
+                (Some(a), Some(b)) if a != b => {
+                    anyhow::bail!("conflicting expected_code_hash for {}", request.path);
+                }
+                (None, Some(hash)) => existing.expected_code_hash = Some(hash.clone()),
+                _ => {}
+            }
+            existing.edits.extend(request.edits);
+        } else {
+            index_by_path.insert(identity, merged.len());
+            merged.push((path, request));
+        }
+    }
     let mut used = 0usize;
-    let mut prepared = Vec::with_capacity(files.len());
-    for (file_index, (file, path)) in files.iter().zip(&targets).enumerate() {
-        let edit = serde_json::from_value::<FileEdit>(file.clone())
-            .context("invalid file edit")
-            .and_then(|request| {
-                let edit = prepare(path, &request).with_context(|| format!("{}", request.path))?;
+    let mut prepared = Vec::with_capacity(merged.len());
+    for (file_index, (path, request)) in merged.iter().enumerate() {
+        let edit = prepare(path, request)
+            .with_context(|| format!("{}", request.path))
+            .and_then(|edit| {
                 used = used
                     .saturating_add(edit.original.len())
                     .saturating_add(edit.updated.len());
@@ -196,7 +215,7 @@ pub fn apply(workspace: &Workspace, args: &Value) -> Result<Value> {
         if atomic {
             prepared.push(Ok(edit.map_err(|error| {
                 let edit_index = edit_index(&error);
-                error.context(PreflightFailure { file_index, path: file["path"].as_str().unwrap_or_default().into(), edit_index })
+                error.context(PreflightFailure { file_index, path: request.path.clone(), edit_index })
             })?));
         } else {
             prepared.push(edit);
@@ -298,6 +317,25 @@ mod tests {
         assert!(err.contains("restored prior files"), "{err}");
         assert_eq!(fs::read(&paths[0]).unwrap(), b"old A\r\n");
         assert_eq!(fs::read(&paths[1]).unwrap(), b"external");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_file_entries_merge_sequentially_in_order() {
+        let (root, work) = fixture();
+        fs::write(root.join("a.txt"), "line 1\nline 2\nline 3\n").unwrap();
+        let args = json!({
+            "files": [
+                {"path": "a.txt", "edits": [{"old_text": "line 1\nline 2", "new_text": "LINE 1\nline 2"}]},
+                {"path": "b.txt", "edits": [{"old_text": "old B", "new_text": "new B"}]},
+                {"path": "a.txt", "edits": [{"old_text": "line 2\nline 3", "new_text": "LINE 2\nLINE 3"}]}
+            ]
+        });
+        let value = apply(&work, &args).unwrap();
+        assert_eq!(value["changed"], 2);
+        assert_eq!(value["failed"], 0);
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "LINE 1\nLINE 2\nLINE 3\n");
+        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "new B\n");
         fs::remove_dir_all(root).unwrap();
     }
 }

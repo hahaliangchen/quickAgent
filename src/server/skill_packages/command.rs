@@ -3,10 +3,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    process::Command,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -84,7 +81,8 @@ pub async fn execute(
     } else {
         tool.program.clone().into()
     };
-    let mut command = Command::new(program);
+    use crate::tools::process_sandbox::{self, ExecutionBoundary};
+    let mut command = process_sandbox::command(program, root, root, ExecutionBoundary::Host)?;
     command
         .args(&tool.args)
         .current_dir(root)
