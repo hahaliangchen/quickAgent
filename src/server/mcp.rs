@@ -1452,7 +1452,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "replace_range",
-            "description": "Replace an inclusive 1-indexed line range inside the selected workspace, preserving untouched bytes and the selected region newline style. Requires expected_old_text or expected_code_hash. Prefer edit_file when a unique text anchor is available. Conflicts apply no changes; retrieve only the affected source.",
+            "description": "Replace an inclusive 1-indexed line range inside the selected workspace, preserving untouched bytes and the selected region newline style. Set end_line = start_line - 1 for a pure 0-line insertion before start_line (including start_line = 1, end_line = 0 to prepend or start_line = lines + 1, end_line = lines to append). Requires expected_old_text or expected_code_hash. Prefer edit_file when a unique text anchor is available. Conflicts apply no changes; retrieve only the affected source.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "start_line", "end_line", "replacement"],
@@ -1463,7 +1463,7 @@ pub fn tool_definitions() -> Value {
                     },
                     "path": { "type": "string" },
                     "start_line": { "type": "integer", "minimum":1 },
-                    "end_line": { "type": "integer", "minimum":1 },
+                    "end_line": { "type": "integer", "minimum":0 },
                     "replacement": { "type": "string" },
                     "expected_old_text": { "type": "string", "description":"Exact selected source excluding its final line delimiter; required unless expected_code_hash is provided." },
                     "expected_code_hash": { "type":"string","description":"Current file version from a source read." }

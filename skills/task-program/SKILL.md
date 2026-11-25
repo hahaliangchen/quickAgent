@@ -184,11 +184,11 @@ function inspectPackage(workdir) {
 
 `program_tool_headers` 是按用途分组的库目录。读代码时，在相关目录用 `io.search` 定位定义，再用 `io.read_lines` 查看指定行。用 `read_tool_contracts({libraries:["io"],overview:true})` 查看库里的方法和用途。选定方法后只传 `methods`，例如 `read_tool_contracts({methods:["io.read_lines"]})`，读取准确参数、约束和返回字段。第三方库也可以按库名查。宿主自带的库按能力分开：io 是本地文件，process 是运行程序和项目脚本，browser 是浏览器页面，另有 http、memory、vision、attachments、session 等，import 什么就是要什么能力；插件有自己的库名，项目技能的库名就是技能名；只公布本作用域可用的工具。import、require 和读取契约都不扩大权限。
 
-顶层 `write_program` 主程序允许直接调用 `process.run_readonly`，并可按会话授权调用 `process.exec_command`、`process.write_stdin`、`process.kill_session` 等执行方法（把多步运行、轮询与大段输出解析留在 JS 堆内）；主 AI 短探索可用 `run_readonly_command` 跑零散只读命令。`@virtual` 虚函数聚焦语义理解与判断，由宿主用隔离的朴素循环实现，**严禁调用任何 shell 工具（含 `run_readonly_command` 及所有 `process` 执行方法）**。shell 路径和能力以 system 动态注入为准：Windows 用 PowerShell 7，Linux 用 Bash；每条命令是新进程，workdir 每次传，变量和 cd 不保留；长进程仍用 session，管道，无 PTY。
+顶层 `write_program` 主程序可按会话授权调用 `process.exec_command`、`process.write_stdin`、`process.kill_session` 等执行方法（把多步运行、轮询与大段输出解析留在 JS 堆内）；常规文件/Git/HTTP/系统检查优先直接调用 `io.*`、`git.*`、`http.*`、`sys.*` 原生方法。`@virtual` 虚函数聚焦语义理解与判断，由宿主用隔离的朴素循环实现，**严禁调用任何 shell 工具（含所有 `process` 执行方法）**。shell 路径和能力以 system 动态注入为准：Windows 用 PowerShell 7，Linux 用 Bash；每条命令是新进程，workdir 每次传，变量和 cd 不保留；长进程仍用 session，管道，无 PTY。
 
 模块收到实际 stdout/stderr 与退出码，结果先进入 JS heap，默认两路输出合计 8 MiB；检查 `running`、`exit_code` 后才能解析。完整输出超出堆交付预算时以 `SHELL_OUTPUT_OVER_CAPACITY` 停止，不交付成功前缀，保留完整 asset 和会话读取引用。模块可用 `process.write_stdin({session_id,chars:"",stream:"stdout",char_offset:0,max_output_tokens})` 读取 `output`，跟随 `next_char_offset` 分页处理，stderr 单独读取；空 chars 轮询，kill_session 终止本会话进程树。命令默认没有标准输入（读到的是输入结束），所以不带文件参数就读 stdin 的工具不会挂住；要用非空 chars 给命令送输入，启动时传 `process.exec_command({cmd, stdin:true})`。分页不重跑命令，也不要盲目拼回超预算字符串。模块返回值先回调用方 JS heap；AI 只接收打印、诊断、显式虚函数输入和成果摘要，不会自动看到整个模块返回值或原始 shell 输出。主流程编排和模块实现继续用具体 JS。定位代码优先 `rg --files frontend/src`、`rg -n "关键词" frontend/src`，默认遵守 `.gitignore`；不要递归 Get-ChildItem 扫 target、node_modules。详见[手册](../../docs/agent-program.md#shell-stage-1process-库)。
 
-`@virtual` 虚函数以隔离的只读工具循环工作：能用的工具继承自调用处允许的非 shell 方法，排除一切 shell 工具（含 `run_readonly_command`）；缺少非 shell 工具时可以用 `find_library_methods` 按关键词查找。
+`@virtual` 虚函数以隔离的只读工具循环工作：能用的工具继承自调用处允许的非 shell 方法，排除一切 shell 工具；缺少非 shell 工具时可以用 `find_library_methods` 按关键词查找。
 
 技能的说明是库的文档，谁引用谁才有。写代码前用 read_skill 读要用的技能；读过的说明只在你自己这里，不会带进你调用的模块和虚函数。模块要按某个技能做事，由写它的 AI 在模块的函数里 require 那个库；要让模块里的一个虚函数按这个技能做事，就把虚函数声明在这个函数里，用 `@uses` 点名库的变量。只有说明、没有方法的技能也这样 require，得到的对象没有方法。比如模块 writeNotes 的代码：
 
@@ -207,11 +207,11 @@ function writeNotes(notes) {
 
 ## AI 工作：单层虚函数（`@virtual`）作为能力契约
 
-普通多步逻辑直接用 JavaScript 函数拆分作用域（调用返回即释放局部变量），无需包成双层虚函数；需要**执行 shell/只读命令**时直接在顶层 `write_program` 里调用 `process.run_readonly` 或按会话权限调用 `process.*` 并在 JS 堆内解析结果。
+普通多步逻辑直接用 JavaScript 函数拆分作用域（调用返回即释放局部变量），无需包成双层虚函数；需要**执行 shell 命令**时直接在顶层 `write_program` 里按会话权限调用 `process.exec_command` / `process.*` 并在 JS 堆内解析结果。
 
 只有当某一步确实需要独立的 AI 语义判断、归纳、理解或结构化提取时，才声明为带 JSDoc `@virtual` 的空函数（类似 C++ 虚函数能力契约，注释说明职责、参数和返回字段；也兼容 `@uses` 点名词法变量或旧模块标记）：
 
-- **单层契约 + 宿主朴素循环实现**：宿主按契约开启一个隔离的只读推理窗口（仅含受权检索/读取/询问等非 shell 工具，**严禁使用 `run_readonly_command` 及任何 `process` 执行工具**），用朴素 ReAct 循环收集材料并返回契约 JSON；返回后该 AI 上下文立即释放。
+- **单层契约 + 宿主朴素循环实现**：宿主按契约开启一个隔离的只读推理窗口（仅含受权检索/读取/询问等非 shell 工具，**严禁使用任何 `process` 执行工具**），用朴素 ReAct 循环收集材料并返回契约 JSON；返回后该 AI 上下文立即释放。
 - **普通 helper vs `@virtual`**：确定性逻辑写真实 JavaScript 函数体；未标 `@virtual` 的空函数是普通 JS，返回 `undefined`；带契约注释却漏写 `@virtual` 的空函数会在编译时报错。
 
 子任务完成就正常返回，做不到就向调用方抛出具体错误；正常返回的数据按任务契约自由定义，没有统一的状态包装。调用方不要检查契约没有声明的 `status`、`saved` 等字段；返回 `null` 也可能是正常完成。正常返回只说明子任务完成，不代替对实际产物或业务判断的必要验证。外部操作结果不确定时，应报告不确定并先核实，不要当成确定失败而重复执行。

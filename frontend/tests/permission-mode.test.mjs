@@ -212,11 +212,14 @@ import { api } from '/agent/src/api.ts';
 
 window.prompts = [];
 window.updates = [];
+window.created = [];
 const tasks = {};
+let seqId = 0;
 api.getSettings = async () => ({ providers: [], orchestrator_provider: '', orchestrator_model: '' });
-api.createSession = async (workspace) => {
-  const id = 'dock-task-1';
-  tasks[id] = { task_id: id, workspace, status: 'idle', title: '代码问答', permission_mode: 'ask' };
+api.createSession = async (workspace, kind) => {
+  const id = 'dock-task-' + (++seqId);
+  window.created.push({ id, workspace: workspace ?? null, kind });
+  tasks[id] = { task_id: id, workspace: workspace ?? '', kind, status: 'idle', title: kind === 'chat' ? 'AI 聊天' : '代码问答', permission_mode: 'ask' };
   return id;
 };
 api.updateSession = async () => ({});
@@ -293,6 +296,16 @@ createRoot(document.getElementById('root')).render(
     await page.waitForFunction(() => window.updates.length === 1)
     assert.equal(((await pill.textContent()) ?? '').trim(), '完全权限')
     assert.deepEqual(await page.evaluate(() => window.updates), [{ id: 'dock-task-1', permission_mode: 'full_access' }])
+
+    // 4. Switch dock mode to 聊天 and verify a chat session is created without binding workspace.
+    await page.getByRole('tab', { name: '聊天', exact: true }).click()
+    await page.locator('textarea').fill('聊聊今天的工作安排')
+    await page.getByRole('button', { name: '发送', exact: true }).click()
+    await page.waitForFunction(() => window.created.length === 2)
+    assert.deepEqual(await page.evaluate(() => window.created), [
+      { id: 'dock-task-1', workspace: '/tmp/demo-repo', kind: 'code' },
+      { id: 'dock-task-2', workspace: null, kind: 'chat' },
+    ])
 
     assert.deepEqual(errors, [])
   } finally {

@@ -457,6 +457,45 @@
     }
 
     #[test]
+    fn replaces_range_supports_pure_insertion_and_rejects_inverted_range() {
+        let root = temp_workspace("replace_insert");
+        let original = "alpha\nbeta\ngamma\n";
+        fs::write(root.join("demo.txt"), original).unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+        let hash = crate::index::symbol_description::content_hash(original.as_bytes());
+        let response = workspace
+            .replace_range(ReplaceRangeRequest {
+                workspace_root: None,
+                path: "demo.txt".to_string(),
+                start_line: 2,
+                end_line: 1,
+                replacement: "inserted".to_string(),
+                expected_old_text: None,
+                expected_code_hash: Some(hash),
+            })
+            .unwrap();
+        assert!(response.changed);
+        assert!(response.preview.as_deref().is_some_and(|preview| preview.contains("L2|inserted")));
+        assert_eq!(
+            fs::read_to_string(root.join("demo.txt")).unwrap(),
+            "alpha\ninserted\nbeta\ngamma\n"
+        );
+        let inverted = workspace
+            .replace_range(ReplaceRangeRequest {
+                workspace_root: None,
+                path: "demo.txt".to_string(),
+                start_line: 3,
+                end_line: 1,
+                replacement: "nope".to_string(),
+                expected_old_text: None,
+                expected_code_hash: Some(response.code_hash),
+            })
+            .unwrap_err();
+        assert!(matches!(inverted, ToolError::InvalidLineRange { start: 3, end: 1 }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn edit_file_returns_merged_line_numbered_preview() {
         let root = temp_workspace("edit_preview");
         fs::write(root.join("demo.txt"), "one\ntwo\nthree\nfour\nfive\nsix\nseven\n").unwrap();

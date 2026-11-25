@@ -227,10 +227,20 @@ pub fn line_replacement(
             Some((begin, *offset))
         })
         .collect::<Vec<_>>();
-    if start == 0 || end < start || end > spans.len() {
+    let pure_insert = start >= 1 && end == start - 1 && end <= spans.len();
+    if !pure_insert && (start == 0 || end < start || end > spans.len()) {
         return Err(ToolError::InvalidLineRange { start, end });
     }
-    let (begin, finish) = (spans[start - 1].0, spans[end - 1].1);
+    let (begin, finish) = if pure_insert {
+        let offset = if start <= spans.len() {
+            spans[start - 1].0
+        } else {
+            source.len()
+        };
+        (offset, offset)
+    } else {
+        (spans[start - 1].0, spans[end - 1].1)
+    };
     let selected = &source[begin..finish];
     let selected_text = normalize(selected);
     if let Some(expected) = expected {
@@ -248,7 +258,21 @@ pub fn line_replacement(
         source
     });
     let mut inserted = normalize(replacement).replace('\n', ending);
-    if !inserted.is_empty()
+    if pure_insert {
+        if !inserted.is_empty() {
+            if begin == source.len()
+                && !source.is_empty()
+                && !source.ends_with('\n')
+                && !inserted.starts_with('\n')
+                && !inserted.starts_with("\r\n")
+            {
+                inserted.insert_str(0, ending);
+            }
+            if !inserted.ends_with('\n') && (finish < source.len() || source.ends_with('\n')) {
+                inserted.push_str(ending);
+            }
+        }
+    } else if !inserted.is_empty()
         && !inserted.ends_with('\n')
         && (finish < source.len() || selected.ends_with('\n'))
     {
@@ -304,6 +328,12 @@ fn expected_mismatch_detail(
             matches.len()
         ));
     }
+    if end < start {
+        out.push_str(&format!(
+            ". Requested range is an empty insertion before line {start} (expected_old_text must be omitted or empty)."
+        ));
+        return out;
+    }
     out.push_str(". Actual lines at requested range:\n");
     let max_lines = 12usize;
     let preview_end = end.min(start + max_lines - 1).min(source_lines.len());
@@ -338,8 +368,9 @@ pub fn preview_for_line_ranges(content: &str, ranges: &[(usize, usize)]) -> Stri
     let mut windows = ranges
         .iter()
         .map(|&(start, end)| {
-            let start = start.max(1).saturating_sub(5).max(1);
-            let end = end.max(start).saturating_add(5).min(lines.len());
+            let clamped = start.max(1).min(lines.len());
+            let start = clamped.saturating_sub(5).max(1);
+            let end = end.max(clamped).saturating_add(5).min(lines.len());
             (start, end)
         })
         .collect::<Vec<_>>();
@@ -814,5 +845,62 @@ mod tests {
         let dup = "let x = 1;  \nlet x = 1;\t\n";
         let err = text_edits(dup, &[edit("let x = 1;")]).unwrap_err().to_string();
         assert!(err.contains("ambiguous"), "{err}");
+    }
+
+    #[test]
+    fn line_replacement_supports_pure_insert_when_end_equals_start_minus_one() {
+        let source = "alpha\nbeta\ngamma\n";
+        // Insert before line 2 (start=2, end=1)
+        assert_eq!(
+            line_replacement(source, 2, 1, "inserted", None).unwrap(),
+            "alpha\ninserted\nbeta\ngamma\n"
+        );
+        // Prepend before line 1 (start=1, end=0)
+        assert_eq!(
+            line_replacement(source, 1, 0, "header\n", None).unwrap(),
+            "header\nalpha\nbeta\ngamma\n"
+        );
+        // Append after last line when file ends with newline (start=4, end=3)
+        assert_eq!(
+            line_replacement(source, 4, 3, "delta", None).unwrap(),
+            "alpha\nbeta\ngamma\ndelta\n"
+        );
+        // Append after last line when file has no trailing newline
+        assert_eq!(
+            line_replacement("alpha\nbeta", 3, 2, "gamma", None).unwrap(),
+            "alpha\nbeta\ngamma"
+        );
+        // Pure insert into empty file (start=1, end=0)
+        assert_eq!(
+            line_replacement("", 1, 0, "first\n", None).unwrap(),
+            "first\n"
+        );
+        // CRLF preservation
+        assert_eq!(
+            line_replacement("a\r\nb\r\n", 2, 1, "x\ny", None).unwrap(),
+            "a\r\nx\r\ny\r\nb\r\n"
+        );
+        // expected_old_text: empty matches, non-empty fails with clear message
+        assert_eq!(
+            line_replacement(source, 2, 1, "ok", Some("")).unwrap(),
+            "alpha\nok\nbeta\ngamma\n"
+        );
+        let mismatch = line_replacement(source, 2, 1, "ok", Some("beta"))
+            .unwrap_err()
+            .to_string();
+        assert!(mismatch.contains("empty insertion before line 2"), "{mismatch}");
+
+        // Inverted ranges with end < start - 1 or out-of-bounds remain invalid
+        for (start, end) in [(0, 0), (3, 1), (2, 0), (5, 4)] {
+            let err = line_replacement(source, start, end, "x", None).unwrap_err();
+            assert!(
+                matches!(err, ToolError::InvalidLineRange { .. }),
+                "expected InvalidLineRange for ({start}, {end}), got {err}"
+            );
+        }
+        assert!(matches!(
+            line_replacement("", 2, 1, "x", None).unwrap_err(),
+            ToolError::InvalidLineRange { start: 2, end: 1 }
+        ));
     }
 }

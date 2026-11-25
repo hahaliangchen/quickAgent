@@ -1017,7 +1017,7 @@ impl Workspace {
         })
     }
     pub fn replace_range(&self, request: ReplaceRangeRequest) -> Result<ReplaceRangeResponse> {
-        validate_line_range(request.start_line, request.end_line)?;
+        validate_replace_range(request.start_line, request.end_line)?;
         check_write_size(request.replacement.len())?;
         if request.expected_old_text.is_none() && request.expected_code_hash.is_none() {
             return Err(ToolError::WritePreconditionRequired("replace_range requires expected_old_text or expected_code_hash from current source".into()));

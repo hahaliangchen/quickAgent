@@ -1,0 +1,40 @@
+# Bug 与工程摩擦台账（Bug & Fix Log）
+
+> 本文档沉淀在真实高强度开发与自举使用中发现的系统 Bug、工具摩擦与设计失误，以及对应的根因、修复方案和防复发设计铁律。
+> **核心原则**：能从引擎与工具层根治、让 AI **一次通过（0 报错）** 的问题，绝不满足于“报错提示清楚、模型能重试自愈”。
+
+---
+
+## 一、总览表
+
+| 编号 | 分类 | 现象 / 问题 | 根因 | 修复方案与位置 | 状态 / 提交 |
+|---|---|---|---|---|---|
+| **BUG-01** | 上下文与软折叠 | 长任务中途上下文从 `214k` 一刀砍到 `35k`，模型失忆反复重读同一批 26 个文件达 96 次 | `apply_economic_soft_fold` 写死 `active_prefix_cutoff(turn, 5)`；超长折叠代码 `take(12 KB)` 截掉离当前最近的尾部代码 | 改为按真实校准 token 二分查找，保留尽量多最近步骤使总上下文落在阈值 ~60%；超长前缀代码改为保留**头 2 KB + 尾 10 KB**（`src/runtime/single_agent/context_engine.rs`、`src/runtime/single_agent/context_doc/mod.rs`） | 已修复（`1ddc10d`） |
+| **BUG-02** | 插件与提示词 | 打开数据库工作台让 AI 连库时，AI 不用 `db.*` 而写 Python/Go 脚本绕路连爆 3 次错，左侧数据库 UI 也无连接 | `declarations.rs` 的 `directory()` 仅输出硬编码白名单，`db` / `excel` / `word` / `pdf` / `daily_report` 及第三方非 MCP 插件在系统提示词中完全隐身 | 补全内置插件目录说明，并增加动态兜底自动列出所有已安装非 MCP 插件库及方法名；在 `model_call.rs` 补充 `db.*` 优先规则；`db-studio` 补充聚焦自动刷新连接列表（`src/runtime/agent_program/declarations.rs`、`src/runtime/single_agent/model_call.rs`、`excel-editor-engine/packages/db-studio/src/main.ts`） | 已修复（`1ddc10d`、`45cd0cb`） |
+| **BUG-03** | VM 运行时诊断 | JS 报 `TypeError: Cannot read properties of null or undefined` 时缺少属性名与源码上下文，模型需要额外步数猜错位 | `runtime_impl_2.inc.rs` 报错未区分 `null`/`undefined` 与属性名；`record_failed_segment` 未附带出错行源码 | 细化为 `Cannot read properties of undefined (reading '<prop>')`，并在失败回执中附带 `// at line N: <源码摘录>`（`src/runtime/agent_program/parts/runtime_impl_2.inc.rs`、`src/runtime/single_agent/context_doc/mod.rs`） | 已修复（`1ddc10d`） |
+| **BUG-04** | VM 作用域 | 模型声明与宿主库同名的顶层变量（如 `const plan = ...`）导致整轮后续无法调用 `plan.*` | 顶层绑定遮蔽预注入宿主库，报错未告知恢复路径 | 检测到宿主库被遮蔽时在报错中明确给出 `require("<lib>")` 恢复提示（`src/runtime/agent_program/`） | 已修复（`236cb59`） |
+| **BUG-05** | 文件编辑工具 | 批量改同一文件相邻代码时高频连炸 `old_text not found` 与 `edit anchors overlap` | `file_edit.rs` 对 `edits` 数组强制同时匹配原始快照并禁止锚点区间共用任何一行；仅做换行符规范化，无行尾空白容错 | 改为**内存顺序原子应用**（任意失败零写盘、同步精确维护 `preview` 字节偏移），并增加“仅行尾空白差异且全文件唯一命中”的安全回退（`src/tools/file_edit.rs`、`src/server/mcp.rs`） | 已修复（`1ddc10d`） |
+| **BUG-06** | 批量编辑工具 | `io.apply_edits` 在大改动中同一文件出现两次条目时直接报 `duplicate edit file` 打断整批 | `batch_edits.rs` 遇到重复文件路径直接拒绝而非合并 | 按出现顺序自动合并同文件 `edits`（仅 `expected_code_hash` 冲突时拒绝），并对文件锁去重防死锁（`src/tools/batch_edits.rs`） | 已修复（`1ddc10d`） |
+| **BUG-07** | 编辑语法摩擦 | 模型为省字符把多行 Rust/TS 代码压成单行单引号 `'...\n...'`，反复手滑写出 `','new_text:'` 导致 JS 编译失败 | JSON/Python 字典引号先验与单行单引号压缩冲突（且单行转义反而比多行模板字符串更费 token） | 提示词与 `.d.ts` 明确引导多行 `old_text`/`new_text` 使用多行模板字符串 `` `...` ``、单次 `apply_edits` 控制在 1–4 个关联文件（`src/runtime/agent_program/declarations.rs`、`src/runtime/single_agent/model_call.rs`） | 已修复（`1ddc10d`） |
+| **BUG-08** | 路径纠错 | `path does not exist` 对复合后缀文件名、缺失中间目录、兄弟 `.tsx` 引用的 CSS 模块提示不够准 | 路径建议算法未覆盖复合词干、兄弟文件 CSS import 及祖先目录回溯 | 升级纯 Rust 确定性路径纠错（复合词干提取、兄弟 `.tsx` CSS import 窥探、有界 Levenshtein + 驼峰分词、祖先目录回溯）（`src/tools/parts/tools_workspace.inc.rs`） | 已修复（`596df5f`） |
+| **BUG-09** | 沙箱与跨平台 | Linux `bwrap` 沙箱导致跨目录 `run_readonly` 报 `workdir must be a directory inside the project`、非完全权限下 `db`/`excel`/`word`/`pdf` 全部报 `SANDBOX_UNSUPPORTED`、且与 Windows 行为严重割裂；`SKILL.md` 残留 `run_readonly` 文案导致模型误调 | 依赖仅限 Linux 的 OS 级 `bwrap` 沙箱，与 JS VM + 结构化库方法（Capability Security）路线重复且互相掣肘 | 正式退场 Linux `bwrap` OS 沙箱与 `run_readonly_command`，保留跨平台入口安全防线（凭据拦截、控制面 SSRF、跨项目目录审批、父进程环境变量剥离），补齐跨平台原生库 `git.*`（`repo`/`check`）、`http.request`、`io.stat`/`io.copy`、`sys.*`，并清理 `skills/task-program/SKILL.md` 残留文案（`src/tools/process_sandbox.rs`、`src/runtime/single_agent/host_tools.rs`、`src/tools/sys_info.rs`、`src/tools/http_probe.rs`、`skills/task-program/SKILL.md`） | 已修复（`1ddc10d` + 残留清理） |
+| **BUG-10** | 多实例并发安全 | Agent 跑自验证子服务时，正在运行的父任务被误标为 `interrupted` | 子 Shell 继承宿主 `WORKSPACE_ROOT` 等内部环境变量，子进程启动执行 `recover_orphaned_tasks` 误伤活着的桌面数据库 | 三重根治：① 子进程剥离 7 个宿主内部环境变量；② `codex_state.db` 旁增加 OS 独占 `service.lock`；③ 新增 `--isolated` 原生隔离验证模式（`src/tools/process_sandbox.rs`、`src/server/agent_service/db.rs`、`src/main.rs`） | 已修复（`236cb59`） |
+| **BUG-11** | 任务取消状态 | 用户点「停止」手动中断任务（尤其在等待模型响应期间）时，任务被标为「执行失败（`WORKER_FAILED: cancelled`）」 | `spawn_supervised_task` 收到 worker `Err` 时未检查 `cancel.is_cancelled()`，直接落入失败分支 | 克隆取消令牌，取消态下准确发送 `turn/end { kind: "aborted" }` 并将任务落为 `"cancelled"`（`src/server/agent_service/routes.rs`） | 已修复（`1ddc10d`） |
+| **BUG-12** | 前端状态提示 | AI 正常调用 `ask_user` 暂停提问时，底部误显示「本轮曾有工具调用失败（ask_user）」 | `handle_ask_user` 通过 `is_error = true` + `NEEDS_USER` 中断步进，`failedToolNames` 未排除该正常暂停 | `failedToolNames` 排除包含 `"NEEDS_USER"` 的 `ask_user` 记录，仍保留真正的参数校验错误（`frontend/src/model.ts`） | 已修复（`1ddc10d`） |
+| **BUG-13** | 前端终端轮询展示 | 长命令（如 `cargo test`）最终退出 `101` 时，前面 4 行正在运行中的 `write_stdin` 轮询行全变红显示 `退出码 101`，看起来像死循环 | `model.ts` 将 `shell/end` 的终态 `exit_code` 回填到同会话所有历史 `write_stdin` 行，`ToolRow` 全部按错误标红 | 为原返回 `running: true` 的中间 `write_stdin` 行标记 `intermediatePoll`，前端温和展示「已拉取输出」，仅终态行显示红字退出码（`frontend/src/model.ts`、`frontend/src/components/ToolRow.tsx`） | 已修复（`1ddc10d`） |
+| **BUG-14** | 侧边栏权限与模式 | 右侧问答栏（`CodeChatDock`）权限徽章为只读 `<span>` 无法切换，且写死为绑定仓库的「代码」模式，在办公/数据库工作台里不够灵活 | `CodeChatDock` 未复用交互式权限选择器，且未提供「代码 / 聊天」模式切换 | 抽出 `PermissionPicker`（支持发首条前/后切换与右侧视口避让）；新增「代码 \| 聊天」分段切换（各自独立记忆会话，聊天模式不绑仓库但保留工作台视图上下文）（`frontend/src/components/PermissionPicker.tsx`、`frontend/src/components/CodeChatDock.tsx`） | 已修复 |
+| **BUG-15** | 侧边栏回退第 1 轮 | 在右侧问答栏对第 1 轮点「回到这里」后，界面一直卡显示「等待事件返回…」，且撤回的消息未填回右侧输入框 | 回退后任务变为 `draft`（0 事件），`ChatView` 对空事件无条件显示 `app.waiting`，且 `CodeChatDock` 未监听 `PREFILL_EVENT` | `ChatView` 在 `draft` 非运行态不显示等待提示；`CodeChatDock` 在 0 事件非运行态恢复欢迎卡片，并监听 `PREFILL_EVENT`（加 `offsetParent !== null` 可见性守卫）（`frontend/src/components/ChatView.tsx`、`frontend/src/components/CodeChatDock.tsx`） | 已修复 |
+| **BUG-16** | 保活页签快捷键 | 开启会话保活（`display: none`）后，按 `Ctrl+F` 会被隐藏页签的 `ConversationPage` 劫持 | 全局 `keydown` 监听未检查当前组件是否可见 | 增加 `bodyRef.current.offsetParent === null` 可见性守卫，仅激活页签响应（`frontend/src/components/AgentPage.tsx`） | 已修复（`596df5f`） |
+| **BUG-17** | 内部日报插件协议 | 对接真实 RuoYi 服务端时登录加解密、列表解包、筛选参数及切会话清页面出现 4 处偏差 | RSA 加密了原始 32 字节 AES Key 而非 Base64 文本；`envelope()` 丢弃顶层 `rows`/`total`；漏传 `userId`/过滤参数；`selectSession` 未清 `pluginPage` | 逐项对齐 RuoYi 协议与前端状态切换，并通过真实后端验收（`src/server/builtin_plugins/daily_report/`、`frontend/src/components/SkillWorkbench.tsx`） | 已修复（`236cb59`） |
+| **BUG-18** | 行区间编辑工具 | 模型想在第 `N` 行前纯插入代码时调用 `io.replace({ start_line: N, end_line: N - 1, ... })` 报 `invalid line range: start_line=145, end_line=144` | `io.*` 无独立行插入接口，模型自然采用 1-based 空闭区间 `[N, N-1]`（0 行）做纯插入，但 `file_edit::line_replacement` 与 `validate_line_range` 写死 `end < start` 一律拒绝 | `line_replacement` / `replace_range` 原生支持 `end_line == start_line - 1` 纯插入（含 `1..=0` 文件头、`N+1..=N` 文件尾，保留换行风格，仍拒绝 `end < start - 1` 的反转范围），并同步更新 schema 与提示（`src/tools/file_edit.rs`、`src/tools/workspace.rs`、`src/tools/parts/tools_workspace.inc.rs`、`src/server/mcp.rs`、`src/server/agent_service/tools.rs`） | 已修复 |
+
+---
+
+## 二、沉淀的 6 条防复发设计铁律
+
+1. **禁止用“拍脑袋步数魔数”替代真实资源预算**：无论是最大步数、虚拟机时限还是软折叠保留步数（`keep = 5`），一律按真实 token / 字节 / 经济预算动态决定，禁止硬切工作记忆。
+2. **工具接口顺应直觉，不设反直觉硬墙**：批量编辑默认**顺序原子应用**并自动合并同文件条目；不要因为“报错信息写得很清楚”就容忍高频可避免的失败重试——在深度推理模型上，每一次多余报错都是 +20 秒与十几万上下文的浪费。
+3. **动态发现优先于手写白名单**：插件库目录、工具暴露、权限检查必须由注册表/清单自动驱动，避免新增插件（如 `db` / `excel` / `pdf`）因漏加白名单而在提示词里“隐身”。
+4. **安全靠 Capability Security（JS VM + 结构化库方法 + 跨平台入口边界）**：用纯 Rust 跨平台库方法压缩对 Shell 的依赖，把权限落到业务语义（只读/写入/生产确认/跨目录审批/凭据拦截），彻底避免维护 Linux/Windows 割裂的 OS 沙箱。
+5. **全局窗口事件必须带可见性守卫**：凡是常驻保活组件（`HiddenFreeze` / `display: none`）监听 `window` 事件（如 `Ctrl+F`、`PREFILL_EVENT`），必须校验 `offsetParent !== null`，防止隐藏页签抢事件。
+6. **区分“正常中断/等待”与“真正失败”**：`ask_user` 暂停、用户手动点击停止、长命令中间轮询行都不应按红色错误展示，确保 UI 状态忠实反映真实语义。

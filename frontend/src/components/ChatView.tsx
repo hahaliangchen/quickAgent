@@ -512,7 +512,7 @@ export function ChatView({ events, projectedItems, task, running, onOpenTask, on
         <div className={chatCss.scroll} data-chat-scroll>
           <div className={chatCss.column}>
             {acceptancePhase && <div className={chatCss.hint} role="status">{acceptancePhase}</div>}
-            {items.length === 0 && !thinking && <div className={chatCss.hint}>{t('app.waiting')}</div>}
+            {items.length === 0 && !thinking && (running || task?.status !== 'draft') && <div className={chatCss.hint}>{t('app.waiting')}</div>}
 
             {nodes.map((node) => {
               if (node.kind === 'user') {

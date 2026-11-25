@@ -18,7 +18,22 @@
 .head { display: flex; align-items: center; gap: 8px; height: 48px; box-sizing: border-box; padding: 0 10px 0 14px; border-bottom: 1px solid var(--codex-border-subtle); }
 .head strong { font-size: 14.5px; }
 .sparkle { color: #e6a817; flex-shrink: 0; }
-.repoRow { display: flex; align-items: center; padding: 10px 16px 6px; }
+.repoRow { display: flex; align-items: center; gap: 8px; padding: 10px 16px 6px; }
+.modeSwitch {
+  display: inline-flex; align-items: center; flex-shrink: 0; padding: 2px; gap: 2px;
+  border-radius: 8px; border: 1px solid var(--codex-card-border); background: var(--codex-hover-bg);
+}
+.modeTab {
+  height: 24px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--codex-text-secondary); font: inherit; font-size: 12px; font-weight: 500;
+  cursor: pointer; transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+.modeTab:hover:not(:disabled):not(.modeTabActive) { color: var(--codex-text-primary); }
+.modeTabActive {
+  background: var(--codex-card-bg); color: var(--codex-text-primary); font-weight: 600;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 0.08);
+}
+.modeTab:disabled { opacity: .5; cursor: default; }
 .repo {
   display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; padding: 4px 10px; border-radius: 8px;
   border: 1px solid var(--codex-card-border); background: var(--codex-card-bg); color: var(--codex-text-secondary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

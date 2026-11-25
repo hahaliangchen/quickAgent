@@ -197,7 +197,7 @@ pub(crate) fn local_tools(
             description = match name {
                 "write_file" => "Create or replace a UTF-8 file. The host manages the file baseline and stops for user action if the file changed externally.",
                 "edit_file" => "Apply unique text replacements to a UTF-8 file. The host manages the file baseline and stops for user action if the file changed externally.",
-                _ => "Replace an inclusive 1-indexed line range. The host manages the file baseline and stops for user action if the file changed externally.",
+                _ => "Replace an inclusive 1-indexed line range (set end_line = start_line - 1 for pure insertion before start_line). The host manages the file baseline and stops for user action if the file changed externally.",
             }.to_owned();
             if let Some(prop)=schema.pointer_mut("/properties/expected_old_text") { prop["description"]=json!("Optional exact selected text, used to validate the requested edit."); }
         }

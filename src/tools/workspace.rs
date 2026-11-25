@@ -879,8 +879,8 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
     Ok(run_git(root, args)?.stdout.trim().to_owned())
 }
 
-fn validate_line_range(start: usize, end: usize) -> Result<()> {
-    if start == 0 || end == 0 || start > end {
+fn validate_replace_range(start: usize, end: usize) -> Result<()> {
+    if start == 0 || (end < start && end != start - 1) {
         Err(ToolError::InvalidLineRange { start, end })
     } else {
         Ok(())
