@@ -301,7 +301,7 @@ pub(super) async fn execute_tool(
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned)
                 .or_else(|| server.default_dir.clone());
-            let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 300);
+            let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 1800);
             let (connection, secret) = client::connect_for_tool(
                 config_dir.clone(),
                 server.id.clone(),
