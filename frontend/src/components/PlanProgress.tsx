@@ -62,7 +62,7 @@ function ProgressRing({ percent, done, blocked }: {
 }
 
 /** Step status node sitting on the left vertical timeline rail (matte, no glow). */
-function StepGlyph({ status }: { status: PlanStatus }): ReactNode {
+function StepGlyph({ status, stale }: { status: PlanStatus; stale?: boolean }): ReactNode {
   if (status === 'done') {
     return (
       <svg className={styles.doneIcon} viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -73,7 +73,13 @@ function StepGlyph({ status }: { status: PlanStatus }): ReactNode {
   }
   if (status === 'in_progress') {
     return (
-      <svg className={styles.activeIcon} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <svg
+        className={styles.activeIcon}
+        data-stale={stale ? 'true' : undefined}
+        viewBox="0 0 16 16"
+        fill="none"
+        aria-hidden="true"
+      >
         <circle cx="8" cy="8" r="6" className={styles.activeTrack} />
         <circle cx="8" cy="8" r="6" className={styles.activeArc} />
       </svg>
@@ -89,7 +95,17 @@ function StepGlyph({ status }: { status: PlanStatus }): ReactNode {
   return <span className={styles.pendingNode} aria-hidden="true" />
 }
 
-export function PlanProgress({ events, variant = 'inline' }: { events: readonly AgentEvent[]; variant?: 'inline' | 'dock' }) {
+export function PlanProgress({
+  events,
+  variant = 'inline',
+  running = true,
+  taskStatus,
+}: {
+  events: readonly AgentEvent[]
+  variant?: 'inline' | 'dock'
+  running?: boolean | undefined
+  taskStatus?: string | undefined
+}) {
   const plan = useMemo(() => latestPlan(events), [events])
   const tree = useMemo(() => groupPlanSteps(plan?.steps ?? []), [plan])
   // Running and blocked phases show their sub-steps by default; a finished or
@@ -117,6 +133,11 @@ export function PlanProgress({ events, variant = 'inline' }: { events: readonly 
   const parentLine = focus?.group.title
   const allDone = topTotal > 0 && topCompleted === topTotal
   const useSegments = topTotal <= 16
+  const staleInProgress = !running
+  const staleLabel = taskStatus === 'cancelled' || taskStatus === 'interrupted' || taskStatus === 'failed'
+    ? '已中断'
+    : '未更新'
+  const statusLabel = (s: PlanStatus) => (s === 'in_progress' && staleInProgress ? staleLabel : labels[s])
 
   return (
     <details className={variant === 'dock' ? styles.plan + ' ' + styles.dock : styles.plan}>
@@ -133,7 +154,11 @@ export function PlanProgress({ events, variant = 'inline' }: { events: readonly 
           <div className={styles.headerRight}>
             {headline !== undefined
               ? (
-                  <span className={styles.collapsedStatus} data-status={status}>
+                  <span
+                    className={styles.collapsedStatus}
+                    data-status={status}
+                    data-stale={status === 'in_progress' && staleInProgress ? 'true' : undefined}
+                  >
                     <span className={styles.statusDot} aria-hidden="true" />
                     {parentLine !== undefined && <span className={styles.statusParent}>{parentLine} ›</span>}
                     <span className={styles.statusTitle}>{headline}</span>
@@ -189,15 +214,20 @@ export function PlanProgress({ events, variant = 'inline' }: { events: readonly 
       <ol className={styles.steps}>
         {topSteps.map(group => {
           const highlighted = group.status === 'in_progress' || group.status === 'blocked'
+          const stepStale = group.status === 'in_progress' && staleInProgress
           const doneChildren = group.children.filter(child => child.status === 'done').length
           const open = group.children.length > 0 && (folded[group.id] ?? highlighted)
           return (
             <li key={group.id} className={styles.step} data-status={group.status}>
               <div className={styles.railCell}>
-                <StepGlyph status={group.status} />
+                <StepGlyph status={group.status} stale={stepStale} />
                 <span className={styles.railStem} aria-hidden="true" />
               </div>
-              <div className={highlighted ? styles.activeCard : styles.plainRow} data-status={group.status}>
+              <div
+                className={highlighted ? styles.activeCard : styles.plainRow}
+                data-status={group.status}
+                data-stale={stepStale ? 'true' : undefined}
+              >
                 <div className={styles.stepMain}>
                   <div className={styles.title}>{group.title}</div>
                   {group.note && <div className={styles.note}>{group.note}</div>}
@@ -218,8 +248,12 @@ export function PlanProgress({ events, variant = 'inline' }: { events: readonly 
                     </button>
                   )}
                   {highlighted && (
-                    <span className={styles.badge} data-status={group.status}>
-                      {labels[group.status]}
+                    <span
+                      className={styles.badge}
+                      data-status={group.status}
+                      data-stale={stepStale ? 'true' : undefined}
+                    >
+                      {statusLabel(group.status)}
                     </span>
                   )}
                 </div>

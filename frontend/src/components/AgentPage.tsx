@@ -374,7 +374,7 @@ export function ConversationPage({
             />
           )}
           <div ref={composerRef} className={root.composerSeat}>
-            {tab === 'chat' && <PlanProgress key={workspace.taskId ?? 'plan'} events={session.events} variant="dock" />}
+            {tab === 'chat' && <PlanProgress key={workspace.taskId ?? 'plan'} events={session.events} variant="dock" running={running} taskStatus={task?.status} />}
             {isChild
               ? (
                   <div className={readonlyCss.frame}>

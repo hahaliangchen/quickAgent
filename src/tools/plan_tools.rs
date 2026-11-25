@@ -85,6 +85,87 @@ fn latest(conn: &Connection, task: &str, turn: usize) -> Result<Vec<Step>> {
         .unwrap_or_default())
 }
 
+fn status_tag(status: Status) -> &'static str {
+    match status {
+        Status::Pending => "pending",
+        Status::InProgress => "in_progress",
+        Status::Done => "done",
+        Status::Blocked => "blocked",
+    }
+}
+
+fn format_step_note(note: Option<&str>) -> String {
+    let Some(raw) = note.map(str::trim).filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    let clean: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = clean.chars();
+    let preview: String = chars.by_ref().take(80).collect();
+    if chars.next().is_some() {
+        format!(" ({preview}…)")
+    } else {
+        format!(" ({preview})")
+    }
+}
+
+fn format_steps_for_context(turn: usize, steps: &[Step]) -> Option<String> {
+    if steps.is_empty() {
+        return None;
+    }
+    let (completed, total) = progress(steps);
+    let mut out = format!("[Current Task Plan — Turn {turn} ({completed}/{total} done)]\n");
+    for top in steps.iter().filter(|step| step.parent_id.is_none()) {
+        out.push_str(&format!(
+            "- [{}] {}: {}{}\n",
+            status_tag(top.status),
+            top.id,
+            top.title,
+            format_step_note(top.note.as_deref()),
+        ));
+        for child in steps
+            .iter()
+            .filter(|step| step.parent_id.as_deref() == Some(top.id.as_str()))
+        {
+            out.push_str(&format!(
+                "  - [{}] {}: {}{}\n",
+                status_tag(child.status),
+                child.id,
+                child.title,
+                format_step_note(child.note.as_deref()),
+            ));
+        }
+    }
+    let has_open = steps.iter().any(|step| step.status != Status::Done);
+    if has_open {
+        out.push_str("Keep this plan accurate via `plan.update({ id, status })` (pass `complete_children: true` when closing a parent); close finished steps before your final reply.");
+    } else {
+        out.push_str("All plan steps are marked done.");
+    }
+    Some(out)
+}
+
+/// Render a compact snapshot of the active turn's plan so it stays visible in
+/// model working memory across long multi-step turns and soft folds without
+/// leaking finished plans from earlier turns.
+pub fn format_turn_plan_for_context(
+    root: &std::path::Path,
+    task: &str,
+    turn: usize,
+) -> Option<String> {
+    let conn = crate::server::agent_service::open_db(root).ok()?;
+    let snapshot: Option<String> = conn
+        .query_row(
+            "SELECT steps_json FROM agent_task_plans WHERE task_id=?1 AND turn=?2",
+            params![task, turn],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let steps: Vec<Step> = serde_json::from_str(&snapshot?).ok()?;
+    format_steps_for_context(turn, &steps)
+}
+
 /// `completed` and `total` keep counting top-level steps so older clients,
 /// stored events and rewind snapshots stay comparable. Sub-steps only refine
 /// the percentage the panel renders.
@@ -702,5 +783,69 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn turn_plan_context_renders_hierarchy_and_scopes_to_active_turn() {
+        let root = std::env::temp_dir().join(format!(
+            "plan_ctx_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut conn = crate::server::agent_service::open_db(&root).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('t','','fake','running',0,0)",
+            [],
+        )
+        .unwrap();
+        assert!(format_turn_plan_for_context(&root, "t", 1).is_none());
+        apply(
+            &mut conn,
+            "t",
+            1,
+            "plan_set",
+            &json!({"steps":[
+                {"id":"a","title":"Prepare","status":"done"},
+                {"id":"b","title":"Deploy","status":"in_progress","note":"running rebuild"}
+            ]}),
+        )
+        .unwrap();
+        apply(
+            &mut conn,
+            "t",
+            1,
+            "plan_add_substeps",
+            &json!({"parent_id":"b","steps":[
+                {"id":"b1","title":"Upload","status":"done"},
+                {"id":"b2","title":"Verify","status":"in_progress"}
+            ]}),
+        )
+        .unwrap();
+        let rendered = format_turn_plan_for_context(&root, "t", 1).unwrap();
+        assert!(rendered.contains("[Current Task Plan — Turn 1 (1/2 done)]"), "{rendered}");
+        assert!(rendered.contains("- [done] a: Prepare"), "{rendered}");
+        assert!(rendered.contains("- [in_progress] b: Deploy (running rebuild)"), "{rendered}");
+        assert!(rendered.contains("  - [in_progress] b2: Verify"), "{rendered}");
+        assert!(rendered.contains("complete_children: true"), "{rendered}");
+        // Newer turn that has not touched the plan must not inherit turn 1's snapshot.
+        assert!(format_turn_plan_for_context(&root, "t", 2).is_none());
+
+        apply(
+            &mut conn,
+            "t",
+            1,
+            "plan_update",
+            &json!({"id":"b","status":"done","complete_children":true}),
+        )
+        .unwrap();
+        let closed = format_turn_plan_for_context(&root, "t", 1).unwrap();
+        assert!(closed.contains("(2/2 done)"), "{closed}");
+        assert!(closed.contains("All plan steps are marked done."), "{closed}");
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

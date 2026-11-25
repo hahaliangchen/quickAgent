@@ -161,7 +161,7 @@ export function DraftChat({ chatId, draftLabel, draftFolder, source, hidden, exp
     </div>
       <div className={styles.chatScroll}>
         <div className={styles.chatBody} ref={body}>
-          <PlanProgress key={chatId} events={session.events} />
+          <PlanProgress key={chatId} events={session.events} running={running} />
           {rows.length === 0 && <div className={styles.chatIntro}>
             <p>这是这份草稿自己的对话。AI 在草稿文件夹里工作，可以分析、修改 <code>programs/</code> 里的草稿，原始流程不会被改动。</p>
             <p>这里没有插件页面的工具，真实插件测试尚未接入；AI 说的检查结果以它实际读过、跑过的为准。</p>

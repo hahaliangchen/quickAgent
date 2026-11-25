@@ -231,6 +231,11 @@
   animation: plan-breathe 1.8s ease-in-out infinite;
 }
 
+.collapsedStatus[data-stale="true"] .statusDot {
+  animation: none;
+  background: var(--plan-muted);
+}
+
 .statusTitle {
   max-inline-size: 30ch;
   overflow: hidden;
@@ -455,6 +460,15 @@
   animation: plan-spin 1.15s linear infinite;
 }
 
+.activeIcon[data-stale="true"] .activeTrack {
+  stroke: var(--plan-chip);
+}
+
+.activeIcon[data-stale="true"] .activeArc {
+  stroke: var(--plan-muted);
+  animation: none;
+}
+
 .blockedNode {
   display: inline-grid;
   place-items: center;
@@ -509,6 +523,12 @@
 .activeCard[data-status="blocked"] {
   background: var(--plan-blocked-bg);
   border-color: var(--plan-blocked-border);
+}
+
+.activeCard[data-stale="true"] {
+  background: var(--plan-chip);
+  border-color: var(--plan-idle-ring);
+  box-shadow: none;
 }
 
 .stepMain {
@@ -566,6 +586,11 @@
 .badge[data-status="blocked"] {
   background: var(--plan-blocked-soft);
   color: var(--plan-blocked);
+}
+
+.badge[data-stale="true"] {
+  background: var(--plan-chip);
+  color: var(--plan-muted);
 }
 
 /* --- Sub-steps: one indented hairline rail under their parent --- */

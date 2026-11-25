@@ -96,7 +96,7 @@ Each response MUST be **one** of the two actions below:
 - For databases (SQLite, MySQL, PostgreSQL), always prefer the built-in `db.*` library (`host.contracts({ libraries: ["db"] })`: `db.list_connections`, `db.save_connection`, `db.inspect_schema`, `db.query`, `db.explain`, `db.execute`, `db.export_xlsx`, `db.import_xlsx`) instead of spawning `mysql`/`psql` CLIs or Python database scripts, so credentials stay in host storage and saved connections appear directly in Database Studio.
 - Use `browser.fill`, `browser.set_viewport`, `browser.scroll`, `browser.wait`, and `browser.screenshot` with a selector for interactive and responsive checks without shell scripts. To start a long-running dev server for browser checks, use `process.run_project_script` (and `process.stop_project_process` when done) rather than backgrounding `cmd &` inside a short-lived `exec_command`, which terminates its process group when the command exits.
 - Prefer `verify.check` and `verify.test` for supported project checks; read raw runner output through `session.read_asset` only when the structured diagnostics are insufficient.
-- For any non-trivial task with 3+ distinct steps or multiple files to modify, call `plan.set({ steps })` in your first `run_js` step to publish a concise 3–8 step checklist, then call `plan.update({ id, status })` as each step moves to `in_progress`, `done`, or `blocked`. Keep IDs stable; never mark unverified work done. Use `plan.add_substeps({ parent_id, steps })` to split a published step into sub-steps instead of resending the whole plan; a plan has at most two levels, and a parent cannot be `done` while one of its sub-steps is still open unless you pass `complete_children: true`.
+- For any non-trivial task with 3+ distinct steps or multiple files to modify, call `plan.set({ steps })` in your first `run_js` step to publish a concise 3–8 step checklist, then call `plan.update({ id, status })` as each step moves to `in_progress`, `done`, or `blocked`. Keep IDs stable; never mark unverified work done. Use `plan.add_substeps({ parent_id, steps })` to split a published step into sub-steps instead of resending the whole plan; a plan has at most two levels, and a parent cannot be `done` while one of its sub-steps is still open unless you pass `complete_children: true`. Before your final reply, close every finished step with `plan.update({ id, status: "done", complete_children: true })` (or mark remaining blockers `"blocked"`).
 - After a failed `io.apply_edits` or `io.edit`, check `globalThis.__lastFailedEdit`. Patch only the failed anchor's `old_text` or 1-based `line_hint` in `.args` and retry; do not re-emit unchanged `new_text`.
 - When building large code replacements in `run_js`, prefer `io.apply_edits` / `io.replace` directly; if you script custom regex/string edits, bind the large replacement text to top-level `const`/`let` variables **before** running any check or `throw`, because already-executed top-level bindings survive exceptions in this turn's REPL so the next step can reuse them directly (`.replace(...)` / `.slice(...)`) without regenerating the code.
 - For a partial batch (`atomic: false`), use the draft's `failed_files` indices and retry only those files.
@@ -352,7 +352,14 @@ pub(super) fn build_request_body(
     libs: &Libraries,
 ) -> Value {
     let base = w.pinned_system_prompt.as_deref().unwrap_or(V2_SYSTEM_PROMPT);
-    build_request_body_for_doc(s, &w.context_doc, base, libs)
+    let live_plan = (!s.scope.starts_with("virtual:")).then(|| {
+        crate::tools::plan_tools::format_turn_plan_for_context(
+            s.state.workspace.root(),
+            s.task,
+            s.turn,
+        )
+    }).flatten();
+    build_request_body_for_doc_with_plan(s, &w.context_doc, base, libs, live_plan.as_deref())
 }
 
 pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String {
@@ -418,6 +425,43 @@ pub(super) fn build_request_body_for_doc(
     base_prompt: &str,
     libs: &Libraries,
 ) -> Value {
+    build_request_body_for_doc_with_plan(s, doc, base_prompt, libs, None)
+}
+
+fn append_ephemeral_plan_tail(
+    messages: &mut Vec<Value>,
+    plan_block: &str,
+    is_responses: bool,
+    is_messages: bool,
+) {
+    if is_responses {
+        // Non-first `system` messages translate to trailing `developer` input in
+        // `responses_request`, keeping the entire history prefix 100% cacheable.
+        messages.push(json!({"role": "system", "content": plan_block}));
+    } else if is_messages {
+        // Anthropic Messages merges a trailing `user` message into the preceding
+        // `tool_result` user turn as a trailing text block, preserving prefix cache.
+        messages.push(json!({"role": "user", "content": plan_block}));
+    } else if let Some(last) = messages.last_mut()
+        && matches!(last["role"].as_str(), Some("tool" | "user"))
+        && let Some(content) = last["content"].as_str()
+    {
+        // OpenAI-compatible Chat Completions: append cleanly to the tail tool/user
+        // content without introducing a non-standard `system` after `tool` or a
+        // synthetic `user` turn mid-tool-chain.
+        last["content"] = json!(format!("{content}\n\n{plan_block}"));
+    } else {
+        messages.push(json!({"role": "user", "content": plan_block}));
+    }
+}
+
+fn build_request_body_for_doc_with_plan(
+    s: &Session<'_>,
+    doc: &super::context_doc::ContextDocument,
+    base_prompt: &str,
+    libs: &Libraries,
+    live_plan: Option<&str>,
+) -> Value {
     let mut system_text = without_runtime_identity(base_prompt);
     let has_pinned_sdk = system_text.contains("/* === RUNTIME HOST SDK (.d.ts) === */");
     if !has_pinned_sdk {
@@ -446,8 +490,22 @@ pub(super) fn build_request_body_for_doc(
          {REPORT_MODEL_PREFIX} (`{model}`) accurately; never guess from pretraining data or echo an earlier turn's different model."
     ));
 
+    let is_responses = s
+        .state
+        .provider_routes
+        .get(&s.state.provider_name)
+        .is_some_and(|route| route.responses);
+    let is_messages = s
+        .state
+        .provider_routes
+        .get(&s.state.provider_name)
+        .is_some_and(|route| route.messages);
+
     let mut messages = vec![json!({"role": "system", "content": system_text})];
     messages.extend(doc.render_conversation_messages());
+    if let Some(plan_block) = live_plan {
+        append_ephemeral_plan_tail(&mut messages, plan_block, is_responses, is_messages);
+    }
 
     let mut body = json!({
         "model": s.model,
@@ -473,16 +531,6 @@ pub(super) fn build_request_body_for_doc(
         body["reasoning_effort"] = json!(mapped);
     }
 
-    let is_responses = s
-        .state
-        .provider_routes
-        .get(&s.state.provider_name)
-        .is_some_and(|route| route.responses);
-    let is_messages = s
-        .state
-        .provider_routes
-        .get(&s.state.provider_name)
-        .is_some_and(|route| route.messages);
     if !is_messages {
         body["prompt_cache_key"] = json!(crate::model::model_transport::affinity(s.task, &s.scope));
     }
@@ -776,5 +824,44 @@ mod tests {
         assert!(V2_SYSTEM_PROMPT.contains("Default to NO Markdown table"));
         assert!(V2_SYSTEM_PROMPT.contains("explicitly asked for a comparison matrix"));
         assert!(V2_SYSTEM_PROMPT.contains("gray backtick inline-code token"));
+    }
+
+    #[test]
+    fn ephemeral_plan_tail_preserves_prefix_across_all_wire_formats() {
+        let base = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "hi"}),
+            json!({"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "run_js", "arguments": "{\"code\":\"1\"}"}}]}),
+            json!({"role": "tool", "tool_call_id": "c1", "content": "1"}),
+        ];
+        let plan = "[Current Task Plan — Turn 1 (1/2 done)]\n- [done] a: A\n- [in_progress] b: B";
+
+        // 1. Responses API: trailing system -> developer message, history prefix untouched
+        let mut resp_msgs = base.clone();
+        append_ephemeral_plan_tail(&mut resp_msgs, plan, true, false);
+        assert_eq!(resp_msgs[..4], base[..4]);
+        let resp_wire = crate::model::model_stream::responses_request(&json!({
+            "model": "gpt-test",
+            "messages": resp_msgs,
+            "tools": [],
+        }));
+        let last_input = resp_wire["input"].as_array().unwrap().last().unwrap();
+        assert_eq!(last_input["role"], "developer");
+        assert!(last_input["content"][0]["text"].as_str().unwrap().contains("[Current Task Plan"));
+
+        // 2. Anthropic Messages API: trailing user merges after tool_result, system untouched
+        let mut msg_msgs = base.clone();
+        append_ephemeral_plan_tail(&mut msg_msgs, plan, false, true);
+        assert_eq!(msg_msgs[..4], base[..4]);
+        assert_eq!(msg_msgs[4]["role"], "user");
+        assert_eq!(msg_msgs[4]["content"], plan);
+
+        // 3. Chat Completions: appends into trailing tool content cleanly
+        let mut chat_msgs = base.clone();
+        append_ephemeral_plan_tail(&mut chat_msgs, plan, false, false);
+        assert_eq!(chat_msgs.len(), 4);
+        assert_eq!(chat_msgs[..3], base[..3]);
+        assert_eq!(chat_msgs[3]["role"], "tool");
+        assert!(chat_msgs[3]["content"].as_str().unwrap().ends_with(plan));
     }
 }
