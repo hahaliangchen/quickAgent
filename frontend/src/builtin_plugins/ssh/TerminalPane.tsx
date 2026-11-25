@@ -8,33 +8,37 @@ import { appConfirm } from '../../components/AppDialog.tsx'
 import css from './style.module.css'
 
 export type OutputStatus = '连接中' | '已连接' | '已断开' | '连接失败'
-export const terminalFontFamily = '"JetBrains Mono", "Cascadia Mono", "DejaVu Sans Mono", "Ubuntu Mono", "Liberation Mono", Menlo, Consolas, monospace'
 
-/** Harmonious 16-color ANSI palettes matching QuickAgent's sage/slate design system. */
+// Put real system monospace fonts first: on Ubuntu Linux with CJK locale, an
+// uninstalled leading family (like "JetBrains Mono") causes WebKitGTK/Fontconfig
+// to fall back to proportional Noto Sans CJK SC inside xterm's cell measurer.
+export const terminalFontFamily = '"Hack", "Noto Sans Mono", "Ubuntu Mono", "DejaVu Sans Mono", "SF Mono", Menlo, Consolas, monospace'
+
+/** Paper-light & dark-ink 16-color ANSI palettes synced with QuickAgent's theme. */
 export const terminalThemes: Record<'dark' | 'light', ITheme> = {
   dark: {
     background: '#121618',
-    foreground: '#e2e8e5',
-    cursor: '#8adbc1',
+    foreground: '#e4ecef',
+    cursor: '#7ce2c3',
     cursorAccent: '#121618',
-    selectionBackground: 'rgba(138, 219, 193, 0.26)',
-    selectionInactiveBackground: 'rgba(138, 219, 193, 0.14)',
-    black: '#1f2624',
-    red: '#ef7b70',
+    selectionBackground: 'rgba(124, 226, 195, 0.26)',
+    selectionInactiveBackground: 'rgba(124, 226, 195, 0.14)',
+    black: '#1d252a',
+    red: '#f2777a',
     green: '#6fd4b2',
-    yellow: '#e5b567',
-    blue: '#7cb7f0',
+    yellow: '#f0c674',
+    blue: '#79b8ff',
     magenta: '#c997e6',
-    cyan: '#68cbd4',
-    white: '#c5d1cc',
-    brightBlack: '#66756e',
-    brightRed: '#ff9b91',
-    brightGreen: '#93e5c9',
-    brightYellow: '#f2ca85',
-    brightBlue: '#9ecbf5',
-    brightMagenta: '#dcb5f2',
-    brightCyan: '#8be0e8',
-    brightWhite: '#f0f5f2',
+    cyan: '#66d2db',
+    white: '#cfd9de',
+    brightBlack: '#667882',
+    brightRed: '#ff9699',
+    brightGreen: '#95e8cc',
+    brightYellow: '#fae09e',
+    brightBlue: '#a3d0ff',
+    brightMagenta: '#e0b8f5',
+    brightCyan: '#8de6ed',
+    brightWhite: '#f4f8fa',
   },
   light: {
     background: '#f8faf9',
@@ -62,33 +66,54 @@ export const terminalThemes: Record<'dark' | 'light', ITheme> = {
   },
 }
 
+// Session-only (zero remote file modifications) Oh My Zsh robbyrussell-inspired
+// bash prompt: green/red status arrow, user@host, cyan cwd, git branch/dirty,
+// conda env badge, and auto-colored ls/grep. Leading space keeps it out of
+// ignorespace bash history.
+const OMZ_BASH_PROMPT_CMD = [
+  ' if [ -n "${BASH_VERSION:-}" ]; then',
+  ' __qa_omz(){ local rc=$?; local arr="\\[\\e[1;32m\\]➜"; [ $rc -ne 0 ] && arr="\\[\\e[1;31m\\]➜";',
+  ' local env=""; [ -n "${CONDA_DEFAULT_ENV:-}" ] && env="\\[\\e[1;35m\\](${CONDA_DEFAULT_ENV}) ";',
+  ' local g=""; local br=$(git rev-parse --abbrev-ref HEAD 2>/dev/null);',
+  ' if [ -n "$br" ]; then local d=""; git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null || d=" \\[\\e[1;33m\\]✗";',
+  ' g=" \\[\\e[1;34m\\]git:(\\[\\e[1;31m\\]${br}\\[\\e[1;34m\\])\\[\\e[0m\\]${d}"; fi;',
+  ' PS1="${env}${arr} \\[\\e[1;35m\\]\\u@\\h \\[\\e[1;36m\\]\\w\\[\\e[0m\\]${g} \\[\\e[1;32m\\]❯\\[\\e[0m\\] "; };',
+  ' PROMPT_COMMAND="__qa_omz";',
+  ' alias ls="ls --color=auto" ll="ls -alF --color=auto" grep="grep --color=auto";',
+  ' clear; fi\r',
+].join('')
+
 export default function TerminalPane({ server, access, active, theme, onError, diagnose, onConnection }: {
   server: Server; access: Access; active: boolean; theme: 'dark' | 'light'; onError: (error: unknown) => void; diagnose?: ((value: string) => void) | undefined; onConnection: () => void
 }) {
   const host = useRef<HTMLDivElement>(null)
   const terminal = useRef<Terminal>()
   const fit = useRef<FitAddon>()
+  const sendRef = useRef<((data: string) => void) | null>(null)
   const callback = useRef({ onError, onConnection })
   callback.current = { onError, onConnection }
   const [status, setStatus] = useState<OutputStatus>('连接中')
   const [attempt, setAttempt] = useState(0)
   const [selected, setSelected] = useState(false)
+  const [omzActive, setOmzActive] = useState(false)
 
   useEffect(() => {
     if (!host.current) return
     const controller = new AbortController()
     setStatus('连接中')
     setSelected(false)
+    setOmzActive(false)
     const term = new Terminal({
       fontSize: 13,
-      lineHeight: 1.5,
-      letterSpacing: 0.2,
+      lineHeight: 1.28,
+      letterSpacing: 0,
       fontFamily: terminalFontFamily,
       fontWeight: '400',
       fontWeightBold: '600',
       cursorStyle: 'bar',
       cursorWidth: 2,
       cursorBlink: true,
+      customGlyphs: true,
       scrollback: 5000,
       smoothScrollDuration: 100,
       theme: terminalThemes[theme],
@@ -121,6 +146,7 @@ export default function TerminalPane({ server, access, active, theme, onError, d
         socket.send(encoded.subarray(offset, offset + 16 * 1024))
       }
     }
+    sendRef.current = sendBytes
 
     term.attachCustomKeyEventHandler(event => {
       if (event.type !== 'keydown') return true
@@ -210,6 +236,7 @@ export default function TerminalPane({ server, access, active, theme, onError, d
       term.dispose()
       terminal.current = undefined
       fit.current = undefined
+      sendRef.current = null
     }
   }, [server.id, access, attempt])
 
@@ -242,6 +269,13 @@ export default function TerminalPane({ server, access, active, theme, onError, d
     terminal.current?.focus()
   }
 
+  function enableOmzPrompt() {
+    if (!sendRef.current || status !== '已连接') return
+    sendRef.current(OMZ_BASH_PROMPT_CMD)
+    setOmzActive(true)
+    terminal.current?.focus()
+  }
+
   async function selectForAI() {
     const value = terminal.current?.getSelection().trim().slice(0, 4000)
     if (!value) return
@@ -271,6 +305,14 @@ export default function TerminalPane({ server, access, active, theme, onError, d
         {(status === '已断开' || status === '连接失败') && (
           <button onClick={() => setAttempt(value => value + 1)}>重新连接</button>
         )}
+        <button
+          className={omzActive ? css.omzActive : undefined}
+          disabled={status !== '已连接'}
+          onClick={enableOmzPrompt}
+          title="仅在当前会话启用 Oh My Zsh 风格彩色提示符与彩色 ls/grep（不修改远端任何文件）"
+        >
+          {omzActive ? '✦ 彩色提示符已启用' : '✦ 彩色提示符'}
+        </button>
         <button onClick={clearScreen} title="清空当前屏幕输出">清屏</button>
         <button disabled={!selected} onClick={() => void copy()} title="复制选区 (Ctrl+Shift+C)">复制选区</button>
         {diagnose && (
