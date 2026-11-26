@@ -70,7 +70,8 @@ fn tsc(root: &Path, cwd: &Path) -> Result<PathBuf> {
     let boundary = root.canonicalize()?;
     cwd.ancestors().take_while(|p| p.starts_with(&boundary)).find_map(|p| {
         let file = p.join("node_modules/typescript/bin/tsc").canonicalize().ok()?;
-        (file.starts_with(&boundary) && file.is_file()).then_some(file)
+        (file.starts_with(&boundary) && file.is_file())
+            .then(|| crate::tools::file_edit::strip_verbatim_prefix(&file))
     }).context("local TypeScript is not installed inside the workspace; install the project dependencies first")
 }
 
@@ -115,7 +116,7 @@ fn invocation(
                 "compileall",
                 "-q",
                 "-x",
-                r"(^|/)(\.git|\.venv|venv|node_modules|target)(/|$)",
+                r"(^|[\\/])(\.git|\.venv|venv|node_modules|target)([\\/]|$)",
                 ".",
             ],
         ),
@@ -282,6 +283,10 @@ fn diagnostic(
     code: Value,
     message: &str,
 ) -> Value {
+    let file = match file {
+        Value::String(path) => Value::String(path.replace('\\', "/")),
+        other => other,
+    };
     json!({"file":file,"line":line,"col":col,"severity":severity,"code":code,"message":message.chars().take(1000).collect::<String>()})
 }
 
@@ -451,7 +456,7 @@ fn tests(ecosystem: &str, raw: &Value, limit: usize) -> Value {
             && let Some(c) = rust_location.captures(line)
         {
             if let Some(i) = failures.iter().position(|f| f["name"] == &c[1]) {
-                failures[i]["file"] = json!(&c[2]);
+                failures[i]["file"] = json!(c[2].replace('\\', "/"));
                 failures[i]["line"] = num(c.get(3));
                 next_detail = Some(i);
             }

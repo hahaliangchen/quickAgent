@@ -132,13 +132,14 @@ pub async fn execute(
     .await??;
     let format = format_of(&bytes, &resolved)?;
     let (png, normalization) = crate::media::attachments::vision_copy(&bytes)?;
+    let clean_path = crate::tools::file_edit::display_path(&resolved);
     let artifact = visual_artifacts::save(
         state.workspace.root(),
         context,
         json!({
             "source": "vision.register_image",
             "requested_path": raw,
-            "path": resolved.display().to_string(),
+            "path": clean_path,
             "source_format": format.extensions_str().first().copied().unwrap_or(""),
             "source_byte_size": bytes.len(),
             "normalization": normalization,
@@ -148,7 +149,7 @@ pub async fn execute(
     Ok(json!({
         "artifact_id": artifact["artifact_id"],
         "visual_artifact": artifact,
-        "path": resolved.display().to_string(),
+        "path": clean_path,
         "width": artifact["width"],
         "height": artifact["height"],
         "source_width": normalization["source_width"],

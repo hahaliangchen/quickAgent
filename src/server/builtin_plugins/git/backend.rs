@@ -333,9 +333,14 @@ async fn files(root: &Path, top: &Path) -> Result<Value> {
 /// One file as text: the working copy, or its blob at a commit.
 async fn file(top: &Path, commit: Option<&str>, path: &str) -> Result<Value> {
     const MAX_FILE: u64 = 1024 * 1024;
-    let relative = Path::new(path);
+    let normalized_path = if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    };
+    let relative = Path::new(&normalized_path);
     ensure!(
-        !path.is_empty()
+        !normalized_path.is_empty()
             && relative
                 .components()
                 .all(|part| matches!(part, std::path::Component::Normal(_))),
@@ -343,7 +348,7 @@ async fn file(top: &Path, commit: Option<&str>, path: &str) -> Result<Value> {
     );
     let (bytes, content) = match commit {
         Some(commit) => {
-            let spec = format!("{commit}:{path}");
+            let spec = format!("{commit}:{normalized_path}");
             let size: u64 = git(top, &["cat-file", "-s", &spec]).await?.trim().parse()?;
             if size > MAX_FILE {
                 return Ok(json!({"path": path, "commit": commit, "bytes": size, "too_large": true}));

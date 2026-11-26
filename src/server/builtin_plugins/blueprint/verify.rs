@@ -8,8 +8,8 @@ use std::{
 };
 
 fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = Command::new("git")
-        .current_dir(root)
+    let mut cmd = Command::new("git");
+    cmd.current_dir(root)
         .args([
             "--no-optional-locks",
             "-c",
@@ -17,9 +17,13 @@ fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
             "-c",
             "core.untrackedCache=false",
         ])
-        .args(args)
-        .output()
-        .ok()?;
+        .args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let output = cmd.output().ok()?;
     output.status.success().then_some(output.stdout)
 }
 
@@ -103,10 +107,10 @@ pub(super) fn verify(
                 .or_insert_with(|| store.source(p).ok().flatten())
                 .as_deref()
         });
-        let modified = e
-            .file_path
-            .as_ref()
-            .is_some_and(|p| changed.contains(p.strip_prefix("./").unwrap_or(p)));
+        let modified = e.file_path.as_ref().is_some_and(|p| {
+            let normalized = p.replace('\\', "/");
+            changed.contains(normalized.strip_prefix("./").unwrap_or(&normalized))
+        });
         if e.file_path.is_some() && file.is_none() {
             status.status = PortStatus::Missing;
         }

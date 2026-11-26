@@ -728,18 +728,22 @@ fn open_workspace_upload_file(
         !local_path.is_empty() && !local_path.contains('\0'),
         "WORKSPACE_BOUNDARY_DENIED: invalid local_path"
     );
-    let raw = Path::new(local_path);
+    let clean_input = crate::tools::file_edit::strip_verbatim_prefix(Path::new(local_path));
+    let clean_root = crate::tools::file_edit::strip_verbatim_prefix(workspace_root);
+    let raw = clean_input.as_path();
     ensure!(
         !raw.components()
             .any(|component| matches!(component, Component::ParentDir)),
         "WORKSPACE_BOUNDARY_DENIED: local_path cannot contain parent traversal (..)"
     );
     let relative = if raw.is_absolute() {
-        raw.strip_prefix(workspace_root).map_err(|_| {
-            anyhow::anyhow!(
-                "WORKSPACE_BOUNDARY_DENIED: local_path must be inside the active workspace"
-            )
-        })?
+        raw.strip_prefix(workspace_root)
+            .or_else(|_| raw.strip_prefix(&clean_root))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "WORKSPACE_BOUNDARY_DENIED: local_path must be inside the active workspace"
+                )
+            })?
     } else {
         raw
     };
@@ -777,7 +781,7 @@ fn open_workspace_upload_file(
     };
     #[cfg(not(unix))]
     let mode = None;
-    Ok((file, size, relative.to_string_lossy().into_owned(), mode))
+    Ok((file, size, relative.to_string_lossy().replace('\\', "/"), mode))
 }
 
 fn prepare_workspace_download_target(
@@ -787,19 +791,25 @@ fn prepare_workspace_download_target(
     overwrite: bool,
 ) -> Result<(PathBuf, PathBuf, String)> {
     ensure!(
-        !local_path.is_empty() && !local_path.contains('\0') && !local_path.ends_with('/'),
+        !local_path.is_empty()
+            && !local_path.contains('\0')
+            && !local_path.ends_with('/')
+            && !local_path.ends_with('\\'),
         "WORKSPACE_BOUNDARY_DENIED: invalid local_path"
     );
-    let raw = Path::new(local_path);
+    let clean_input = crate::tools::file_edit::strip_verbatim_prefix(Path::new(local_path));
+    let raw = clean_input.as_path();
     ensure!(
         !raw.components()
             .any(|component| matches!(component, Component::ParentDir)),
         "WORKSPACE_BOUNDARY_DENIED: local_path cannot contain parent traversal (..)"
     );
     let canonical_root = workspace_root.canonicalize()?;
+    let clean_root = crate::tools::file_edit::strip_verbatim_prefix(&canonical_root);
     let relative = if raw.is_absolute() {
         raw.strip_prefix(&canonical_root)
             .or_else(|_| raw.strip_prefix(workspace_root))
+            .or_else(|_| raw.strip_prefix(&clean_root))
             .map_err(|_| {
                 anyhow::anyhow!(
                     "WORKSPACE_BOUNDARY_DENIED: local_path must be inside the active workspace"
@@ -867,7 +877,7 @@ fn prepare_workspace_download_target(
     getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("Cannot generate temp filename"))?;
     let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
     let temp_path = canonical_parent.join(format!(".grow-download-{nonce}.tmp"));
-    Ok((dest, temp_path, relative.to_string_lossy().into_owned()))
+    Ok((dest, temp_path, relative.to_string_lossy().replace('\\', "/")))
 }
 
 fn list_servers(config_dir: &Path, workspace: &str) -> Result<Value> {

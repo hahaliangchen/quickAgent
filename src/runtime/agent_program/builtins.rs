@@ -440,8 +440,13 @@ pub(super) fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "btoa" => json!(btoa(strings[0])?),
         "os.platform" => json!(platform()),
         "os.homedir" => {
-            let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-            json!(std::env::var(var).context("os.homedir: the home directory is not set")?)
+            let dir = if cfg!(windows) {
+                std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME"))
+            } else {
+                std::env::var("HOME")
+            }
+            .context("os.homedir: the home directory is not set")?;
+            json!(dir)
         }
         "os.tmpdir" => {
             // Node drops a trailing separator unless the path is a root.

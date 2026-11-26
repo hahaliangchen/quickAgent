@@ -96,15 +96,20 @@ fn changed_files(root: &Path, start: i64, end: i64) -> Result<Vec<Value>> {
 
 /// Commits made today, or nothing when the project is not a git checkout.
 fn commits(workspace: &str, date: &str) -> Vec<String> {
-    let output = std::process::Command::new("git")
-        .args([
-            "log",
-            &format!("--since={date} 00:00:00"),
-            "--pretty=%h %s",
-            &format!("-n{COMMIT_LIMIT}"),
-        ])
-        .current_dir(workspace)
-        .output();
+    let mut cmd = std::process::Command::new("git");
+    cmd.args([
+        "log",
+        &format!("--since={date} 00:00:00"),
+        "--pretty=%h %s",
+        &format!("-n{COMMIT_LIMIT}"),
+    ])
+    .current_dir(workspace);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let output = cmd.output();
     match output {
         Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
             .lines()

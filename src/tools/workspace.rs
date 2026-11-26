@@ -1324,7 +1324,7 @@ fn allowed_noise_dirs(globs: &[String]) -> std::collections::HashSet<&'static st
             continue;
         }
         for &noise in NOISE_DIRS {
-            if trimmed.split('/').any(|seg| seg == noise) {
+            if trimmed.split(['/', '\\']).any(|seg| seg == noise) {
                 allowed.insert(noise);
             }
         }

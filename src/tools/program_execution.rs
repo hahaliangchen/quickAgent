@@ -444,7 +444,7 @@ fn resolve_project_path(root: &Path, raw: &str) -> Result<(PathBuf, String)> {
             };
             return Ok((canonical, rel));
         }
-        let display = canonical.to_string_lossy().replace('\\', "/");
+        let display = crate::tools::file_edit::display_path(&canonical);
         return Ok((canonical, display));
     }
     let resolved = crate::tools::file_edit::workspace_path(root, trimmed)?;

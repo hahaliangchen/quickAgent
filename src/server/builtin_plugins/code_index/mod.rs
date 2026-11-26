@@ -15,7 +15,7 @@ fn execute(workspace: &crate::tools::Workspace, method: &str, mut args: Value) -
         Some(path) => workspace.root().join(path),
         None => workspace.root().to_owned(),
     };
-    args["workspace_root"] = Value::String(root.canonicalize()?.to_string_lossy().into_owned());
+    args["workspace_root"] = Value::String(crate::tools::file_edit::display_path(&root.canonicalize()?));
     args.as_object_mut().context("expected an object")?.remove("language");
     macro_rules! call {
         ($name:ident) => { serde_json::to_value(workspace.$name(serde_json::from_value(args)?)?).map_err(Into::into) };
