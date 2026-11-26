@@ -82,6 +82,37 @@ pub(crate) fn add_column(conn: &Connection, table: &str, column: &str, definitio
     Ok(!exists)
 }
 
+tokio::task_local! {
+    static ALLOW_PROJECT_ENV_READ: bool;
+}
+thread_local! {
+    static THREAD_ALLOW_PROJECT_ENV_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn allow_project_env_read() -> bool {
+    ALLOW_PROJECT_ENV_READ.try_with(|v| *v).unwrap_or(false)
+        || THREAD_ALLOW_PROJECT_ENV_READ.with(|c| c.get())
+}
+
+pub(crate) async fn with_allow_project_env_read<F: std::future::Future>(
+    allow: bool,
+    fut: F,
+) -> F::Output {
+    ALLOW_PROJECT_ENV_READ.scope(allow, fut).await
+}
+
+pub(crate) fn with_thread_allow_project_env_read<R>(allow: bool, f: impl FnOnce() -> R) -> R {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            THREAD_ALLOW_PROJECT_ENV_READ.with(|c| c.set(self.0));
+        }
+    }
+    let prev = THREAD_ALLOW_PROJECT_ENV_READ.with(|c| c.replace(allow));
+    let _guard = Reset(prev);
+    f()
+}
+
 /// Ordinary file I/O must never open SQLite's own state files. On Unix,
 /// closing any descriptor for the DB/SHM inode releases this process's POSIX
 /// locks, including locks held by SQLite on other threads. A subsequent
@@ -98,13 +129,13 @@ pub(crate) fn check_source_access(path: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
             "SQLITE_STATE_FILE: host database files are accessed through SQLite, not source-file tools"));
     }
-    if is_generic_secret_path(&resolved) {
-        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
-            "SECRET_FILE: environment and credential files are not accessible through source-file tools"));
-    }
     if is_secret_file(&resolved, &crate::server::ai_proxy::secret_files()) {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
             "SECRET_FILE: this file holds API keys and is never readable by tools; the host applies the credentials itself. Model settings are in providers.yml and agent-generation.yml beside it"));
+    }
+    if is_generic_secret_path(&resolved) && !allow_project_env_read() {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+            "SECRET_FILE: environment and credential files are not accessible through source-file tools"));
     }
     Ok(())
 }
@@ -566,6 +597,27 @@ mod tests {
             std::os::unix::fs::symlink(&secret, root.join("link.yaml")).unwrap();
             assert!(super::is_secret_file(&resolve(&root.join("link.yaml")), &secrets), "a symlink reaches the same file");
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_access_allows_project_env_read_while_keeping_host_db_protected() {
+        let root = std::env::temp_dir().join(format!(
+            "env_read_scope_{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(root.join(".codex-workspace-mcp")).unwrap();
+        let env_file = root.join(".env");
+        let db_file = root.join(".codex-workspace-mcp/codex_state.db");
+        std::fs::write(&env_file, "DB_HOST=127.0.0.1\n").unwrap();
+        std::fs::write(&db_file, b"").unwrap();
+
+        assert!(super::check_source_access(&env_file).is_err());
+        super::with_thread_allow_project_env_read(true, || {
+            assert!(super::check_source_access(&env_file).is_ok());
+            assert!(super::check_source_access(&db_file).is_err());
+        });
+        assert!(super::check_source_access(&env_file).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 }

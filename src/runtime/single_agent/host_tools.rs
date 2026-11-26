@@ -729,11 +729,25 @@ pub(super) async fn business_tool_inner(
             if program_read {
                 crate::index::source_read::mark_program_read(name, &mut args);
             }
-            agent_service::execute_tool(
-                tool_workspace.clone(),
-                s.state.tool_catalog.as_deref(),
-                name,
-                args,
+            let allow_env_read = s.state.permission_mode
+                == agent_service::PermissionMode::FullAccess
+                && matches!(
+                    name,
+                    "read_file"
+                        | "read_file_lines"
+                        | "read_file_chunk"
+                        | "stat_paths"
+                        | "search_text"
+                        | "list_dir"
+                );
+            crate::context::database::with_allow_project_env_read(
+                allow_env_read,
+                agent_service::execute_tool(
+                    tool_workspace.clone(),
+                    s.state.tool_catalog.as_deref(),
+                    name,
+                    args,
+                ),
             )
             .await
         };

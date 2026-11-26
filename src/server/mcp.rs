@@ -1060,15 +1060,18 @@ pub async fn call_tool(workspace: &Workspace, params: Value) -> anyhow::Result<V
         "list_dir" | "read_file" | "read_file_lines" | "read_file_chunk" | "search_text" | "stat_paths" => {
             let workspace = Workspace::new(workspace.root())?;
             let name = name.to_owned();
+            let allow_env_read = crate::context::database::allow_project_env_read();
             tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
-                Ok(match name.as_str() {
-                    "list_dir" => serde_json::to_value(workspace.list_dir(serde_json::from_value::<ListDirRequest>(arguments)?)?)?,
-                    "read_file" => serde_json::to_value(workspace.read_file(serde_json::from_value::<ReadFileRequest>(arguments)?)?)?,
-                    "read_file_lines" => serde_json::to_value(workspace.read_file_lines(serde_json::from_value::<ReadFileLinesRequest>(arguments)?)?)?,
-                    "read_file_chunk" => serde_json::to_value(workspace.read_file_chunk(serde_json::from_value::<ReadFileChunkRequest>(arguments)?)?)?,
-                    "search_text" => serde_json::to_value(workspace.search_text(serde_json::from_value::<SearchTextRequest>(arguments)?)?)?,
-                    "stat_paths" => serde_json::to_value(workspace.stat_paths(serde_json::from_value::<crate::tools::StatRequest>(arguments)?)?)?,
-                    _ => unreachable!(),
+                crate::context::database::with_thread_allow_project_env_read(allow_env_read, || {
+                    Ok(match name.as_str() {
+                        "list_dir" => serde_json::to_value(workspace.list_dir(serde_json::from_value::<ListDirRequest>(arguments)?)?)?,
+                        "read_file" => serde_json::to_value(workspace.read_file(serde_json::from_value::<ReadFileRequest>(arguments)?)?)?,
+                        "read_file_lines" => serde_json::to_value(workspace.read_file_lines(serde_json::from_value::<ReadFileLinesRequest>(arguments)?)?)?,
+                        "read_file_chunk" => serde_json::to_value(workspace.read_file_chunk(serde_json::from_value::<ReadFileChunkRequest>(arguments)?)?)?,
+                        "search_text" => serde_json::to_value(workspace.search_text(serde_json::from_value::<SearchTextRequest>(arguments)?)?)?,
+                        "stat_paths" => serde_json::to_value(workspace.stat_paths(serde_json::from_value::<crate::tools::StatRequest>(arguments)?)?)?,
+                        _ => unreachable!(),
+                    })
                 })
             }).await??
         },
