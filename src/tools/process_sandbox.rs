@@ -6,11 +6,13 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+#[cfg(target_os = "linux")]
+use std::net::Ipv6Addr;
 use std::{
     collections::BTreeSet,
     ffi::OsStr,
     future::Future,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };

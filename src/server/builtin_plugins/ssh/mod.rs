@@ -1,7 +1,7 @@
 //! Interactive SSH workbench and AI remote operations tools.
 mod client;
 mod credentials;
-mod live;
+pub(crate) mod live;
 mod package;
 mod pty;
 pub(crate) mod routes;

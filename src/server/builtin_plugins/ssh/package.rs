@@ -308,6 +308,9 @@ pub(super) async fn execute_tool(
                 .map(str::to_owned)
                 .or_else(|| server.default_dir.clone());
             let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60).clamp(1, 1800);
+            let idle_timeout_secs = args["idle_timeout_secs"].as_u64().unwrap_or(120).min(1800);
+            let idle_timeout =
+                (idle_timeout_secs > 0).then(|| Duration::from_secs(idle_timeout_secs));
             let (connection, secret) = client::connect_for_tool(
                 config_dir.clone(),
                 server.id.clone(),
@@ -339,6 +342,7 @@ pub(super) async fn execute_tool(
                 &command,
                 cwd.as_deref(),
                 Duration::from_secs(timeout_secs),
+                idle_timeout,
                 task.map(|_| &mut callback as &mut client::ChunkCallback<'_>),
             )
             .await;
@@ -359,11 +363,34 @@ pub(super) async fn execute_tool(
             if let Some(task) = task {
                 live::emit_exec_chunk(task, &server.id, &stdout.finish());
                 live::emit_exec_chunk(task, &server.id, &stderr.finish());
+                if output.as_ref().is_ok_and(|o| o.idle_timed_out) {
+                    let notice = format!(
+                        "\r\n\x1b[33m[idle_timeout: no output for {idle_timeout_secs}s]\x1b[0m\r\n"
+                    );
+                    live::emit_exec_chunk(task, &server.id, notice.as_bytes());
+                }
                 let code = output.as_ref().ok().and_then(|output| output.exit_code);
                 live::emit_exec_end(task, &server.id, display_cwd, code, elapsed_ms);
             }
             let output = output?;
             recorded?;
+            if output.idle_timed_out {
+                return Ok(json!({
+                    "server_id": server.id,
+                    "cwd": cwd,
+                    "status": "idle_timeout",
+                    "timed_out": true,
+                    "idle_timeout_secs": idle_timeout_secs,
+                    "exit_code": Value::Null,
+                    "stdout": output.stdout,
+                    "stderr": output.stderr,
+                    "stdout_truncated": output.stdout_truncated,
+                    "stderr_truncated": output.stderr_truncated,
+                    "hint": format!(
+                        "远端命令连续 {idle_timeout_secs} 秒无任何新输出已被自动中断，请检查进程是否已退出、卡死或等待交互输入。"
+                    ),
+                }));
+            }
             Ok(json!({
                 "server_id": server.id,
                 "cwd": cwd,

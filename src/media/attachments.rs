@@ -552,13 +552,13 @@ pub async fn read(state: &AgentServiceState, task: &str, args: &Value) -> Result
         let input=path(&root,id)?;
         if let Some(page)=args["page_index"].as_u64() {
             ensure!(media=="application/pdf"&&page>0&&page<=10000,"page_index requires a valid PDF page");
-            let rendered=std::process::Command::new("python3").arg("-c").arg("import subprocess,sys; r=subprocess.run(['pdftoppm','-f',sys.argv[2],'-l',sys.argv[2],'-singlefile','-scale-to','2048','-png',sys.argv[1]],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=30,check=True);sys.stdout.buffer.write(r.stdout)").arg(&input).arg(page.to_string()).output()?;
+            let rendered=python_command().arg("-c").arg(RENDER_PDF_PAGE_PY).arg(&input).arg(page.to_string()).output()?;
             ensure!(rendered.status.success()&&rendered.stdout.len()<=MAX_BYTES,"PDF 页面渲染失败：{}",String::from_utf8_lossy(&rendered.stderr).chars().take(300).collect::<String>());
             let context=crate::media::visual_artifacts::VisualContext{identity:json!({"task_id":task,"request_id":turn,"node_id":format!("attachment:{receipt}:page:{page}")}),turn:Some(turn),..Default::default()};
             let(png,normalization)=vision_copy(&rendered.stdout)?;let artifact=crate::media::visual_artifacts::save(&root,&context,json!({"source":"user_pdf","attachment":reference,"page_index":page,"normalization":normalization}),&png)?;
             return Ok(json!({"attachment":reference,"page_index":page,"artifact_id":artifact["artifact_id"],"next":"Call await vision.analyze_images({ artifact_ids: [artifact_id], question }) inside run_js to read this PDF page."}));
         }
-        let output=std::process::Command::new("python3").arg("-c").arg(include_str!("attachments/read_document.py")).arg(&input).arg(reference["name"].as_str().unwrap_or("attachment")).output()?;
+        let output=python_command().arg("-c").arg(include_str!("attachments/read_document.py")).arg(&input).arg(reference["name"].as_str().unwrap_or("attachment")).output()?;
         ensure!(output.status.success(),"附件解析失败：{}",String::from_utf8_lossy(&output.stderr).chars().take(400).collect::<String>());
         ensure!(output.stdout.len()<=16*1024*1024,"附件提取文本过大");
         let extracted:Value=serde_json::from_slice(&output.stdout)?;let text=extracted["text"].as_str().context("missing extracted text")?;
@@ -567,8 +567,100 @@ pub async fn read(state: &AgentServiceState, task: &str, args: &Value) -> Result
         Ok(json!({"attachment":reference,"remote_path":remote,"content":content,"char_offset":offset,"total_chars":count,"next_char_offset":if end<count{Some(end)}else{None},"warnings":extracted["warnings"]}))
     }).await?
 }
+
+const RENDER_PDF_PAGE_PY: &str = r#"import shutil, subprocess, sys
+pdf_path, page_str = sys.argv[1], sys.argv[2]
+page_num = int(page_str)
+if shutil.which('pdftoppm'):
+    r = subprocess.run(['pdftoppm', '-f', page_str, '-l', page_str, '-singlefile', '-scale-to', '2048', '-png', pdf_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=True)
+    sys.stdout.buffer.write(r.stdout)
+    sys.exit(0)
+try:
+    import fitz
+    with fitz.open(pdf_path) as doc:
+        if page_num < 1 or page_num > len(doc):
+            raise ValueError(f'PDF page {page_num} out of range (1..{len(doc)})')
+        page = doc[page_num - 1]
+        rect = page.rect
+        max_dim = max(rect.width, rect.height, 1.0)
+        scale = min(2048.0 / max_dim, 3.0)
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        sys.stdout.buffer.write(pix.tobytes('png'))
+        sys.exit(0)
+except ImportError:
+    pass
+try:
+    import io, pypdfium2 as pdfium
+    doc = pdfium.PdfDocument(pdf_path)
+    if page_num < 1 or page_num > len(doc):
+        raise ValueError(f'PDF page {page_num} out of range (1..{len(doc)})')
+    page = doc[page_num - 1]
+    w, h = page.get_size()
+    scale = min(2048.0 / max(w, h, 1.0), 3.0)
+    pil_img = page.render(scale=scale).to_pil()
+    buf = io.BytesIO()
+    pil_img.save(buf, format='PNG')
+    sys.stdout.buffer.write(buf.getvalue())
+    sys.exit(0)
+except ImportError:
+    pass
+print('PDF 页面渲染需要安装 Poppler (pdftoppm) 或 Python PyMuPDF (pip install pymupdf)', file=sys.stderr)
+sys.exit(1)
+"#;
+
+fn configure_hidden_command(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+fn resolve_python() -> (&'static str, &'static [&'static str]) {
+    static PYTHON: std::sync::OnceLock<(&'static str, &'static [&'static str])> =
+        std::sync::OnceLock::new();
+    *PYTHON.get_or_init(|| {
+        #[cfg(windows)]
+        const CANDIDATES: &[(&str, &[&str])] = &[
+            ("python", &[]),
+            ("py", &["-3"]),
+            ("python3", &[]),
+        ];
+        #[cfg(not(windows))]
+        const CANDIDATES: &[(&str, &[&str])] = &[
+            ("python3", &[]),
+            ("python", &[]),
+        ];
+        for &(exe, args) in CANDIDATES {
+            let mut probe = std::process::Command::new(exe);
+            probe.args(args).arg("--version");
+            configure_hidden_command(&mut probe);
+            if let Ok(out) = probe.output()
+                && out.status.success()
+            {
+                let ver = String::from_utf8_lossy(&out.stdout);
+                let err = String::from_utf8_lossy(&out.stderr);
+                if ver.starts_with("Python 3.") || err.starts_with("Python 3.") {
+                    return (exe, args);
+                }
+            }
+        }
+        CANDIDATES[0]
+    })
+}
+
+pub(crate) fn python_command() -> std::process::Command {
+    let (exe, args) = resolve_python();
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args);
+    configure_hidden_command(&mut cmd);
+    cmd
+}
+
 fn run_pptx_script(input: &PathBuf, mode: &str, target: Option<&str>) -> Result<Value> {
-    let mut command = std::process::Command::new("python3");
+    let mut command = python_command();
     command
         .arg("-I")
         .arg("-c")
@@ -899,7 +991,7 @@ mod tests {
         let input = f.root.join("encoding-regression.txt");
         let text = format!("{}😀中文\\uDC00", "a".repeat(11_999));
         std::fs::write(&input, text.as_bytes()).unwrap();
-        let output = std::process::Command::new("python3")
+        let output = python_command()
             .arg("-c").arg(include_str!("attachments/read_document.py"))
             .arg(&input).arg("encoding-regression.txt")
             .env("PYTHONIOENCODING", "cp936").env("PYTHONUTF8", "0")
@@ -1194,7 +1286,7 @@ mod tests {
     #[tokio::test]
     async fn attachments_docx_text_and_large_image_normalization() {
         let f = Fixture::new();
-        let output=std::process::Command::new("python3").arg("-c").arg(r#"import io,zipfile,sys
+        let output=python_command().arg("-c").arg(r#"import io,zipfile,sys
 b=io.BytesIO()
 with zipfile.ZipFile(b,'w') as z:z.writestr('word/document.xml','<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>需求正文</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>表格资料</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>')
 sys.stdout.buffer.write(b.getvalue())"#).output().unwrap();

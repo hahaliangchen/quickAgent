@@ -1,0 +1,491 @@
+{
+  "version": 1,
+  "vendors": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "default_base_url": "https://api.openai.com/v1",
+      "default_api_type": "openai-responses",
+      "models": {
+        "gpt-6.2-astra": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+          "default_effort": "medium",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-6.2-sol": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+          "default_effort": "medium",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-6.1-terra": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+          "default_effort": "medium",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-6.1-sol": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+          "default_effort": "medium",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-6-luna": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+          "default_effort": "medium",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-6-astra": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+          "default_effort": "medium",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-5.6-luna": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+          "default_effort": "medium",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-5.6-sol": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+          "default_effort": "medium",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-5.4": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+          "default_effort": "none",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-5.4-pro": {
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["medium", "high", "xhigh"],
+          "default_effort": "medium",
+          "fast_mode": true,
+          "long_context_threshold": 272000
+        },
+        "gpt-5.4-mini": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+          "default_effort": "none",
+          "fast_mode": true
+        },
+        "gpt-5.4-nano": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+          "default_effort": "none",
+          "fast_mode": true
+        },
+        "gpt-5.3-codex": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+          "default_effort": "medium",
+          "fast_mode": true
+        },
+        "gpt-5.2-codex": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+          "default_effort": "medium",
+          "fast_mode": true
+        },
+        "gpt-5.2": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["none", "low", "medium", "high", "xhigh"],
+          "default_effort": "none",
+          "fast_mode": true
+        },
+        "gpt-5.2-pro": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["medium", "high", "xhigh"],
+          "default_effort": "medium",
+          "fast_mode": false
+        },
+        "gpt-5.1": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["none", "low", "medium", "high"],
+          "default_effort": "none",
+          "fast_mode": true
+        },
+        "gpt-5.1-codex-max": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+          "default_effort": "medium",
+          "fast_mode": true
+        },
+        "gpt-5.1-codex": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": true
+        },
+        "gpt-5.1-codex-mini": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": true
+        },
+        "gpt-5": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": true
+        },
+        "gpt-5-mini": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": true
+        },
+        "gpt-5-nano": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": true
+        },
+        "gpt-5-codex": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": true
+        },
+        "gpt-5-pro": {
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["high"],
+          "default_effort": "high",
+          "fast_mode": false
+        },
+        "gpt-4.1": {
+          "context_window": 1047576,
+          "max_output_tokens": 32768,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        },
+        "gpt-4.1-mini": {
+          "context_window": 1047576,
+          "max_output_tokens": 32768,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        },
+        "gpt-4.1-nano": {
+          "context_window": 1047576,
+          "max_output_tokens": 32768,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        },
+        "gpt-4o": {
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        },
+        "gpt-4o-mini": {
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        },
+        "o3": {
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        },
+        "o3-pro": {
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        },
+        "o3-mini": {
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        },
+        "o4-mini": {
+          "context_window": 200000,
+          "max_output_tokens": 100000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        }
+      }
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "default_base_url": "https://api.deepseek.com/v1",
+      "default_api_type": "openai-completions",
+      "models": {
+        "deepseek-flash": {
+          "context_window": 1048576,
+          "max_output_tokens": 393216,
+          "reasoning_efforts": ["none", "low", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false
+        },
+        "deepseek-v4-pro": {
+          "context_window": 1048576,
+          "max_output_tokens": 393216,
+          "reasoning_efforts": ["none", "low", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false
+        },
+        "deepseek-reasoner": {
+          "context_window": 131072,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": ["low", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false
+        },
+        "deepseek-chat": {
+          "context_window": 131072,
+          "max_output_tokens": 8192,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        }
+      }
+    },
+    {
+      "id": "moonshot",
+      "name": "Moonshot AI",
+      "default_base_url": "https://api.moonshot.cn/v1",
+      "default_api_type": "openai-completions",
+      "models": {
+        "kimi-k3": {
+          "context_window": 1048576,
+          "max_output_tokens": 131072,
+          "reasoning_efforts": ["low", "high", "max"],
+          "default_effort": "max",
+          "fast_mode": false
+        },
+        "kimi-k3.1-pro": {
+          "context_window": 1048576,
+          "max_output_tokens": 131072,
+          "reasoning_efforts": ["low", "high", "max"],
+          "default_effort": "max",
+          "fast_mode": false
+        },
+        "kimi-k2.6": {
+          "context_window": 262144,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        },
+        "kimi-k2.5": {
+          "context_window": 262144,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        },
+        "kimi-k2-thinking": {
+          "context_window": 262144,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        },
+        "kimi-k2-0905-preview": {
+          "context_window": 262144,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        },
+        "kimi-k2-turbo-preview": {
+          "context_window": 262144,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": [],
+          "default_effort": null,
+          "fast_mode": false
+        }
+      }
+    },
+    {
+      "id": "qwen",
+      "name": "Qwen",
+      "default_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "default_api_type": "openai-completions",
+      "models": {
+        "qwen3.8-27b": {
+          "context_window": 262144,
+          "max_output_tokens": 131072,
+          "reasoning_efforts": ["low", "medium", "xhigh"],
+          "default_effort": "xhigh",
+          "fast_mode": false
+        }
+      }
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "default_base_url": "https://api.anthropic.com/v1",
+      "default_api_type": "anthropic-messages",
+      "models": {
+        "claude-opus-4-6": {
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "reasoning_efforts": ["low", "medium", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false,
+          "long_context_threshold": 200000
+        },
+        "claude-sonnet-4-6": {
+          "context_window": 1000000,
+          "max_output_tokens": 64000,
+          "reasoning_efforts": ["low", "medium", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false,
+          "long_context_threshold": 200000
+        },
+        "claude-opus-4-5": {
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "reasoning_efforts": ["low", "medium", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false,
+          "long_context_threshold": 200000
+        },
+        "claude-sonnet-4-5": {
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "reasoning_efforts": ["low", "medium", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false,
+          "long_context_threshold": 200000
+        },
+        "claude-opus-4-1": {
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "reasoning_efforts": ["low", "medium", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false,
+          "long_context_threshold": 200000
+        },
+        "claude-opus-4": {
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "reasoning_efforts": ["low", "medium", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false,
+          "long_context_threshold": 200000
+        },
+        "claude-sonnet-4": {
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "reasoning_efforts": ["low", "medium", "high", "max"],
+          "default_effort": "high",
+          "fast_mode": false,
+          "long_context_threshold": 200000
+        },
+        "claude-haiku-4-5": {
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false,
+          "long_context_threshold": 200000
+        }
+      }
+    },
+    {
+      "id": "google",
+      "name": "Google Gemini",
+      "default_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "default_api_type": "openai-completions",
+      "models": {
+        "gemini-2.5-pro": {
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        },
+        "gemini-3-pro": {
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        },
+        "gemini-3-pro-preview": {
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": ["low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        },
+        "gemini-2.5-flash": {
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": ["none", "low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        },
+        "gemini-3-flash": {
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": ["none", "low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        },
+        "gemini-3-flash-preview": {
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "reasoning_efforts": ["none", "low", "medium", "high"],
+          "default_effort": "medium",
+          "fast_mode": false
+        }
+      }
+    }
+  ]
+}

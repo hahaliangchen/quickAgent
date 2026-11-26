@@ -22,10 +22,19 @@ export interface ObserverSuggestion {
 }
 
 export interface ObserverTrigger {
-  readonly kind: 'manual' | 'error' | 'turn_failed' | 'plan_phase' | 'turn_completed'
+  readonly kind: 'manual' | 'error' | 'turn_failed' | 'plan_phase' | 'turn_completed' | 'stalled_tool'
   readonly label: string
   readonly latestSeq: number
   readonly detail?: string | undefined
+}
+
+export interface StalledInFlightTool {
+  readonly callId: string
+  readonly seq: number
+  readonly toolName: string
+  readonly startedAt: number
+  readonly lastActivityAt: number
+  readonly idleSec: number
 }
 
 export interface ObserverPrefs {
@@ -39,6 +48,7 @@ export interface ObserverPrefs {
 
 export const OBSERVER_TITLE_PREFIX = '[观察者] '
 export const OBSERVER_COOLDOWN_MS = 45_000
+export const OBSERVER_STALL_THRESHOLD_MS = 180_000
 
 const PREFS_KEY = 'blueprint_observer_prefs_v1'
 const SESSION_MAP_KEY = 'blueprint_observer_sessions_v1'
@@ -270,6 +280,79 @@ export function detectObserverTrigger(
 }
 
 /**
+ * Pure zero-cost stalled-tool detector for the Observer single-shot watchdog.
+ *
+ * Scans the main session's event stream to locate the latest unclosed `tool/call`
+ * (without a matching `tool/result` in the active turn) and checks whether the session
+ * has been completely silent (`nowMs - lastActivityAt >= thresholdMs`, default 3 min).
+ */
+export function findStalledInFlightTool(
+  events: readonly AgentEvent[],
+  nowMs: number,
+  thresholdMs: number = OBSERVER_STALL_THRESHOLD_MS,
+): StalledInFlightTool | null {
+  if (events.length === 0 || !Number.isFinite(nowMs) || thresholdMs <= 0) return null
+
+  const inFlight = new Map<string, { callId: string; seq: number; toolName: string; startedAt: number }>()
+  for (const ev of events) {
+    if (ev.type === 'turn/end') {
+      inFlight.clear()
+      continue
+    }
+    if (ev.type === 'tool/call') {
+      const rawId = typeof ev.data.callId === 'string' && ev.data.callId
+        ? ev.data.callId
+        : (typeof ev.data.call_id === 'string' && ev.data.call_id ? ev.data.call_id : `call_${ev.seq}`)
+      const toolName = typeof ev.data.name === 'string' && ev.data.name ? ev.data.name : 'unknown'
+      inFlight.set(rawId, {
+        callId: rawId,
+        seq: ev.seq,
+        toolName,
+        startedAt: typeof ev.time === 'number' && Number.isFinite(ev.time) ? ev.time : 0,
+      })
+      continue
+    }
+    if (ev.type === 'tool/result') {
+      const msg = asRecord(ev.data.message)
+      const cid = typeof msg?.toolCallId === 'string' && msg.toolCallId
+        ? msg.toolCallId
+        : (typeof ev.data.callId === 'string' && ev.data.callId
+          ? ev.data.callId
+          : (typeof ev.data.call_id === 'string' ? ev.data.call_id : ''))
+      if (cid) inFlight.delete(cid)
+    }
+  }
+
+  if (inFlight.size === 0) return null
+
+  let latestCall: { callId: string; seq: number; toolName: string; startedAt: number } | null = null
+  for (const call of inFlight.values()) {
+    if (!latestCall || call.seq > latestCall.seq) latestCall = call
+  }
+  if (!latestCall) return null
+
+  let lastActivityAt = latestCall.startedAt
+  for (const ev of events) {
+    if (ev.seq >= latestCall.seq && typeof ev.time === 'number' && Number.isFinite(ev.time) && ev.time > lastActivityAt) {
+      lastActivityAt = ev.time
+    }
+  }
+  if (lastActivityAt <= 0) return null
+
+  const idleMs = nowMs - lastActivityAt
+  if (idleMs < thresholdMs) return null
+
+  return {
+    callId: latestCall.callId,
+    seq: latestCall.seq,
+    toolName: latestCall.toolName,
+    startedAt: latestCall.startedAt,
+    lastActivityAt,
+    idleSec: Math.floor(idleMs / 1000),
+  }
+}
+
+/**
  * Build the SQLite-first inspection prompt sent to the Observer AI session.
  */
 export function buildObserverInspectPrompt(input: {
@@ -289,9 +372,12 @@ export function buildObserverInspectPrompt(input: {
     ...(input.recentSummary ? [`- 最新进展摘要：${input.recentSummary}`] : []),
     '',
     '请按以下步骤高效执行（严格只读，禁止修改任何文件或执行写操作）：',
-    `1. **一步拿到全局快照 + 最新尾巴**：直接调用 \`blueprint.inspect_session({ task_id: "${input.watchedTaskId}", max_recent: 20 })\`（注意用点号 \`blueprint.inspect_session\`）。一次即可读出 SQLite 全量摘要（原始目标、红线、计划进度、钉住事实、失败聚类、改动文件、环境线索、费用）以及 \`recent_tail\`（最新 20 条关键实时事件）。**严禁**用 \`after_seq\` 从头逐页翻历史浪费时间；如需看某条报错的完整内容，仅按 \`event_seq\` 点查 \`session.read_session_history({ task_id: "${input.watchedTaskId}", event_seq })\`。`,
-    '2. **源码真相双视野核验**：你拥有当前工作区的只读权限，如发现主会话怀疑某个源码逻辑或改动异常，可直接用 `read_file` / `search_text` / 只读 `git diff` 对照本地源码真相，并按需查 `blueprint.overview()` / `blueprint.read_playbook` 对照蓝图最短路径。',
-    '3. **高信噪比决断**：如果主会话进展正常、无需打断，则设置 `"should_interject": false`；只有在发现**明确风险、踩坑、偏航、重复报错或需止损**时，才设置 `"should_interject": true`。',
+    `1. **一步拿到全局快照 + 多轮指令时间线 + 实时终端尾巴**：直接调用 \`blueprint.inspect_session({ task_id: "${input.watchedTaskId}", max_recent: 20 })\`（注意用点号 \`blueprint.inspect_session\`）。一次即可读出 SQLite 全量摘要（含按时间排序的多轮 \`user_instructions\` 与 \`latest_user_instruction\`、运行中工具 \`in_flight_tools\` 及实时 SSH/Shell 终端最后 30 行 \`tail_lines\`、计划进度、钉住事实、失败聚类、改动文件、环境线索、费用）以及 \`recent_tail\`（最新 20 条关键实时事件）。**严禁**用 \`after_seq\` 从头逐页翻历史浪费时间；如需看某条报错的完整内容，仅按 \`event_seq\` 点查 \`session.read_session_history({ task_id: "${input.watchedTaskId}", event_seq })\`。`,
+    '2. **核心判据（必须严格遵守）**：',
+    '   - **最新授权优先**：判定主会话「是否越界/跑偏」必须对照 `user_instructions` 全量时间线与 `latest_user_instruction`；当后续轮次的 `user/message` 或 `user/interjection` 明确放宽或覆盖了第 1 轮红线（如允许改代码、允许重启指定服务）时，以最新轮次用户授权为准，**严禁**拿第 1 轮已被覆盖的旧约束误报越界。',
+    '   - **先看运行中终端尾巴**：优先检查 `in_flight_tools` 的 `elapsed_sec`、`idle_sec` 与 `tail_lines`；若终端尾部已明确报错（如 HTTP 4xx/5xx、异常堆栈、进程退出）或长时间零新输出卡死，直接建议 `action: "stop"` 或 `"stop_and_continue"` 并引用终端报错原文，不要凭空猜测进程是否还在后台。',
+    '3. **源码真相双视野核验**：你拥有当前工作区的只读权限，如发现主会话怀疑某个源码逻辑或改动异常，可直接用 `read_file` / `search_text` / 只读 `git diff` 对照本地源码真相，并按需查 `blueprint.overview()` / `blueprint.read_playbook` 对照蓝图最短路径。',
+    '4. **高信噪比决断**：如果主会话进展正常、无需打断，则设置 `"should_interject": false`；只有在发现**明确风险、踩坑、偏航、重复报错或需止损**时，才设置 `"should_interject": true`。',
     '',
     '请在回复末尾**必须**附上如下 JSON 代码块（前端会自动渲染为确认推送卡片，隐藏原始 JSON）：',
     '```observer-suggestion',
@@ -327,10 +413,11 @@ export function buildObserverUserChatPrompt(input: {
   const metaBody = input.isFirstMessage
     ? [
         `[观察者上下文] 你是专属于主会话 \`${input.watchedTaskId}\`（当前状态：${input.watchedStatus}）的只读蓝图观察者。`,
-        `查主会话进展请直接一步调用 \`blueprint.inspect_session({ task_id: "${input.watchedTaskId}", max_recent: 20 })\`（含全局摘要 + 最新 20 条事件 \`recent_tail\`），不要从头按 \`after_seq\` 翻页；需要核对代码真相可直接用只读 \`read_file\` / \`search_text\` / \`git diff\`。`,
+        `查主会话进展请直接一步调用 \`blueprint.inspect_session({ task_id: "${input.watchedTaskId}", max_recent: 20 })\`（含完整多轮 \`user_instructions\` / \`latest_user_instruction\`、运行中工具 \`in_flight_tools\` 实时终端 \`tail_lines\` 与最新 20 条事件 \`recent_tail\`），不要从头按 \`after_seq\` 翻页；需要核对代码真相可直接用只读 \`read_file\` / \`search_text\` / \`git diff\`。`,
+        '判据铁律：①「最新授权优先」：判定是否越界/跑偏必须以 `user_instructions` 全量时间线与 `latest_user_instruction` 为准，禁止拿第 1 轮已被后续轮次覆盖的旧约束误报越界；②「先看运行中终端尾巴」：优先核对 `in_flight_tools` 的 `elapsed_sec`、`idle_sec` 与 `tail_lines`，若已报错或长时间零新输出，直接建议 `action: "stop"` 或 `"stop_and_continue"` 并引用终端报错原文。',
         '如果和用户讨论后形成了可直接执行的插嘴或停止决断方案，请在回复末尾附上 ```observer-suggestion JSON 块（含 should_interject, action: "interject"|"stop"|"stop_and_continue", severity, title, reason, interject），方便用户一键确认执行。',
       ].join('\n')
-    : `[当前主会话 \`${input.watchedTaskId}\` 状态：${input.watchedStatus}；如需刷新进展请一步调用 blueprint.inspect_session({ task_id: "${input.watchedTaskId}", max_recent: 20 })，可配合只读 read_file/search_text 核验源码；形成新方案请在末尾附 \`\`\`observer-suggestion JSON 块]`
+    : `[当前主会话 \`${input.watchedTaskId}\` 状态：${input.watchedStatus}；如需刷新进展请一步调用 blueprint.inspect_session({ task_id: "${input.watchedTaskId}", max_recent: 20 })，注意最新授权优先（以 user_instructions/latest_user_instruction 为准）并先看 in_flight_tools 实时终端 tail_lines，可配合只读 read_file/search_text 核验源码；形成新方案请在末尾附 \`\`\`observer-suggestion JSON 块]`
   return `${OBSERVER_META_START}\n${metaBody}\n${OBSERVER_META_END}\n\n${input.userText.trim()}`
 }
 

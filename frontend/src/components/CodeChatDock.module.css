@@ -2,9 +2,23 @@
   position: fixed; right: 28px; bottom: 28px; z-index: 40; width: 48px; height: 48px; border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer; border: 0;
   color: #fff; background: var(--codex-blue-primary); box-shadow: 0 6px 20px rgb(0 0 0 / 0.18);
+  transition: background 140ms ease, box-shadow 140ms ease, transform 120ms ease;
 }
-.launcher:hover { background: var(--codex-blue-hover); }
+/* The glyph is white on the accent disc, and it is drawn solid: a 1.6px outline
+   at this size antialiases into the green and reads as grey rather than white. */
+.launcher svg {
+  display: block; flex: 0 0 auto; color: #fff; fill: #fff; stroke: none;
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.18));
+}
+.launcher:hover { background: var(--codex-blue-hover); box-shadow: 0 10px 26px rgb(0 0 0 / 0.22); transform: translateY(-1px); }
+.launcher:active { transform: translateY(0); box-shadow: 0 4px 14px rgb(0 0 0 / 0.18); }
+.launcher:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-blue-primary) 32%, transparent), 0 6px 20px rgb(0 0 0 / 0.18);
+}
+@media (prefers-reduced-motion: reduce) { .launcher { transition: none; } .launcher:hover { transform: none; } }
 .embeddedLauncher { position: static; flex: 0 0 36px; align-self: flex-end; width: 36px; height: 36px; margin: 6px; border-radius: 7px; box-shadow: none; }
+.embeddedLauncher svg { width: 19px; height: 19px; }
 
 .panel {
   position: relative; flex-shrink: 0; height: 100%; min-height: 0; max-width: 60%;
@@ -215,7 +229,7 @@
 
 .send, .stop {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 30px; border-radius: 999px;
-  border: 0; cursor: pointer; font: inherit; font-weight: 600;
+  border: 0; cursor: pointer; font: inherit; font-weight: 600; flex-shrink: 0;
   transition: background 120ms ease, transform 120ms ease, opacity 120ms ease;
 }
 .send {
@@ -226,6 +240,9 @@
 .send:hover:not(:disabled) { background: var(--codex-blue-hover); }
 .send:active:not(:disabled) { transform: scale(0.94); }
 .send:disabled { opacity: .38; cursor: default; box-shadow: none; }
-.stop { padding: 0 12px; color: var(--codex-diff-del); background: color-mix(in srgb, var(--codex-diff-del) 12%, transparent); }
+.stop { width: 30px; padding: 0; color: var(--codex-diff-del); background: color-mix(in srgb, var(--codex-diff-del) 12%, transparent); }
+.stop:hover:not(:disabled) { background: color-mix(in srgb, var(--codex-diff-del) 20%, transparent); }
+.stop:active:not(:disabled) { transform: scale(0.94); }
+.stop:disabled { opacity: .48; cursor: wait; }
 
 

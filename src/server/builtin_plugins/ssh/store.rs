@@ -524,6 +524,6 @@ fn store_host_key(tx: &Transaction<'_>, id: &str, key: HostKeyFingerprint) -> Re
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;

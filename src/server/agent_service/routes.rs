@@ -929,7 +929,57 @@ pub async fn cancel_task(
 ) -> impl IntoResponse {
     if let Some(active) = state.cancellations.lock().await.get(&task_id).cloned() {
         active.token.cancel();
+        let root = state.workspace.root().to_path_buf();
+        let id = task_id.clone();
+        let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let conn = open_db(&root)?;
+            conn.execute(
+                "UPDATE agent_tasks SET status='cancelling', updated_at=?1 WHERE id=?2 AND status='running'",
+                params![now(), id],
+            )?;
+            Ok(())
+        })
+        .await;
         return Json(json!({"task_id":task_id,"status":"cancelling"})).into_response();
+    }
+    // Recover orphaned tasks stuck in `running`/`cancelling` in SQLite when no active runner exists.
+    let root = state.workspace.root().to_path_buf();
+    let id = task_id.clone();
+    let orphan_turn = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<usize>> {
+        let conn = open_db(&root)?;
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM agent_tasks WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if !matches!(status.as_deref(), Some("running" | "cancelling")) {
+            return Ok(None);
+        }
+        let turn: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(CAST(json_extract(data,'$.turn') AS INTEGER)), 1) FROM agent_task_events WHERE task_id=?1 AND kind='turn/start'",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap_or(1);
+        Ok(Some(turn.max(1) as usize))
+    })
+    .await
+    .ok()
+    .and_then(|res| res.ok())
+    .flatten();
+    if let Some(turn) = orphan_turn {
+        let _ = emit(
+            state.workspace.root(),
+            &task_id,
+            "turn/end",
+            json!({"turn": turn, "reason": {"kind": "aborted"}}),
+        )
+        .await;
+        let _ = finish(&state, &task_id, "cancelled").await;
+        return Json(json!({"task_id":task_id,"status":"cancelled"})).into_response();
     }
     (
         StatusCode::NOT_FOUND,

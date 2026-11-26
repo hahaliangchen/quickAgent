@@ -60,6 +60,10 @@ struct ModelCapabilities {
     default_effort: Option<String>,
     #[serde(default)]
     fast_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<usize>,
     #[serde(default)]
     image_input: crate::media::visual_artifacts::ImageCapability,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,21 +71,72 @@ struct ModelCapabilities {
 }
 
 fn built_in_capabilities(model: &str) -> ModelCapabilities {
-    if model == "gpt-6-luna" {
+    if let Some(preset) = crate::model::model_presets::lookup_preset(model) {
         ModelCapabilities {
             tool_calling: None,
-            reasoning_efforts: ["none", "low", "medium", "high", "xhigh", "max"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            default_effort: Some("max".into()),
-            fast_mode: true,
+            reasoning_efforts: preset.reasoning_efforts.clone(),
+            default_effort: preset.default_effort.clone(),
+            fast_mode: preset.fast_mode,
+            context_window: Some(preset.context_window),
+            max_output_tokens: Some(preset.max_output_tokens),
             image_input: Default::default(),
             image_probe: None,
         }
     } else {
         ModelCapabilities::default()
     }
+}
+
+fn effective_context_window(
+    provider: &ProviderConfig,
+    capability: Option<&ModelCapabilities>,
+    id: &str,
+) -> Option<usize> {
+    let declared = provider
+        .model_metadata
+        .get(id)
+        .and_then(|m| m.get("contextWindow"))
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| *n > 0);
+    let from_cap = capability
+        .and_then(|cap| cap.context_window)
+        .filter(|n| *n > 0);
+    declared.or(from_cap).or_else(|| {
+        let upstream = provider
+            .model_map
+            .get(id)
+            .map(String::as_str)
+            .unwrap_or(id);
+        crate::model::model_presets::lookup_preset(upstream)
+            .or_else(|| crate::model::model_presets::lookup_preset(id))
+            .map(|preset| preset.context_window)
+    })
+}
+
+fn effective_max_output_tokens(
+    provider: &ProviderConfig,
+    capability: Option<&ModelCapabilities>,
+    id: &str,
+) -> Option<usize> {
+    let declared = provider
+        .max_output_tokens
+        .get(id)
+        .copied()
+        .filter(|n| *n > 0);
+    let from_cap = capability
+        .and_then(|cap| cap.max_output_tokens)
+        .filter(|n| *n > 0);
+    declared.or(from_cap).or_else(|| {
+        let upstream = provider
+            .model_map
+            .get(id)
+            .map(String::as_str)
+            .unwrap_or(id);
+        crate::model::model_presets::lookup_preset(upstream)
+            .or_else(|| crate::model::model_presets::lookup_preset(id))
+            .map(|preset| preset.max_output_tokens)
+    })
 }
 
 pub(super) fn default_api_type() -> String {
@@ -186,26 +241,50 @@ pub(crate) fn apply_agent_config(
                     url: provider.url.clone(),
                     api_key: provider.api_key.clone(),
                     models: provider.model_map.clone(),
-                    max_output_tokens: provider.max_output_tokens.clone(),
-                    context_windows: provider
-                        .model_metadata
-                        .iter()
-                        .filter_map(|(id, metadata)| {
-                            let tokens = metadata["contextWindow"]
-                                .as_u64()
-                                .and_then(|n| usize::try_from(n).ok())?;
-                            (tokens > 0).then(|| {
-                                (
-                                    provider
-                                        .model_map
-                                        .get(id)
-                                        .cloned()
-                                        .unwrap_or_else(|| id.clone()),
-                                    tokens,
-                                )
+                    max_output_tokens: {
+                        let mut limits = provider.max_output_tokens.clone();
+                        for (id, upstream) in &provider.model_map {
+                            let cap = config
+                                .model_capabilities
+                                .get(name)
+                                .and_then(|models| models.get(id));
+                            if let Some(tokens) = effective_max_output_tokens(provider, cap, id) {
+                                limits.entry(upstream.clone()).or_insert(tokens);
+                            }
+                        }
+                        limits
+                    },
+                    context_windows: {
+                        let mut windows: HashMap<String, usize> = provider
+                            .model_metadata
+                            .iter()
+                            .filter_map(|(id, metadata)| {
+                                let tokens = metadata["contextWindow"]
+                                    .as_u64()
+                                    .and_then(|n| usize::try_from(n).ok())?;
+                                (tokens > 0).then(|| {
+                                    (
+                                        provider
+                                            .model_map
+                                            .get(id)
+                                            .cloned()
+                                            .unwrap_or_else(|| id.clone()),
+                                        tokens,
+                                    )
+                                })
                             })
-                        })
-                        .collect(),
+                            .collect();
+                        for (id, upstream) in &provider.model_map {
+                            let cap = config
+                                .model_capabilities
+                                .get(name)
+                                .and_then(|models| models.get(id));
+                            if let Some(tokens) = effective_context_window(provider, cap, id) {
+                                windows.entry(upstream.clone()).or_insert(tokens);
+                            }
+                        }
+                        windows
+                    },
                     model_costs: provider
                         .model_metadata
                         .iter()
@@ -214,26 +293,37 @@ pub(crate) fn apply_agent_config(
                             Some((id.clone(), cost))
                         })
                         .collect(),
-                    long_context_thresholds: provider
-                        .model_metadata
-                        .iter()
-                        .filter_map(|(id, metadata)| {
-                            let threshold = metadata
-                                .pointer("/cost/longContextThreshold")
-                                .and_then(Value::as_u64)
-                                .and_then(|n| usize::try_from(n).ok())?;
-                            (threshold > 0).then(|| {
-                                (
-                                    provider
-                                        .model_map
-                                        .get(id)
-                                        .cloned()
-                                        .unwrap_or_else(|| id.clone()),
-                                    threshold,
-                                )
+                    long_context_thresholds: {
+                        let mut thresholds: HashMap<String, usize> = provider
+                            .model_metadata
+                            .iter()
+                            .filter_map(|(id, metadata)| {
+                                let threshold = metadata
+                                    .pointer("/cost/longContextThreshold")
+                                    .and_then(Value::as_u64)
+                                    .and_then(|n| usize::try_from(n).ok())?;
+                                (threshold > 0).then(|| {
+                                    (
+                                        provider
+                                            .model_map
+                                            .get(id)
+                                            .cloned()
+                                            .unwrap_or_else(|| id.clone()),
+                                        threshold,
+                                    )
+                                })
                             })
-                        })
-                        .collect(),
+                            .collect();
+                        for (id, upstream) in &provider.model_map {
+                            if let Some(threshold) = crate::model::model_presets::lookup_preset(upstream)
+                                .or_else(|| crate::model::model_presets::lookup_preset(id))
+                                .and_then(|preset| preset.long_context_threshold)
+                            {
+                                thresholds.entry(upstream.clone()).or_insert(threshold);
+                            }
+                        }
+                        thresholds
+                    },
                 },
             )
         })
@@ -651,16 +741,35 @@ pub(crate) fn load_config(config_path: &Path) -> anyhow::Result<AiProxyConfig> {
             .entry(provider_id.clone())
             .or_default();
         for model_id in provider.model_map.keys() {
-            models
-                .entry(model_id.clone())
-                .or_insert_with(|| built_in_capabilities(model_id));
+            if !models.contains_key(model_id) {
+                let builtin = built_in_capabilities(model_id);
+                models.insert(
+                    model_id.clone(),
+                    ModelCapabilities {
+                        reasoning_efforts: Vec::new(),
+                        ..builtin
+                    },
+                );
+            }
         }
         for (model, capability) in models {
-            // A model entry that names its own levels is honoured even when the
-            // generation settings do not repeat them.
+            // Precedence: explicit generation settings > explicit model entry
+            // `reasoningEfforts` > built-in vendor presets.
             if capability.reasoning_efforts.is_empty() {
                 if let Some(metadata) = provider.model_metadata.get(model) {
                     capability.reasoning_efforts = declared_reasoning_efforts(metadata);
+                }
+                if capability.reasoning_efforts.is_empty() {
+                    let builtin = built_in_capabilities(model);
+                    if !builtin.reasoning_efforts.is_empty() {
+                        capability.reasoning_efforts = builtin.reasoning_efforts;
+                        if capability.default_effort.is_none() {
+                            capability.default_effort = builtin.default_effort;
+                        }
+                        if !capability.fast_mode {
+                            capability.fast_mode = builtin.fast_mode;
+                        }
+                    }
                 }
             }
             if capability.default_effort.is_none() {
@@ -673,6 +782,9 @@ pub(crate) fn load_config(config_path: &Path) -> anyhow::Result<AiProxyConfig> {
                         .map(str::to_owned);
                 }
             }
+            capability.context_window = effective_context_window(provider, Some(capability), model);
+            capability.max_output_tokens =
+                effective_max_output_tokens(provider, Some(capability), model);
             // A level written by hand in the generation settings is folded onto
             // one the host can save, so the settings screen never offers a level
             // its own save would reject.
@@ -776,6 +888,7 @@ fn settings_view(config: &AiProxyConfig, revision: String) -> Value {
                 "visual_tool":config.visual_tool,"image_generation":config.image_generation,"delegate_agent":config.delegate_agent,
         "plugin_models":config.plugin_models,"plugin_generation":config.plugin_generation,
         "web_search_provider":config.web_search_provider,
+        "model_presets": crate::model::model_presets::presets_view(),
     })
 }
 
@@ -827,8 +940,8 @@ pub(crate) fn scoped_catalog_view(config: &AiProxyConfig) -> Value {
                 "provider_name":route.extra.get("displayName").and_then(Value::as_str).unwrap_or(provider),
                 "enabled":true, "available_for_agent":agent_api(&route.api_type),
                 "api_type":route.api_type,
-                "context_window":metadata.and_then(|m|m["contextWindow"].as_u64()),
-                "max_output_tokens":route.max_output_tokens.get(id),
+                "context_window":effective_context_window(route, Some(&cap), id),
+                "max_output_tokens":effective_max_output_tokens(route, Some(&cap), id),
                 "capabilities":{
                     "image_input":cap.image_input, "tool_calling":cap.tool_calling,
                     "reasoning_efforts":cap.reasoning_efforts, "default_effort":cap.default_effort,

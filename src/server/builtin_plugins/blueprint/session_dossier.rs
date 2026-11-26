@@ -9,7 +9,58 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::Path,
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+const MAX_USER_INSTRUCTIONS: usize = 20;
+const OLD_TURN_INSTRUCTION_CHARS: usize = 800;
+const RECENT_TURN_INSTRUCTION_CHARS: usize = 2_500;
+const IN_FLIGHT_TAIL_LINES: usize = 30;
+const TAIL_LINE_MAX_CHARS: usize = 240;
+
+fn now_epoch_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn extract_user_text(data: &Value) -> String {
+    let from_msg = crate::context::session_history::message_text(&data["message"]["content"]);
+    if !from_msg.trim().is_empty() {
+        return from_msg;
+    }
+    if let Some(text) = data["text"].as_str().filter(|s| !s.trim().is_empty()) {
+        return text.to_owned();
+    }
+    crate::context::session_history::message_text(&data["content"])
+}
+
+fn append_tail_lines(ring: &mut VecDeque<String>, raw: &str, cap: usize) {
+    let clean = crate::server::builtin_plugins::ssh::live::strip_ansi_csi(raw);
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if ring.len() >= cap {
+            ring.pop_front();
+        }
+        ring.push_back(clip(line.trim_end(), TAIL_LINE_MAX_CHARS));
+    }
+}
+
+struct InFlightCall {
+    call_id: String,
+    seq: i64,
+    step: i64,
+    tool: String,
+    target: String,
+    server_id: Option<String>,
+    started_at_ms: i64,
+    last_output_at_ms: i64,
+    tail_lines: VecDeque<String>,
+}
 
 fn clip(raw: &str, max_chars: usize) -> String {
     let clean = raw.trim();
@@ -164,7 +215,7 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
     let (plan_steps, pinned_facts) = load_latest_plan(&conn, task_id);
 
     let mut stmt = conn.prepare(
-        "SELECT seq, kind, data FROM agent_task_events WHERE task_id = ?1 ORDER BY seq ASC",
+        "SELECT seq, timestamp, kind, data FROM agent_task_events WHERE task_id = ?1 ORDER BY seq ASC",
     )?;
     let mut rows = stmt.query(params![task_id])?;
 
@@ -173,6 +224,12 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
     let mut total_programs = 0usize;
     let mut total_tool_calls = 0usize;
     let mut total_cost_usd = 0.0f64;
+
+    let mut current_turn: i64 = 1;
+    let mut max_event_ts_ms: i64 = 0;
+    let mut raw_user_instructions: Vec<(i64, i64, &'static str, String)> = Vec::new();
+    let mut in_flight_calls: BTreeMap<String, InFlightCall> = BTreeMap::new();
+    let mut last_in_flight_id: Option<String> = None;
 
     let mut calls_by_id: BTreeMap<String, (i64, String, Value)> = BTreeMap::new();
     let mut local_files = Vec::<String>::new();
@@ -203,11 +260,14 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
         total_events += 1;
         let seq: i64 = row.get(0)?;
         latest_seq = latest_seq.max(seq);
-        let kind: String = row.get(1)?;
-        let raw_data: String = row.get(2)?;
+        let timestamp_ms: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+        max_event_ts_ms = max_event_ts_ms.max(timestamp_ms);
+        let kind: String = row.get(2)?;
+        let raw_data: String = row.get(3)?;
 
-        // Fast-skip high-volume streaming delta events before JSON parsing.
-        if kind == "assistant/delta" || kind == "shell/output" || kind == "debug/context_request" || kind == "debug/context_end" {
+        // Fast-skip high-volume streaming delta/debug events before JSON parsing.
+        // Keep `shell/output` so in-flight local commands retain their latest 30-line tail.
+        if kind == "assistant/delta" || kind == "debug/context_request" || kind == "debug/context_end" {
             continue;
         }
 
@@ -220,6 +280,9 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
         match kind.as_str() {
             "turn/start" => {
                 let turn = data["turn"].as_i64().unwrap_or(0);
+                if turn > 0 {
+                    current_turn = turn;
+                }
                 push_recent(&mut recent_tail, json!({
                     "seq": seq,
                     "kind": "turn/start",
@@ -227,6 +290,8 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
                 }));
             }
             "turn/end" => {
+                in_flight_calls.clear();
+                last_in_flight_id = None;
                 let reason = data["reason"]["kind"].as_str().unwrap_or("completed");
                 let err = data["reason"]["error"]["message"]
                     .as_str()
@@ -238,6 +303,68 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
                     "reason": reason,
                     "error": err,
                 }));
+            }
+            "user/message" => {
+                let turn = data["turn"]
+                    .as_i64()
+                    .filter(|&t| t > 0)
+                    .unwrap_or(current_turn);
+                current_turn = turn;
+                let text = extract_user_text(&data);
+                if !text.trim().is_empty() {
+                    push_recent(&mut recent_tail, json!({
+                        "seq": seq,
+                        "turn": turn,
+                        "kind": "user/message",
+                        "summary": clip_inline(&text, 200),
+                    }));
+                    raw_user_instructions.push((turn, seq, "user/message", text));
+                }
+            }
+            "user/interjection" => {
+                let turn = data["turn"]
+                    .as_i64()
+                    .filter(|&t| t > 0)
+                    .unwrap_or(current_turn);
+                let text = extract_user_text(&data);
+                if !text.trim().is_empty() {
+                    push_recent(&mut recent_tail, json!({
+                        "seq": seq,
+                        "turn": turn,
+                        "kind": "user/interjection",
+                        "summary": clip_inline(&text, 200),
+                    }));
+                    raw_user_instructions.push((turn, seq, "user/interjection", text));
+                }
+            }
+            "shell/output" => {
+                let target_id = data["callId"]
+                    .as_str()
+                    .or_else(|| data["call_id"].as_str())
+                    .filter(|cid| in_flight_calls.contains_key(*cid))
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        in_flight_calls
+                            .values()
+                            .filter(|c| !c.tool.starts_with("ssh__"))
+                            .max_by_key(|c| c.seq)
+                            .map(|c| c.call_id.clone())
+                    })
+                    .or_else(|| last_in_flight_id.clone());
+                if let Some(cid) = target_id
+                    && let Some(call) = in_flight_calls.get_mut(&cid)
+                {
+                    let mut saw_output = false;
+                    for field in ["text", "chunk", "output", "stdout", "stderr"] {
+                        if let Some(text) = data[field].as_str().filter(|s| !s.is_empty()) {
+                            append_tail_lines(&mut call.tail_lines, text, IN_FLIGHT_TAIL_LINES);
+                            saw_output = true;
+                        }
+                    }
+                    if saw_output || timestamp_ms > 0 {
+                        call.last_output_at_ms = call.last_output_at_ms.max(timestamp_ms);
+                    }
+                }
             }
             "plan/updated" => {
                 let active_step = data["steps"].as_array().and_then(|steps| {
@@ -296,11 +423,42 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
                 total_tool_calls += 1;
                 let name = data["name"].as_str().unwrap_or_default().to_owned();
                 let args = parse_tool_args(&data["arguments"]);
+                let server_id = args["server_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
                 if let Some(cid) = data["callId"].as_str().or_else(|| data["call_id"].as_str()) {
                     calls_by_id.insert(cid.to_owned(), (step, name.clone(), args.clone()));
+                    let base_target = target_of_tool(&name, &args);
+                    let in_flight_target = match server_id.as_deref() {
+                        Some(sid) if name.starts_with("ssh__") && !base_target.starts_with("server:") => {
+                            if base_target == name {
+                                format!("server:{sid}")
+                            } else {
+                                format!("server:{sid} · {base_target}")
+                            }
+                        }
+                        _ => base_target,
+                    };
+                    in_flight_calls.insert(
+                        cid.to_owned(),
+                        InFlightCall {
+                            call_id: cid.to_owned(),
+                            seq,
+                            step,
+                            tool: name.clone(),
+                            target: in_flight_target,
+                            server_id: server_id.clone(),
+                            started_at_ms: timestamp_ms,
+                            last_output_at_ms: timestamp_ms,
+                            tail_lines: VecDeque::new(),
+                        },
+                    );
+                    last_in_flight_id = Some(cid.to_owned());
                 }
                 if name.starts_with("ssh__") {
-                    if let Some(sid) = args["server_id"].as_str().filter(|s| !s.is_empty()) {
+                    if let Some(sid) = server_id.as_deref() {
                         let cwds = remote_servers.entry(sid.to_owned()).or_default();
                         if let Some(cwd) = args["cwd"].as_str().filter(|s| !s.is_empty()) {
                             cwds.insert(cwd.to_owned());
@@ -352,7 +510,18 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
             }
             "tool/result" => {
                 let msg = &data["message"];
-                let cid = msg["toolCallId"].as_str().unwrap_or_default();
+                let cid = msg["toolCallId"]
+                    .as_str()
+                    .or_else(|| data["callId"].as_str())
+                    .or_else(|| data["call_id"].as_str())
+                    .unwrap_or_default();
+                in_flight_calls.remove(cid);
+                if last_in_flight_id.as_deref() == Some(cid) {
+                    last_in_flight_id = in_flight_calls
+                        .values()
+                        .max_by_key(|c| c.seq)
+                        .map(|c| c.call_id.clone());
+                }
                 let (call_step, tool_name, call_args) = calls_by_id
                     .get(cid)
                     .cloned()
@@ -507,6 +676,87 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
         winning_commands.drain(0..drop_n);
     }
 
+    // Build chronological multi-turn user instruction timeline (user/message + user/interjection).
+    if raw_user_instructions.is_empty() && !prompt.trim().is_empty() {
+        raw_user_instructions.push((1, 0, "user/message", prompt.clone()));
+    }
+    if raw_user_instructions.len() > MAX_USER_INSTRUCTIONS {
+        let drop_n = raw_user_instructions.len() - MAX_USER_INSTRUCTIONS;
+        raw_user_instructions.drain(0..drop_n);
+    }
+    let distinct_turns: Vec<i64> = raw_user_instructions
+        .iter()
+        .map(|(turn, _, _, _)| *turn)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let recent_turns: BTreeSet<i64> = distinct_turns.into_iter().rev().take(2).collect();
+    let user_instructions: Vec<Value> = raw_user_instructions
+        .into_iter()
+        .map(|(turn, seq, kind, text)| {
+            let limit = if recent_turns.contains(&turn) {
+                RECENT_TURN_INSTRUCTION_CHARS
+            } else {
+                OLD_TURN_INSTRUCTION_CHARS
+            };
+            json!({
+                "turn": turn,
+                "seq": seq,
+                "kind": kind,
+                "text": clip(&text, limit),
+            })
+        })
+        .collect();
+    let latest_user_instruction = user_instructions.last().cloned().unwrap_or(Value::Null);
+
+    // Collect currently in-flight tool calls with live SSH / shell terminal tails.
+    let now_ms = now_epoch_ms().max(max_event_ts_ms).max(updated_at);
+    let mut in_flight_vec: Vec<InFlightCall> = in_flight_calls.into_values().collect();
+    in_flight_vec.sort_by_key(|c| c.seq);
+    let in_flight_tools: Vec<Value> = in_flight_vec
+        .into_iter()
+        .map(|call| {
+            let mut last_out_ms = call.last_output_at_ms;
+            let mut tail_lines: Vec<String> = call.tail_lines.into_iter().collect();
+            if call.tool.starts_with("ssh__")
+                && let Some(snap) = crate::server::builtin_plugins::ssh::live::tail_lines_for_task(
+                    task_id,
+                    call.server_id.as_deref(),
+                    IN_FLIGHT_TAIL_LINES,
+                )
+            {
+                if !snap.tail_lines.is_empty() {
+                    tail_lines = snap.tail_lines;
+                }
+                if snap.last_output_at_ms > 0 {
+                    last_out_ms = last_out_ms.max(snap.last_output_at_ms);
+                }
+            }
+            let started_ms = if call.started_at_ms > 0 {
+                call.started_at_ms
+            } else {
+                now_ms
+            };
+            let last_active_ms = if last_out_ms > 0 {
+                last_out_ms.max(started_ms)
+            } else {
+                started_ms
+            };
+            let elapsed_sec = ((now_ms - started_ms).max(0)) / 1000;
+            let idle_sec = ((now_ms - last_active_ms).max(0)) / 1000;
+            json!({
+                "call_id": call.call_id,
+                "seq": call.seq,
+                "step": call.step,
+                "tool": call.tool,
+                "target": call.target,
+                "elapsed_sec": elapsed_sec,
+                "idle_sec": idle_sec,
+                "tail_lines": tail_lines,
+            })
+        })
+        .collect();
+
     let mut failure_clusters: Vec<Value> = cluster_map
         .into_iter()
         .filter(|(_, (count, _, _, _))| *count >= 2)
@@ -557,6 +807,10 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
             "steps": plan_steps,
             "pinned_facts": pinned_facts,
         },
+        "user_instructions": user_instructions,
+        "latest_user_instruction": latest_user_instruction,
+        "instruction_precedence_note": "When later user_instructions (user/message or user/interjection) conflict with or relax turn-1 task.prompt constraints, ALWAYS treat the latest user_instructions as authoritative.",
+        "in_flight_tools": in_flight_tools,
         "recent_tail": recent_tail.into_iter().collect::<Vec<_>>(),
         "changed_files": {
             "local": local_files,

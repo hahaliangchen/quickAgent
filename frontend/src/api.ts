@@ -133,6 +133,8 @@ export interface ModelCapabilities {
   readonly reasoning_efforts: readonly string[]
   readonly default_effort: string | null
   readonly fast_mode: boolean
+  readonly context_window?: number | null
+  readonly max_output_tokens?: number | null
 }
 
 export interface ProviderConfig {
@@ -174,6 +176,28 @@ export interface ModelCatalog {
   readonly defaults: Readonly<Record<'agent' | 'visual_tool' | 'delegate_agent', ModelUseSettings>>
 }
 
+export interface ModelPresetSpec {
+  readonly context_window: number
+  readonly max_output_tokens: number
+  readonly reasoning_efforts: readonly string[]
+  readonly default_effort: string | null
+  readonly fast_mode: boolean
+  readonly long_context_threshold?: number | null
+}
+
+export interface VendorPreset {
+  readonly id: string
+  readonly name: string
+  readonly default_base_url: string
+  readonly default_api_type: ProviderApiType
+  readonly models: Readonly<Record<string, ModelPresetSpec>>
+}
+
+export interface ModelPresetsCatalog {
+  readonly vendors: readonly VendorPreset[]
+  readonly models: Readonly<Record<string, ModelPresetSpec>>
+}
+
 export interface SettingsData {
   readonly web_search_provider?: string | null
   readonly bash_path?: string | null
@@ -182,6 +206,7 @@ export interface SettingsData {
   readonly plugin_models?: Readonly<Record<string,readonly ModelRef[]>>
   readonly visual_tool?: ModelUseSettings
   readonly delegate_agent?: ModelUseSettings
+  readonly model_presets?: ModelPresetsCatalog
   readonly revision: string
   readonly providers: readonly ProviderConfig[]
   readonly orchestrator_provider: string | null

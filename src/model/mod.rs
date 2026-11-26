@@ -2,6 +2,7 @@
 
 pub(crate) mod anthropic_messages;
 pub(crate) mod model_catalog;
+pub(crate) mod model_presets;
 pub(crate) mod model_settings;
 pub(crate) mod model_stream;
 pub(crate) mod model_transport;

@@ -34,7 +34,7 @@ impl Workspace {
         };
         let workspace = self.with_root(Some(workspace_root))?;
         Ok(WorkspaceInfo {
-            workspace_root: workspace.root.display().to_string(),
+            workspace_root: crate::tools::file_edit::display_path(&workspace.root),
             platform: std::env::consts::OS.to_string(),
             allowed_scope: "reads can use accessible absolute paths, and outside workspace_root they wait for the user's approval unless the permission mode is full access; structured writes must stay inside the selected workspace_root, including resolved symlinks and junctions; relative paths resolve below workspace_root".to_string(),
             default_ignored_dirs: NOISE_DIRS.to_vec(),
@@ -149,9 +149,15 @@ impl Workspace {
             if request.staged { check_args.push("--cached"); }
             if let Some(range) = request.rev_range.as_deref() { check_args.push(range); }
             if !paths.is_empty() { check_args.push("--"); check_args.extend(paths.iter().map(String::as_str)); }
-            let output = Command::new("git").args(["-c", "core.fsmonitor=false", "-c", "color.ui=never"]).args(&check_args)
-                .current_dir(&workspace.root).env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0")
-                .output().map_err(ToolError::from)?;
+            let mut check_cmd = Command::new("git");
+            check_cmd.args(["-c", "core.fsmonitor=false", "-c", "color.ui=never"]).args(&check_args)
+                .current_dir(&workspace.root).env("GIT_OPTIONAL_LOCKS", "0").env("GIT_TERMINAL_PROMPT", "0");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                check_cmd.creation_flags(0x08000000);
+            }
+            let output = check_cmd.output().map_err(ToolError::from)?;
             let diagnostics = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
             let issues = diagnostics.lines().filter_map(|line| {
                 let (location, message) = line.split_once(": ")?;
@@ -667,14 +673,23 @@ impl Workspace {
         if !has_glob {
             return Ok((self.resolve_existing(trimmed)?, None));
         }
-        let normalized = trimmed.replace('\\', "/");
+        let stripped = trimmed
+            .strip_prefix(r"\\?\")
+            .or_else(|| trimmed.strip_prefix("//?/"))
+            .unwrap_or(trimmed);
+        let normalized = stripped.replace('\\', "/");
         if normalized.split('/').any(|seg| seg == "..") {
             return Err(ToolError::ParentTraversal(trimmed.to_owned()));
         }
         let mut prefix_segments = Vec::new();
         let mut tail_segments = Vec::new();
         let mut seen_glob = false;
-        let is_abs = normalized.starts_with('/');
+        let is_unix_abs = normalized.starts_with('/');
+        let win_drive_prefix = {
+            let b = normalized.as_bytes();
+            b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+        };
+        let is_abs = is_unix_abs || win_drive_prefix;
         for seg in normalized.split('/') {
             if seg.is_empty() || (!is_abs && seg == "." && prefix_segments.is_empty() && !seen_glob) {
                 continue;
@@ -687,9 +702,11 @@ impl Workspace {
             }
         }
         let base_raw = if prefix_segments.is_empty() {
-            if is_abs { "/".to_owned() } else { ".".to_owned() }
-        } else if is_abs {
+            if is_unix_abs { "/".to_owned() } else { ".".to_owned() }
+        } else if is_unix_abs {
             format!("/{}", prefix_segments.join("/"))
+        } else if win_drive_prefix && prefix_segments.len() == 1 {
+            format!("{}/", prefix_segments[0])
         } else {
             prefix_segments.join("/")
         };
@@ -835,7 +852,7 @@ impl Workspace {
                 let executable = None;
                 (Some(kind),Some(meta.len()),modified_at,modified_ms,Some(meta.permissions().readonly()),executable)
             } else { (None,None,None,None,None,None) };
-            let display = if candidate.starts_with(&self.root) { candidate.strip_prefix(&self.root).unwrap_or(&candidate).to_string_lossy().replace('\\', "/") } else { candidate.to_string_lossy().into_owned() };
+            let display = crate::tools::file_edit::display_relative_or_abs(&self.root, &candidate);
             entries.push(StatEntry {path:display,exists:kind.is_some(),kind,size_bytes:size,modified_at:modified,modified_ms,readonly,executable});
         }
         Ok(StatResponse { entries })
@@ -1705,16 +1722,7 @@ impl Workspace {
     }
 
     fn relative_display(&self, path: &Path) -> Result<String> {
-        let value = if let Ok(relative) = path.strip_prefix(&self.root) {
-            if relative.as_os_str().is_empty() {
-                ".".to_string()
-            } else {
-                relative.to_string_lossy().replace('\\', "/")
-            }
-        } else {
-            path.to_string_lossy().replace('\\', "/")
-        };
-        Ok(value)
+        Ok(crate::tools::file_edit::display_relative_or_abs(&self.root, path))
     }
 }
 

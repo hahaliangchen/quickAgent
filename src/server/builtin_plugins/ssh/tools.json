@@ -101,7 +101,7 @@
   },
   {
     "name": "ssh__exec",
-    "description": "通过 SSH 在指定服务器上执行远程命令（输出实时流式推送到 SSH 终端，支持最长 1800 秒超时）；prod 或需审批服务器将强制弹出人工审批。等待远端后台长任务时，请在单次 JS 程序内用循环 + 进度看门狗轮询，不要每睡几十秒就结束一步回给模型。",
+    "description": "通过 SSH 在指定服务器上执行远程命令（输出实时流式推送到 SSH 终端，支持最长 1800 秒总超时与默认 120 秒静默无输出超时 idle_timeout_secs）；prod 或需审批服务器将强制弹出人工审批。轮询铁律：①单次轮询等待不超过 60-90 秒，严禁手写几十上百次 sleep 死循环，长任务必须后台重定向日志并落盘 .pid/.rc 分步短查；②严禁 pgrep -f <命令片段> 判活（易匹配自身命令行造成死等），必须捕获真实 $! PID 用 kill -0 + .rc 判活；③连续 2 次日志与指标零变化或上游已终态但下游为 0 时立即止损排查。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -123,7 +123,14 @@
           "minimum": 1,
           "maximum": 1800,
           "default": 60,
-          "description": "单次命令超时秒数（默认 60，最大 1800，内置 20s SSH keepalive）"
+          "description": "单次命令总超时秒数（默认 60，最大 1800，内置 20s SSH keepalive）"
+        },
+        "idle_timeout_secs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1800,
+          "default": 120,
+          "description": "静默无输出超时秒数（默认 120，范围 0..=1800）：连续超过该时长 0 字节 stdout/stderr 新输出将自动中断并返回 status=\"idle_timeout\" 及已收集尾部输出；传 0 显式关闭静默超时（仅限明确长时间静默计算场景）"
         }
       },
       "required": ["server_id", "command"],

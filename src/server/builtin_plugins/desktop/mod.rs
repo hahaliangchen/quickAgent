@@ -25,6 +25,8 @@ mod kwin;
 mod linux;
 #[cfg(target_os = "linux")]
 mod portal;
+#[cfg(target_os = "windows")]
+mod windows;
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -220,15 +222,24 @@ trait DesktopBackend: Send + Sync + 'static {
         async { Err(unavailable()) }
     }
 }
+#[cfg(not(target_os = "windows"))]
 fn unavailable() -> anyhow::Error {
     fault(
         "DEPENDENCY_MISSING",
-        "Requires a supported local Linux desktop and its helper tools",
+        "Requires a supported local Linux or Windows desktop session and its helper tools",
     )
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+fn unavailable() -> anyhow::Error {
+    fault(
+        "DEPENDENCY_MISSING",
+        "Requires a supported local Linux or Windows desktop session and its helper tools",
+    )
+}
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 struct Unsupported;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl DesktopBackend for Unsupported {}
 
 struct CachedTree {
@@ -456,6 +467,8 @@ fn with_backend<B: DesktopBackend>(backend: B) -> Result<Package> {
 pub(super) fn package() -> Result<Package> {
     #[cfg(target_os = "linux")]
     return with_backend(linux::Linux::default());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    return with_backend(windows::Windows);
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     return with_backend(Unsupported);
 }

@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::broadcast;
@@ -8,6 +9,15 @@ use tokio::sync::broadcast;
 const CHANNELS: usize = 32;
 const REPLAY_BYTES: usize = 256 * 1024;
 const CHUNK_BYTES: usize = 8 * 1024;
+const TAIL_SCAN_BYTES: usize = 32 * 1024;
+const TAIL_LINE_MAX_CHARS: usize = 240;
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 #[derive(Clone)]
 pub(super) enum LiveMessage {
@@ -21,6 +31,7 @@ pub(super) enum LiveMessage {
 
 struct Channel {
     touched: u64,
+    last_output_at_ms: i64,
     replay: VecDeque<u8>,
     sender: broadcast::Sender<LiveMessage>,
 }
@@ -46,6 +57,7 @@ impl Hub {
         self.clock += 1;
         let channel = self.channels.entry(key).or_insert_with(|| Channel {
             touched: 0,
+            last_output_at_ms: 0,
             replay: VecDeque::new(),
             sender: broadcast::channel(256).0,
         });
@@ -56,6 +68,9 @@ impl Hub {
 
 impl Channel {
     fn write(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.last_output_at_ms = now_ms();
+        }
         for chunk in bytes.chunks(CHUNK_BYTES) {
             let excess = (self.replay.len() + chunk.len()).saturating_sub(REPLAY_BYTES);
             self.replay.drain(..excess);
@@ -88,6 +103,105 @@ pub(super) struct StreamSummary {
 
 pub(super) fn list_streams() -> Vec<StreamSummary> {
     hub().lock().unwrap().list_streams()
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LiveTailSnapshot {
+    pub server_id: String,
+    pub last_output_at_ms: i64,
+    pub tail_lines: Vec<String>,
+}
+
+/// Read the latest redacted terminal tail lines (up to `max_lines`) for an active or recent
+/// task from the in-memory SSH live ring buffer. Never mutates or clears the buffer.
+pub(crate) fn tail_lines_for_task(
+    task_id: &str,
+    server_id: Option<&str>,
+    max_lines: usize,
+) -> Option<LiveTailSnapshot> {
+    if task_id.trim().is_empty() || max_lines == 0 {
+        return None;
+    }
+    let hub = hub().lock().unwrap();
+    let (matched_server, channel) = if let Some(sid) = server_id.filter(|s| !s.trim().is_empty()) {
+        hub.channels
+            .get(&(task_id.to_owned(), sid.to_owned()))
+            .filter(|ch| !ch.replay.is_empty())
+            .map(|ch| (sid.to_owned(), ch))?
+    } else {
+        hub.channels
+            .iter()
+            .filter(|((tid, _), ch)| tid == task_id && !ch.replay.is_empty())
+            .max_by_key(|(_, ch)| ch.touched)
+            .map(|((_, sid), ch)| (sid.clone(), ch))?
+    };
+
+    let len = channel.replay.len();
+    let start = len.saturating_sub(TAIL_SCAN_BYTES);
+    let tail_bytes: Vec<u8> = channel.replay.iter().skip(start).copied().collect();
+    let tail_lines = extract_clean_tail_lines(&tail_bytes, max_lines);
+
+    Some(LiveTailSnapshot {
+        server_id: matched_server,
+        last_output_at_ms: channel.last_output_at_ms,
+        tail_lines,
+    })
+}
+
+pub(crate) fn strip_ansi_csi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if matches!(chars.peek(), Some('[')) {
+                chars.next();
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if ch != '\r' {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn clip_tail_line(line: &str) -> String {
+    let trimmed = line.trim_end();
+    let mut chars = trimmed.chars();
+    let head: String = chars.by_ref().take(TAIL_LINE_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
+fn extract_clean_tail_lines(bytes: &[u8], max_lines: usize) -> Vec<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let clean = strip_ansi_csi(&text);
+    let mut ring: VecDeque<String> = VecDeque::with_capacity(max_lines + 1);
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if ring.len() >= max_lines {
+            ring.pop_front();
+        }
+        ring.push_back(clip_tail_line(line));
+    }
+    ring.into_iter().collect()
+}
+
+#[cfg(test)]
+pub(crate) fn emit_test_chunk(task: &str, server: &str, bytes: &[u8]) {
+    emit_exec_chunk(task, server, bytes);
 }
 
 impl Hub {
@@ -322,5 +436,19 @@ mod tests {
         assert_eq!(streams[0].buffered_bytes, 6);
         assert_eq!(streams[1].task_id, "task_a");
         assert_eq!(streams[1].server_id, "srv1");
+    }
+
+    #[test]
+    fn extracts_ansi_free_tail_lines_with_timestamp() {
+        let task = "test-live-tail-snapshot";
+        emit_exec_chunk(
+            task,
+            "srv-tail",
+            b"\x1b[36m[AI]\x1b[0m line-1\r\nline-2\r\n\x1b[31mHTTP 422: missing doc\x1b[0m\r\n",
+        );
+        let snap = tail_lines_for_task(task, Some("srv-tail"), 2).expect("tail snapshot");
+        assert_eq!(snap.server_id, "srv-tail");
+        assert!(snap.last_output_at_ms > 0);
+        assert_eq!(snap.tail_lines, vec!["line-2", "HTTP 422: missing doc"]);
     }
 }

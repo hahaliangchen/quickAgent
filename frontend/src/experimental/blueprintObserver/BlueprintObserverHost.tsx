@@ -27,11 +27,13 @@ import { taskTitle } from '../../sidebarModel.ts'
 import { useSession } from '../../useSession.ts'
 import {
   OBSERVER_COOLDOWN_MS,
+  OBSERVER_STALL_THRESHOLD_MS,
   OBSERVER_TITLE_PREFIX,
   buildObserverInspectPrompt,
   buildObserverUserChatPrompt,
   detectObserverTrigger,
   extractLatestAssistantMessage,
+  findStalledInFlightTool,
   getObserverSessionId,
   isObserverOwnTask,
   loadDismissedSuggestionIds,
@@ -133,7 +135,6 @@ function BlueprintObserverInner({
   const [activeSuggestion, setActiveSuggestion] = useState<ObserverSuggestion | null>(null)
   const [popupDismissedId, setPopupDismissedId] = useState<string | null>(null)
   const [decisionText, setDecisionText] = useState('')
-  const [editingDecision, setEditingDecision] = useState(false)
   const [lastTriggerLabel, setLastTriggerLabel] = useState<string>('')
 
   const observerSession = useSession(observerTaskId, () => {})
@@ -147,6 +148,11 @@ function BlueprintObserverInner({
   // Baseline event seq on mount so opening an old historical session does NOT immediately fire an auto-inspect.
   const lastInspectedSeqRef = useRef<number>(watchedEvents.at(-1)?.seq ?? 0)
   const lastAutoInspectAtRef = useRef<number>(0)
+  const watchdogFiredCallIdsRef = useRef<Set<string>>(new Set())
+  const watchedEventsRef = useRef(watchedEvents)
+  watchedEventsRef.current = watchedEvents
+  const observerBusyRef = useRef(sending || observerRunning)
+  observerBusyRef.current = sending || observerRunning
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const showToast = useCallback((text: string) => {
@@ -226,7 +232,6 @@ function BlueprintObserverInner({
     setActiveSuggestion(prev => {
       if (prev?.id === parsed.id) return prev
       setDecisionText(parsed.interject)
-      setEditingDecision(false)
       return parsed
     })
   }, [latestAssistant, observerRunning])
@@ -303,6 +308,9 @@ function BlueprintObserverInner({
     workspaceRoot,
   ])
 
+  const triggerInspectRef = useRef(triggerInspect)
+  triggerInspectRef.current = triggerInspect
+
   // Automatic milestone / error / failure watcher (ONLY active when prefs.enabled && prefs.autoInspect).
   useEffect(() => {
     if (!prefs.enabled || !prefs.autoInspect) return
@@ -313,6 +321,28 @@ function BlueprintObserverInner({
     if (trigger.kind !== 'turn_failed' && elapsed < OBSERVER_COOLDOWN_MS) return
     void triggerInspect(trigger)
   }, [prefs.enabled, prefs.autoInspect, watchedEvents, watchedRunning, sending, observerRunning, triggerInspect])
+
+  // Zero-cost local silent-stall watchdog: wakes the Observer AT MOST ONCE per in-flight callId
+  // when the main session is running with 0 new events for >= 3 minutes (never loops).
+  useEffect(() => {
+    if (!prefs.enabled || !prefs.autoInspect || !watchedRunning) return
+    const timer = setInterval(() => {
+      if (observerBusyRef.current) return
+      const events = watchedEventsRef.current
+      const stalled = findStalledInFlightTool(events, Date.now(), OBSERVER_STALL_THRESHOLD_MS)
+      if (!stalled) return
+      if (watchdogFiredCallIdsRef.current.has(stalled.callId)) return
+      watchdogFiredCallIdsRef.current.add(stalled.callId)
+      const latestSeq = events.at(-1)?.seq ?? stalled.seq
+      void triggerInspectRef.current({
+        kind: 'stalled_tool',
+        label: '疑似卡死看门狗（单次唤醒）',
+        latestSeq,
+        detail: `${stalled.toolName} 已静默 ${stalled.idleSec}s 无新事件（callId: ${stalled.callId}）`,
+      })
+    }, 15_000)
+    return () => clearInterval(timer)
+  }, [prefs.enabled, prefs.autoInspect, watchedRunning])
 
   // Send a user message directly to this session's Observer AI.
   const sendObserverChat = useCallback(async () => {
@@ -445,6 +475,7 @@ function BlueprintObserverInner({
   const resetObserverSession = useCallback(() => {
     setObserverSessionId(watchedTaskId, undefined)
     setObserverTaskId(undefined)
+    watchdogFiredCallIdsRef.current.clear()
     setActiveSuggestion(null)
     setDecisionText('')
     setError('')
@@ -653,7 +684,7 @@ function BlueprintObserverInner({
               >
                 {observerRunning ? '正在查库分析…' : '立即巡检 DB'}
               </button>
-              <label className={css.autoCheck} title="主会话报错、中断、计划阶段变更或本轮结束时自动巡检（无固定步数限制）">
+              <label className={css.autoCheck} title="主会话报错、中断、计划阶段变更、本轮结束或运行中工具静默卡死超 3 分钟时自动巡检（单次唤醒，绝不循环）">
                 <input
                   type="checkbox"
                   checked={prefs.autoInspect}
@@ -711,19 +742,15 @@ function BlueprintObserverInner({
           {/* AI-proposed confirmation push card — ONLY shown when the Observer actually raises a decision */}
           {hasUnhandledSuggestion && activeSuggestion && (
             <div
-              className={clsx(
-                css.confirmCard,
-                activeSuggestion.severity === 'blocker' && css.confirmCardBlocker,
-                activeSuggestion.severity === 'warn' && css.confirmCardWarn,
-              )}
+              className={css.confirmCard}
               role="region"
               aria-label="观察者待确认方案"
             >
               <div className={css.confirmCardHeader}>
-                <span className={clsx(css.severityBadge, css[`sev_${activeSuggestion.severity}`])}>
-                  {severityLabel(activeSuggestion.severity)}
+                <span className={clsx(css.confirmEyebrow, css[`eyebrow_${activeSuggestion.severity}`])}>
+                  <span className={css.confirmEyebrowDot} aria-hidden="true" />
+                  <span>{severityLabel(activeSuggestion.severity)}</span>
                 </span>
-                <strong className={css.confirmCardTitle}>{activeSuggestion.title}</strong>
                 <button
                   type="button"
                   className={css.confirmDismissBtn}
@@ -732,34 +759,52 @@ function BlueprintObserverInner({
                   onClick={() => {
                     markSuggestionHandled(activeSuggestion.id)
                     setDecisionText('')
-                    setEditingDecision(false)
                   }}
                 >
                   <Icon name="close" size={13} />
                 </button>
               </div>
 
-              <p className={css.confirmCardReason}>{activeSuggestion.reason}</p>
+              <div className={css.confirmTextBlock}>
+                <strong className={css.confirmCardTitle}>{activeSuggestion.title}</strong>
+                <p className={css.confirmCardReason}>{activeSuggestion.reason}</p>
+              </div>
 
               {(activeSuggestion.action !== 'stop' || decisionText.trim()) && (
-                editingDecision ? (
-                  <textarea
-                    rows={3}
-                    className={css.confirmEditInput}
-                    value={decisionText}
-                    autoFocus
-                    placeholder="微调将发送给主会话的指令…"
-                    onChange={e => setDecisionText(e.target.value)}
-                  />
-                ) : (
-                  <div className={css.confirmQuote}>
-                    <span className={css.confirmQuoteTag}>拟执行指令</span>
-                    <span className={css.confirmQuoteText}>{decisionText || activeSuggestion.interject}</span>
-                  </div>
-                )
+                <textarea
+                  rows={3}
+                  className={css.confirmEditInput}
+                  value={decisionText}
+                  placeholder="可在此直接微调发送给主会话的指令…"
+                  onChange={e => setDecisionText(e.target.value)}
+                />
               )}
 
               <div className={css.confirmCardFooter}>
+                <div className={css.confirmFooterLeft}>
+                  <button
+                    type="button"
+                    className={css.confirmGhostBtn}
+                    onClick={() => {
+                      markSuggestionHandled(activeSuggestion.id)
+                      setDecisionText('')
+                    }}
+                  >
+                    忽略
+                  </button>
+                  {activeSuggestion.action !== 'stop' && watchedRunning && (
+                    <button
+                      type="button"
+                      className={css.confirmDangerBtn}
+                      disabled={executing}
+                      onClick={() => { void executeStopMain() }}
+                      title="直接停止当前主会话的运行"
+                    >
+                      仅停止
+                    </button>
+                  )}
+                </div>
+
                 {activeSuggestion.action === 'stop' ? (
                   <button
                     type="button"
@@ -767,12 +812,12 @@ function BlueprintObserverInner({
                     disabled={executing || !watchedRunning}
                     onClick={() => { void executeStopMain() }}
                   >
-                    {watchedRunning ? '确认停止主会话' : '主会话已停止'}
+                    {watchedRunning ? '确认停止' : '主会话已停止'}
                   </button>
                 ) : activeSuggestion.action === 'stop_and_continue' ? (
                   <button
                     type="button"
-                    className={css.confirmPrimaryBtn}
+                    className={activeSuggestion.severity === 'blocker' ? css.confirmDangerSolidBtn : css.confirmPrimaryBtn}
                     disabled={executing || (!decisionText.trim() && !watchedRunning)}
                     onClick={() => { void executeStopAndContinue() }}
                   >
@@ -788,40 +833,6 @@ function BlueprintObserverInner({
                     {watchedRunning ? '确认插嘴' : '确认发送'}
                   </button>
                 )}
-
-                {activeSuggestion.action !== 'stop' && (
-                  <button
-                    type="button"
-                    className={css.confirmOutlineBtn}
-                    onClick={() => setEditingDecision(v => !v)}
-                  >
-                    {editingDecision ? '完成编辑' : '修改文案'}
-                  </button>
-                )}
-
-                {activeSuggestion.action !== 'stop' && watchedRunning && (
-                  <button
-                    type="button"
-                    className={css.confirmDangerBtn}
-                    disabled={executing}
-                    onClick={() => { void executeStopMain() }}
-                    title="直接停止当前主会话的运行"
-                  >
-                    停止运行
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  className={css.confirmGhostBtn}
-                  onClick={() => {
-                    markSuggestionHandled(activeSuggestion.id)
-                    setDecisionText('')
-                    setEditingDecision(false)
-                  }}
-                >
-                  忽略
-                </button>
               </div>
             </div>
           )}

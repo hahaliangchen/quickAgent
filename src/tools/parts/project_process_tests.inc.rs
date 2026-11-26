@@ -737,3 +737,55 @@
             }
         }
     }
+
+    #[test]
+    fn managed_node_discovery_finds_fnm_default_and_highest_semver() {
+        let root = std::env::temp_dir().join(format!(
+            "node-discovery-{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        let fnm = root.join("fnm");
+        let exe_rel = if cfg!(windows) {
+            "installation/node.exe"
+        } else {
+            "installation/bin/node"
+        };
+        let v22 = fnm.join("node-versions/v22.5.1").join(exe_rel);
+        let v24 = fnm.join("node-versions/v24.21.0").join(exe_rel);
+        std::fs::create_dir_all(v22.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(v24.parent().unwrap()).unwrap();
+        std::fs::write(&v22, b"").unwrap();
+        std::fs::write(&v24, b"").unwrap();
+
+        let env_fnm = |name: &str| match name {
+            "FNM_DIR" => Some(fnm.clone()),
+            _ => None,
+        };
+        // Without aliases, highest semver (v24.21.0) wins over v22.5.1.
+        assert_eq!(super::discover_managed_node_in(&env_fnm), Some(v24.clone()));
+
+        // With aliases/default present, aliases/default takes priority.
+        let alias_exe = if cfg!(windows) {
+            fnm.join("aliases/default/node.exe")
+        } else {
+            fnm.join("aliases/default/bin/node")
+        };
+        std::fs::create_dir_all(alias_exe.parent().unwrap()).unwrap();
+        std::fs::write(&alias_exe, b"").unwrap();
+        assert_eq!(super::discover_managed_node_in(&env_fnm), Some(alias_exe));
+
+        // Volta fallback when fnm is absent.
+        let volta = root.join("volta");
+        let volta_exe = volta
+            .join("bin")
+            .join(if cfg!(windows) { "node.exe" } else { "node" });
+        std::fs::create_dir_all(volta_exe.parent().unwrap()).unwrap();
+        std::fs::write(&volta_exe, b"").unwrap();
+        let env_volta = |name: &str| match name {
+            "VOLTA_HOME" => Some(volta.clone()),
+            _ => None,
+        };
+        assert_eq!(super::discover_managed_node_in(&env_volta), Some(volta_exe));
+
+        let _ = std::fs::remove_dir_all(root);
+    }

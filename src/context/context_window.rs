@@ -36,8 +36,14 @@ pub const MAX_TOKENS: usize = 256_000;
 /// Known two-times pricing/context cliffs. Unknown routes use the budget-only
 /// economic line in the caller.
 pub fn pricing_cliff(model: &str, _input_budget: usize) -> Option<usize> {
+    if let Some(threshold) =
+        crate::model::model_presets::lookup_preset(model).and_then(|p| p.long_context_threshold)
+    {
+        return Some(threshold);
+    }
     let lower = model.to_ascii_lowercase();
-    if lower.contains("gpt-5.6")
+    if (lower.contains("gpt-5.4") && !lower.contains("mini") && !lower.contains("nano"))
+        || lower.contains("gpt-5.6")
         || lower.contains("gpt-6")
         || lower.contains("gpt-6.1")
         || lower.contains("gpt-6.2")

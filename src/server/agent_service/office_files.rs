@@ -164,11 +164,13 @@ fn spawn_os_reveal(target: &Path, dir: &Path) -> std::io::Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        let clean_target = crate::tools::file_edit::strip_verbatim_prefix(target);
+        let clean_dir = crate::tools::file_edit::strip_verbatim_prefix(dir);
         let mut cmd = Command::new("explorer");
         if target.is_file() {
-            cmd.arg(format!("/select,{}", target.display()));
+            cmd.arg(format!("/select,{}", clean_target.display()));
         } else {
-            cmd.arg(dir);
+            cmd.arg(&clean_dir);
         }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -261,10 +263,10 @@ fn scan_office_docs_in_dir(
                 .to_owned();
             let dir_str = canonical
                 .parent()
-                .map(|p| p.to_string_lossy().into_owned())
+                .map(crate::tools::file_edit::display_path)
                 .unwrap_or_default();
             out.push(OfficeRecentDocItem {
-                path: canonical.to_string_lossy().into_owned(),
+                path: crate::tools::file_edit::display_path(&canonical),
                 filename,
                 dir: dir_str,
                 ext,
@@ -347,7 +349,7 @@ pub async fn office_reveal_folder(
                 format!("无法打开所在文件夹: {err}"),
             )
         })?;
-        Ok(dir.to_string_lossy().into_owned())
+        Ok(crate::tools::file_edit::display_path(&dir))
     })
     .await;
 

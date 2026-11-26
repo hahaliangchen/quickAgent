@@ -53,7 +53,7 @@
   },
   {
     "name": "blueprint__inspect_session",
-    "description": "Read-only SQLite panoramic X-ray of a historical or running session (task prompt & red-lines, plan & pinned facts, local/remote changed files, failure clusters, environment cues, and winning commands) in one call.",
+    "description": "Read-only SQLite panoramic X-ray of a historical or running session (full multi-turn user_instructions timeline & latest_user_instruction, live in_flight_tools with real-time SSH/shell terminal tail_lines, plan & pinned facts, local/remote changed files, failure clusters, environment cues, and winning commands) in one call.",
     "inputSchema": {
       "type": "object",
       "properties": {

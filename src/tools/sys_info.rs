@@ -31,7 +31,8 @@ fn disk_space(args: &Value) -> Result<Value> {
     #[cfg(not(any(unix,windows)))]
     let (total,available,free):(u64,u64,u64)=anyhow::bail!("disk query unsupported");
     let used=if total==0{0.0}else{(total.saturating_sub(free) as f64/total as f64*100.0).clamp(0.0,100.0)};
-    Ok(json!({"path":path,"total_bytes":total,"available_bytes":available,"free_bytes":free,"available_gb":available as f64/1_000_000_000.0,"used_percent":used}))
+    let display_path = crate::tools::file_edit::display_path(&path);
+    Ok(json!({"path":display_path,"total_bytes":total,"available_bytes":available,"free_bytes":free,"available_gb":available as f64/1_000_000_000.0,"used_percent":used}))
 }
 fn which(args:&Value)->Result<Value>{
     let names=args["names"].as_array().context("names must be an array")?;ensure!(names.len()<=32,"sys.which accepts at most 32 names");
@@ -41,7 +42,7 @@ fn which(args:&Value)->Result<Value>{
     let mut found=BTreeMap::new();
     for item in names { let n=item.as_str().context("command name must be a string")?;ensure!(!n.is_empty()&&!n.contains('/')&&!n.contains('\\')&&!n.contains('\0'),"sys.which expects bare names");
         let candidates=if Path::new(n).extension().is_some(){vec![n.to_owned()]}else{exts.iter().map(|e|if e.is_empty(){n.to_owned()}else{format!("{n}{e}")}).collect()};
-        let path=dirs.iter().flat_map(|d|candidates.iter().map(move|c|d.join(c))).find(|p|p.is_file()&&executable(p)).and_then(|p|p.canonicalize().ok()).map(|p|p.to_string_lossy().into_owned());found.insert(n.to_owned(),path);
+        let path=dirs.iter().flat_map(|d|candidates.iter().map(move|c|d.join(c))).find(|p|p.is_file()&&executable(p)).and_then(|p|p.canonicalize().ok()).map(|p|crate::tools::file_edit::display_path(&p));found.insert(n.to_owned(),path);
     } Ok(json!({"found":found}))
 }
 #[cfg(unix)] fn executable(p:&Path)->bool{use std::os::unix::fs::PermissionsExt;std::fs::metadata(p).is_ok_and(|m|m.permissions().mode()&0o111!=0)}
@@ -61,7 +62,37 @@ fn listening_ports(args:&Value)->Result<Value>{
     unsafe fn get(f:u32)->Result<Vec<u8>>{let mut n=0u32;let _=unsafe{GetExtendedTcpTable(std::ptr::null_mut(),&mut n,0,f,TCP_TABLE_OWNER_PID_LISTENER,0)};let mut b=vec![0u8;n as usize];let r=unsafe{GetExtendedTcpTable(b.as_mut_ptr().cast(),&mut n,0,f,TCP_TABLE_OWNER_PID_LISTENER,0)};ensure!(r==0,"GetExtendedTcpTable failed: {r}");Ok(b)}
     for(f,proto)in[(AF_INET as u32,"tcp"),(AF_INET6 as u32,"tcp6")]{let b=unsafe{get(f)}?;if b.len()<4{continue;}let n=u32::from_ne_bytes(b[..4].try_into()?)as usize;if f==AF_INET as u32{let rows=unsafe{std::slice::from_raw_parts(b.as_ptr().add(4).cast::<MIB_TCPROW_OWNER_PID>(),n.min(8192))};for r in rows{let port=u16::from_be(r.dwLocalPort as u16);let ip=std::net::Ipv4Addr::from(u32::from_be(r.dwLocalAddr)).to_string();if wanted.is_some_and(|p|p!=port)||local&&!ip.parse::<std::net::IpAddr>().is_ok_and(|v|v.is_loopback()){continue;}out.push(json!({"protocol":proto,"address":ip,"port":port,"pid":r.dwOwningPid}));}}else{let rows=unsafe{std::slice::from_raw_parts(b.as_ptr().add(4).cast::<MIB_TCP6ROW_OWNER_PID>(),n.min(8192))};for r in rows{let port=u16::from_be(r.dwLocalPort as u16);let ip=std::net::Ipv6Addr::from(r.ucLocalAddr).to_string();if wanted.is_some_and(|p|p!=port)||local&&!ip.parse::<std::net::IpAddr>().is_ok_and(|v|v.is_loopback()){continue;}out.push(json!({"protocol":proto,"address":ip,"port":port,"pid":r.dwOwningPid}));}}}Ok(json!({"ports":out,"supported":true}))
 }
-#[cfg(not(any(target_os="linux",windows)))] fn listening_ports(_:&Value)->Result<Value>{Ok(json!({"ports":[],"supported":false}))}
+#[cfg(target_os="macos")]
+fn listening_ports(args:&Value)->Result<Value>{
+    let wanted=args["port"].as_u64().map(|v|v as u16);ensure!(args["port"].is_null()||args["port"].as_u64().is_some_and(|v|v<=65535),"port must be 0..65535");let local=args["loopback_only"]==true;
+    let output=std::process::Command::new("/usr/sbin/lsof").args(["-nP","-iTCP","-sTCP:LISTEN","-F","pcn"]).output();
+    let Ok(output)=output else { return Ok(json!({"ports":[],"supported":false})); };
+    if !output.status.success() && !output.stdout.is_empty() { anyhow::bail!("lsof failed"); }
+    let text=String::from_utf8_lossy(&output.stdout);
+    let mut out=Vec::new();
+    let mut pid:Option<u32>=None;
+    let mut proc_name:Option<String>=None;
+    for line in text.lines() {
+        if let Some(v)=line.strip_prefix('p') { pid=v.parse().ok(); proc_name=None; }
+        else if let Some(v)=line.strip_prefix('c') { proc_name=Some(v.to_owned()); }
+        else if let Some(v)=line.strip_prefix('n') {
+            let Some((raw_addr,raw_port))=v.rsplit_once(':') else { continue; };
+            let Ok(port)=raw_port.parse::<u16>() else { continue; };
+            if wanted.is_some_and(|p|p!=port) { continue; }
+            let ip=raw_addr.trim_start_matches('[').trim_end_matches(']');
+            let proto=if raw_addr.starts_with('[') || ip.contains(':') { "tcp6" } else { "tcp" };
+            let addr=if ip=="*" { if proto=="tcp6" { "::" } else { "0.0.0.0" } } else { ip };
+            if local && !addr.parse::<std::net::IpAddr>().is_ok_and(|a|a.is_loopback()) { continue; }
+            let mut row=json!({"protocol":proto,"address":addr,"port":port});
+            if let Some(p)=pid { row["pid"]=json!(p); }
+            if let Some(ref c)=proc_name { row["process"]=json!(c); }
+            out.push(row);
+        }
+    }
+    out.sort_by_key(|v|(v["port"].as_u64(),v["protocol"].as_str().map(str::to_owned),v["address"].as_str().map(str::to_owned)));
+    Ok(json!({"ports":out,"supported":true}))
+}
+#[cfg(not(any(target_os="linux",target_os="macos",windows)))] fn listening_ports(_:&Value)->Result<Value>{Ok(json!({"ports":[],"supported":false}))}
 
 fn process_filter(args:&Value)->Result<String>{
     let filter=args["filter"].as_str().unwrap_or("");

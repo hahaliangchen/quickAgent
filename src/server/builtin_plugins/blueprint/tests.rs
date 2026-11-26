@@ -542,3 +542,116 @@ fn blueprint_inspect_session_aggregates_sqlite_dossier() {
     assert_eq!(bounded_tail[0]["seq"], 15);
     assert_eq!(bounded_tail[1]["seq"], 17);
 }
+
+#[test]
+fn blueprint_inspect_session_tracks_user_instructions_timeline_and_in_flight_tails() {
+    let root = Workspace::new();
+    let conn = crate::server::agent_service::open_db(&root.0).unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let task_id = format!("task-live-{}", crate::server::agent_service::uuid_like());
+    conn.execute(
+        "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at,provider_name)
+         VALUES (?1,'第1轮：不要改代码，也不要重启服务','gpt-6.2-sol','running',?2,?3,'subapi')",
+        rusqlite::params![task_id, now_ms - 600_000, now_ms],
+    )
+    .unwrap();
+
+    let long_turn1 = format!("第1轮红线不要改代码 {}", "甲".repeat(1200));
+    let long_turn3 = format!("第3轮授权修复 anydoc_image_vlm.go 并仅重启 9005 {}", "乙".repeat(1200));
+    let events = [
+        (1, now_ms - 500_000, "turn/start", json!({"turn": 1})),
+        (2, now_ms - 499_000, "user/message", json!({"turn": 1, "message": {"role": "user", "content": long_turn1}})),
+        (3, now_ms - 450_000, "turn/end", json!({"turn": 1, "reason": {"kind": "completed"}})),
+        (4, now_ms - 400_000, "turn/start", json!({"turn": 2})),
+        (5, now_ms - 399_000, "user/message", json!({"turn": 2, "message": {"role": "user", "content": [{"type": "text", "text": "第2轮：先排查日志原因"}]}})),
+        (6, now_ms - 350_000, "turn/end", json!({"turn": 2, "reason": {"kind": "completed"}})),
+        (7, now_ms - 300_000, "turn/start", json!({"turn": 3})),
+        (8, now_ms - 299_000, "user/message", json!({"turn": 3, "message": {"role": "user", "content": long_turn3}})),
+        (9, now_ms - 250_000, "user/interjection", json!({"text": "补充授权：如果 9005 报错 422 立即停下来查代码"})),
+        // Completed call should NOT appear in in_flight_tools.
+        (10, now_ms - 240_000, "tool/call", json!({"step": 25, "callId": "call_done", "name": "read_file", "arguments": json!({"path": "anydoc_image_vlm.go"}).to_string()})),
+        (11, now_ms - 239_000, "tool/result", json!({"step": 25, "message": {"toolCallId": "call_done", "isError": false}, "meta": {"result": {"ok": true}}})),
+        // In-flight SSH call (reads live tail from ssh::live).
+        (12, now_ms - 200_000, "tool/call", json!({"step": 26, "callId": "call_26", "name": "ssh__exec", "arguments": json!({"server_id": "srv-201", "command": "bash verify.sh"}).to_string()})),
+        // In-flight local shell call with streaming shell/output lines.
+        (13, now_ms - 90_000, "tool/call", json!({"step": 27, "callId": "call_27", "name": "exec_command", "arguments": json!({"cmd": "cargo test"}).to_string()})),
+        (14, now_ms - 30_000, "shell/output", json!({"callId": "call_27", "text": "running 2 tests\nFAIL: assertion failed\n"})),
+    ];
+    for (seq, ts, kind, data) in events {
+        conn.execute(
+            "INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![task_id, seq, ts, kind, data.to_string()],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    // Seed SSH live terminal ring buffer with >30 lines and ANSI color codes.
+    let mut ssh_stream = String::new();
+    for i in 1..=35 {
+        ssh_stream.push_str(&format!("\x1b[32mline-{i}\x1b[0m\r\n"));
+    }
+    ssh_stream.push_str("\x1b[31mHTTP 422: selected document does not exist\x1b[0m\r\n");
+    crate::server::builtin_plugins::ssh::live::emit_test_chunk(
+        &task_id,
+        "srv-201",
+        ssh_stream.as_bytes(),
+    );
+
+    let dossier = super::session_dossier::inspect_session(
+        &root.0,
+        &json!({"task_id": task_id}),
+    )
+    .unwrap();
+
+    // Verify user_instructions timeline & latest_user_instruction.
+    let instructions = dossier["user_instructions"].as_array().unwrap();
+    assert_eq!(instructions.len(), 4);
+    assert_eq!(instructions[0]["turn"], 1);
+    assert_eq!(instructions[0]["kind"], "user/message");
+    // Turn 1 is an older turn (turns 2 and 3 are the latest 2 turns), clipped to <= 800 chars + ellipsis.
+    assert!(instructions[0]["text"].as_str().unwrap().chars().count() <= 801);
+    assert_eq!(instructions[1]["turn"], 2);
+    assert_eq!(instructions[2]["turn"], 3);
+    // Turn 3 is within the latest 2 turns, retains > 1000 chars without aggressive truncation.
+    assert!(instructions[2]["text"].as_str().unwrap().chars().count() > 1000);
+    assert_eq!(instructions[3]["turn"], 3);
+    assert_eq!(instructions[3]["kind"], "user/interjection");
+    assert_eq!(dossier["latest_user_instruction"], instructions[3]);
+    assert!(
+        dossier["latest_user_instruction"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("422")
+    );
+
+    // Verify in_flight_tools captures both SSH live tail (capped at 30 lines, ANSI stripped) and local shell/output.
+    let in_flight = dossier["in_flight_tools"].as_array().unwrap();
+    assert_eq!(in_flight.len(), 2);
+
+    let ssh_call = &in_flight[0];
+    assert_eq!(ssh_call["call_id"], "call_26");
+    assert_eq!(ssh_call["step"], 26);
+    assert_eq!(ssh_call["tool"], "ssh__exec");
+    assert!(ssh_call["target"].as_str().unwrap().contains("srv-201"));
+    assert!(ssh_call["elapsed_sec"].as_i64().unwrap() >= 190);
+    let ssh_tail = ssh_call["tail_lines"].as_array().unwrap();
+    assert_eq!(ssh_tail.len(), 30);
+    assert_eq!(
+        ssh_tail.last().unwrap().as_str().unwrap(),
+        "HTTP 422: selected document does not exist"
+    );
+
+    let local_call = &in_flight[1];
+    assert_eq!(local_call["call_id"], "call_27");
+    assert_eq!(local_call["tool"], "exec_command");
+    assert!(local_call["elapsed_sec"].as_i64().unwrap() >= 85);
+    assert!(local_call["idle_sec"].as_i64().unwrap() >= 25);
+    assert_eq!(
+        local_call["tail_lines"],
+        json!(["running 2 tests", "FAIL: assertion failed"])
+    );
+}

@@ -107,7 +107,7 @@
   },
   {
     "name": "desktop__read_tree",
-    "description": "Read the AT-SPI tree of one identified window. Returns fallback guidance when unavailable.",
+    "description": "Read the accessibility tree (AT-SPI on Linux, UI Automation on Windows) of one identified window. Returns fallback guidance when unavailable.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,

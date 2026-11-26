@@ -135,12 +135,35 @@ export function AppDialogHost() {
       }}
     >
       {current && (
-        <form onSubmit={submit}>
+        <form onSubmit={submit} className={css.form}>
           <header className={css.header}>
-            <h2 id="app-dialog-title" className={css.title}>{title}</h2>
-            <button type="button" className={css.close} aria-label="关闭确认弹窗" onClick={dismiss}>×</button>
+            <span
+              className={css.ringIcon}
+              data-tone={current.kind === 'confirm' && current.options.danger ? 'danger' : 'brand'}
+              aria-hidden="true"
+            >
+              {current.kind === 'confirm' && current.options.danger ? (
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                  <line x1="12" y1="9" x2="12" y2="13" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+              ) : (
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  <polyline points="9 12 11 14 15 10" />
+                </svg>
+              )}
+            </span>
+            <button type="button" className={css.close} aria-label="关闭确认弹窗" onClick={dismiss}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
           </header>
           <div className={css.body}>
+            <h2 id="app-dialog-title" className={css.title}>{title}</h2>
             {current.options.message && <p className={css.message}>{current.options.message}</p>}
             {current.kind === 'prompt' && (
               <input

@@ -439,7 +439,9 @@ function Login({ onDone, initialBase }: { onDone: (status: DailyStatus) => void;
       </button>
       {advanced && <Field label="clientId" wide><input value={clientId} onChange={event => setClientId(event.target.value)} placeholder="留空使用系统默认值" spellCheck={false} /></Field>}
       {error && <p className={css.error} role="alert">{error}</p>}
-      <button type="submit" className={css.primary} disabled={busy}>{busy ? '正在登录…' : '登录'}</button>
+      <button type="submit" className={clsx(css.primary, css.loginSubmit)} disabled={busy} data-busy={busy ? 'true' : undefined}>
+        {busy ? '正在登录…' : '登录'}
+      </button>
       <p className={css.loginFoot}>令牌保存在本机的插件目录里，不会写进仓库，也不会回显。</p>
     </form>
   </div>

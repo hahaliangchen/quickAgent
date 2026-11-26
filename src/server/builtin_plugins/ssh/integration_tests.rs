@@ -198,6 +198,17 @@ impl server::Handler for MockSsh {
         } else {
             (None, raw.trim())
         };
+        if cmd == "echo start; sleep 10" {
+            session.data(id, b"start\n".to_vec())?;
+            let handle = session.handle();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let _ = handle.exit_status_request(id, 0).await;
+                let _ = handle.eof(id).await;
+                let _ = handle.close(id).await;
+            });
+            return Ok(());
+        }
         if cmd.starts_with("stream-check ") {
             session.data(id, b"live stdout\nloopback-test-".to_vec())?;
             let handle = session.handle();
@@ -1593,6 +1604,70 @@ async fn ssh_upload_preserves_executable_permissions() -> Result<()> {
             .mode()
             & 0o777;
         assert_eq!(remote_mode, 0o755);
+        Ok(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn ssh_exec_idle_timeout_aborts_silent_command_and_preserves_output() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let remote_root = tempfile::tempdir()?;
+        let config = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let fixture = Fixture::start(remote_root.path().to_owned()).await?;
+
+        let server_id = {
+            let mut store = Store::open(config.path())?;
+            let id = store.create(NewServer {
+                name: "idle-timeout-node".into(),
+                host: "127.0.0.1".into(),
+                port: Some(fixture.port),
+                username: "tester".into(),
+                auth_type: AuthType::Password,
+                key_path: None,
+                env_tier: EnvTier::Dev,
+                require_approval: false,
+                default_dir: None,
+                tags: vec![],
+                notes: None,
+            })?;
+            store.set_credential(&id, Some(Secret::new(PASSWORD.into())?))?;
+            id
+        };
+
+        let start = std::time::Instant::now();
+        let res = package::scoped(
+            "task-idle-timeout".into(),
+            false,
+            package::execute_tool(
+                config.path().to_path_buf(),
+                workspace.path().to_path_buf(),
+                "ssh__exec",
+                json!({
+                    "server_id": server_id,
+                    "command": "echo start; sleep 10",
+                    "timeout_secs": 30,
+                    "idle_timeout_secs": 1,
+                }),
+            ),
+        )
+        .await?;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "idle timeout should abort around 1s, took {elapsed:?}"
+        );
+        assert_eq!(res["status"], "idle_timeout");
+        assert_eq!(res["timed_out"], true);
+        assert_eq!(res["idle_timeout_secs"], 1);
+        assert!(res["exit_code"].is_null());
+        assert_eq!(res["stdout"], "start\n");
+        assert!(
+            res["hint"].as_str().unwrap_or("").contains("1 秒"),
+            "unexpected hint: {res}"
+        );
         Ok(())
     })
     .await?

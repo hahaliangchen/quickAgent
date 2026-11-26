@@ -461,8 +461,23 @@ fn save_settings(
                     .is_none_or(|effort| capability.reasoning_efforts.contains(effort)),
                 "provider {id} model {model} default effort is not in its supported levels"
             );
+            anyhow::ensure!(
+                capability
+                    .context_window
+                    .is_none_or(|n| (1_024..=crate::model::model_settings::MAX_CONTEXT_WINDOW).contains(&n)),
+                "provider {id} model {model} context window must be between 1024 and {} tokens",
+                crate::model::model_settings::MAX_CONTEXT_WINDOW
+            );
+            anyhow::ensure!(
+                capability
+                    .max_output_tokens
+                    .is_none_or(|n| (1..=crate::model::model_settings::MAX_CONTEXT_WINDOW).contains(&n)),
+                "provider {id} model {model} max output tokens must be between 1 and {} tokens",
+                crate::model::model_settings::MAX_CONTEXT_WINDOW
+            );
             capabilities.insert(model.clone(), capability);
         }
+        let saved_capabilities = capabilities.clone();
         model_capabilities.insert(id.clone(), capabilities);
         let previous = config.providers.get(&id);
         let requested_key = draft.api_key.filter(|v| !v.is_empty());
@@ -496,6 +511,28 @@ fn save_settings(
             .into_iter()
             .map(|model| (model.clone(), model))
             .collect();
+        provider.max_output_tokens.retain(|m, _| provider.model_map.contains_key(m));
+        provider.model_metadata.retain(|m, _| provider.model_map.contains_key(m));
+        for (model, cap) in &saved_capabilities {
+            let meta = provider
+                .model_metadata
+                .entry(model.clone())
+                .or_insert_with(|| json!({"id": model}));
+            if let Some(obj) = meta.as_object_mut() {
+                if let Some(cw) = cap.context_window {
+                    obj.insert("contextWindow".into(), json!(cw));
+                } else {
+                    obj.remove("contextWindow");
+                }
+                if let Some(mt) = cap.max_output_tokens {
+                    obj.insert("maxTokens".into(), json!(mt));
+                    provider.max_output_tokens.insert(model.clone(), mt);
+                } else {
+                    obj.remove("maxTokens");
+                    provider.max_output_tokens.remove(model);
+                }
+            }
+        }
         provider.api_type = draft.api_type;
         if let Some(prefix) = draft.prefix_system_messages {
             provider
@@ -753,7 +790,23 @@ fn save_settings(
                     a.iter()
                         .find(|v| v.get("id").and_then(Value::as_str) == Some(model))
                 });
-            models.push(previous.cloned().unwrap_or_else(|| json!({"id":model})));
+            let mut entry = previous.cloned().unwrap_or_else(|| json!({"id":model}));
+            if let (Some(obj), Some(cap)) = (
+                entry.as_object_mut(),
+                config.model_capabilities.get(id).and_then(|m| m.get(model)),
+            ) {
+                if let Some(cw) = cap.context_window {
+                    obj.insert("contextWindow".into(), json!(cw));
+                } else {
+                    obj.remove("contextWindow");
+                }
+                if let Some(mt) = cap.max_output_tokens {
+                    obj.insert("maxTokens".into(), json!(mt));
+                } else {
+                    obj.remove("maxTokens");
+                }
+            }
+            models.push(entry);
         }
         models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
         models.dedup_by(|a, b| a["id"] == b["id"]);
@@ -946,25 +999,40 @@ async fn discover_agent_models(
     let response = match tokio::time::timeout(std::time::Duration::from_secs(20), call.send()).await
     {
         Ok(Ok(response)) => response,
-        Ok(Err(_)) => {
+        Ok(Err(err)) => {
+            let reason = if err.is_timeout() {
+                "连接上游模型目录超时，请检查网络、代理或 http/https 协议"
+            } else if err.is_connect() {
+                "无法连接上游模型目录，请检查地址、端口、http/https 协议或 TLS 证书"
+            } else {
+                "请求上游模型目录失败（可能是 TLS 证书校验失败或网络异常）"
+            };
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error":"could not reach provider model catalog"})),
+                Json(json!({"error": reason})),
             )
                 .into_response();
         }
         Err(_) => {
             return (
                 StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({"error":"provider model catalog timed out"})),
+                Json(json!({"error":"连接上游模型目录超时（20s），请检查地址、代理或是否误填了 https/http"})),
             )
                 .into_response();
         }
     };
     if !response.status().is_success() {
+        let status = response.status();
+        let detail = if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            format!(
+                "上游返回 {status} 未授权：请确认 API 密钥有效；若刚修改过基础地址请先点「保存更改」再拉取"
+            )
+        } else {
+            format!("上游模型目录接口返回 {status}")
+        };
         return (
             StatusCode::BAD_GATEWAY,
-            Json(json!({"error":format!("provider model catalog returned {}", response.status())})),
+            Json(json!({"error": detail})),
         )
             .into_response();
     }
@@ -973,7 +1041,7 @@ async fn discover_agent_models(
         Err(_) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(json!({"error":"provider returned an invalid model catalog"})),
+                Json(json!({"error":"上游返回的不是合法的 JSON 模型目录"})),
             )
                 .into_response();
         }

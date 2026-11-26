@@ -155,6 +155,7 @@ pub(super) struct ExecOutput {
     pub(super) stderr: String,
     pub(super) stdout_truncated: bool,
     pub(super) stderr_truncated: bool,
+    pub(super) idle_timed_out: bool,
 }
 
 fn posix_quote(value: &str) -> String {
@@ -194,6 +195,7 @@ pub(super) async fn exec(
     command: &str,
     cwd: Option<&str>,
     timeout: Duration,
+    idle_timeout: Option<Duration>,
     mut on_chunk: Option<&mut ChunkCallback<'_>>,
 ) -> Result<ExecOutput> {
     const OUTPUT_LIMIT: usize = 128 * 1024;
@@ -214,19 +216,52 @@ pub(super) async fn exec(
         let mut stdout_truncated = false;
         let mut stderr_truncated = false;
         let mut exit_code = None;
-        while let Some(msg) = channel.wait().await {
+        let mut idle_timed_out = false;
+        let idle_sleep = tokio::time::sleep(idle_timeout.unwrap_or(Duration::from_secs(86_400)));
+        tokio::pin!(idle_sleep);
+        loop {
+            let maybe_msg = if idle_timeout.is_some() {
+                tokio::select! {
+                    msg = channel.wait() => msg,
+                    () = &mut idle_sleep => {
+                        idle_timed_out = true;
+                        let _ = channel.eof().await;
+                        let _ = channel.close().await;
+                        break;
+                    }
+                }
+            } else {
+                channel.wait().await
+            };
+            let Some(msg) = maybe_msg else {
+                break;
+            };
             match msg {
                 russh::ChannelMsg::Data { data } => {
-                    if let Some(callback) = on_chunk.as_deref_mut() {
-                        callback(false, &data);
+                    if !data.is_empty() {
+                        if let Some(idle_dur) = idle_timeout {
+                            idle_sleep
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + idle_dur);
+                        }
+                        if let Some(callback) = on_chunk.as_deref_mut() {
+                            callback(false, &data);
+                        }
+                        append_bounded(&mut stdout, &data, OUTPUT_LIMIT, &mut stdout_truncated);
                     }
-                    append_bounded(&mut stdout, &data, OUTPUT_LIMIT, &mut stdout_truncated);
                 }
                 russh::ChannelMsg::ExtendedData { data, ext } if ext == 1 => {
-                    if let Some(callback) = on_chunk.as_deref_mut() {
-                        callback(true, &data);
+                    if !data.is_empty() {
+                        if let Some(idle_dur) = idle_timeout {
+                            idle_sleep
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + idle_dur);
+                        }
+                        if let Some(callback) = on_chunk.as_deref_mut() {
+                            callback(true, &data);
+                        }
+                        append_bounded(&mut stderr, &data, OUTPUT_LIMIT, &mut stderr_truncated);
                     }
-                    append_bounded(&mut stderr, &data, OUTPUT_LIMIT, &mut stderr_truncated);
                 }
                 russh::ChannelMsg::ExitStatus { exit_status } => {
                     exit_code = Some(exit_status);
@@ -241,6 +276,7 @@ pub(super) async fn exec(
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             stdout_truncated,
             stderr_truncated,
+            idle_timed_out,
         })
     })
     .await
@@ -280,4 +316,157 @@ async fn authenticate_agent(session: &mut Connection, user: &str) -> Result<bool
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh::{
+        Channel, ChannelId,
+        keys::{Algorithm, PrivateKey},
+        server::{self, Auth, Msg, Session},
+    };
+    use tokio::net::TcpListener;
+
+    struct IdleMockServer;
+
+    impl server::Handler for IdleMockServer {
+        type Error = anyhow::Error;
+
+        async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth> {
+            Ok(if user == "tester" && password == "pw" {
+                Auth::Accept
+            } else {
+                Auth::Reject {
+                    proceed_with_methods: None,
+                    partial_success: false,
+                }
+            })
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _channel: Channel<Msg>,
+            _session: &mut Session,
+        ) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn exec_request(
+            &mut self,
+            id: ChannelId,
+            data: &[u8],
+            session: &mut Session,
+        ) -> Result<()> {
+            session.channel_success(id)?;
+            let cmd = String::from_utf8_lossy(data);
+            let handle = session.handle();
+            if cmd.trim() == "echo start; sleep 10" {
+                session.data(id, b"start\n".to_vec())?;
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    let _ = handle.exit_status_request(id, 0).await;
+                    let _ = handle.eof(id).await;
+                    let _ = handle.close(id).await;
+                });
+            } else {
+                tokio::spawn(async move {
+                    for i in 1..=3 {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        let _ = handle.data(id, format!("tick-{i}\n").into_bytes()).await;
+                    }
+                    let _ = handle.exit_status_request(id, 0).await;
+                    let _ = handle.eof(id).await;
+                    let _ = handle.close(id).await;
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_idle_timeout_aborts_silent_command_and_resets_on_output() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let config = Arc::new(server::Config {
+            keys: vec![PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)?],
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            ..Default::default()
+        });
+        let server_task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let cfg = config.clone();
+                tokio::spawn(async move {
+                    if let Ok(session) = server::run_stream(cfg, stream, IdleMockServer).await {
+                        let _ = session.await;
+                    }
+                });
+            }
+        });
+
+        let dir = tempfile::tempdir()?;
+        let server_id = {
+            let store = Store::open(dir.path())?;
+            store.create(super::super::store::NewServer {
+                name: "idle-unit".into(),
+                host: "127.0.0.1".into(),
+                port: Some(port),
+                username: "tester".into(),
+                auth_type: AuthType::Password,
+                key_path: None,
+                env_tier: super::super::store::EnvTier::Dev,
+                require_approval: false,
+                default_dir: None,
+                tags: vec![],
+                notes: None,
+            })?
+        };
+        let handler = VerifyKey {
+            directory: dir.path().to_path_buf(),
+            id: server_id,
+            observed: Arc::default(),
+            failure: Arc::default(),
+        };
+        let mut conn = client::connect(
+            Arc::new(client::Config::default()),
+            ("127.0.0.1", port),
+            handler,
+        )
+        .await?;
+        assert!(conn.authenticate_password("tester", "pw").await?.success());
+
+        // 1. Silent command after initial output triggers idle timeout around 1s.
+        let started = std::time::Instant::now();
+        let out = exec(
+            &conn,
+            "echo start; sleep 10",
+            None,
+            Duration::from_secs(15),
+            Some(Duration::from_secs(1)),
+            None,
+        )
+        .await?;
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(out.idle_timed_out);
+        assert_eq!(out.exit_code, None);
+        assert_eq!(out.stdout, "start\n");
+
+        // 2. Periodic output keeps resetting the idle timer and completes normally.
+        let ok = exec(
+            &conn,
+            "tick",
+            None,
+            Duration::from_secs(10),
+            Some(Duration::from_millis(600)),
+            None,
+        )
+        .await?;
+        assert!(!ok.idle_timed_out);
+        assert_eq!(ok.exit_code, Some(0));
+        assert_eq!(ok.stdout, "tick-1\ntick-2\ntick-3\n");
+
+        server_task.abort();
+        Ok(())
+    }
 }

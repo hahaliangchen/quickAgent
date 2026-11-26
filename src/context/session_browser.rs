@@ -84,7 +84,8 @@ pub fn decorate(conn: &Connection, root: &FsPath, mut task: Value) -> Result<Val
     task["workspace"] = if chat {
         Value::Null
     } else {
-        json!(workspace.unwrap_or_else(|| root.display().to_string()))
+        let raw = workspace.unwrap_or_else(|| root.display().to_string());
+        json!(crate::tools::file_edit::display_path(FsPath::new(&raw)))
     };
     task["plugin_id"] = json!(plugin);
     task["awaiting_approval"] = json!(awaiting);
@@ -260,7 +261,9 @@ pub async fn projects(State(state): State<AgentServiceState>) -> Response {
         let mut stmt = conn.prepare("SELECT path,title FROM agent_projects ORDER BY rowid")?;
         let projects = stmt
             .query_map([], |r| {
-                Ok(json!({"path":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?}))
+                let raw = r.get::<_, String>(0)?;
+                let clean = crate::tools::file_edit::display_path(FsPath::new(&raw));
+                Ok(json!({"path":clean,"title":r.get::<_,String>(1)?}))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(json!({"projects":projects}))
@@ -276,8 +279,9 @@ pub async fn add_project(
     Json(input): Json<ProjectInput>,
 ) -> Response {
     response((|| {
-        let path = std::fs::canonicalize(input.path.trim()).context("项目目录不存在")?;
-        ensure!(path.is_dir(), "请选择项目目录");
+        let canonical = std::fs::canonicalize(input.path.trim()).context("项目目录不存在")?;
+        ensure!(canonical.is_dir(), "请选择项目目录");
+        let path = crate::tools::file_edit::strip_verbatim_prefix(&canonical);
         let title = input
             .title
             .filter(|s| !s.trim().is_empty())
@@ -308,10 +312,11 @@ pub async fn rename_project(
         let title = input.title.context("请输入项目名称")?;
         ensure!(!title.trim().is_empty(), "请输入项目名称");
         let conn = agent_service::open_db(state.workspace.root())?;
+        let legacy = format!(r"\\?\{}", input.path);
         ensure!(
             conn.execute(
-                "UPDATE agent_projects SET title=?2 WHERE path=?1",
-                params![input.path, title.trim()]
+                "UPDATE agent_projects SET title=?2 WHERE path=?1 OR path=?3",
+                params![input.path, title.trim(), legacy]
             )? > 0,
             "项目不存在"
         );
@@ -324,7 +329,8 @@ pub async fn remove_project(
 ) -> Response {
     response((|| {
         let conn = agent_service::open_db(state.workspace.root())?;
-        conn.execute("DELETE FROM agent_projects WHERE path=?1", [input.path])?;
+        let legacy = format!(r"\\?\{}", input.path);
+        conn.execute("DELETE FROM agent_projects WHERE path=?1 OR path=?2", params![input.path, legacy])?;
         Ok(json!({"ok":true}))
     })())
 }

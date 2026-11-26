@@ -1,8 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import clsx from 'clsx'
 import type { AgentEvent } from '../api.ts'
-import css from './NoteProposal.module.css'
+import css from './ApprovalCards.module.css'
 
 type Decision = 'once' | 'session' | 'project' | 'deny'
+type AllowScope = 'once' | 'session' | 'project'
 
 interface PendingApproval {
   readonly callId: string
@@ -39,6 +41,12 @@ const TOOL_LABELS: Record<string, string> = {
   go_index_status: '读取工作区外的索引状态', python_index_status: '读取工作区外的索引状态',
   read_file: '读取工作区外的文件', read_file_lines: '读取工作区外的文件', list_dir: '查看工作区外的目录', search_text: '在工作区外搜索',
   read_rust_symbol: '读取工作区外的代码', read_ts_symbol: '读取工作区外的代码', read_go_symbol: '读取工作区外的代码', read_python_symbol: '读取工作区外的代码',
+}
+
+const SCOPE_META: Readonly<Record<AllowScope, { label: string; desc: string; button: string }>> = {
+  once: { label: '仅允许这一次', desc: '仅放行当前这一项操作', button: '允许这一次' },
+  session: { label: '本会话都允许', desc: '当前对话同类操作不再询问', button: '本会话允许' },
+  project: { label: '该项目都允许', desc: '记住此项目的该类权限', button: '该项目允许' },
 }
 
 function argumentRecord(raw: unknown): Record<string, unknown> | undefined {
@@ -96,10 +104,34 @@ export function pendingApprovals(events: readonly AgentEvent[]): PendingApproval
 export function ApprovalCards({ taskId, events, className }: { taskId: string; events: readonly AgentEvent[]; className?: string | undefined }) {
   const pending = useMemo(() => pendingApprovals(events), [events])
   const [sent, setSent] = useState<Record<string, Decision>>({})
+  const [scopes, setScopes] = useState<Record<string, AllowScope>>({})
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!openMenuId) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        setOpenMenuId(null)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenMenuId(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [openMenuId])
+
   if (pending.length === 0) return null
+
   const decide = (callId: string, decision: Decision) => {
     setError('')
+    setOpenMenuId(null)
     setSent(current => ({ ...current, [callId]: decision }))
     fetch(`/agent/tasks/${encodeURIComponent(taskId)}/approvals`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ call_id: callId, decision }),
@@ -110,24 +142,138 @@ export function ApprovalCards({ taskId, events, className }: { taskId: string; e
       setError(cause instanceof Error ? cause.message : String(cause))
     })
   }
-  return <div className={className}>{pending.map(item => {
-    const chosen = sent[item.callId]
-    return <div key={item.callId} className={css.card} role="alertdialog" aria-label={`是否允许${TOOL_LABELS[item.tool] ?? item.tool}`}>
-      <div className={css.title}>要{TOOL_LABELS[item.tool] ?? `调用 ${item.tool}`}吗？</div>
-      {item.unsandboxed && <p className={css.warning}>命令以当前系统用户的权限运行，可访问该用户有权限使用的文件和系统资源。</p>}
-      {item.outsideWrite && <p className={css.warning}>跨项目目录审批：允许后，此工具可在下列工作区外的目标目录写入或执行。</p>}
-      {item.reviewReason && <p className={css.hint}>AI 审查拿不准：{item.reviewReason}</p>}
-      {item.outside.length > 0 && <p className={css.hint}>这些路径在当前工作区之外：{item.outside.join('、')}</p>}
-      {item.shell && <p className={css.hint}>Shell：{item.shell}</p>}
-      {item.workdir && <p className={css.hint}>工作目录：{item.workdir}</p>}
-      <code className={css.command}>{item.summary}</code>
-      {error && <p className={css.error} role="alert">{error}</p>}
-      <div className={css.actions}>
-        <button type="button" className={css.secondary} disabled={!!chosen} onClick={() => decide(item.callId, 'deny')}>拒绝</button>
-        {!item.onceOnly && item.project && <button type="button" className={css.secondary} disabled={!!chosen} onClick={() => decide(item.callId, 'project')}>这个项目以后都允许</button>}
-        {!item.onceOnly && <button type="button" className={css.secondary} disabled={!!chosen} onClick={() => decide(item.callId, 'session')}>本会话都允许</button>}
-        <button type="button" className={css.primary} disabled={!!chosen} onClick={() => decide(item.callId, 'once')}>{chosen ? '已提交…' : '允许这一次'}</button>
-      </div>
+
+  return (
+    <div ref={rootRef} className={clsx(css.stack, className)}>
+      {pending.map(item => {
+        const chosen = sent[item.callId]
+        const highRisk = item.unsandboxed || item.outsideWrite || item.outside.length > 0
+        const availableScopes: AllowScope[] = item.onceOnly
+          ? ['once']
+          : item.project ? ['once', 'session', 'project'] : ['once', 'session']
+        const selectedScope: AllowScope = availableScopes.includes(scopes[item.callId] ?? 'once')
+          ? (scopes[item.callId] ?? 'once')
+          : 'once'
+        const menuOpen = openMenuId === item.callId
+        const metaParts = [
+          item.shell && item.shell,
+          item.workdir && item.workdir,
+          item.onceOnly && '仅支持单次授权',
+        ].filter(Boolean) as string[]
+
+        return (
+          <div
+            key={item.callId}
+            className={css.card}
+            role="alertdialog"
+            aria-label={`是否允许${TOOL_LABELS[item.tool] ?? item.tool}`}
+          >
+            <div className={css.header}>
+              <span className={clsx(css.ringIcon, highRisk ? css.ringWarn : css.ringBrand)} aria-hidden="true">
+                {highRisk ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                    <line x1="12" y1="8" x2="12" y2="12" />
+                    <line x1="12" y1="16" x2="12.01" y2="16" />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <polyline points="4 17 10 11 4 5" />
+                    <line x1="12" y1="19" x2="20" y2="19" />
+                  </svg>
+                )}
+              </span>
+              <div className={css.headCopy}>
+                <div className={css.title}>{TOOL_LABELS[item.tool] ?? `调用 ${item.tool}`}</div>
+                {metaParts.length > 0 && (
+                  <div className={css.meta}>
+                    {metaParts.map((part, idx) => (
+                      <span key={part} className={css.metaMono}>
+                        {idx > 0 && <span className={css.metaSep}>· </span>}
+                        {part}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {item.unsandboxed && (
+              <p className={css.calloutWarn}>命令将以当前系统用户权限运行，可访问该用户有权限使用的文件与系统资源。</p>
+            )}
+            {item.outsideWrite && (
+              <p className={css.calloutWarn}>跨项目目录审批：允许后，此工具可在下列工作区外的目标目录写入或执行。</p>
+            )}
+            {item.reviewReason && (
+              <p className={css.calloutWarn}>AI 审查转交给你：{item.reviewReason}</p>
+            )}
+            {item.outside.length > 0 && (
+              <p className={css.hint}>工作区外路径：{item.outside.join('、')}</p>
+            )}
+
+            <code className={css.command}>{item.summary}</code>
+            {error && <p className={css.error} role="alert">{error}</p>}
+
+            <div className={clsx(css.footer, availableScopes.length === 1 && css.footerRightOnly)}>
+              {availableScopes.length > 1 && (
+                <div className={css.scopeWrap}>
+                  <button
+                    type="button"
+                    className={clsx(css.scopeTrigger, menuOpen && css.scopeTriggerOpen)}
+                    disabled={!!chosen}
+                    aria-haspopup="listbox"
+                    aria-expanded={menuOpen}
+                    onClick={() => setOpenMenuId(curr => curr === item.callId ? null : item.callId)}
+                  >
+                    <svg className={css.scopeShield} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                    </svg>
+                    <span>{SCOPE_META[selectedScope].label}</span>
+                    <svg className={css.scopeChev} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                  {menuOpen && (
+                    <div className={css.scopeMenu} role="listbox" aria-label="授权范围">
+                      {availableScopes.map(scope => {
+                        const active = scope === selectedScope
+                        return (
+                          <button
+                            key={scope}
+                            type="button"
+                            role="option"
+                            aria-selected={active}
+                            className={clsx(css.scopeOption, active && css.scopeOptionActive)}
+                            onClick={() => {
+                              setScopes(prev => ({ ...prev, [item.callId]: scope }))
+                              setOpenMenuId(null)
+                            }}
+                          >
+                            <span>
+                              <span className={css.scopeOptTitle}>{SCOPE_META[scope].label}</span>
+                              <span className={css.scopeOptDesc}>{SCOPE_META[scope].desc}</span>
+                            </span>
+                            <svg className={css.scopeCheck} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true">
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className={css.actions}>
+                <button type="button" className={css.secondary} disabled={!!chosen} onClick={() => decide(item.callId, 'deny')}>拒绝</button>
+                <button type="button" className={css.primary} disabled={!!chosen} onClick={() => decide(item.callId, selectedScope)}>
+                  {chosen ? '已提交…' : SCOPE_META[selectedScope].button}
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })}
     </div>
-  })}</div>
+  )
 }

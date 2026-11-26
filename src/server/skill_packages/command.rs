@@ -52,7 +52,7 @@ impl CommandTool {
         );
         if self.program.contains('/') || self.program.contains('\\') {
             ensure!(
-                crate::tools::file_edit::workspace_path(root, &self.program)?.is_file(),
+                super::resolve_package_executable(root, &self.program)?.is_file(),
                 "package executable missing"
             );
         }
@@ -76,11 +76,7 @@ pub async fn execute(
     cancel: &CancellationToken,
 ) -> Result<Value> {
     ensure!(args.is_object(), "tool arguments must be an object");
-    let program = if tool.program.contains('/') || tool.program.contains('\\') {
-        crate::tools::file_edit::workspace_path(root, &tool.program)?
-    } else {
-        tool.program.clone().into()
-    };
+    let program = super::resolve_package_executable(root, &tool.program)?;
     use crate::tools::process_sandbox::{self, ExecutionBoundary};
     let mut command = process_sandbox::command(program, root, root, ExecutionBoundary::Host)?;
     command
@@ -90,14 +86,21 @@ pub async fn execute(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    if std::env::var_os("HOME").is_none_or(|v| v.is_empty())
+        && let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty())
+    {
+        command.env("HOME", profile);
+    }
     crate::tools::project_process::prepare_process_group(&mut command);
     let mut child = command.spawn().context("starting package tool")?;
     let group = crate::tools::project_process::ProcessGroup::attach(&child)?;
     let mut stdin = child.stdin.take().context("tool stdin missing")?;
     let stdout = child.stdout.take().context("tool stdout missing")?;
     let stderr = child.stderr.take().context("tool stderr missing")?;
+    let clean_workspace = crate::tools::file_edit::display_path(workspace);
     let request = serde_json::to_vec(
-        &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool.name,"arguments":args,"workspace_root":workspace}}),
+        &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool.name,"arguments":args,"workspace_root":clean_workspace}}),
     )?;
     ensure!(request.len() <= 1048576, "package tool input exceeds 1 MiB");
     let io = async {

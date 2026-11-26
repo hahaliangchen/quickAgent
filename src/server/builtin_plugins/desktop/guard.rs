@@ -77,6 +77,14 @@ pub(super) const SENSITIVE_WINDOWS: &[&str] = &[
     "seahorse",
     "gcrprompter",
     "xdgdesktopportalkde",
+    // Windows UAC / credential prompt / lock screen protections
+    "consentexe",
+    "useraccountcontrol",
+    "credentialuibroker",
+    "windowssecurity",
+    "lockapp",
+    "logonui",
+    "smartscreen",
 ];
 
 pub(super) fn sensitive(title: &str, class: &str) -> bool {
@@ -297,6 +305,15 @@ pub(super) fn open_target(target: &str) -> Result<OpenTarget> {
         "org.kde.kate.desktop",
         "firefox.desktop",
         "chromium.desktop",
+        // Windows allowlisted desktop app IDs
+        "calc",
+        "notepad",
+        "mspaint",
+        "msedge",
+        "chrome",
+        "firefox",
+        "explorer",
+        "wt",
     ];
     if let Some(app) = APPS.iter().find(|app| **app == target) {
         return Ok(OpenTarget::App(app));

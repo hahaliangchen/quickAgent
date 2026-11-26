@@ -715,11 +715,225 @@ fn node_executable() -> Result<PathBuf> {
         .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .unwrap_or_default();
     let executable = if cfg!(windows) { "node.exe" } else { "node" };
-    paths
+    if let Some(found) = paths
         .iter()
         .map(|dir| dir.join(executable))
         .find(|path| path.is_file())
-        .context("Node.js is not installed or not visible in the host PATH")
+    {
+        return Ok(found);
+    }
+    if let Some(found) = discover_managed_node_executable() {
+        return Ok(found);
+    }
+    anyhow::bail!(
+        "Node.js is not installed or not visible in PATH, fnm, nvm, volta, or mise; install Node.js or activate a version manager (e.g. `fnm use default` / `nvm use`)"
+    )
+}
+
+fn discover_managed_node_executable() -> Option<PathBuf> {
+    let env_var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    discover_managed_node_in(&env_var)
+}
+
+fn parse_semver_dir_name(name: &str) -> Option<(u64, u64, u64)> {
+    let trimmed = name.trim().strip_prefix('v').unwrap_or(name.trim());
+    let mut parts = trimmed.split('.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let patch_raw = parts.next().unwrap_or("0");
+    let patch_digits: String = patch_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let patch = patch_digits.parse::<u64>().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+fn highest_version_node_in(versions_dir: &Path, subpaths: &[&str]) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(versions_dir).ok()?;
+    let mut candidates: Vec<((u64, u64, u64), PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        let Some(ver) = parse_semver_dir_name(name_str) else { continue };
+        let root = entry.path();
+        for sub in subpaths {
+            let exe = root.join(sub);
+            if exe.is_file() {
+                candidates.push((ver, exe));
+                break;
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.into_iter().next().map(|(_, path)| path)
+}
+
+fn discover_managed_node_in(env_var: &dyn Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+    let exe_name = if cfg!(windows) { "node.exe" } else { "node" };
+    let home = env_var("HOME").or_else(|| env_var("USERPROFILE"));
+
+    // 1. fnm (FNM_DIR, %APPDATA%\fnm, %LOCALAPPDATA%\fnm, ~/.local/share/fnm, ~/.fnm)
+    let mut fnm_roots = Vec::new();
+    if let Some(dir) = env_var("FNM_DIR") {
+        fnm_roots.push(dir);
+    }
+    if cfg!(windows) {
+        if let Some(appdata) = env_var("APPDATA") {
+            fnm_roots.push(appdata.join("fnm"));
+        }
+        if let Some(local) = env_var("LOCALAPPDATA") {
+            fnm_roots.push(local.join("fnm"));
+        }
+    } else {
+        if let Some(xdg) = env_var("XDG_DATA_HOME") {
+            fnm_roots.push(xdg.join("fnm"));
+        }
+        if let Some(h) = &home {
+            fnm_roots.push(h.join(".local/share/fnm"));
+            fnm_roots.push(h.join(".fnm"));
+        }
+    }
+    let fnm_alias_subpaths: &[&str] = if cfg!(windows) {
+        &["node.exe", "installation/node.exe"]
+    } else {
+        &["bin/node", "installation/bin/node", "node"]
+    };
+    let fnm_ver_subpaths: &[&str] = if cfg!(windows) {
+        &["installation/node.exe", "node.exe"]
+    } else {
+        &["installation/bin/node", "bin/node"]
+    };
+    for root in fnm_roots {
+        for alias in ["default", "lts-latest"] {
+            let alias_dir = root.join("aliases").join(alias);
+            for sub in fnm_alias_subpaths {
+                let candidate = alias_dir.join(sub);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        if let Some(found) = highest_version_node_in(&root.join("node-versions"), fnm_ver_subpaths) {
+            return Some(found);
+        }
+    }
+
+    // 2. nvm / nvm-windows
+    if cfg!(windows) {
+        if let Some(symlink) = env_var("NVM_SYMLINK") {
+            let candidate = symlink.join("node.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        let mut nvm_roots = Vec::new();
+        if let Some(dir) = env_var("NVM_HOME") {
+            nvm_roots.push(dir);
+        }
+        if let Some(appdata) = env_var("APPDATA") {
+            nvm_roots.push(appdata.join("nvm"));
+        }
+        nvm_roots.push(PathBuf::from(r"C:\nvm4w\nodejs"));
+        for root in nvm_roots {
+            let direct = root.join("node.exe");
+            if direct.is_file() {
+                return Some(direct);
+            }
+            if let Some(found) = highest_version_node_in(&root, &["node.exe"]) {
+                return Some(found);
+            }
+        }
+    } else {
+        let mut nvm_roots = Vec::new();
+        if let Some(dir) = env_var("NVM_DIR") {
+            nvm_roots.push(dir);
+        }
+        if let Some(h) = &home {
+            nvm_roots.push(h.join(".nvm"));
+        }
+        for root in nvm_roots {
+            if let Ok(default_alias) = std::fs::read_to_string(root.join("alias/default")) {
+                let target = default_alias.trim();
+                if !target.is_empty() {
+                    let with_v = if target.starts_with('v') {
+                        target.to_owned()
+                    } else {
+                        format!("v{target}")
+                    };
+                    let direct = root.join("versions/node").join(&with_v).join("bin/node");
+                    if direct.is_file() {
+                        return Some(direct);
+                    }
+                    // Prefix match like "22" or "v22"
+                    if let Ok(entries) = std::fs::read_dir(root.join("versions/node")) {
+                        let mut matches: Vec<((u64, u64, u64), PathBuf)> = entries
+                            .flatten()
+                            .filter_map(|e| {
+                                let name = e.file_name().into_string().ok()?;
+                                if !(name == target || name == with_v || name.starts_with(&format!("{with_v}."))) {
+                                    return None;
+                                }
+                                let ver = parse_semver_dir_name(&name)?;
+                                let exe = e.path().join("bin/node");
+                                exe.is_file().then_some((ver, exe))
+                            })
+                            .collect();
+                        matches.sort_by(|a, b| b.0.cmp(&a.0));
+                        if let Some((_, found)) = matches.into_iter().next() {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+            if let Some(found) = highest_version_node_in(&root.join("versions/node"), &["bin/node"]) {
+                return Some(found);
+            }
+        }
+    }
+
+    // 3. Volta / mise / asdf / Scoop / standard system install paths
+    let mut extra_dirs = Vec::new();
+    if let Some(volta) = env_var("VOLTA_HOME") {
+        extra_dirs.push(volta.join("bin"));
+    }
+    if cfg!(windows) {
+        if let Some(local) = env_var("LOCALAPPDATA") {
+            extra_dirs.push(local.join("Volta/bin"));
+            extra_dirs.push(local.join("mise/shims"));
+        }
+        if let Some(h) = &home {
+            extra_dirs.push(h.join(".volta/bin"));
+            extra_dirs.push(h.join("scoop/apps/nodejs/current"));
+            extra_dirs.push(h.join("scoop/apps/nodejs-lts/current"));
+        }
+        extra_dirs.push(PathBuf::from(r"C:\Program Files\nodejs"));
+        extra_dirs.push(PathBuf::from(r"C:\Program Files (x86)\nodejs"));
+    } else {
+        if let Some(h) = &home {
+            extra_dirs.push(h.join(".volta/bin"));
+            extra_dirs.push(h.join(".local/share/mise/shims"));
+            extra_dirs.push(h.join(".asdf/shims"));
+        }
+        extra_dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        extra_dirs.push(PathBuf::from("/usr/local/bin"));
+    }
+    for dir in extra_dirs {
+        let candidate = dir.join(exe_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if let Some(local) = env_var("LOCALAPPDATA") {
+        let subpaths: &[&str] = if cfg!(windows) { &["node.exe"] } else { &["bin/node"] };
+        if let Some(found) = highest_version_node_in(&local.join("mise/installs/node"), subpaths) {
+            return Some(found);
+        }
+    }
+    if let Some(h) = &home {
+        let subpaths: &[&str] = if cfg!(windows) { &["node.exe"] } else { &["bin/node"] };
+        if let Some(found) = highest_version_node_in(&h.join(".local/share/mise/installs/node"), subpaths) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn node_npm() -> Result<(PathBuf, PathBuf)> {

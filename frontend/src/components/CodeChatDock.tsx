@@ -53,7 +53,11 @@ function savedModel(): ModelPick | undefined {
   } catch { return undefined }
 }
 const mention = (path: string) => path.includes(' ') ? `@"${path}"` : `@${path}`
-const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1) || path
+const baseName = (path: string) => {
+  const clean = path.replace(/^\\\\\?\\/, '').replace(/[\\/]+$/, '')
+  const parts = clean.split(/[\\/]/).filter(Boolean)
+  return parts.at(-1) || clean || path
+}
 
 function parseJsonRecord(raw: unknown): Record<string, unknown> | undefined {
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
@@ -116,6 +120,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
   const [draft, setDraft] = useState('')
   const [error, setError] = useState('')
   const [sending, setSending] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const [dropping, setDropping] = useState(false)
   // The current file is offered again whenever it changes.
   const [skipped, setSkipped] = useState<string>()
@@ -263,6 +268,23 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
   }, [diagnostic])
 
   const running = task?.status === 'running' || task?.status === 'cancelling'
+  const cancelling = stopping || task?.status === 'cancelling'
+  useEffect(() => {
+    if (!running) setStopping(false)
+  }, [running, taskId])
+  const stopCurrentTask = useCallback(() => {
+    if (!taskId || stopping) return
+    setStopping(true)
+    setError('')
+    void api.cancel(taskId).then(
+      () => { session.reload() },
+      (reason: unknown) => {
+        setStopping(false)
+        setError(reason instanceof Error ? reason.message : String(reason))
+        session.reload()
+      },
+    )
+  }, [api, session, stopping, taskId])
   const syncTaskId = taskId
   const dbSyncRef = useRef<{ taskId: string | undefined; seq: number; seeded: boolean }>({ taskId: undefined, seq: 0, seeded: false })
   useEffect(() => {
@@ -456,7 +478,11 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
 
   if (!open) return <button type="button" className={clsx(css.launcher, embeddedLauncher && css.embeddedLauncher, dropping && css.dropping)} title="代码问答：问 AI 当前文件"
     onClick={() => setOpen(true)} onDragEnter={event => { if (accepts(event)) setOpen(true) }} {...dropProps}>
-    <Icon name="chat" size={20} />
+    {/* White on the accent disc, and drawn solid: an outlined glyph at this size
+        antialiases away and reads as grey instead of white. */}
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+      <path d="M7.2 4h9.6A4.2 4.2 0 0 1 21 8.2v5.6a4.2 4.2 0 0 1-4.2 4.2h-6.1l-4.2 3.4V17.9A4.2 4.2 0 0 1 3 13.8V8.2A4.2 4.2 0 0 1 7.2 4z" />
+    </svg>
   </button>
 
   // Drag the left edge to resize; the width is remembered on this device.
@@ -701,7 +727,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
           <span className={css.grow} />
           {running && taskId && <button type="button" className={css.send} title="插话" aria-label="插话" disabled={!draft.trim() || sending || attachments.items.length > 0} onClick={() => { void send() }}><Icon name="send" size={16} /></button>}
           {running
-            ? <button type="button" className={css.stop} onClick={() => { if (taskId) void api.cancel(taskId).then(session.reload, () => {}) }}><Icon name="stop" size={14} />停止</button>
+            ? <button type="button" className={css.stop} title={cancelling ? '正在停止…' : '停止'} aria-label={cancelling ? '正在停止…' : '停止'} disabled={cancelling} onClick={stopCurrentTask}><Icon name="stop" size={14} /></button>
             : <button type="button" className={css.send} title="发送" aria-label="发送" disabled={!draft.trim() || sending || (usingLinked && !task)} onClick={() => { void send() }}><Icon name="send" size={16} /></button>}
         </div>
       </div>

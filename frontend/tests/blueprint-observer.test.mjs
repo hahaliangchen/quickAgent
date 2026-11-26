@@ -1,11 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  OBSERVER_STALL_THRESHOLD_MS,
   OBSERVER_TITLE_PREFIX,
   buildObserverInspectPrompt,
   buildObserverUserChatPrompt,
   detectObserverTrigger,
   extractLatestAssistantMessage,
+  findStalledInFlightTool,
   getObserverSessionId,
   isObserverOwnTask,
   loadObserverPrefs,
@@ -120,6 +122,11 @@ test('buildObserverInspectPrompt and buildObserverUserChatPrompt include SQLite 
     trigger: { kind: 'manual', label: '用户手动触发巡检', latestSeq: 15 },
   })
   assert.match(prompt, /blueprint\.inspect_session/)
+  assert.match(prompt, /user_instructions/)
+  assert.match(prompt, /latest_user_instruction/)
+  assert.match(prompt, /in_flight_tools/)
+  assert.match(prompt, /tail_lines/)
+  assert.match(prompt, /最新授权优先/)
   assert.match(prompt, /recent_tail/)
   assert.match(prompt, /task_abc123/)
   assert.match(prompt, /stop_and_continue/)
@@ -133,7 +140,69 @@ test('buildObserverInspectPrompt and buildObserverUserChatPrompt include SQLite 
   })
   assert.match(chatPrompt, /task_abc123/)
   assert.match(chatPrompt, /blueprint\.inspect_session/)
+  assert.match(chatPrompt, /user_instructions/)
+  assert.match(chatPrompt, /in_flight_tools/)
+  assert.match(chatPrompt, /最新授权优先/)
   assert.match(chatPrompt, /帮我确认要不要先停掉它/)
+
+  const followUpChatPrompt = buildObserverUserChatPrompt({
+    watchedTaskId: 'task_abc123',
+    watchedStatus: 'running',
+    userText: '再看一下终端尾巴',
+    isFirstMessage: false,
+  })
+  assert.match(followUpChatPrompt, /user_instructions/)
+  assert.match(followUpChatPrompt, /in_flight_tools/)
+})
+
+test('findStalledInFlightTool detects silent unclosed tool/call once threshold elapses and respects turn/end & single-shot dedupe', () => {
+  const t0 = 1_700_000_000_000
+
+  // Completed call is never considered stalled.
+  const completed = [
+    { seq: 1, time: t0, type: 'tool/call', data: { callId: 'c1', name: 'ssh__exec' } },
+    { seq: 2, time: t0 + 1000, type: 'tool/result', data: { message: { toolCallId: 'c1', isError: false } } },
+  ]
+  assert.equal(findStalledInFlightTool(completed, t0 + 500_000), null)
+
+  // Active in-flight call below default 180s threshold returns null.
+  const active = [
+    ...completed,
+    { seq: 3, time: t0 + 2_000, type: 'tool/call', data: { callId: 'c26', name: 'ssh__exec' } },
+  ]
+  assert.equal(findStalledInFlightTool(active, t0 + 2_000 + OBSERVER_STALL_THRESHOLD_MS - 1), null)
+
+  // Activity after tool/call resets the silence clock.
+  const withActivity = [
+    ...active,
+    { seq: 4, time: t0 + 100_000, type: 'shell/output', data: { callId: 'c26', text: 'still working\n' } },
+  ]
+  assert.equal(findStalledInFlightTool(withActivity, t0 + 250_000), null)
+
+  // Once >= thresholdMs (180s) has elapsed after the last activity, returns stalled metadata.
+  const stalled = findStalledInFlightTool(withActivity, t0 + 100_000 + OBSERVER_STALL_THRESHOLD_MS)
+  assert.ok(stalled)
+  assert.equal(stalled.callId, 'c26')
+  assert.equal(stalled.seq, 3)
+  assert.equal(stalled.toolName, 'ssh__exec')
+  assert.equal(stalled.idleSec, 180)
+
+  // Single-shot watchdog guard ensures the same callId never fires twice.
+  const fired = new Set()
+  const shouldFire = (candidate) => {
+    if (!candidate || fired.has(candidate.callId)) return false
+    fired.add(candidate.callId)
+    return true
+  }
+  assert.equal(shouldFire(stalled), true)
+  assert.equal(shouldFire(findStalledInFlightTool(withActivity, t0 + 100_000 + OBSERVER_STALL_THRESHOLD_MS + 60_000)), false)
+
+  // Unclosed tool/call from an ended turn is cleared by turn/end.
+  const afterTurnEnd = [
+    ...withActivity,
+    { seq: 5, time: t0 + 200_000, type: 'turn/end', data: { reason: { kind: 'cancelled' } } },
+  ]
+  assert.equal(findStalledInFlightTool(afterTurnEnd, t0 + 1_000_000), null)
 })
 
 test('prefs, session map, and anti-recursion check persist cleanly', () => {

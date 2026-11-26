@@ -189,6 +189,7 @@ fn profile_dir(home: &Path, root: &Path, name: &str) -> Result<std::path::PathBu
 }
 
 fn create_private_directory(path: &Path) -> Result<()> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {

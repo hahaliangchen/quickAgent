@@ -20,6 +20,8 @@ import {
   api,
   REASONING_LEVELS,
   type ModelCapabilities,
+  type ModelPresetSpec,
+  type ModelPresetsCatalog,
   type McpServerStatus,
   type ModelUseSettings,
   type PluginsSnapshot,
@@ -120,6 +122,42 @@ function protocolTag(apiType: ProviderApiType): string {
   }
 }
 
+function formatTokenQuota(tokens: number | null | undefined, fallback: number): string {
+  const value = typeof tokens === 'number' && tokens > 0 ? tokens : fallback
+  if (value >= 1_000_000) {
+    if (value % 1_048_576 === 0) return `${value / 1_048_576}M`
+    return `${Number((value / 1_000_000).toFixed(2))}M`
+  }
+  if (value >= 1024) {
+    if (value % 1024 === 0 && value % 1000 !== 0) return `${value / 1024}K`
+    return `${Number((value / 1000).toFixed(1))}K`
+  }
+  return String(value)
+}
+
+function lookupModelPreset(presets: ModelPresetsCatalog | null, rawModel: string): ModelPresetSpec | undefined {
+  if (presets === null) return undefined
+  let key = rawModel.trim().toLowerCase()
+  const slash = key.lastIndexOf('/')
+  if (slash >= 0) key = key.slice(slash + 1)
+  if (key.endsWith('-latest')) key = key.slice(0, -'-latest'.length)
+  key = key.replace(/-\d{4}-\d{2}-\d{2}$/, '')
+  return presets.models[key]
+}
+
+function capabilityFromPreset(preset: ModelPresetSpec | undefined): ModelCapabilities {
+  if (preset === undefined) {
+    return { reasoning_efforts: [], default_effort: null, fast_mode: false, context_window: null, max_output_tokens: null }
+  }
+  return {
+    reasoning_efforts: [...preset.reasoning_efforts],
+    default_effort: preset.default_effort,
+    fast_mode: preset.fast_mode,
+    context_window: preset.context_window,
+    max_output_tokens: preset.max_output_tokens,
+  }
+}
+
 export function SettingsModal({
   open,
   activeTab,
@@ -147,6 +185,7 @@ export function SettingsModal({
   const [statusMsg, setStatusMsg] = useState<{ text: string; error: boolean } | null>(null)
   const [discoveringId, setDiscoveringId] = useState<string | null>(null)
   const [discoveredModels, setDiscoveredModels] = useState<Record<string, string[]>>({})
+  const [discoverFeedback, setDiscoverFeedback] = useState<Record<string, { text: string; error: boolean }>>({})
   const [discoverFilter, setDiscoverFilter] = useState('')
   const [pluginsData, setPluginsData] = useState<PluginsSnapshot | null>(null)
   const [packages,setPackages]=useState<SkillPackage[]>([])
@@ -158,6 +197,7 @@ export function SettingsModal({
   const visibleMcpServers = mcpServers.filter(server => [server.name, server.id, server.library].some(value => value.toLowerCase().includes(pluginQuery.toLowerCase())))
   const [expandedPlugins, setExpandedPlugins] = useState<Record<string, boolean>>({})
   const [shellStatus, setShellStatus] = useState<ShellStatus | null>(null)
+  const [modelPresets, setModelPresets] = useState<ModelPresetsCatalog | null>(null)
   const [detectingShell, setDetectingShell] = useState(false)
   const opening = useRef(0)
   const windowsShell = shellStatus?.platform.os === 'windows'
@@ -208,6 +248,7 @@ export function SettingsModal({
     setProbingImage(null)
     setThemeModeState(getThemeMode())
     setStatusMsg(null)
+    setDiscoverFeedback({})
     setDraft(null)
     setBaseline(null)
     // Load once per opening. Disclosure changes must never replace unsaved edits.
@@ -215,6 +256,7 @@ export function SettingsModal({
       (data) => {
         if (cancelled) return
         setShellStatus(data.shell_environment ?? null)
+        setModelPresets(data.model_presets ?? null)
         const next = toDraft(data)
         setDraft(next)
         setBaseline(JSON.stringify(next))
@@ -264,7 +306,7 @@ export function SettingsModal({
   }
 
   const updateModelCapability = (provider: DraftProvider, model: string, patch: Partial<ModelCapabilities>) => {
-    const current = provider.model_capabilities[model] ?? { reasoning_efforts: [], default_effort: null, fast_mode: false }
+    const current = provider.model_capabilities[model] ?? capabilityFromPreset(lookupModelPreset(modelPresets, model))
     updateProvider(provider._draftId, {
       model_capabilities: {
         ...provider.model_capabilities,
@@ -317,6 +359,7 @@ export function SettingsModal({
       if (opening.current !== currentOpening) return
       const savedDraft = toDraft(saved)
       setShellStatus(saved.shell_environment ?? null)
+      setModelPresets(saved.model_presets ?? null)
       setDraft(savedDraft)
       setBaseline(JSON.stringify(savedDraft))
       setStatusMsg({ text: '设置已保存并立即对新任务生效。', error: false })
@@ -405,15 +448,31 @@ export function SettingsModal({
   const handleDiscover = async (provider: DraftProvider) => {
     setDiscoveringId(provider._draftId)
     setDiscoverFilter('')
+    setDiscoverFeedback(prev => {
+      const next = { ...prev }
+      delete next[provider._draftId]
+      return next
+    })
     try {
       const res = await api.discoverModels({
         id: provider.id,
         url: provider.url,
         ...(provider.api_key ? { api_key: provider.api_key } : {}),
       })
-      setDiscoveredModels(prev => ({ ...prev, [provider._draftId]: res.models ?? [] }))
+      const models = res.models ?? []
+      setDiscoveredModels(prev => ({ ...prev, [provider._draftId]: models }))
+      setDiscoverFeedback(prev => ({
+        ...prev,
+        [provider._draftId]: models.length > 0
+          ? { text: `已从端点发现 ${models.length} 个模型，勾选下方项即可加入目录。`, error: false }
+          : { text: '端点连接成功，但返回了 0 个模型，请检查接口路径或手动输入。', error: true },
+      }))
     } catch (err) {
-      setStatusMsg({ text: err instanceof Error ? err.message : String(err), error: true })
+      const text = err instanceof Error ? err.message : String(err)
+      setDiscoverFeedback(prev => ({
+        ...prev,
+        [provider._draftId]: { text: `拉取失败：${text}`, error: true },
+      }))
     } finally {
       setDiscoveringId(null)
     }
@@ -894,6 +953,15 @@ export function SettingsModal({
                                     {discoveringId === provider._draftId ? '正在查询…' : '从端点拉取'}
                                   </button>
                                 </div>
+                                {discoverFeedback[provider._draftId] && (
+                                  <p
+                                    role={discoverFeedback[provider._draftId]!.error ? 'alert' : 'status'}
+                                    className={discoverFeedback[provider._draftId]!.error ? modelsCss.error : modelsCss.savedNotice}
+                                    style={{ margin: 0 }}
+                                  >
+                                    {discoverFeedback[provider._draftId]!.text}
+                                  </p>
+                                )}
                                 <textarea
                                   className={appearanceCss.textarea}
                                   placeholder="deepseek-chat&#10;deepseek-reasoner"
@@ -931,16 +999,90 @@ export function SettingsModal({
                               )}
 
                               {parseModels(provider.models_text).map(model => {
-                                const capability = provider.model_capabilities[model] ?? { reasoning_efforts: [], default_effort: null, fast_mode: false }
+                                const preset = lookupModelPreset(modelPresets, model)
+                                const capability = provider.model_capabilities[model] ?? capabilityFromPreset(preset)
                                 return (
                                   <details key={model} className={appearanceCss.row} style={{ display: 'block', padding: 0 }}>
                                     <summary className={appearanceCss.modelSummary}>
                                       <span>{model}</span>
                                       <span className={appearanceCss.modelMeta}>
-                                        思考等级 {capability.reasoning_efforts.length ? capability.reasoning_efforts.join(', ') : '未声明'}
+                                        上下文 {formatTokenQuota(capability.context_window, 256_000)} · 输出 {formatTokenQuota(capability.max_output_tokens, 32_768)} · 思考等级 {capability.reasoning_efforts.length ? capability.reasoning_efforts.join(', ') : '未声明'}
                                       </span>
                                     </summary>
                                     <div className={appearanceCss.expand} style={{ margin: '0 8px 8px', background: 'var(--dsw-alias-bg-module-platform)' }}>
+                                      {preset !== undefined && (
+                                        <div className={appearanceCss.row}>
+                                          <div className={appearanceCss.rowText}>
+                                            <span className={appearanceCss.rowTitle}>内置官方规格</span>
+                                            <span className={appearanceCss.rowHint}>
+                                              上下文 {formatTokenQuota(preset.context_window, 256_000)} · 输出 {formatTokenQuota(preset.max_output_tokens, 32_768)} · 等级 {preset.reasoning_efforts.length ? preset.reasoning_efforts.join(', ') : '无'}
+                                            </span>
+                                          </div>
+                                          <button
+                                            type="button"
+                                            className={appearanceCss.link}
+                                            onClick={() => {
+                                              updateModelCapability(provider, model, {
+                                                context_window: preset.context_window,
+                                                max_output_tokens: preset.max_output_tokens,
+                                                reasoning_efforts: [...preset.reasoning_efforts],
+                                                default_effort: preset.default_effort,
+                                                fast_mode: preset.fast_mode,
+                                              })
+                                            }}
+                                          >
+                                            恢复官方预设
+                                          </button>
+                                        </div>
+                                      )}
+                                      <div className={appearanceCss.row}>
+                                        <div className={appearanceCss.rowText}>
+                                          <span className={appearanceCss.rowTitle}>上下文额度 (tokens)</span>
+                                          <span className={appearanceCss.rowHint}>该模型的总上下文窗口上限，留空按官方预设或宿主默认 256,000 处理。</span>
+                                        </div>
+                                        <div className={appearanceCss.control}>
+                                          <input
+                                            type="number"
+                                            min={1024}
+                                            max={2000000}
+                                            step={1}
+                                            className={modelsCss.input}
+                                            placeholder="默认 256000"
+                                            value={capability.context_window ?? ''}
+                                            onChange={event => {
+                                              const raw = event.target.value.trim()
+                                              const parsed = raw === '' ? null : Number(raw)
+                                              updateModelCapability(provider, model, {
+                                                context_window: parsed !== null && Number.isFinite(parsed) ? Math.trunc(parsed) : null,
+                                              })
+                                            }}
+                                          />
+                                        </div>
+                                      </div>
+                                      <div className={appearanceCss.row}>
+                                        <div className={appearanceCss.rowText}>
+                                          <span className={appearanceCss.rowTitle}>最大输出 (tokens)</span>
+                                          <span className={appearanceCss.rowHint}>单次回复允许生成的最大 token 数（含思考 token），留空按预设或 32,768 处理。</span>
+                                        </div>
+                                        <div className={appearanceCss.control}>
+                                          <input
+                                            type="number"
+                                            min={1}
+                                            max={2000000}
+                                            step={1}
+                                            className={modelsCss.input}
+                                            placeholder="默认 32768"
+                                            value={capability.max_output_tokens ?? ''}
+                                            onChange={event => {
+                                              const raw = event.target.value.trim()
+                                              const parsed = raw === '' ? null : Number(raw)
+                                              updateModelCapability(provider, model, {
+                                                max_output_tokens: parsed !== null && Number.isFinite(parsed) ? Math.trunc(parsed) : null,
+                                              })
+                                            }}
+                                          />
+                                        </div>
+                                      </div>
                                       <div className={appearanceCss.row}>
                                         <div className={appearanceCss.rowText}>
                                           <span className={appearanceCss.rowTitle}>图片输入能力</span>

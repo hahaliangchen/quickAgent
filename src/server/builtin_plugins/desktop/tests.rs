@@ -257,6 +257,10 @@ fn desktop_blocks_sensitive_windows_dangerous_chords_and_untrusted_launch_target
         "GNOME Keyring",
         "1Password",
         "KeePassXC",
+        "consent.exe",
+        "CredentialUIBroker.exe",
+        "Windows Security",
+        "LockApp.exe",
     ] {
         for require_active in [false, true] {
             let w = Window {

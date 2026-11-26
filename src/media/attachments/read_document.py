@@ -1,10 +1,35 @@
-import json,sys,subprocess,zipfile,xml.etree.ElementTree as ET
+import json,shutil,sys,subprocess,zipfile,xml.etree.ElementTree as ET
 from pathlib import Path
 path=Path(sys.argv[1]);name=sys.argv[2];ext=Path(name).suffix.lower();warnings=[]
+
+def extract_pdf_text(pdf_path: Path) -> str:
+    if shutil.which('pdftotext'):
+        result=subprocess.run(['pdftotext','-layout','-enc','UTF-8',str(pdf_path),'-'],capture_output=True,timeout=30,check=True)
+        return result.stdout.decode('utf-8')
+    try:
+        import fitz  # PyMuPDF
+        with fitz.open(str(pdf_path)) as doc:
+            return '\n\f\n'.join(page.get_text('text') or '' for page in doc)
+    except ImportError:
+        pass
+    for mod_name in ('pypdf', 'PyPDF2'):
+        try:
+            mod=__import__(mod_name)
+            reader=mod.PdfReader(str(pdf_path))
+            return '\n\f\n'.join((page.extract_text() or '') for page in reader.pages)
+        except ImportError:
+            pass
+    try:
+        import pdfplumber
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            return '\n\f\n'.join((page.extract_text() or '') for page in pdf.pages)
+    except ImportError:
+        pass
+    raise RuntimeError('PDF 文本提取需要安装 Poppler (pdftotext) 或 Python pypdf/pymupdf (pip install pypdf)')
+
 try:
     if ext=='.pdf':
-        result=subprocess.run(['pdftotext','-layout','-enc','UTF-8',str(path),'-'],capture_output=True,timeout=30,check=True)
-        text=result.stdout.decode('utf-8')
+        text=extract_pdf_text(path)
         if not text.strip(): warnings.append('PDF 未提取到文字；可能为扫描件，需要将相关页渲染为图片后进行视觉分析。')
     elif ext=='.docx':
         with zipfile.ZipFile(path) as z:

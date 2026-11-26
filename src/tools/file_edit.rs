@@ -26,9 +26,63 @@ pub fn file_lock(path: &Path) -> Arc<Mutex<()>> {
 }
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Strip Windows extended-length verbatim prefixes (`\\?\C:\...`, `\\?\UNC\...`,
+/// or forward-slash `//?/C:/...`) for clean display, JSON output, and OS shell
+/// boundaries. No-op on Linux and macOS.
+pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(unc) = raw
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| raw.strip_prefix("//?/UNC/"))
+    {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    if let Some(rest) = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+    {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
+}
+
+/// Format an absolute or OS path cleanly without Windows `\\?\` verbatim prefixes.
+pub fn display_path(path: &Path) -> String {
+    strip_verbatim_prefix(path).to_string_lossy().into_owned()
+}
+
+/// Format a path relative to `root` using POSIX `/` separators on every OS
+/// (Windows, Linux, macOS). Paths outside `root` return a clean OS path without
+/// `\\?\` verbatim prefixes.
+pub fn display_relative_or_abs(root: &Path, path: &Path) -> String {
+    if let Ok(relative) = path.strip_prefix(root) {
+        if relative.as_os_str().is_empty() {
+            return ".".to_string();
+        }
+        return relative.to_string_lossy().replace('\\', "/");
+    }
+    let clean_root = strip_verbatim_prefix(root);
+    let clean_path = strip_verbatim_prefix(path);
+    if let Ok(relative) = clean_path.strip_prefix(&clean_root) {
+        if relative.as_os_str().is_empty() {
+            return ".".to_string();
+        }
+        return relative.to_string_lossy().replace('\\', "/");
+    }
+    clean_path.to_string_lossy().into_owned()
+}
+
 pub fn workspace_path(root: &Path, raw: &str) -> Result<PathBuf> {
     let root = root.canonicalize()?;
-    let input = Path::new(raw);
+    #[cfg(windows)]
+    let normalized_raw = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+        .unwrap_or(raw)
+        .replace('/', "\\");
+    #[cfg(not(windows))]
+    let normalized_raw = raw;
+    let input = Path::new(&normalized_raw);
     if !input.is_absolute()
         && input
             .components()
@@ -39,7 +93,15 @@ pub fn workspace_path(root: &Path, raw: &str) -> Result<PathBuf> {
     let candidate = if input.is_absolute() {
         input.to_path_buf()
     } else {
-        root.join(input)
+        let mut joined = root.clone();
+        for part in input.components() {
+            match part {
+                Component::CurDir => {}
+                Component::ParentDir => return Err(ToolError::ParentTraversal(raw.into())),
+                other => joined.push(other.as_os_str()),
+            }
+        }
+        joined
     };
     if candidate
         .components()
@@ -66,13 +128,16 @@ pub fn workspace_path(root: &Path, raw: &str) -> Result<PathBuf> {
     let suffix = candidate
         .strip_prefix(ancestor)
         .map_err(|_| ToolError::OutsideWorkspace(raw.into()))?;
-    // Joining an empty suffix adds a trailing separator to an existing file on
-    // Windows, so it is then treated as a directory (ERROR_DIRECTORY / 267).
-    let path = if suffix.as_os_str().is_empty() {
-        resolved
-    } else {
-        resolved.join(suffix)
-    };
+    // Push suffix components individually so Windows `\\?\` verbatim paths
+    // never contain `/` separators and never get a trailing separator on files.
+    let mut path = resolved;
+    for part in suffix.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => return Err(ToolError::ParentTraversal(raw.into())),
+            other => path.push(other.as_os_str()),
+        }
+    }
     crate::context::database::check_source_access(&path)?;
     Ok(path)
 }
@@ -1314,5 +1379,71 @@ mod tests {
                 .to_string()
                 .contains("old_text not found")
         );
+    }
+
+    #[test]
+    fn cross_platform_path_helpers_strip_verbatim_and_normalize_separators() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\D:\enterpriseProject\demo")),
+            r"D:\enterpriseProject\demo"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\file.txt")),
+            r"\\server\share\file.txt"
+        );
+        assert_eq!(
+            display_path(Path::new("/Users/dev/project")),
+            "/Users/dev/project"
+        );
+        assert_eq!(
+            display_relative_or_abs(
+                Path::new(r"\\?\D:\proj"),
+                Path::new(r"\\?\D:\proj\src\main.rs")
+            ),
+            "src/main.rs"
+        );
+        assert_eq!(
+            display_relative_or_abs(
+                Path::new(r"\\?\D:\proj"),
+                Path::new(r"D:\proj\src\main.rs")
+            ),
+            "src/main.rs"
+        );
+        assert_eq!(
+            display_relative_or_abs(
+                Path::new(r"\\?\D:\proj"),
+                Path::new(r"\\?\E:\other\tool.exe")
+            ),
+            r"E:\other\tool.exe"
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "file-edit-xplat-{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let existing = root.join("sub").join("a.txt");
+        fs::write(&existing, "line1\r\nline2\r\n").unwrap();
+
+        let p_fwd = workspace_path(&root, "sub/a.txt").unwrap();
+        assert_eq!(p_fwd, existing.canonicalize().unwrap());
+
+        // New nested path under a canonical root must not mix `/` inside Windows `\\?\` verbatim paths.
+        let p_new = workspace_path(&root, "new_dir/nested/b.txt").unwrap();
+        #[cfg(windows)]
+        assert!(
+            !p_new.to_string_lossy().contains('/'),
+            "verbatim path must not contain forward slashes: {}",
+            p_new.display()
+        );
+        fs::create_dir_all(p_new.parent().unwrap()).unwrap();
+        fs::write(&p_new, "ok").unwrap();
+        assert_eq!(display_relative_or_abs(&root.canonicalize().unwrap(), &p_new), "new_dir/nested/b.txt");
+
+        // CRLF preservation across line_replacement and text_edits.
+        let updated = line_replacement("a\r\nb\r\nc\r\n", 2, 2, "B1\nB2", Some("b")).unwrap();
+        assert_eq!(updated, "a\r\nB1\r\nB2\r\nc\r\n");
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }

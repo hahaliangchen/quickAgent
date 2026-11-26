@@ -28,13 +28,20 @@ pub fn mutates(name: &str) -> bool {
 
 fn literal_path(root: &Path, raw: &str) -> Result<(String, PathBuf)> {
     ensure!(
-        !raw.is_empty() && raw.len() <= 4096 && !raw.contains(['\0', '\r', '\n', '\\']),
+        !raw.is_empty() && raw.len() <= 4096 && !raw.contains(['\0', '\r', '\n']),
         "expected a relative Git file path"
     );
+    #[cfg(windows)]
+    let normalized = raw.replace('\\', "/");
+    #[cfg(not(windows))]
+    let normalized = {
+        ensure!(!raw.contains('\\'), "expected a relative Git file path");
+        raw.to_owned()
+    };
     let mut parts = Vec::new();
     let root = root.canonicalize()?;
     let mut lexical = root.clone();
-    for part in Path::new(raw).components() {
+    for part in Path::new(&normalized).components() {
         let Component::Normal(part) = part else {
             anyhow::bail!("expected a relative Git file path without traversal")
         };
@@ -53,9 +60,15 @@ fn literal_path(root: &Path, raw: &str) -> Result<(String, PathBuf)> {
         parts.push(s);
     }
     ensure!(!parts.is_empty(), "expected a file path");
-    let path = crate::tools::file_edit::workspace_path(&root, raw)?;
+    let path = crate::tools::file_edit::workspace_path(&root, &normalized)?;
+    #[cfg(windows)]
+    let same_target = path
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&lexical.to_string_lossy());
+    #[cfg(not(windows))]
+    let same_target = path == lexical;
     ensure!(
-        path == lexical && !path.is_dir(),
+        same_target && !path.is_dir(),
         "Git tool requires an explicit file path: {raw}"
     );
     Ok((parts.join("/"), path))
@@ -415,6 +428,7 @@ mod tests {
             std::env::temp_dir().join(format!("git-tools-{}", crate::server::agent_service::uuid_like()));
         fs::create_dir_all(&dir).unwrap();
         run(&dir, &["init", "-q", "-b", "fixture"]);
+        run(&dir, &["config", "core.autocrlf", "false"]);
         fs::write(dir.join("a.txt"), "original\nline two\n").unwrap();
         fs::write(dir.join("b.txt"), "original B\n").unwrap();
         run(&dir, &["add", "--", "a.txt", "b.txt"]);

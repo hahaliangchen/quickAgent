@@ -859,16 +859,20 @@ fn git_paths(paths: &[String]) -> Result<Vec<String>> {
 }
 
 fn run_git(root: &Path, args: &[&str]) -> Result<GitOutput> {
-    let output = Command::new("git")
-        .args(["-c", "core.quotepath=off", "-c", "color.ui=never", "-c", "core.fsmonitor=false"])
+    let mut cmd = Command::new("git");
+    cmd.args(["-c", "core.quotepath=off", "-c", "color.ui=never", "-c", "core.fsmonitor=false"])
         .args(args)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(ToolError::from)?;
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let output = cmd.output().map_err(ToolError::from)?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if !output.status.success() {

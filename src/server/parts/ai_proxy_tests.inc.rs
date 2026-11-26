@@ -724,3 +724,96 @@
         assert_eq!(switched.image_generation.model.as_deref(), Some("gpt-image-2"));
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn built_in_presets_populate_efforts_and_context_limits_and_allow_overrides() {
+        let root = std::env::temp_dir().join(crate::media::visual_artifacts::new_id());
+        let path = root.join("providers.yml");
+        write_yaml_atomic(&path, &json!([
+            {"id":"llm-pi-ai","config":{"providers":{
+                "gpt-proxy":{"baseURL":"http://127.0.0.1:58081/v1","api":"openai-completions","models":[
+                    {"id":"gpt-6-luna"},
+                    {"id":"gpt-6.1-terra"},
+                    {"id":"gpt-6.2-astra"},
+                    {"id":"gpt-6.2-sol"}
+                ]},
+                "deepseek":{"baseURL":"https://api.deepseek.com/v1","api":"openai-completions","models":[
+                    {"id":"deepseek-flash"},
+                    {"id":"deepseek-v4-pro"}
+                ]},
+                "moonshot":{"baseURL":"https://api.moonshot.cn/v1","api":"openai-completions","models":[
+                    {"id":"kimi-k2.6"},
+                    {"id":"kimi-k3"}
+                ]}
+            }}},
+            {"id":"agent-default-model","config":{"provider":"gpt-proxy","model":"gpt-6.2-sol"}}
+        ])).unwrap();
+        // Simulate stale empty capability records saved before presets existed.
+        write_yaml_atomic(
+            &generation_settings_path(&path),
+            &json!({"model_capabilities":{"gpt-proxy":{"gpt-6.2-sol":{"reasoning_efforts":[],"default_effort":null,"fast_mode":false}}}}),
+        )
+        .unwrap();
+
+        let loaded = load_config(&path).unwrap();
+        let sol = &loaded.model_capabilities["gpt-proxy"]["gpt-6.2-sol"];
+        assert_eq!(sol.reasoning_efforts, vec!["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(sol.default_effort.as_deref(), Some("medium"));
+        assert!(sol.fast_mode);
+        assert_eq!(sol.context_window, Some(1_050_000));
+        assert_eq!(sol.max_output_tokens, Some(128_000));
+
+        let terra = &loaded.model_capabilities["gpt-proxy"]["gpt-6.1-terra"];
+        assert_eq!(terra.reasoning_efforts, vec!["none", "low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(terra.default_effort.as_deref(), Some("medium"));
+        assert!(terra.fast_mode);
+
+        let k26 = &loaded.model_capabilities["moonshot"]["kimi-k2.6"];
+        assert!(k26.reasoning_efforts.is_empty());
+        assert_eq!(k26.context_window, Some(262_144));
+        assert_eq!(k26.max_output_tokens, Some(65_536));
+
+        let k3 = &loaded.model_capabilities["moonshot"]["kimi-k3"];
+        assert_eq!(k3.reasoning_efforts, vec!["low", "high", "max"]);
+        assert_eq!(k3.default_effort.as_deref(), Some("max"));
+        assert_eq!(k3.context_window, Some(1_048_576));
+        assert_eq!(k3.max_output_tokens, Some(131_072));
+
+        let mut state = crate::server::agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        apply_agent_config(&mut state, &loaded);
+        assert_eq!(crate::model::model_settings::context_window(&state, "gpt-6.2-sol"), 1_050_000);
+        assert_eq!(
+            crate::model::model_settings::output_tokens(&state, "gpt-6.2-sol", 1_000_000, 1_000),
+            128_000
+        );
+        state.provider_name = "deepseek".into();
+        assert_eq!(crate::model::model_settings::context_window(&state, "deepseek-flash"), 1_048_576);
+        assert_eq!(
+            crate::model::model_settings::output_tokens(&state, "deepseek-flash", 1_024_000, 1_000),
+            393_216
+        );
+
+        // User-edited context_window & max_output_tokens persist into providers.yml and win over presets.
+        let mut view = settings_view(&loaded, disk_revision(&path).unwrap());
+        assert_eq!(view["model_presets"]["models"]["gpt-6.2-sol"]["context_window"], 1_050_000);
+        assert!(view["model_presets"]["vendors"].as_array().unwrap().len() >= 6);
+        let providers = view["providers"].as_array_mut().unwrap();
+        let gpt = providers.iter_mut().find(|p| p["id"] == "gpt-proxy").unwrap();
+        gpt["model_capabilities"]["gpt-6.2-sol"]["context_window"] = json!(500_000);
+        gpt["model_capabilities"]["gpt-6.2-sol"]["max_output_tokens"] = json!(64_000);
+        let edit = json!({
+            "revision": view["revision"],
+            "providers": view["providers"],
+            "orchestrator_provider": "gpt-proxy",
+            "orchestrator_model": "gpt-6.2-sol"
+        });
+        let (saved, _) = save_settings(&path, serde_json::from_value(edit).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.model_capabilities["gpt-proxy"]["gpt-6.2-sol"].context_window, Some(500_000));
+        assert_eq!(saved.model_capabilities["gpt-proxy"]["gpt-6.2-sol"].max_output_tokens, Some(64_000));
+        let reloaded = load_config(&path).unwrap();
+        assert_eq!(reloaded.model_capabilities["gpt-proxy"]["gpt-6.2-sol"].context_window, Some(500_000));
+        assert_eq!(reloaded.model_capabilities["gpt-proxy"]["gpt-6.2-sol"].max_output_tokens, Some(64_000));
+        let _ = std::fs::remove_dir_all(root);
+    }

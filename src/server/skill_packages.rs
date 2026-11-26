@@ -267,7 +267,7 @@ fn load_with(root: &Path, origin: Origin, native: Option<NativeBackend>) -> Resu
         );
         if service.program.contains('/') || service.program.contains('\\') {
             ensure!(
-                crate::tools::file_edit::workspace_path(&root, &service.program)?.is_file(),
+                resolve_package_executable(&root, &service.program)?.is_file(),
                 "local service executable missing"
             );
         }
@@ -663,6 +663,25 @@ fn discover_bundled_dirs(dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+pub(crate) fn resolve_package_executable(root: &Path, program: &str) -> Result<PathBuf> {
+    if program.contains('/') || program.contains('\\') {
+        let exact = crate::tools::file_edit::workspace_path(root, program)?;
+        if exact.is_file() {
+            return Ok(exact);
+        }
+        #[cfg(windows)]
+        if !program.to_ascii_lowercase().ends_with(".exe") {
+            let with_exe = crate::tools::file_edit::workspace_path(root, &format!("{program}.exe"))?;
+            if with_exe.is_file() {
+                return Ok(with_exe);
+            }
+        }
+        Ok(exact)
+    } else {
+        Ok(program.into())
+    }
+}
+
 fn spawn_local_service(
     root: &Path,
     service: &crate::server::plugin_protocol::LocalService,
@@ -671,11 +690,7 @@ fn spawn_local_service(
         .context("allocating ephemeral port for plugin local service")?;
     let port = listener.local_addr()?.port();
     drop(listener);
-    let program: PathBuf = if service.program.contains('/') || service.program.contains('\\') {
-        crate::tools::file_edit::workspace_path(root, &service.program)?
-    } else {
-        service.program.clone().into()
-    };
+    let program = resolve_package_executable(root, &service.program)?;
     let mut command = std::process::Command::new(&program);
     command
         .args(&service.args)
@@ -689,6 +704,11 @@ fn spawn_local_service(
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
+        if std::env::var_os("HOME").is_none_or(|v| v.is_empty())
+            && let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty())
+        {
+            command.env("HOME", profile);
+        }
     }
     let child = command
         .spawn()
@@ -1600,6 +1620,26 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':r['params']}))
         });
         std::fs::write(ppt.join("plugin.json"), bad_manifest.to_string()).unwrap();
         assert!(load(&ppt).is_err());
+
+        #[cfg(windows)]
+        {
+            std::fs::remove_file(ppt.join("bin/helper")).unwrap();
+            std::fs::write(ppt.join("bin/helper.exe"), b"MZ").unwrap();
+            let win_manifest = json!({
+                "version": 1,
+                "id": "ppt",
+                "title": "PPT",
+                "local_service": {"program": "bin/helper"}
+            });
+            std::fs::write(ppt.join("plugin.json"), win_manifest.to_string()).unwrap();
+            let loaded = load(&ppt).unwrap();
+            let resolved = resolve_package_executable(
+                &ppt,
+                &loaded.manifest.local_service.as_ref().unwrap().program,
+            )
+            .unwrap();
+            assert!(resolved.ends_with("helper.exe"));
+        }
 
         std::fs::remove_dir_all(root).unwrap();
     }

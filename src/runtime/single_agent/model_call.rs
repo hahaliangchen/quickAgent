@@ -684,16 +684,23 @@ async fn send_model_request(
         };
         diagnostics.sending();
         let attempt_res = async {
-            let response = crate::model::anthropic_messages::send(s.state, s.task, &s.scope, &body)
+            let request = crate::model::anthropic_messages::send(s.state, s.task, &s.scope, &body)
                 .header("x-client-request-id", node)
                 .header(
                     "x-agent-affinity",
                     crate::model::model_transport::affinity(s.task, &s.scope),
-                )
-                .send()
-                .await?;
+                );
+            let response = tokio::select! {
+                biased;
+                _ = s.cancel.cancelled() => anyhow::bail!("cancelled"),
+                result = request.send() => result?,
+            };
             diagnostics.headers(&response);
-            let response = crate::media::visual_probe::successful_response(response).await?;
+            let response = tokio::select! {
+                biased;
+                _ = s.cancel.cancelled() => anyhow::bail!("cancelled"),
+                result = crate::media::visual_probe::successful_response(response) => result?,
+            };
             let (message, stats) = agent_service::consume_model_stream_observed(
                 response,
                 s.state.workspace.root(),

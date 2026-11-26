@@ -1,9 +1,12 @@
 use super::*;
-use std::{
-    os::unix::fs::{PermissionsExt, symlink},
-    sync::Barrier,
-    thread,
-};
+#[cfg(unix)]
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::{sync::Barrier, thread};
+
+#[cfg(windows)]
+const TEST_KEY_PATH: &str = r"C:\local\private-key";
+#[cfg(not(windows))]
+const TEST_KEY_PATH: &str = "/local/private-key";
 
 fn draft(name: &str, auth_type: AuthType, env_tier: EnvTier) -> NewServer {
     NewServer {
@@ -12,7 +15,7 @@ fn draft(name: &str, auth_type: AuthType, env_tier: EnvTier) -> NewServer {
         port: None,
         username: " deploy ".into(),
         auth_type,
-        key_path: (auth_type == AuthType::KeyFile).then(|| "/local/private-key".into()),
+        key_path: (auth_type == AuthType::KeyFile).then(|| TEST_KEY_PATH.into()),
         env_tier,
         require_approval: false,
         default_dir: Some("/srv/project".into()),
@@ -55,7 +58,7 @@ fn initializes_per_database_and_enforces_profile_settings() -> Result<()> {
     assert_eq!(list[0].username, "deploy");
     assert_eq!(list[0].port, 22);
     assert!(!list[0].require_approval);
-    assert_eq!(list[1].key_path.as_deref(), Some("/local/private-key"));
+    assert_eq!(list[1].key_path.as_deref(), Some(TEST_KEY_PATH));
     assert!(list[1].require_approval);
     assert!(list[2].require_approval);
     assert_eq!(list[2].port, 2222);
@@ -92,8 +95,22 @@ fn credentials_stay_out_of_sqlite_and_public_profiles() -> Result<()> {
     );
     store.set_credential(&pwd, Some(Secret::new("unique-password-value".into())?))?;
     store.set_credential(&key, Some(Secret::new("unique-passphrase-value".into())?))?;
-    let mode = fs::metadata(&store.credentials_path)?.permissions().mode();
-    assert_eq!(mode & 0o7777, 0o600);
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(&store.credentials_path)?.permissions().mode();
+        assert_eq!(mode & 0o7777, 0o600);
+    }
+    #[cfg(windows)]
+    {
+        let raw = fs::read(&store.credentials_path)?;
+        assert!(raw.starts_with(b"QA_SSH_DPAPI_V1\n"));
+        for secret in ["unique-password-value", "unique-passphrase-value"] {
+            assert!(
+                !raw.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "Windows DPAPI credential file must not store plaintext secrets"
+            );
+        }
+    }
     let reopened = Store::open(dir.path())?;
     assert_eq!(
         reopened.auth_secret(&pwd)?.unwrap().expose(),
@@ -122,6 +139,7 @@ fn credentials_stay_out_of_sqlite_and_public_profiles() -> Result<()> {
     assert!(store.delete(&key)?);
     assert!(store.get(&key)?.is_none());
     assert!(store.auth_secret(&key).is_err());
+    #[cfg(unix)]
     assert!(!fs::read_to_string(&store.credentials_path)?.contains("unique-passphrase-value"));
     assert!(reopened.auth_secret(&pwd)?.is_some());
     store.set_credential(&pwd, None)?;
@@ -137,25 +155,28 @@ fn rejects_unsafe_or_corrupt_credential_files_without_leaking_contents() -> Resu
     let id = store.create(draft("key", AuthType::Password, EnvTier::Dev))?;
     let path = store.credentials_path.clone();
     store.set_credential(&id, Some(Secret::new("stored-private-value".into())?))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
-    let Err(error) = store.auth_secret(&id) else {
-        panic!("accepted public permissions")
-    };
-    assert!(error.to_string().contains("mode 0600"));
-    assert!(store.delete(&id).is_err());
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    let renamed = dir.path().join("renamed.json");
-    fs::rename(&path, &renamed)?;
-    symlink(&renamed, &path)?;
-    assert!(store.auth_secret(&id).is_err());
-    assert!(
-        store
-            .set_credential(&id, Some(Secret::new("must-not-replace".into())?))
-            .is_err()
-    );
-    assert!(fs::read_to_string(&renamed)?.contains("stored-private-value"));
-    fs::remove_file(&path)?;
-    fs::rename(&renamed, &path)?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+        let Err(error) = store.auth_secret(&id) else {
+            panic!("accepted public permissions")
+        };
+        assert!(error.to_string().contains("mode 0600"));
+        assert!(store.delete(&id).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        let renamed = dir.path().join("renamed.json");
+        fs::rename(&path, &renamed)?;
+        symlink(&renamed, &path)?;
+        assert!(store.auth_secret(&id).is_err());
+        assert!(
+            store
+                .set_credential(&id, Some(Secret::new("must-not-replace".into())?))
+                .is_err()
+        );
+        assert!(fs::read_to_string(&renamed)?.contains("stored-private-value"));
+        fs::remove_file(&path)?;
+        fs::rename(&renamed, &path)?;
+    }
     fs::write(
         &path,
         br#"{"bad":{"kind":"do-not-leak-this","value":"another-secret"}}"#,

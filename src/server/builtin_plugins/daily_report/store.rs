@@ -7,8 +7,10 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 /// Owner-only directory: the session file next to it holds a bearer token.
+#[cfg(unix)]
 const DIR_MODE: u32 = 0o700;
 /// Owner-only file, set after every write so a looser umask cannot widen it.
+#[cfg(unix)]
 const FILE_MODE: u32 = 0o600;
 const SESSION_FILE: &str = "session.json";
 const DRAFT_FILE: &str = "draft.json";
@@ -192,6 +194,7 @@ impl Store {
             .or_else(|| std::env::var_os("APPDATA").filter(|dir| !dir.is_empty()).map(PathBuf::from))
             .or_else(|| {
                 std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
                     .filter(|dir| !dir.is_empty())
                     .map(|home| PathBuf::from(home).join(".config"))
             })
