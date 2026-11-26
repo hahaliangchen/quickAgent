@@ -9,16 +9,54 @@ use std::{
 };
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
-struct Agent(Mutex<Child>);
+struct Agent {
+    child: Mutex<Child>,
+    #[cfg(windows)]
+    _job: Option<std::os::windows::io::OwnedHandle>,
+}
+
+#[cfg(windows)]
+fn attach_kill_on_close_job(child: &Child) -> Option<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    unsafe {
+        let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if handle.is_null() {
+            return None;
+        }
+        let owned = OwnedHandle::from_raw_handle(handle);
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            handle,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of_val(&info) as u32,
+        ) == 0
+        {
+            return None;
+        }
+        if AssignProcessToJobObject(handle, child.as_raw_handle()) == 0 {
+            return None;
+        }
+        Some(owned)
+    }
+}
 
 impl Drop for Agent {
     fn drop(&mut self) {
-        if let Ok(child) = self.0.get_mut() {
-            // Closing the pipe lets the backend exit even if the shell crashes.
+        if let Ok(child) = self.child.get_mut() {
+            // Closing the pipe lets the backend exit gracefully first so plugins shut down cleanly.
             drop(child.stdin.take());
             let _ = child.kill();
             let _ = child.wait();
         }
+        // Dropping `_job` closes the Job Object handle, which on Windows atomically
+        // terminates the entire process tree (grow-agent + all plugin local services).
     }
 }
 
@@ -122,6 +160,8 @@ fn main() {
                 command.creation_flags(0x08000000); // CREATE_NO_WINDOW
             }
             let mut child = command.spawn()?;
+            #[cfg(windows)]
+            let job = attach_kill_on_close_job(&child);
             let output = child.stdout.take().ok_or("后端输出不可用")?;
             let (tx, rx) = mpsc::sync_channel(1);
             std::thread::spawn(move || {
@@ -135,7 +175,11 @@ fn main() {
                 }
             });
             // Manage the child before any fallible startup work so failure cleans it up.
-            app.manage(Agent(Mutex::new(child)));
+            app.manage(Agent {
+                child: Mutex::new(child),
+                #[cfg(windows)]
+                _job: job,
+            });
             let port = rx
                 .recv_timeout(Duration::from_secs(30))
                 .map_err(|_| "Agent 后端未能启动")?;
