@@ -164,6 +164,12 @@ impl Store {
         };
         subdir(&dir, "graphs", create)
     }
+    fn playbooks(&self, create: bool) -> Result<Option<Dir>> {
+        let Some(dir) = self.dir(create)? else {
+            return Ok(None);
+        };
+        subdir(&dir, "playbooks", create)
+    }
     pub fn manifest(&self) -> Result<Option<Manifest>> {
         let Some(dir) = self.dir(false)? else {
             return Ok(None);
@@ -198,6 +204,24 @@ impl Store {
             .map(|g| self.graph(&g.id)?.context("indexed graph is missing"))
             .collect()
     }
+    pub fn playbook(&self, id: &str) -> Result<Option<Playbook>> {
+        graph_id(id)?;
+        let Some(dir) = self.playbooks(false)? else {
+            return Ok(None);
+        };
+        let playbook: Option<Playbook> = read(&dir, &format!("{id}.json"))?;
+        if let Some(playbook) = &playbook {
+            ensure!(playbook.id == id, "playbook ID does not match filename");
+        }
+        Ok(playbook)
+    }
+    pub fn all_playbooks(&self, manifest: &Manifest) -> Result<Vec<Playbook>> {
+        manifest
+            .playbooks
+            .iter()
+            .filter_map(|p| self.playbook(&p.id).transpose())
+            .collect()
+    }
     fn save_manifest(
         &self,
         mut m: Manifest,
@@ -212,6 +236,7 @@ impl Store {
         }
         m.updated_at = chrono::Utc::now().to_rfc3339();
         m.graphs.sort_by(|a, b| a.id.cmp(&b.id));
+        m.playbooks.sort_by(|a, b| a.id.cmp(&b.id));
         write(&self.dir(true)?.unwrap(), "manifest.json", &m)
     }
     pub fn upsert_entities(&self, update: EntityUpdate) -> Result<EntityStore> {
@@ -380,6 +405,132 @@ impl Store {
             }
         }
         manifest.graphs.retain(|g| g.id != id);
+        self.save_manifest(manifest, None, None)
+    }
+    pub fn upsert_playbook(&self, id: &str, update: PlaybookUpdate) -> Result<Playbook> {
+        graph_id(id)?;
+        ensure!(
+            update.id.as_deref().is_none_or(|arg| arg == id),
+            "playbook ID does not match route"
+        );
+        let mut manifest = self.manifest()?.unwrap_or_default();
+        let mut playbook = self.playbook(id)?.unwrap_or_else(|| Playbook {
+            id: id.into(),
+            title: id.into(),
+            trigger: String::new(),
+            summary: String::new(),
+            code: String::new(),
+            anchor_files: Vec::new(),
+            related_entities: Vec::new(),
+            related_graphs: Vec::new(),
+            verify_commands: Vec::new(),
+            environment: Vec::new(),
+            pitfalls: Vec::new(),
+            source_tasks: Vec::new(),
+            updated_at: String::new(),
+        });
+        if let Some(title) = update.title {
+            ensure!(!title.trim().is_empty(), "playbook title is required");
+            playbook.title = title.trim().to_owned();
+        }
+        if let Some(trigger) = update.trigger {
+            playbook.trigger = trigger.trim().to_owned();
+        }
+        if let Some(summary) = update.summary {
+            playbook.summary = summary.trim().to_owned();
+        }
+        if let Some(code) = update.code {
+            playbook.code = code;
+        }
+        if let Some(files) = update.anchor_files {
+            let mut clean = BTreeSet::new();
+            for raw in files {
+                let trimmed = raw.trim().strip_prefix("./").unwrap_or(raw.trim());
+                if trimmed.is_empty() {
+                    continue;
+                }
+                source_path(&self.root, trimmed)?;
+                clean.insert(trimmed.to_owned());
+            }
+            playbook.anchor_files = clean.into_iter().collect();
+        }
+        if let Some(entities) = update.related_entities {
+            let mut clean = BTreeSet::new();
+            for item in entities {
+                let trimmed = item.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                item_id(trimmed)?;
+                clean.insert(trimmed.to_owned());
+            }
+            playbook.related_entities = clean.into_iter().collect();
+        }
+        if let Some(graphs) = update.related_graphs {
+            let mut clean = BTreeSet::new();
+            for item in graphs {
+                let trimmed = item.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                graph_id(trimmed)?;
+                clean.insert(trimmed.to_owned());
+            }
+            playbook.related_graphs = clean.into_iter().collect();
+        }
+        if let Some(commands) = update.verify_commands {
+            playbook.verify_commands = commands
+                .into_iter()
+                .map(|c| c.trim().to_owned())
+                .filter(|c| !c.is_empty())
+                .collect();
+        }
+        if let Some(env_facts) = update.environment {
+            playbook.environment = env_facts
+                .into_iter()
+                .map(|e| e.trim().to_owned())
+                .filter(|e| !e.is_empty())
+                .collect();
+        }
+        if let Some(pitfalls) = update.pitfalls {
+            playbook.pitfalls = pitfalls
+                .into_iter()
+                .map(|p| p.trim().to_owned())
+                .filter(|p| !p.is_empty())
+                .collect();
+        }
+        if let Some(tasks) = update.source_tasks {
+            let mut seen = BTreeSet::new();
+            playbook.source_tasks = tasks
+                .into_iter()
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty() && seen.insert(t.clone()))
+                .collect();
+        }
+        playbook.updated_at = chrono::Utc::now().to_rfc3339();
+        let dir = self.dir(true)?.unwrap();
+        if read::<EntityStore>(&dir, "entities.json")?.is_none() {
+            write(&dir, "entities.json", &EntityStore::default())?;
+        }
+        write(&self.playbooks(true)?.unwrap(), &format!("{id}.json"), &playbook)?;
+        manifest.playbooks.retain(|p| p.id != id);
+        manifest.playbooks.push(playbook.summary_entry());
+        self.save_manifest(manifest, update.project_kind, update.last_synced_commit)?;
+        Ok(playbook)
+    }
+    pub fn delete_playbook(&self, id: &str) -> Result<()> {
+        graph_id(id)?;
+        let Some(mut manifest) = self.manifest()? else {
+            return Ok(());
+        };
+        if let Some(dir) = self.playbooks(false)? {
+            match dir.remove_file(format!("{id}.json")) {
+                Ok(()) => (),
+                Err(e) if e.kind() == ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        manifest.playbooks.retain(|p| p.id != id);
         self.save_manifest(manifest, None, None)
     }
     pub fn save_layout(&self, id: &str, nodes: Vec<GraphNode>) -> Result<()> {

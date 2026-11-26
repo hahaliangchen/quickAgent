@@ -1,5 +1,6 @@
 import { createContext } from 'react'
-import type { BlueprintProjectStatus, BlueprintState, Entity, Graph, GraphNode, GraphView, Impact, ProjectKind, Source, Verify } from './types.ts'
+import type { Task } from '../../api.ts'
+import type { BlueprintProjectStatus, BlueprintState, Entity, Graph, GraphNode, GraphView, Impact, Playbook, PlaybookUpdate, PlaybookView, ProjectKind, Source, Verify } from './types.ts'
 
 export interface BlueprintProjectOption {
   readonly path: string
@@ -11,6 +12,8 @@ export const BlueprintContext = createContext<{
   refreshSignal?: string | undefined
   projects?: readonly BlueprintProjectOption[]
   selectWorkspace?: (path: string) => void
+  sessions?: readonly Task[]
+  openSession?: (taskId: string) => void
 }>({})
 
 export async function fetchBlueprintProjects(workspaces: readonly string[]): Promise<BlueprintProjectStatus[]> {
@@ -35,6 +38,7 @@ export function blueprintApi(workspaceRoot: string) {
     return data as T
   }
   const graph = (id: string) => '/graph/' + encodeURIComponent(id)
+  const playbook = (id: string) => '/playbook/' + encodeURIComponent(id)
   return {
     state: () => request<BlueprintState>('/state'),
     graph: (id: string) => request<GraphView>(graph(id)),
@@ -42,6 +46,10 @@ export function blueprintApi(workspaceRoot: string) {
     save: (id: string, value: Partial<Graph>) => request<Graph>(graph(id), 'PUT', value),
     deleteGraph: (id: string) => request(graph(id), 'DELETE'),
     layout: (id: string, nodes: GraphNode[]) => request(graph(id) + '/layout', 'PUT', { nodes }),
+    playbook: (id: string) => request<PlaybookView>(playbook(id)),
+    createPlaybook: (value: PlaybookUpdate & { id: string }) => request<Playbook>('/playbook', 'POST', value),
+    savePlaybook: (id: string, value: PlaybookUpdate) => request<Playbook>(playbook(id), 'PUT', value),
+    deletePlaybook: (id: string) => request(playbook(id), 'DELETE'),
     putEntity: (entity: Entity) => request('/entities', 'PUT', { entities: [entity], replace_ports: true }),
     deleteEntity: (id: string) => request('/entities/' + encodeURIComponent(id), 'DELETE'),
     impact: (entity: string, port?: string) => request<Impact>('/impact', 'GET', undefined, { entity_id: entity, ...(port ? { port_id: port } : {}) }),

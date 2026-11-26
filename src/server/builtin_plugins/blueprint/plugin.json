@@ -7,10 +7,12 @@
   "tools": [
     "blueprint__overview",
     "blueprint__read_graph",
+    "blueprint__read_playbook",
     "blueprint__impact",
     "blueprint__verify_sync",
     "blueprint__upsert_entities",
-    "blueprint__upsert_graph"
+    "blueprint__upsert_graph",
+    "blueprint__upsert_playbook"
   ],
   "pages": [
     {

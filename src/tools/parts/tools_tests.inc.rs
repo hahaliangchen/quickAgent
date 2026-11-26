@@ -1588,3 +1588,58 @@
         assert!(workspace.copy_path(CopyPathRequest{from:"large.bin".into(),to:"large-copy.bin".into(),recursive:false,overwrite:false,create_parent_dirs:true}).is_err());
         let _=fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn search_text_skips_missing_paths_when_other_paths_exist() {
+        let root = temp_workspace("search_missing_paths");
+        fs::create_dir_all(root.join("lightrag_service")).unwrap();
+        fs::write(root.join("lightrag_service/SKILL.md"), "mentioned_subjects\n").unwrap();
+        let workspace = Workspace::new(&root).unwrap();
+
+        // Mixed existing + missing paths: succeeds on existing paths and reports missing_paths.
+        let res = workspace
+            .search_text(SearchTextRequest {
+                query: "mentioned_subjects".to_string(),
+                paths: vec![
+                    "lightrag_service".to_string(),
+                    "SKILL.md".to_string(),
+                    "anydoc_service/config.py".to_string(),
+                ],
+                max_matches: 20,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(res.matches.len(), 1);
+        assert_eq!(res.matches[0].path, "lightrag_service/SKILL.md");
+        assert_eq!(res.missing_paths, vec!["SKILL.md", "anydoc_service/config.py"]);
+        assert!(res.hints.iter().any(|h| h.contains("missing_paths")));
+
+        // All paths missing -> still returns NotFound error.
+        let all_missing = workspace.search_text(SearchTextRequest {
+            query: "mentioned_subjects".to_string(),
+            paths: vec!["SKILL.md".to_string(), "nope.py".to_string()],
+            max_matches: 20,
+            ..Default::default()
+        });
+        assert!(matches!(all_missing, Err(ToolError::NotFound(_))));
+
+        // Single missing path -> still returns NotFound error.
+        let single_missing = workspace.search_text(SearchTextRequest {
+            query: "mentioned_subjects".to_string(),
+            paths: vec!["SKILL.md".to_string()],
+            max_matches: 20,
+            ..Default::default()
+        });
+        assert!(matches!(single_missing, Err(ToolError::NotFound(_))));
+
+        // Parent traversal must still fail even when paired with an existing path.
+        let traversal = workspace.search_text(SearchTextRequest {
+            query: "mentioned_subjects".to_string(),
+            paths: vec!["lightrag_service".to_string(), "../outside".to_string()],
+            max_matches: 20,
+            ..Default::default()
+        });
+        assert!(traversal.is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }

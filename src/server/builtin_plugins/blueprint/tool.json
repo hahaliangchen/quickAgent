@@ -1,7 +1,7 @@
 [
   {
     "name": "blueprint__overview",
-    "description": "List project and trigger-first canvas metadata without initializing storage.",
+    "description": "List project, trigger-first canvas, and shortest-path playbook metadata without initializing storage.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -28,6 +28,25 @@
       },
       "required": [
         "graph_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "blueprint__read_playbook",
+    "description": "Read one distilled shortest-path playbook (Blueprint-as-Code) together with live anchor file freshness status.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_root": {
+          "type": "string"
+        },
+        "playbook_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "playbook_id"
       ],
       "additionalProperties": false
     }
@@ -320,6 +339,96 @@
             ],
             "additionalProperties": false
           }
+        },
+        "project_kind": {
+          "type": "string",
+          "enum": [
+            "fullstack",
+            "frontend",
+            "backend",
+            "cli",
+            "library"
+          ]
+        },
+        "last_synced_commit": {
+          "type": "string",
+          "description": "Latest verified Git commit (hex object ID)"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "blueprint__upsert_playbook",
+    "description": "Create or patch a distilled shortest-path playbook (Blueprint-as-Code) anchored to workspace files, entities, graphs, pitfalls, and verification commands. Omit unchanged fields.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "title": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string",
+          "description": "When an agent should reuse this shortest path"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string",
+          "description": "Distilled shortest-path orchestration code or structured JS blueprint with detours pruned"
+        },
+        "anchor_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Workspace-relative files whose modification/deletion flags this playbook for refresh"
+        },
+        "related_entities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "related_graphs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verify_commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Key runtime environment facts (ports, venv/interpreter paths, remote directories, isolation boundaries) auto-surfaced at context tail"
+        },
+        "pitfalls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source_tasks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Historical session task IDs from which this playbook was distilled"
         },
         "project_kind": {
           "type": "string",

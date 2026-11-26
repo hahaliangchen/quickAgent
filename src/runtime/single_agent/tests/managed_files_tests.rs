@@ -857,3 +857,29 @@ async fn what_a_background_process_changes_is_not_taken_as_the_tasks_own() -> Re
     Ok(())
 }
 
+#[test]
+fn prepare_edit_file_honors_top_level_replace_all() -> Result<()> {
+    let root = root();
+    let state = crate::server::agent_service::tests::test_state(&root, "127.0.0.1:1".parse()?);
+    let workspace = state.workspace.root();
+    fs::write(workspace.join("dup.py"), "role = 'mentioned'\nother = 'mentioned'\n")?;
+    let prepared = prepare(
+        &root,
+        "task",
+        workspace,
+        "edit_file",
+        json!({
+            "path": "dup.py",
+            "replace_all": true,
+            "edits": [{"old_text": "'mentioned'", "new_text": "'related'"}],
+        }),
+    )?;
+    assert_eq!(
+        String::from_utf8(prepared.proposed)?,
+        "role = 'related'\nother = 'related'\n"
+    );
+    drop(state);
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+

@@ -401,6 +401,21 @@ async fn today_activity_reads_the_state_database() {
         [workspace.display().to_string()],
     )
     .unwrap();
+    // A written file is credited to the session that wrote it, not just the project.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_change_ledger(seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace TEXT NOT NULL, task_id TEXT NOT NULL, turn INTEGER NOT NULL, path TEXT NOT NULL,
+            source TEXT NOT NULL, interval_id TEXT, before_exists INTEGER NOT NULL, before_hash TEXT,
+            before_bytes BLOB, after_exists INTEGER NOT NULL, after_hash TEXT, after_bytes BLOB,
+            created_at INTEGER NOT NULL);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_change_ledger(workspace,task_id,turn,path,source,before_exists,after_exists,created_at)
+         VALUES(?1,'t1',1,'src/report.rs','tool',0,1,?2)",
+        [workspace.display().to_string(), now.to_string()],
+    )
+    .unwrap();
     drop(conn);
     let day = activity::today(&workspace, None).unwrap();
     assert_eq!(day["totals"]["sessions"], 1);
@@ -408,6 +423,11 @@ async fn today_activity_reads_the_state_database() {
     assert_eq!(project["sessions"][0]["title"], "日报插件");
     // The model follows this id into session.read_session_history for details.
     assert_eq!(project["sessions"][0]["task_id"], "t1");
+    assert!(project["sessions"][0]["project"].as_str().unwrap_or_default().starts_with("daily-report-activity-workspace"));
+    assert_eq!(project["sessions"][0]["files"][0], "src/report.rs");
+    assert_eq!(project["files"][0], "src/report.rs");
+    // The page offers the same sessions flat, to pick as AI context.
+    assert_eq!(day["sessions"][0]["task_id"], "t1");
     assert!(project["workspace"].as_str().unwrap_or_default().contains("daily-report-activity-workspace"));
     // An explicit date with no work is empty, not yesterday.
     let quiet = activity::today(&workspace, Some("2020-01-01")).unwrap();

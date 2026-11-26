@@ -7,6 +7,10 @@ import { CodeView, DiffView, diffStats } from './WorkbenchCode.tsx'
 import { DraftChat } from './WorkbenchChat.tsx'
 import { Icon, type IconName } from './WorkbenchIcon.tsx'
 import { PluginPageHost } from './PluginPageHost.tsx'
+import { CodeChatDock } from './CodeChatDock.tsx'
+import type { AgentSlotProps } from '../cordis/slot-contract.ts'
+import type { PreviewTheme } from '../filePreview.ts'
+import type { StudioAskAiRequest, StudioViewContext } from '../plugins/protocol.ts'
 import styles from './SkillWorkbench.module.css'
 
 const TONE_ICON: Record<Tone, IconName> = { ok: 'check', error: 'close', warn: 'bars', live: 'spark', muted: 'minus' }
@@ -40,16 +44,26 @@ function Status({ tone, label }: { tone: Tone; label: string }) {
 }
 
 /** Recorded workflows of real sessions, and drafts of them that an Agent conversation edits. */
-export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, onPackages, pageRequest }: {
+export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, onDistillToBlueprint, onFilePreview, onPackages, pageRequest, renderSlot, theme }: {
   tasks: readonly Task[]
   projects: readonly Project[]
   defaultWorkspace: string
   onOpenChat: (id: string) => void
+  onDistillToBlueprint?: ((task: Task) => void) | undefined
+  onFilePreview?: ((taskId: string, path: string, options?: { line?: number; url?: string }, root?: string) => void) | undefined
   onPackages: () => void
   /** A plugin conversation asked for its page; the signal changes on every request. */
   pageRequest?: { owner: string; seq: number } | undefined
+  /** A plugin page gets the same chat dock beside it as the studio pages do. */
+  renderSlot: AgentSlotProps['renderSlot']
+  theme?: PreviewTheme | undefined
 }) {
   const [pluginPage, setPluginPage] = useState<string>()
+  // The page's AI panel speaks to the dock beside it: a prompt to prefill, and
+  // the facts it is looking at right now, so a follow-up needs no repeating.
+  const [pluginDraft, setPluginDraft] = useState<{ text: string; kind: 'prompt' }>()
+  const [pluginViewContext, setPluginViewContext] = useState<StudioViewContext | null>(null)
+  const [pluginChatSignal, setPluginChatSignal] = useState(0)
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [selectedId, setSelectedId] = useState(() => stored<string | null>('skill-workbench:session', null) ?? undefined)
@@ -280,7 +294,18 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
         {task && <button type="button" className={clsx(styles.ghostButton, styles.contextToggle)} onClick={() => setContextOpen(true)}><Icon name="panel" size={16} />流程上下文</button>}
       </div>
       {pluginPage ? <div className={styles.pluginPage}>
-        <PluginPageHost owner={pluginPage} page="workbench" workspaceRoot={defaultWorkspace} />
+        <div className={styles.pluginSplit}>
+          <div className={styles.pluginHost}>
+            <PluginPageHost owner={pluginPage} page="workbench" workspaceRoot={defaultWorkspace} theme={theme}
+              onStudioContext={setPluginViewContext}
+              onAskAi={(request: StudioAskAiRequest) => {
+                if (request.prompt && request.prompt.trim()) setPluginDraft({ text: request.prompt, kind: 'prompt' })
+                setPluginChatSignal(value => value + 1)
+              }} />
+          </div>
+          <CodeChatDock key={`plugin:${pluginPage}`} workspace={defaultWorkspace} renderSlot={renderSlot} onOpenInChat={onOpenChat} onFilePreview={onFilePreview}
+            diagnostic={pluginDraft} viewContext={pluginViewContext} sessions={tasks} embeddedLauncher openSignal={pluginChatSignal} />
+        </div>
       </div> : !task ? <div className={styles.empty}>
         <span className={styles.emptyIcon}><Icon name="code" size={26} /></span>
         <strong>选择一个会话</strong>
@@ -374,6 +399,15 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
                   {!filePath && program.note && <p className={styles.codeNote} title={program.note}>AI 交出时说：{program.note}</p>}
                 </div>
                 <div className={styles.codeActions}>
+                  {onDistillToBlueprint && (
+                    <button
+                      type="button"
+                      onClick={() => onDistillToBlueprint(task)}
+                      title="跳转到架构蓝图，让 AI 复盘本会话编排代码并提炼为最短路径蓝图"
+                    >
+                      <Icon name="spark" size={15} />提炼到蓝图
+                    </button>
+                  )}
                   {draft ? <>
                     <button type="button" disabled title="插件页面工具的真实测试尚未接入，现在不能在这里运行"><Icon name="play" size={15} />运行测试<span className={styles.soon}>未接入</span></button>
                     <button type="button" className={styles.primary} disabled title="技能的保存、发布和插件侧发现尚未实现"><Icon name="box" size={15} />保存为技能包<span className={styles.soon}>未接入</span></button>

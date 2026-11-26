@@ -437,6 +437,80 @@
     }
 
     #[tokio::test]
+    async fn workspace_file_routes_general_chat_to_unified_chat_assets_folder() {
+        use axum::{routing::get, Router};
+        let root = std::env::temp_dir().join(format!("chat-assets-preview-{}", uuid_like()));
+        let assets = crate::context::session_browser::chat_assets_dir(&root).unwrap();
+        std::fs::create_dir_all(assets.join("daily-report-skill")).unwrap();
+        std::fs::write(assets.join("daily-report-skill/SKILL.md"), b"# Daily Guide").unwrap();
+        std::fs::write(root.join("legacy-note.md"), b"# Legacy").unwrap();
+        let db = open_db(&root).unwrap();
+        db.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES('chat_new','','test','completed',0,0)", []).unwrap();
+        db.execute("INSERT INTO agent_session_meta(task_id,workspace,kind) VALUES('chat_new',?1,'chat')", [assets.to_str().unwrap()]).unwrap();
+        db.execute("INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES('chat_legacy','','test','completed',0,0)", []).unwrap();
+        db.execute("INSERT INTO agent_session_meta(task_id,workspace,kind) VALUES('chat_legacy',?1,'chat')", [root.to_str().unwrap()]).unwrap();
+        drop(db);
+
+        assert_eq!(
+            crate::context::session_browser::task_workspace(&root, "chat_new").unwrap(),
+            assets
+        );
+        assert_eq!(
+            crate::context::session_browser::task_workspace(&root, "chat_legacy").unwrap(),
+            assets
+        );
+
+        let state = test_state(&root, "127.0.0.1:1".parse().unwrap());
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let base = format!("http://{}/agent/tasks", listener.local_addr().unwrap());
+        let app = Router::new().route("/agent/tasks/{task_id}/workspace-file", get(super::workspace_file)).with_state(state);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+
+        for id in ["chat_new", "chat_legacy"] {
+            let resp = client
+                .get(format!("{base}/{id}/workspace-file"))
+                .query(&[("path", "daily-report-skill/SKILL.md")])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "{id}");
+            assert_eq!(resp.text().await.unwrap(), "# Daily Guide");
+
+            // Absolute path inside chat-assets also resolves cleanly.
+            let abs_resp = client
+                .get(format!("{base}/{id}/workspace-file"))
+                .query(&[("path", assets.join("daily-report-skill/SKILL.md").to_str().unwrap())])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(abs_resp.status(), 200, "{id} abs");
+
+            // Traversal and host-state paths remain strictly blocked.
+            let denied = client
+                .get(format!("{base}/{id}/workspace-file"))
+                .query(&[("path", "../.codex-workspace-mcp/codex_state.db")])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(denied.status(), 404, "{id} denied");
+        }
+        // Pre-migration file under root still remains readable as fallback for chat.
+        let legacy = client
+            .get(format!("{base}/chat_legacy/workspace-file"))
+            .query(&[("path", "legacy-note.md")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(legacy.status(), 200);
+        assert_eq!(legacy.text().await.unwrap(), "# Legacy");
+
+        server.abort();
+        let _ = server.await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn workspace_file_attachment_range_head_and_scoping() {
         use axum::{routing::get, Router};
         use reqwest::header;

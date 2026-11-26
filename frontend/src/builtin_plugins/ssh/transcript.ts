@@ -62,16 +62,27 @@ const MAX_OUTPUT_CHARS = 120_000
 const MAX_OUTPUT_LINES = 1_500
 
 const COMMAND_MARK = '\u001b[36m[AI \u00b7 '
-const SFTP_MARK = '\u001b[33m[AI SFTP]'
-const PASS_MARK = '\u001b[32m['
-const FAIL_MARK = '\u001b[31m['
-const MARKS = [COMMAND_MARK, SFTP_MARK, PASS_MARK, FAIL_MARK]
+const SFTP_MARK = '\u001b[33m[AI SFTP]\u001b[0m '
+const PASS_EXIT_MARK = '\u001b[32m[exit '
+const FAIL_EXIT_MARK = '\u001b[31m[exit '
+const PASS_NO_STATUS_MARK = '\u001b[32m[no exit status'
+const FAIL_NO_STATUS_MARK = '\u001b[31m[no exit status'
+const MARKS = [
+  COMMAND_MARK,
+  SFTP_MARK,
+  PASS_EXIT_MARK,
+  FAIL_EXIT_MARK,
+  PASS_NO_STATUS_MARK,
+  FAIL_NO_STATUS_MARK,
+]
 /** Longest marker prefix, the most that can be held back across a chunk boundary. */
 const MARK_LIMIT = Math.max(...MARKS.map(mark => mark.length))
+/** Maximum bytes an outcome marker line can legitimately span before its newline. */
+const MAX_OUTCOME_LINE_CHARS = 128
 
-const COMMAND_LINE = /^\u001b\[36m\[AI \u00b7 ([\s\S]*?)\]\u001b\[0m \$ ([\s\S]*?)\r?\n/
-const SFTP_LINE = /^\u001b\[33m\[AI SFTP\]\u001b\[0m ([\s\S]*?)\r?\n/
-const OUTCOME_LINE = /^\u001b\[(?:32|31)m\[([^\]]*)\]\u001b\[0m\r?\n/
+const COMMAND_LINE = /^\u001b\[36m\[AI \u00b7 ([^\r\n]*?)\]\u001b\[0m \$ ([^\r\n]*?)\r?\n/
+const SFTP_LINE = /^\u001b\[33m\[AI SFTP\]\u001b\[0m ([^\r\n]*?)\r?\n/
+const OUTCOME_LINE = /^\u001b\[(?:32|31)m\[((?:exit \d+|no exit status)(?: \u00b7 \d+ ms)?)\]\u001b\[0m\r?\n/
 
 /**
  * A transcript with nothing in it yet.
@@ -229,6 +240,16 @@ export function feedTranscript(state: TranscriptState, text: string): void {
       if (state.open !== null) state.open.exit = readExit(outcome[1] ?? '')
       state.open = null
       state.buffer = buffer.slice(outcome[0].length)
+      continue
+    }
+    // If the line already ended (or an outcome candidate grew past any valid
+    // outcome line) without matching a control line, this prefix came from
+    // ordinary command output. Advance past the leading ESC so parsing never
+    // stalls on colored bracketed logs.
+    const isOutcomePrefix = !buffer.startsWith(COMMAND_MARK) && !buffer.startsWith(SFTP_MARK)
+    if (buffer.includes('\n') || (isOutcomePrefix && buffer.length > MAX_OUTCOME_LINE_CHARS)) {
+      append(state, buffer.slice(0, 1))
+      state.buffer = buffer.slice(1)
       continue
     }
     // A marker arrived but its line is not complete yet: wait for the rest.

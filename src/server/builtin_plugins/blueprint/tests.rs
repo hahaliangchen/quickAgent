@@ -1,7 +1,7 @@
 use super::{
     impact::{self, ImpactQuery},
     model::*,
-    package::graph_view,
+    package::{graph_view, playbook_view},
     store::Store,
     verify,
 };
@@ -192,6 +192,7 @@ fn blueprint_verify_distinguishes_matching_moved_changed_and_missing_anchors() {
         Some(&manifest),
         &store.entities().unwrap().entities,
         &store.all_graphs(&manifest).unwrap(),
+        &store.all_playbooks(&manifest).unwrap(),
     );
     assert_eq!(
         (report.ok_ports, report.drifted_ports, report.missing_ports),
@@ -333,4 +334,117 @@ fn blueprint_projects_endpoint_reports_unbuilt_synced_and_stale() {
     assert!(items[1]["updated_at"].as_str().is_some_and(|s| !s.is_empty()));
     assert_eq!(items[2]["status"], "stale");
     assert_eq!(items[2]["missing_ports"], 1);
+}
+
+#[test]
+fn blueprint_playbook_crud_and_anchor_drift_verification() {
+    let root = Workspace::new();
+    git(&root.0, &["init", "-q"]);
+    fs::write(root.0.join("src.rs"), "pub fn run() {}\n").unwrap();
+    fs::write(root.0.join("gone.rs"), "pub fn legacy() {}\n").unwrap();
+    git(&root.0, &["add", "."]);
+    git(
+        &root.0,
+        &[
+            "-c",
+            "user.name=Blueprint",
+            "-c",
+            "user.email=blueprint@example.test",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+    );
+    let baseline = git(&root.0, &["rev-parse", "HEAD"]);
+    {
+        let store = root.open();
+
+        // Upsert playbook and verify manifest/file/view
+        let created = store
+            .upsert_playbook(
+                "release-path",
+                serde_json::from_value(json!({
+                    "title": "桌面端打包最短路径",
+                    "trigger": "修改后端并重启桌面端前",
+                    "summary": "省去试错，直接构建带 daily-report 的 Release 并同步二进制",
+                    "code": "// 1. cargo build --release --features internal-daily-report\n// 2. sync desktop binaries",
+                    "anchor_files": ["src.rs", "gone.rs"],
+                    "related_graphs": ["main"],
+                    "verify_commands": ["cargo test -- blueprint"],
+                    "environment": ["201 验证端口 18133 必须使用 venv/bin/python (3.12)"],
+                    "pitfalls": ["不要漏掉 internal-daily-report feature"],
+                    "source_tasks": ["task-123"],
+                    "last_synced_commit": baseline
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(created.id, "release-path");
+        assert_eq!(created.anchor_files, ["gone.rs", "src.rs"]);
+        assert!(
+            root.0
+                .join(".quickagent/blueprint/playbooks/release-path.json")
+                .is_file()
+        );
+
+        // Clean baseline -> ok
+        let view = playbook_view(&store, "release-path").unwrap();
+        assert_eq!(view["status"]["status"], "ok");
+
+        // Modify one anchor -> drifted
+        fs::write(root.0.join("src.rs"), "pub fn run() { /* changed */ }\n").unwrap();
+        let manifest = store.manifest().unwrap().unwrap();
+        let report = verify::verify(
+            &store,
+            Some(&manifest),
+            &[],
+            &[],
+            &store.all_playbooks(&manifest).unwrap(),
+        );
+        assert_eq!(report.drifted_playbooks, 1);
+        assert_eq!(report.missing_playbooks, 0);
+        assert_eq!(report.affected_playbooks, ["release-path"]);
+        assert_eq!(report.playbooks["release-path"].status, PortStatus::Drifted);
+        assert_eq!(report.playbooks["release-path"].changed_files, ["src.rs"]);
+        assert!(report.stale);
+
+        // Delete another anchor -> missing
+        fs::remove_file(root.0.join("gone.rs")).unwrap();
+        let view_missing = playbook_view(&store, "release-path").unwrap();
+        assert_eq!(view_missing["status"]["status"], "missing");
+        assert_eq!(view_missing["status"]["missing_files"], json!(["gone.rs"]));
+
+        // Reject invalid path traversal in anchor_files
+        assert!(
+            store
+                .upsert_playbook(
+                    "bad",
+                    serde_json::from_value(json!({"anchor_files": ["../outside.rs"]})).unwrap(),
+                )
+                .is_err()
+        );
+    }
+
+    // Hint & tail reminders & project scanner reopen Store internally, so run after dropping store guard.
+    let hint = super::workspace_blueprint_hint(&root.0).unwrap();
+    assert!(hint.contains("0 graphs, 1 playbooks") && hint.lines().count() == 1);
+    let tail = super::workspace_blueprint_tail(&root.0).unwrap();
+    assert!(tail.contains("Blueprint Environment & Pitfall Reminders"), "{tail}");
+    assert!(tail.contains("201 验证端口 18133 必须使用 venv/bin/python (3.12)"), "{tail}");
+    assert!(tail.contains("不要漏掉 internal-daily-report feature"), "{tail}");
+    assert!(tail.contains("cargo test -- blueprint"), "{tail}");
+
+    let scan = super::routes::scan_project_statuses(vec![root.0.clone()]);
+    let item = &scan["projects"][0];
+    assert_eq!(item["playbook_count"], 1);
+    assert_eq!(item["missing_playbooks"], 1);
+    assert_eq!(item["status"], "stale");
+
+    // Delete playbook cleans up file & manifest
+    {
+        let store = root.open();
+        store.delete_playbook("release-path").unwrap();
+        assert!(store.playbook("release-path").unwrap().is_none());
+        assert!(store.manifest().unwrap().unwrap().playbooks.is_empty());
+    }
 }

@@ -44,6 +44,7 @@ export interface ProjectOption {
 
 export interface ReportRow {
   id?: number | string
+  userId?: number | string
   reportDate?: string
   userName?: string
   nickName?: string
@@ -57,10 +58,23 @@ export interface ReportRow {
   [key: string]: unknown
 }
 
+/** One session started today, with the id the AI follows back into its history. */
+export interface TodaySession {
+  task_id: string
+  title: string
+  status: string
+  created_at: number
+  updated_at?: number
+  project: string
+  workspace?: string
+  plugin_id?: string | null
+  files?: string[]
+}
+
 export interface TodayProject {
   project: string
   workspace: string
-  sessions: { title: string; status: string; created_at: number }[]
+  sessions: TodaySession[]
   files: string[]
   commits: string[]
 }
@@ -68,8 +82,17 @@ export interface TodayProject {
 export interface TodayActivity {
   date: string
   projects: TodayProject[]
+  /** The same sessions, ungrouped: the page offers them as AI context. */
+  sessions?: TodaySession[]
   totals: { sessions: number; files: number; commits: number }
   warnings: string[]
+}
+
+/** Every session of the day, whichever grouping the server sent. */
+export function todaySessions(activity: TodayActivity | undefined): TodaySession[] {
+  if (!activity) return []
+  if (activity.sessions && activity.sessions.length > 0) return [...activity.sessions]
+  return activity.projects.flatMap(entry => entry.sessions ?? [])
 }
 
 /** A failed call keeps the backend's reason, and says whether it was the login. */

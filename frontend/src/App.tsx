@@ -5,6 +5,8 @@ import { PluginPageHost } from './components/PluginPageHost.tsx'
 import { OfficeStudioView } from './components/OfficeStudioView.tsx'
 import type { StudioAskAiRequest, StudioViewContext } from './plugins/protocol.ts'
 import { BlueprintContext } from './builtin_plugins/blueprint/api.ts'
+import { buildDistillPlaybookPrompt } from './builtin_plugins/blueprint/playbookPrompts.ts'
+import type { Task } from './api.ts'
 import { CodeChatDock } from './components/CodeChatDock.tsx'
 import { type AiFocus, type RemoteTool, remoteTools, SshContext } from './builtin_plugins/ssh/api.ts'
 import { announceDraftReady } from './builtin_plugins/daily-report/api.ts'
@@ -17,7 +19,8 @@ import { AppDialogHost } from './components/AppDialog.tsx'
 import { isCodeShellContext } from './shellSetup.ts'
 import type { AgentSlotProps } from './cordis/slot-contract.ts'
 import { toggleTheme } from './theme.ts'
-import { previewFile, type OpenFilePreview, type PendingOpen, type PreviewFile } from './filePreview.ts'
+import { usePluginPages } from './plugins/react.tsx'
+import { previewFile, previewModule, type OpenFilePreview, type PendingOpen, type PreviewFile } from './filePreview.ts'
 import { useAgentWorkspace } from './useAgentWorkspace.ts'
 import css from './App.module.css'
 
@@ -33,10 +36,11 @@ const HiddenFreeze = memo(
 /** Assemble the task model and the Codex 4-column layout + SettingsModal overlay. */
 export function App({ renderSlot }: AgentSlotProps) {
   const workspace = useAgentWorkspace()
+  const { packages: pluginPackages } = usePluginPages()
   const [tab, setTab] = useState<Tab>('chat')
   const [workbench, setWorkbench] = useState(false)
+  const [workbenchMode, setWorkbenchMode] = useState<'flows' | 'blueprint'>('flows')
   const [git, setGit] = useState(false)
-  const [blueprint, setBlueprint] = useState(false)
   const [blueprintWorkspace, setBlueprintWorkspace] = useState('')
   const [blueprintDraft, setBlueprintDraft] = useState<{ text: string; kind: 'prompt' }>()
   const [blueprintChatOpenSignal, setBlueprintChatOpenSignal] = useState(0)
@@ -48,6 +52,12 @@ export function App({ renderSlot }: AgentSlotProps) {
     setBlueprintWorkspace(path)
     setBlueprintDraft(undefined)
   }, [])
+  const distillTaskToBlueprint = useCallback((task: Task) => {
+    const targetWorkspace = task.workspace || workspace.activeWorkspace || workspace.info?.workspace || ''
+    if (targetWorkspace) setBlueprintWorkspace(targetWorkspace)
+    setOffice(false); setSsh(false); setGit(false); setWorkbench(true); setWorkbenchMode('blueprint')
+    sendBlueprintDraft(buildDistillPlaybookPrompt([task]))
+  }, [workspace.activeWorkspace, workspace.info?.workspace, sendBlueprintDraft])
   const [ssh, setSsh] = useState(false)
   const [sshMounted, setSshMounted] = useState(false)
   const [followAi, setFollowAi] = useState(() => {
@@ -61,6 +71,7 @@ export function App({ renderSlot }: AgentSlotProps) {
   // aiFocus silently without stealing focus from Home.
   const sshAutoOpenedRef = useRef<Set<string>>(new Set())
   const [sshDraft, setSshDraft] = useState<{ text: string }>()
+  const [sshViewContext, setSshViewContext] = useState<StudioViewContext | null>(null)
   // A prepared daily-report draft brings its page forward, the way an SSH
   // command opens the remote terminal.
   const [dailyReportPage, setDailyReportPage] = useState<{ owner: string; seq: number }>()
@@ -136,7 +147,7 @@ export function App({ renderSlot }: AgentSlotProps) {
     observation.seq = Math.max(observation.seq, events.at(-1)?.seq ?? -1)
     if (latest) setAiFocus(latest)
     if (open) {
-      setSsh(true); setSshMounted(true); setOffice(false); setGit(false); setBlueprint(false); setWorkbench(false)
+      setSsh(true); setSshMounted(true); setOffice(false); setGit(false); setWorkbench(false)
       setSshChatOpenSignal(value => value + 1)
     }
   }, [taskId, workspace.session.task, workspace.session.events, workspace.newTaskLaunch, followAi])
@@ -157,7 +168,7 @@ export function App({ renderSlot }: AgentSlotProps) {
     const ready = events.filter(event => event.type === 'daily_report/draft_ready' && event.seq > baseline.seq).at(-1)
     if (last > baseline.seq) dailyReportWatch.current = { taskId, seq: last }
     if (!ready) return
-    setSsh(false); setGit(false); setBlueprint(false); setOffice(false); setWorkbench(true)
+    setSsh(false); setGit(false); setOffice(false); setWorkbench(true); setWorkbenchMode('flows')
     setDailyReportPage({ owner: 'daily-report', seq: ready.seq })
     announceDraftReady()
   }, [taskId, workspace.session])
@@ -182,8 +193,7 @@ export function App({ renderSlot }: AgentSlotProps) {
     const files = current.files.filter(file => file.url !== url)
     return { ...current, files, active: current.active === url ? files[Math.min(index, files.length - 1)]?.url : current.active }
   })
-  const editPreview = (slotId: string, file: PreviewFile) => {
-    setBlueprint(false)
+  const editPreview = useCallback((slotId: string, file: PreviewFile) => {
     setPendingOpen(prev => ({ slotId, fileUrl: file.url, filename: file.name, seq: (prev?.seq ?? 0) + 1 }))
     setOffice(true)
     setSsh(false)
@@ -191,7 +201,27 @@ export function App({ renderSlot }: AgentSlotProps) {
     setOfficeMounted(true)
     setGit(false)
     setWorkbench(false)
-  }
+  }, [])
+  const openDockFile = useCallback((targetTaskId: string, path: string, options?: { line?: number; url?: string }, root = '') => {
+    const file = previewFile(targetTaskId, path, options, root)
+    if (!file) return
+    const mod = previewModule(file.name, pluginPackages)
+    if (mod) {
+      editPreview(mod.slotId, file)
+      return
+    }
+    setOffice(false); setSsh(false); setSshDraft(undefined); setGit(false); setWorkbench(false)
+    setTab('chat')
+    if (targetTaskId !== taskId) workspace.openTask(targetTaskId)
+    setPreview(current => {
+      const files = current?.taskId === targetTaskId ? current.files : []
+      return { taskId: targetTaskId, active: file.url, files: files.some(item => item.url === file.url)
+        ? files.map(item => item.url === file.url ? file : item) : [...files, file] }
+    })
+    setMode('preview')
+    setRightPanelOpen(true)
+    setRightPanelWidth(width => limitPanelWidth(width < 520 ? 560 : width))
+  }, [pluginPackages, editPreview, taskId, workspace.openTask])
   useEffect(() => {
     const resize = () => setRightPanelWidth(limitPanelWidth)
     window.addEventListener('resize', resize)
@@ -222,7 +252,7 @@ export function App({ renderSlot }: AgentSlotProps) {
   }
 
   const handleNewChat = () => {
-    setBlueprint(false); setBlueprintDraft(undefined)
+    setBlueprintDraft(undefined)
     setOffice(false)
     setWorkbench(false)
     setGit(false)
@@ -289,18 +319,17 @@ export function App({ renderSlot }: AgentSlotProps) {
     titleFor: titleForTask,
     ...(gitWorkspace ? { diagnose: diagnoseSsh } : {}),
   }), [taskId, openSshChat, aiFocus, followAi, toggleFollowAi, titleForTask, gitWorkspace, diagnoseSsh])
-  const showHomeSidebar = !sidebarCollapsed && !workbench && !git && !ssh && !office && !blueprint
-  const isHome = !office && !ssh && !blueprint && !git && !workbench && tab !== 'skill-pages'
+  const showHomeSidebar = !sidebarCollapsed && !workbench && !git && !ssh && !office
+  const isHome = !office && !ssh && !git && !workbench && tab !== 'skill-pages'
 
   return (
     <div className={css.appFrame} data-ds-dark-theme={dark ? '' : undefined}>
       {/* 1. Activity Dock (48px fixed on left) */}
       <CodexDock
-        activeTab={office ? 'office' : ssh ? 'ssh' : blueprint ? 'blueprint' : git ? 'git' : workbench || tab === 'skill-pages' ? 'skills' : 'home'}
+        activeTab={office ? 'office' : ssh ? 'ssh' : git ? 'git' : workbench || tab === 'skill-pages' ? 'skills' : 'home'}
         onSelectTab={selected => {
           setSsh(selected === 'ssh')
-          setBlueprint(selected === 'blueprint')
-          if (selected !== 'blueprint') setBlueprintDraft(undefined)
+          if (selected !== 'skills') setBlueprintDraft(undefined)
           if (selected === 'ssh') setSshMounted(true)
           if (selected !== 'ssh') setSshDraft(undefined)
           if (selected === 'office') {
@@ -378,53 +407,91 @@ export function App({ renderSlot }: AgentSlotProps) {
               />
             </div>
             <HiddenFreeze hidden={!office}>
-              {gitWorkspace && (
-                <CodeChatDock
-                  key="office"
-                  workspace={gitWorkspace}
-                  renderSlot={renderSlot}
-                  onOpenInChat={id => { setOffice(false); setOfficeDraft(undefined); setWorkbench(false); setTab('chat'); workspace.openTask(id) }}
-                  diagnostic={officeDraft}
-                  viewContext={officeViewContext}
-                  embeddedLauncher
-                  openSignal={officeChatOpenSignal}
-                />
-              )}
+              <CodeChatDock
+                key="office"
+                workspace={gitWorkspace}
+                renderSlot={renderSlot}
+                onOpenInChat={id => { setOffice(false); setOfficeDraft(undefined); setWorkbench(false); setTab('chat'); workspace.openTask(id) }}
+                onFilePreview={openDockFile}
+                diagnostic={officeDraft}
+                viewContext={officeViewContext}
+                sessions={workspace.allTasks}
+                embeddedLauncher
+                openSignal={officeChatOpenSignal}
+              />
             </HiddenFreeze>
           </div>
         )}
         {sshMounted && <div className={css.dockedView} style={{ display: ssh ? 'flex' : 'none' }}>
           <SshContext.Provider value={sshContextValue}>
-            <div className={css.dockedPage}><PluginPageHost owner="ssh" page="workbench" workspaceRoot={gitWorkspace} theme={dark ? 'dark' : 'light'} /></div>
+            <div className={css.dockedPage}><PluginPageHost owner="ssh" page="workbench" workspaceRoot={gitWorkspace} theme={dark ? 'dark' : 'light'} onStudioContext={setSshViewContext} /></div>
           </SshContext.Provider>
           <HiddenFreeze hidden={!ssh}>
-            {gitWorkspace && <CodeChatDock key="ssh" workspace={gitWorkspace} renderSlot={renderSlot} onOpenInChat={openSshChat} diagnostic={sshDraft} embeddedLauncher linkedTaskId={taskId} linkedSession={workspace.session} openSignal={sshChatOpenSignal} />}
+            <CodeChatDock key="ssh" workspace={gitWorkspace} renderSlot={renderSlot} onOpenInChat={openSshChat} onFilePreview={openDockFile} diagnostic={sshDraft} viewContext={sshViewContext} sessions={workspace.allTasks} embeddedLauncher linkedTaskId={taskId} linkedSession={workspace.session} openSignal={sshChatOpenSignal} />
           </HiddenFreeze>
         </div>}
-        {blueprint && (() => {
-          const activeBlueprintWorkspace = blueprintWorkspace || gitWorkspace
-          const knownProjects = workspace.projects.some(p => p.path === gitWorkspace) || !gitWorkspace
-            ? workspace.projects
-            : [{ path: gitWorkspace, title: gitWorkspace.split(/[\\/]/).filter(Boolean).pop() ?? gitWorkspace }, ...workspace.projects]
-          return <div className={css.dockedView}>
-            <BlueprintContext.Provider value={{
-              sendToAi: sendBlueprintDraft,
-              refreshSignal: workspace.session.task?.status,
-              projects: knownProjects,
-              selectWorkspace: selectBlueprintWorkspace,
-            }}>
-              <div className={css.dockedPage}><PluginPageHost owner="blueprint" page="workbench" workspaceRoot={activeBlueprintWorkspace} theme={dark ? 'dark' : 'light'} /></div>
-            </BlueprintContext.Provider>
-            {activeBlueprintWorkspace && <CodeChatDock key={`blueprint:${activeBlueprintWorkspace}`} workspace={activeBlueprintWorkspace} renderSlot={renderSlot}
-              onOpenInChat={id => { setBlueprint(false); setBlueprintDraft(undefined); setWorkbench(false); setTab('chat'); workspace.openTask(id) }}
-              diagnostic={blueprintDraft} embeddedLauncher linkedTaskId={activeBlueprintWorkspace === gitWorkspace ? taskId : undefined} linkedSession={activeBlueprintWorkspace === gitWorkspace ? workspace.session : undefined} openSignal={blueprintChatOpenSignal} />}
-          </div>
-        })()}
-        {!office && !ssh && !blueprint && (git ? <div className={css.dockedView}>
+        {!office && !ssh && (git ? <div className={css.dockedView}>
           <div className={css.dockedPage}><PluginPageHost owner="git" page="history" workspaceRoot={gitWorkspace} /></div>
-          {gitWorkspace && <CodeChatDock key="git" workspace={gitWorkspace} renderSlot={renderSlot} onOpenInChat={id => { setGit(false); setWorkbench(false); setTab('chat'); workspace.openTask(id) }} />}
+          {gitWorkspace && <CodeChatDock key="git" workspace={gitWorkspace} renderSlot={renderSlot} sessions={workspace.allTasks} onOpenInChat={id => { setGit(false); setWorkbench(false); setTab('chat'); workspace.openTask(id) }} onFilePreview={openDockFile} />}
         </div>
-          : workbench ? <SkillWorkbench tasks={workspace.allTasks} projects={workspace.projects} defaultWorkspace={workspace.info?.workspace ?? ''} onOpenChat={id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) }} onPackages={() => { setWorkbench(false); setTab('skill-pages') }} pageRequest={dailyReportPage} /> : tab === 'skill-pages' ? <SkillPackagesPage workspace={workspace} onBack={() => setTab('chat')} /> : null)}
+          : workbench ? (() => {
+            const activeBlueprintWorkspace = blueprintWorkspace || gitWorkspace
+            const knownProjects = workspace.projects.some(p => p.path === gitWorkspace) || !gitWorkspace
+              ? workspace.projects
+              : [{ path: gitWorkspace, title: gitWorkspace.split(/[\\/]/).filter(Boolean).pop() ?? gitWorkspace }, ...workspace.projects]
+            return <div className={css.workbenchShell}>
+              <div className={css.workbenchTopBar}>
+                <div className={css.workbenchTabs} role="tablist" aria-label="流程与蓝图模式">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={workbenchMode === 'flows'}
+                    className={css.workbenchTab}
+                    onClick={() => setWorkbenchMode('flows')}
+                  >
+                    历史编排与技能
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={workbenchMode === 'blueprint'}
+                    className={css.workbenchTab}
+                    onClick={() => setWorkbenchMode('blueprint')}
+                  >
+                    架构蓝图与最短路径
+                  </button>
+                </div>
+                <span className={css.workbenchHint}>
+                  {workbenchMode === 'flows'
+                    ? '查看历史会话编排代码，或一键提炼为架构蓝图最短路径'
+                    : '代码表示蓝图 · 架构画布 + 从历史会话提炼的可复用最短路径'}
+                </span>
+              </div>
+              <div className={css.workbenchBody}>
+                {workbenchMode === 'blueprint' ? (
+                  <div className={css.dockedView}>
+                    <BlueprintContext.Provider value={{
+                      sendToAi: sendBlueprintDraft,
+                      refreshSignal: workspace.session.task?.status,
+                      projects: knownProjects,
+                      selectWorkspace: selectBlueprintWorkspace,
+                      sessions: workspace.allTasks,
+                      openSession: id => { setBlueprintDraft(undefined); setWorkbench(false); setTab('chat'); workspace.openTask(id) },
+                    }}>
+                      <div className={css.dockedPage}><PluginPageHost owner="blueprint" page="workbench" workspaceRoot={activeBlueprintWorkspace} theme={dark ? 'dark' : 'light'} /></div>
+                    </BlueprintContext.Provider>
+                    {activeBlueprintWorkspace && <CodeChatDock key={`blueprint:${activeBlueprintWorkspace}`} workspace={activeBlueprintWorkspace} renderSlot={renderSlot}
+                      onOpenInChat={id => { setBlueprintDraft(undefined); setWorkbench(false); setTab('chat'); workspace.openTask(id) }}
+                      onFilePreview={openDockFile}
+                      diagnostic={blueprintDraft} sessions={workspace.allTasks} embeddedLauncher linkedTaskId={activeBlueprintWorkspace === gitWorkspace ? taskId : undefined} linkedSession={activeBlueprintWorkspace === gitWorkspace ? workspace.session : undefined} openSignal={blueprintChatOpenSignal} />}
+                  </div>
+                ) : (
+                  <SkillWorkbench tasks={workspace.allTasks} projects={workspace.projects} defaultWorkspace={workspace.info?.workspace ?? ''} onOpenChat={id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) }} onDistillToBlueprint={distillTaskToBlueprint} onFilePreview={openDockFile} onPackages={() => { setWorkbench(false); setTab('skill-pages') }} pageRequest={dailyReportPage} renderSlot={renderSlot} theme={dark ? 'dark' : 'light'} />
+                )}
+              </div>
+            </div>
+          })()
+            : tab === 'skill-pages' ? <SkillPackagesPage workspace={workspace} renderSlot={renderSlot} theme={dark ? 'dark' : 'light'} onBack={() => setTab('chat')} onOpenInChat={id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) }} onFilePreview={openDockFile} /> : null)}
         <div style={{ display: isHome ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
           <HiddenFreeze hidden={!isHome}>
             {workspace.heroPhase ? (
@@ -445,7 +512,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       </div>
 
       {/* Drag handle for Right Panel */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && !blueprint && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && (
         <div
           className={css.dragHandle}
           role="separator" aria-orientation="vertical" aria-label="调整预览抽屉宽度"
@@ -469,7 +536,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       )}
 
       {/* 4. Right Inspector Panel (Changes, Sources) */}
-      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && !blueprint && (
+      {rightPanelOpen && !workspace.heroPhase && tab !== 'skill-pages' && !workbench && !git && !ssh && !office && (
         <CodexRightPanel
           width={rightPanelWidth}
           mode={tabs ? mode : 'changes'}
@@ -494,7 +561,7 @@ export function App({ renderSlot }: AgentSlotProps) {
       )}
 
       <ShellSetupDialog
-        enabled={!git && !blueprint && !workbench && tab !== 'skill-pages' && !workspace.settingsOpen && isCodeShellContext(workspace.taskId, workspace.task, workspace.sidebarMode, workspace.activeWorkspace ?? '')}
+        enabled={!git && !workbench && tab !== 'skill-pages' && !workspace.settingsOpen && isCodeShellContext(workspace.taskId, workspace.task, workspace.sidebarMode, workspace.activeWorkspace ?? '')}
         scope={workspace.taskId ?? workspace.activeWorkspace ?? ''}
         onReady={workspace.refreshInfoAndSettings}
       />

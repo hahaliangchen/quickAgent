@@ -558,10 +558,147 @@ pub fn compile_entry_with_libraries(
 ) -> Result<Program> {
     link_prelude(compile_inner(source, entry, false, libraries, BTreeSet::new(), false, false)?)
 }
-/// Rewrite raw triple-double-quoted literals (`"""..."""` or `r"""..."""`) into
-/// standard JSON-escaped JS string literals while preserving exact line numbers
-/// via newline-bearing block comments. Standard JS never permits `"""`, so this
-/// cannot alter any valid JS/TS program.
+/// Parse a non-raw triple-double-quoted string starting right after the opening `"""`.
+/// Aligns with Python's `"""..."""`: unescaped backticks, `${...}`, quotes (`"` / `""`)
+/// and real newlines stay literal; standard escapes (`\t`, `\n`, `\r`, `\\`, `\"`, `\'`,
+/// `\b`, `\f`, `\v`, `\0` when not followed by an octal digit, `\<newline>`, `\xHH`,
+/// `\uHHHH`, `\u{...}`) are decoded; unrecognized escapes such as `\1`, `\d`, `\s` stay
+/// verbatim (`\1`, `\d`, `\s`) just like Python 3.
+fn parse_escaped_triple_quote(
+    source: &str,
+    content_start: usize,
+    start_line: usize,
+    start_col: usize,
+) -> Result<(String, usize)> {
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut out = String::new();
+    let mut j = content_start;
+    while j < len {
+        let b = bytes[j];
+        if b == b'"' && j + 2 < len && bytes[j + 1] == b'"' && bytes[j + 2] == b'"' {
+            // Support trailing quotes inside the string (e.g. `"""baz""""` -> `baz"`).
+            while j + 3 < len && bytes[j + 3] == b'"' {
+                out.push('"');
+                j += 1;
+            }
+            return Ok((out, j + 3));
+        }
+        if b == b'\\' && j + 1 < len {
+            let next = bytes[j + 1];
+            match next {
+                b'\\' => {
+                    out.push('\\');
+                    j += 2;
+                }
+                b'"' => {
+                    out.push('"');
+                    j += 2;
+                }
+                b'\'' => {
+                    out.push('\'');
+                    j += 2;
+                }
+                b'n' => {
+                    out.push('\n');
+                    j += 2;
+                }
+                b'r' => {
+                    out.push('\r');
+                    j += 2;
+                }
+                b't' => {
+                    out.push('\t');
+                    j += 2;
+                }
+                b'b' => {
+                    out.push('\u{0008}');
+                    j += 2;
+                }
+                b'f' => {
+                    out.push('\u{000C}');
+                    j += 2;
+                }
+                b'v' => {
+                    out.push('\u{000B}');
+                    j += 2;
+                }
+                b'0' if j + 2 >= len || !matches!(bytes[j + 2], b'0'..=b'7') => {
+                    out.push('\0');
+                    j += 2;
+                }
+                b'\n' => {
+                    j += 2;
+                }
+                b'\r' => {
+                    if j + 2 < len && bytes[j + 2] == b'\n' {
+                        j += 3;
+                    } else {
+                        j += 2;
+                    }
+                }
+                b'x' if j + 3 < len
+                    && bytes[j + 2].is_ascii_hexdigit()
+                    && bytes[j + 3].is_ascii_hexdigit() =>
+                {
+                    if let Ok(v) = u8::from_str_radix(&source[j + 2..j + 4], 16) {
+                        out.push(v as char);
+                        j += 4;
+                    } else {
+                        out.push('\\');
+                        out.push('x');
+                        j += 2;
+                    }
+                }
+                b'u' => {
+                    if j + 2 < len && bytes[j + 2] == b'{' {
+                        if let Some(rel_close) = source[j + 3..].find('}') {
+                            let hex = &source[j + 3..j + 3 + rel_close];
+                            if !hex.is_empty()
+                                && hex.bytes().all(|c| c.is_ascii_hexdigit())
+                                && let Ok(code) = u32::from_str_radix(hex, 16)
+                                && let Some(ch) = char::from_u32(code)
+                            {
+                                out.push(ch);
+                                j += 3 + rel_close + 1;
+                                continue;
+                            }
+                        }
+                    } else if j + 5 < len
+                        && bytes[j + 2..j + 6].iter().all(|c| c.is_ascii_hexdigit())
+                        && let Ok(code) = u32::from_str_radix(&source[j + 2..j + 6], 16)
+                        && let Some(ch) = char::from_u32(code)
+                    {
+                        out.push(ch);
+                        j += 6;
+                        continue;
+                    }
+                    out.push('\\');
+                    out.push('u');
+                    j += 2;
+                }
+                _ => {
+                    let ch = source[j + 1..].chars().next().unwrap();
+                    out.push('\\');
+                    out.push(ch);
+                    j += 1 + ch.len_utf8();
+                }
+            }
+            continue;
+        }
+        let ch = source[j..].chars().next().unwrap();
+        out.push(ch);
+        j += ch.len_utf8();
+    }
+    bail!(
+        "TS_PROGRAM {start_line}:{start_col}: Unterminated triple-quoted string (missing closing \"\"\")"
+    );
+}
+
+/// Rewrite triple-double-quoted literals (`"""..."""` Python-style escaped, or
+/// `r"""..."""` / `R"""..."""` raw verbatim) into standard JSON-escaped JS string
+/// literals while preserving exact line numbers via newline-bearing block comments.
+/// Standard JS never permits `"""`, so this cannot alter any valid JS/TS program.
 fn preprocess_raw_triple_quotes(source: &str) -> Result<String> {
     if !source.contains("\"\"\"") {
         return Ok(source.to_owned());
@@ -688,36 +825,41 @@ fn preprocess_raw_triple_quotes(source: &str) -> Result<String> {
             regex_allowed = false;
             continue;
         }
-        // Raw triple-double-quoted string: `"""..."""` or `r"""..."""`
-        let raw_prefix_len = if b == b'"' && i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
-            Some(0usize)
-        } else if b == b'r'
+        // Triple-double-quoted string: `"""..."""` (Python-style escaped) or `r"""..."""` (raw verbatim)
+        let triple_kind = if b == b'"' && i + 2 < len && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
+            Some((0usize, false))
+        } else if (b == b'r' || b == b'R')
             && i + 3 < len
             && bytes[i + 1] == b'"'
             && bytes[i + 2] == b'"'
             && bytes[i + 3] == b'"'
             && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_' || bytes[i - 1] == b'$'))
         {
-            Some(1usize)
+            Some((1usize, true))
         } else {
             None
         };
-        if let Some(prefix_len) = raw_prefix_len {
+        if let Some((prefix_len, is_raw)) = triple_kind {
             let start_line = line;
             let start_col = col;
             let content_start = i + prefix_len + 3;
-            let Some(rel_end) = source[content_start..].find("\"\"\"") else {
-                bail!("TS_PROGRAM {start_line}:{start_col}: Unterminated raw triple-quoted string (missing closing \"\"\")");
+            let (decoded, close_end) = if is_raw {
+                let Some(rel_end) = source[content_start..].find("\"\"\"") else {
+                    bail!("TS_PROGRAM {start_line}:{start_col}: Unterminated raw triple-quoted string (missing closing \"\"\")");
+                };
+                let mut close_pos = content_start + rel_end;
+                // Support trailing quotes inside the raw string (e.g. `r"""foo""""` -> `foo"`).
+                while close_pos + 3 < len && bytes[close_pos + 3] == b'"' {
+                    close_pos += 1;
+                }
+                (source[content_start..close_pos].to_owned(), close_pos + 3)
+            } else {
+                parse_escaped_triple_quote(source, content_start, start_line, start_col)?
             };
-            let mut close_pos = content_start + rel_end;
-            // Support trailing quotes inside the raw string (e.g. `"""foo""""` -> `foo"`).
-            while close_pos + 3 < len && bytes[close_pos + 3] == b'"' {
-                close_pos += 1;
-            }
-            let raw_body = &source[content_start..close_pos];
-            let escaped = serde_json::to_string(raw_body)?;
+            let escaped = serde_json::to_string(&decoded)?;
             out.push_str(&escaped);
-            let newline_count = raw_body.bytes().filter(|&byte| byte == b'\n').count();
+            let span_src = &source[i..close_end];
+            let newline_count = span_src.bytes().filter(|&byte| byte == b'\n').count();
             if newline_count > 0 {
                 out.push_str("/*");
                 for _ in 0..newline_count {
@@ -725,10 +867,10 @@ fn preprocess_raw_triple_quotes(source: &str) -> Result<String> {
                 }
                 out.push_str("*/");
             }
-            for ch in source[i..close_pos + 3].chars() {
+            for ch in span_src.chars() {
                 advance_pos(ch, &mut line, &mut col);
             }
-            i = close_pos + 3;
+            i = close_end;
             regex_allowed = false;
             continue;
         }
@@ -945,7 +1087,7 @@ fn compile_inner(
                 .get(..idx)
                 .is_some_and(|prev| prev.iter().any(|l| l.contains("String.raw`") || l.contains('`')));
             if current_has_backtick && prior_opens_template {
-                "\n  Hint: an unescaped backtick (`) or ${ inside a template literal / String.raw terminates it early. For multi-line code or docs containing backticks (Go, Markdown, TS, shell), use raw triple-double-quotes `\"\"\"...\"\"\"` (everything inside is verbatim with zero escaping)."
+                "\n  Hint: an unescaped backtick (`) or ${ inside a template literal / String.raw terminates it early. For multi-line code or docs containing backticks (Go, Markdown, TS, shell), use triple-double-quotes `\"\"\"...\"\"\"` (supports \\t/\\n/\\\\ escapes) or raw `r\"\"\"...\"\"\"` (verbatim with zero escaping)."
             } else {
                 ""
             }
@@ -1818,19 +1960,25 @@ mod diagnostic_hint_tests {
     }
 
     #[test]
-    fn raw_triple_quoted_strings_preserve_backticks_escapes_and_line_numbers() {
+    fn triple_quoted_strings_split_python_escaped_and_raw_semantics() {
         let mut repl = Runtime::new_repl(libraries::builtin()).unwrap();
         let src = r####"
 const goCode = """package main
 const q = `SELECT * FROM "users" WHERE name = '\1'`
 const tpl = "${notInterpolated}"
 """;
-const rawPrefixed = r"""foo\n\1`bar`""" + """baz"""";
+const goTabEdit = """\t\tif r == '\\n' {
+\t\t\treturn "ok\\n"
+\t\t}""";
+const rawPrefixed = r"""foo\n\t\1`bar`""" + """baz"""";
+const escapedInnerQuotes = """a \"\"\" b\\""";
+const lineContinuation = """hello \
+world""";
 const withRegex = "a\"b".replace(/"/g, "") + """ok""";
 const inComment = 1; // """ not a string
 const inSingle = '"""';
 const inTemplate = `"""`;
-[goCode, rawPrefixed, withRegex, inComment, inSingle, inTemplate]
+[goCode, goTabEdit, rawPrefixed, escapedInnerQuotes, lineContinuation, withRegex, inComment, inSingle, inTemplate]
 "####;
         uncalled_functions(src, None).unwrap();
         let state = repl.append_segment(src, libraries::builtin(), false).unwrap();
@@ -1841,14 +1989,20 @@ const inTemplate = `"""`;
             arr[0].as_str().unwrap(),
             "package main\nconst q = `SELECT * FROM \"users\" WHERE name = '\\1'`\nconst tpl = \"${notInterpolated}\"\n"
         );
-        assert_eq!(arr[1].as_str().unwrap(), "foo\\n\\1`bar`baz\"");
-        assert_eq!(arr[2].as_str().unwrap(), "abok");
-        assert_eq!(arr[3].as_i64().unwrap(), 1);
-        assert_eq!(arr[4].as_str().unwrap(), "\"\"\"");
-        assert_eq!(arr[5].as_str().unwrap(), "\"\"\"");
+        assert_eq!(
+            arr[1].as_str().unwrap(),
+            "\t\tif r == '\\n' {\n\t\t\treturn \"ok\\n\"\n\t\t}"
+        );
+        assert_eq!(arr[2].as_str().unwrap(), "foo\\n\\t\\1`bar`baz\"");
+        assert_eq!(arr[3].as_str().unwrap(), "a \"\"\" b\\");
+        assert_eq!(arr[4].as_str().unwrap(), "hello world");
+        assert_eq!(arr[5].as_str().unwrap(), "abok");
+        assert_eq!(arr[6].as_i64().unwrap(), 1);
+        assert_eq!(arr[7].as_str().unwrap(), "\"\"\"");
+        assert_eq!(arr[8].as_str().unwrap(), "\"\"\"");
 
-        // Error line number after a multi-line triple-quoted string must remain exact (line 6).
-        let with_err = "const a = \"\"\"line1\nline2\nline3\nline4\"\"\";\nconst ok = 1;\nconst broken = ;";
+        // Error line number after multi-line triple-quoted string (including line continuation) must remain exact (line 6).
+        let with_err = "const a = \"\"\"line1\\\nline2\nline3\nline4\"\"\";\nconst ok = 1;\nconst broken = ;";
         let err = compile(with_err).unwrap_err().to_string();
         assert!(
             err.starts_with("TS_PROGRAM 6:"),
@@ -1857,11 +2011,16 @@ const inTemplate = `"""`;
     }
 
     #[test]
-    fn unterminated_raw_triple_quoted_string_reports_location() {
+    fn unterminated_triple_quoted_strings_report_location() {
         let err = compile("const a = 1;\nconst s = \"\"\"oops").unwrap_err().to_string();
         assert!(
-            err.contains("TS_PROGRAM 2:11: Unterminated raw triple-quoted string"),
+            err.contains("TS_PROGRAM 2:11: Unterminated triple-quoted string"),
             "unexpected error: {err}"
+        );
+        let raw_err = compile("const a = 1;\nconst s = r\"\"\"oops").unwrap_err().to_string();
+        assert!(
+            raw_err.contains("TS_PROGRAM 2:11: Unterminated raw triple-quoted string"),
+            "unexpected error: {raw_err}"
         );
     }
 

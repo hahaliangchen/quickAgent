@@ -93,19 +93,62 @@ pub fn decorate(conn: &Connection, root: &FsPath, mut task: Value) -> Result<Val
     Ok(task)
 }
 
-pub fn task_workspace(root: &FsPath, task: &str) -> Result<PathBuf> {
+/// Unified folder for general-chat (`kind == "chat"`) generated assets, kept
+/// separate from host state (`.codex-workspace-mcp/`) and code repositories.
+/// Overridable via `GROW_CHAT_ASSETS_DIR`; defaults to `<root>/chat-assets`.
+pub fn chat_assets_dir(root: &FsPath) -> Result<PathBuf> {
+    let dir = std::env::var_os("GROW_CHAT_ASSETS_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("chat-assets"));
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+pub fn is_general_chat(root: &FsPath, task: &str) -> Result<bool> {
     let conn = agent_service::open_db(root)?;
-    let path: Option<String> = conn
+    let kind: Option<String> = conn
         .query_row(
-            "SELECT workspace FROM agent_session_meta WHERE task_id=?1",
+            "SELECT kind FROM agent_session_meta WHERE task_id=?1",
             [task],
             |r| r.get(0),
         )
-        .optional()?
-        .flatten();
-    Ok(path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.to_path_buf()))
+        .optional()?;
+    Ok(kind.as_deref() == Some("chat"))
+}
+
+pub fn task_workspace(root: &FsPath, task: &str) -> Result<PathBuf> {
+    let conn = agent_service::open_db(root)?;
+    let row: Option<(Option<String>, String)> = conn
+        .query_row(
+            "SELECT workspace, COALESCE(kind, 'code') FROM agent_session_meta WHERE task_id=?1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((path, kind)) = row {
+        let trimmed = path.filter(|p| !p.trim().is_empty());
+        if kind == "chat" {
+            let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+            let uses_legacy_root = match trimmed.as_deref() {
+                None => true,
+                Some(p) => {
+                    let pb = PathBuf::from(p);
+                    pb == root
+                        || std::fs::canonicalize(&pb).ok().as_deref()
+                            == Some(canonical_root.as_path())
+                }
+            };
+            if uses_legacy_root {
+                return chat_assets_dir(root);
+            }
+            return Ok(PathBuf::from(trimmed.unwrap()));
+        }
+        if let Some(p) = trimmed {
+            return Ok(PathBuf::from(p));
+        }
+    }
+    Ok(root.to_path_buf())
 }
 
 fn response(result: Result<Value>) -> Response {

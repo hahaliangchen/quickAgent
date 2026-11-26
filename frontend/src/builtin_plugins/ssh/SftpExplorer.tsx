@@ -8,9 +8,9 @@ type Transfer = { id: number; name: string; progress: number; status: '等待' |
 const fileSize = (bytes: number | null) => bytes === null ? '—' : bytes < 1024 ? bytes + ' B' : bytes < 1024 * 1024 ? (bytes / 1024).toFixed(1) + ' KiB' : (bytes / (1024 * 1024)).toFixed(1) + ' MiB'
 const validName = (value: string) => !!value && value !== '.' && value !== '..' && !value.includes('/') && !value.includes('\0')
 
-export default function SftpExplorer({ server, access, hidden, theme = 'light', followTarget, refreshSignal, onError, onActivity }: {
+export default function SftpExplorer({ server, access, hidden, theme = 'light', followTarget, refreshSignal, onError, onActivity, onPathChange }: {
   server: Server; access: Access; hidden: boolean; theme?: 'dark' | 'light'; followTarget?: { path: string; seq: number } | undefined; refreshSignal?: number | undefined
-  onError: (error: unknown) => void; onActivity: () => void
+  onError: (error: unknown) => void; onActivity: () => void; onPathChange?: ((serverId: string, path: string) => void) | undefined
 }) {
   const [icons, setIcons] = useState<IconTheme>()
   const [path, setPath] = useState(server.default_dir || '.')
@@ -24,8 +24,8 @@ export default function SftpExplorer({ server, access, hidden, theme = 'light', 
   const listRef = useRef<HTMLInputElement>(null)
   const queue = useRef<Transfer[]>([])
   const seq = useRef(0)
-  const callback = useRef({ onError, onActivity })
-  callback.current = { onError, onActivity }
+  const callback = useRef({ onError, onActivity, onPathChange })
+  callback.current = { onError, onActivity, onPathChange }
 
   useEffect(() => {
     let live = true
@@ -60,6 +60,9 @@ export default function SftpExplorer({ server, access, hidden, theme = 'light', 
   useEffect(() => () => { for (const item of queue.current) item.controller.abort() }, [])
 
   const target = result?.path ?? path
+  useEffect(() => {
+    callback.current.onPathChange?.(server.id, target)
+  }, [server.id, target])
   const refresh = () => { setInitialized(true); setRevision(value => value + 1) }
   function navigate(dir: string) { setResult(undefined); setPath(dir); setInitialized(true) }
   function transferStatus(id: number, status: Transfer['status'], progress?: number) {

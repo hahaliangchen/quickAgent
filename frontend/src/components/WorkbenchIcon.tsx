@@ -28,6 +28,7 @@ const PATHS = {
   ok: <><circle cx="12" cy="12" r="8.5" /><path d="m8.4 12.3 2.4 2.4 4.8-5" /></>,
   list: <path d="M5 6.5h14M5 12h14M5 17.5h14" />,
   panel: <><rect x="3.5" y="4.5" width="17" height="15" rx="3" /><path d="M14.5 4.5v15" /></>,
+  sidebarLeft: <><rect x="3.5" y="4.5" width="17" height="15" rx="3" /><path d="M9.5 4.5v15" /></>,
   stop: <rect x="7" y="7" width="10" height="10" rx="2.5" />,
   clip: <path d="m19 11.5-6.8 6.8a4.2 4.2 0 0 1-6-6l7.3-7.3a2.8 2.8 0 0 1 4 4l-7.3 7.3a1.4 1.4 0 0 1-2-2l6.6-6.6" />,
   back: <path d="M19 12H5m6-6.5L4.5 12l6.5 6.5" />,

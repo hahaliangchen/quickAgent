@@ -90,9 +90,25 @@ export function HeroPage({ workspace, renderSlot }: PageProps) {
   )
 }
 
-export function SkillPackagesPage({ workspace, onBack }: { workspace: AgentWorkspace; onBack: () => void }) {
+export function SkillPackagesPage({ workspace, renderSlot, theme, onBack, onOpenInChat, onFilePreview }: {
+  workspace: AgentWorkspace
+  renderSlot: AgentSlotProps['renderSlot']
+  theme?: 'light' | 'dark' | undefined
+  onBack: () => void
+  onOpenInChat: (taskId: string) => void
+  onFilePreview?: ((taskId: string, path: string, options?: { line?: number; url?: string }, root?: string) => void) | undefined
+}) {
   return <main className={root.root} style={{ minHeight: 0 }}>
-    <SkillPagesView workspaceRoot={workspace.activeWorkspace ?? workspace.info?.workspace ?? ''} onBack={onBack} />
+    <SkillPagesView
+      workspaceRoot={workspace.activeWorkspace ?? workspace.info?.workspace ?? ''}
+      stateWorkspaceRoot={workspace.info?.workspace ?? ''}
+      onBack={onBack}
+      renderSlot={renderSlot}
+      theme={theme}
+      sessions={workspace.allTasks}
+      onOpenInChat={onOpenInChat}
+      onFilePreview={onFilePreview}
+    />
   </main>
 }
 

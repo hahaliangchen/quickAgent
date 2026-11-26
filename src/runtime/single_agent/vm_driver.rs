@@ -70,6 +70,54 @@ fn preserve_edit_failure(runtime: &mut Runtime, tool: &str, step: usize, args: V
     }
 }
 
+fn record_completed_writes(tool: &str, result: &Value, completed: &mut Vec<String>) {
+    let mut push_unique = |path: &str| {
+        if !path.is_empty() && !completed.iter().any(|existing| existing == path) {
+            completed.push(path.to_owned());
+        }
+    };
+    match tool {
+        "edit_file" | "write_file" | "replace_range" | "ssh__edit_file" | "ssh__write_file" => {
+            if result["changed"].as_bool() == Some(true)
+                && let Some(path) = result["path"].as_str()
+            {
+                push_unique(path);
+            }
+        }
+        "apply_edits" => {
+            if let Some(files) = result["files"].as_array() {
+                for file in files {
+                    if file["changed"].as_bool() == Some(true)
+                        && let Some(path) = file["path"].as_str()
+                    {
+                        push_unique(path);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn attach_completed_writes(err: &mut Value, completed: &[String]) {
+    if completed.is_empty() {
+        return;
+    }
+    let note = format!(
+        "Note: earlier file writes in this JS segment ALREADY SUCCEEDED on disk and were NOT rolled back: {}. Do not re-apply those already-committed edits.",
+        completed.join(", ")
+    );
+    if let Some(obj) = err.as_object_mut() {
+        obj.insert("completed_writes".into(), json!(completed));
+        if let Some(text) = obj.get("error").and_then(Value::as_str) {
+            obj.insert("error".into(), json!(format!("{text}\n{note}")));
+        }
+        if let Some(text) = obj.get("message").and_then(Value::as_str) {
+            obj.insert("message".into(), json!(format!("{text}\n{note}")));
+        }
+    }
+}
+
 /// Execute one prepared JS segment in `runtime` until it returns or fails.
 /// Returns `(terminal_state, external_call_count, segment_context_hints)`.
 pub(super) async fn drive_vm_segment(
@@ -86,6 +134,7 @@ pub(super) async fn drive_vm_segment(
     let mut external_tool_calls = 0usize;
     let mut total_timer_wait_ms = 0u64;
     let mut hints = context_doc::SegmentContextHints::default();
+    let mut completed_writes = Vec::<String>::new();
     let mut spawned_ids = BTreeSet::<String>::new();
     let mut inflight_jobs: tokio::task::JoinSet<
         Result<(String, Value, bool, Option<String>)>,
@@ -124,6 +173,7 @@ pub(super) async fn drive_vm_segment(
                                 preserve_edit_failure(runtime, &name, step, args, &mut result, is_error);
                             }
                             if !is_error {
+                                record_completed_writes(&name, &result, &mut completed_writes);
                                 context_doc::tag_resource_handle_in_turn(
                                     &mut result,
                                     next_ref_id,
@@ -465,8 +515,9 @@ pub(super) async fn drive_vm_segment(
                 inflight_jobs.abort_all();
                 return Ok((State::Returned(val), external_tool_calls, hints));
             }
-            ConcurrentState::Failed(err) => {
+            ConcurrentState::Failed(mut err) => {
                 inflight_jobs.abort_all();
+                attach_completed_writes(&mut err, &completed_writes);
                 return Ok((State::Failed(err), external_tool_calls, hints));
             }
         }
@@ -812,5 +863,55 @@ pub(super) fn build_virtual_spec_for_task(
         params,
         captures,
         partial_locals,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_segment_attaches_prior_completed_writes() {
+        let mut completed = Vec::new();
+        record_completed_writes(
+            "edit_file",
+            &json!({"path": "lightrag_service/test_kg.py", "changed": true}),
+            &mut completed,
+        );
+        record_completed_writes(
+            "apply_edits",
+            &json!({"files": [
+                {"path": "lightrag_service/test_kg.py", "changed": true},
+                {"path": "lightrag_service/test_adapter.py", "changed": true},
+                {"path": "untouched.py", "changed": false}
+            ]}),
+            &mut completed,
+        );
+        assert_eq!(
+            completed,
+            vec!["lightrag_service/test_kg.py", "lightrag_service/test_adapter.py"]
+        );
+
+        let mut err = json!({
+            "error": "invalid_edit: edit 0: old_text not found",
+            "message": "invalid_edit: edit 0: old_text not found"
+        });
+        attach_completed_writes(&mut err, &completed);
+        assert_eq!(
+            err["completed_writes"],
+            json!(["lightrag_service/test_kg.py", "lightrag_service/test_adapter.py"])
+        );
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap()
+                .contains("ALREADY SUCCEEDED on disk")
+        );
+        assert!(
+            err["message"]
+                .as_str()
+                .unwrap()
+                .contains("lightrag_service/test_kg.py")
+        );
     }
 }

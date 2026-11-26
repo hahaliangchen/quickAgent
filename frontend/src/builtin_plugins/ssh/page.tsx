@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
 import type { PluginPageProps } from '../../plugins/protocol.ts'
 import { type Access, type AiActivity, type RemoteTool, type Server, type Usage, confirmAccess, message, ssh, SshContext, SshError } from './api.ts'
 import { appConfirm } from '../../components/AppDialog.tsx'
@@ -6,6 +6,7 @@ import TerminalPane from './TerminalPane.tsx'
 import AiTerminalPane from './AiTerminalPane.tsx'
 import SftpExplorer from './SftpExplorer.tsx'
 import ServerModal from './ServerModal.tsx'
+import { buildSshViewContext } from './serverContext.ts'
 import css from './style.module.css'
 
 type Tab = { kind: 'human'; id: number; profile: Server; access: Access } | { kind: 'ai'; id: string; taskId: string; profile: Server }
@@ -16,7 +17,7 @@ const directory = (tool: RemoteTool, path: string) => {
   return slash < 0 ? '.' : slash === 0 ? '/' : path.slice(0, slash)
 }
 
-export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPageProps) {
+export default function Workbench({ workspaceRoot, theme = 'light', onStudioContext }: PluginPageProps) {
   const context = useContext(SshContext)
   const access = { ...(workspaceRoot ? { workspace_root: workspaceRoot } : {}), ...context.access }
   const [servers, setServers] = useState<Server[]>([])
@@ -25,6 +26,7 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
   const [tab, setTab] = useState<Tab['id']>()
   const [followTarget, setFollowTarget] = useState<{ serverId: string; path: string; seq: number }>()
   const [refreshTarget, setRefreshTarget] = useState<{ serverId: string; seq: number }>()
+  const [sftpPaths, setSftpPaths] = useState<Record<string, string>>({})
   const [visited, setVisited] = useState<Set<string>>(() => new Set())
   const [history, setHistory] = useState<Usage[]>([])
   const [revision, setRevision] = useState(0)
@@ -110,6 +112,19 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
   useEffect(() => {
     if (selected) setVisited(current => current.has(selected) ? current : new Set([...current, selected]))
   }, [selected])
+
+  const handleSftpPathChange = useCallback((serverId: string, path: string) => {
+    setSftpPaths(current => current[serverId] === path ? current : { ...current, [serverId]: path })
+  }, [])
+  const activeTabItem = tabs.find(item => item.id === tab)
+  const activeTabKind = activeTabItem && server && activeTabItem.profile.id === server.id ? activeTabItem.kind : undefined
+  const activeSftpPath = server ? sftpPaths[server.id] : undefined
+  const studioContextCallback = useRef(onStudioContext)
+  studioContextCallback.current = onStudioContext
+  useEffect(() => {
+    studioContextCallback.current?.(buildSshViewContext(server, { sftpPath: activeSftpPath, activeTabKind }))
+  }, [server, activeSftpPath, activeTabKind])
+  useEffect(() => () => { studioContextCallback.current?.(null) }, [])
 
   useEffect(() => {
     if (!ready || !focus) return
@@ -230,6 +245,7 @@ export default function Workbench({ workspaceRoot, theme = 'light' }: PluginPage
       {servers.filter(profile => profile.id === selected || visited.has(profile.id)).map(profile => <SftpExplorer key={profile.id} server={profile} access={access}
         hidden={profile.id !== selected} theme={theme} followTarget={followTarget?.serverId === profile.id ? followTarget : undefined}
         refreshSignal={refreshTarget?.serverId === profile.id ? refreshTarget.seq : undefined}
+        onPathChange={handleSftpPathChange}
         onError={cause => { if (profile.id === selected) report(cause, profile.id) }} onActivity={activity} />)}
       {!server && <section className={css.explorer}><header className={css.panelHeader}><h2>SFTP 文件</h2></header><p className={css.muted}>未选择服务器</p></section>}
     </div>

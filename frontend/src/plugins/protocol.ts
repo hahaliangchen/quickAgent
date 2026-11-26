@@ -25,6 +25,7 @@ export interface DbStudioSyncAction {
   readonly sql?: string | undefined
   readonly column?: string | undefined
   readonly row?: number | undefined
+  readonly offset?: number | undefined
   readonly range?: string | undefined
   readonly findColumn?: string | undefined
   readonly findValue?: string | undefined
@@ -38,6 +39,12 @@ export interface ExcelStudioSyncAction {
   readonly row?: number | undefined
   readonly findColumn?: string | undefined
   readonly findValue?: string | undefined
+}
+export const DAILY_REPORT_SYNC_EVENT = 'quickagent:daily-report-sync'
+export interface DailyReportSyncAction {
+  readonly action: 'prepare_draft' | 'write_guide' | 'submit' | 'today_activity' | 'list'
+  readonly reportDate?: string | undefined
+  readonly content?: string | undefined
 }
 export interface PluginPageProps {
   workspaceRoot: string

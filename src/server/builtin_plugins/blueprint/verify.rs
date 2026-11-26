@@ -80,6 +80,7 @@ pub(super) fn verify(
     manifest: Option<&Manifest>,
     entities: &[Entity],
     graphs: &[BlueprintGraph],
+    playbooks: &[Playbook],
 ) -> VerifyReport {
     let Some(manifest) = manifest else {
         return VerifyReport::default();
@@ -151,8 +152,34 @@ pub(super) fn verify(
         .filter(|g| g.nodes.iter().any(|n| affected.contains(&n.entity_id)))
         .map(|g| g.meta.id.clone())
         .collect();
+    for pb in playbooks {
+        let mut status = PlaybookStatus::default();
+        for raw_path in &pb.anchor_files {
+            let norm = raw_path.strip_prefix("./").unwrap_or(raw_path);
+            let exists = store.source(norm).ok().flatten().is_some();
+            if !exists {
+                status.missing_files.push(norm.to_owned());
+            } else if changed.contains(norm) {
+                status.changed_files.push(norm.to_owned());
+            }
+        }
+        if !status.missing_files.is_empty() {
+            status.status = PortStatus::Missing;
+            report.missing_playbooks += 1;
+            report.affected_playbooks.push(pb.id.clone());
+        } else if !status.changed_files.is_empty() {
+            status.status = PortStatus::Drifted;
+            report.drifted_playbooks += 1;
+            report.affected_playbooks.push(pb.id.clone());
+        } else {
+            status.status = PortStatus::Ok;
+            report.ok_playbooks += 1;
+        }
+        report.playbooks.insert(pb.id.clone(), status);
+    }
     report.affected_entities = affected.into_iter().collect();
     report.stale = !report.affected_entities.is_empty()
+        || !report.affected_playbooks.is_empty()
         || (report.last_synced_commit.is_some()
             && report.head_commit != report.last_synced_commit
             && !report.changed_files.is_empty());

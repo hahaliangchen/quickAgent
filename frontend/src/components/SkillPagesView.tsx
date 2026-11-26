@@ -1,16 +1,33 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import clsx from 'clsx'
+import type { Task } from '../api.ts'
+import type { AgentSlotProps } from '../cordis/slot-contract.ts'
+import type { PreviewTheme } from '../filePreview.ts'
+import type { StudioAskAiRequest, StudioViewContext } from '../plugins/protocol.ts'
 import { useAgentApi } from '../cordis/react.tsx'
 import { usePluginPages } from '../plugins/react.tsx'
+import { CodeChatDock } from './CodeChatDock.tsx'
 import { Icon } from './WorkbenchIcon.tsx'
 import styles from './SkillPagesView.module.css'
 
 /** Installed skill packages with their pages, and the forms that add more. */
-export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: string; onBack: () => void }) {
+export function SkillPagesView({ workspaceRoot, stateWorkspaceRoot, onBack, renderSlot, theme, sessions, onOpenInChat, onFilePreview }: {
+  workspaceRoot: string
+  stateWorkspaceRoot?: string | undefined
+  onBack: () => void
+  renderSlot: AgentSlotProps['renderSlot']
+  theme?: PreviewTheme | undefined
+  sessions?: readonly Task[] | undefined
+  onOpenInChat: (taskId: string) => void
+  onFilePreview?: ((taskId: string, path: string, options?: { line?: number; url?: string }, root?: string) => void) | undefined
+}) {
   const api = useAgentApi()
   const { packages: allPackages, pages, errors } = usePluginPages()
   const packages = allPackages.filter(item => !item.mcp)
   const [selected, setSelected] = useState<{ owner: string; page: string }>()
+  const [pageDraft, setPageDraft] = useState<{ text: string; kind: 'prompt' }>()
+  const [pageViewContext, setPageViewContext] = useState<StudioViewContext | null>(null)
+  const [pageChatSignal, setPageChatSignal] = useState(0)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [installPath, setInstallPath] = useState('')
@@ -23,6 +40,15 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
   const contribution = pages.find(item => item.owner === owner?.id && item.scope === owner?.scope && item.id === page?.id)
   const Page = contribution?.component
   const problem = error || Object.values(errors).join('；')
+  const selectedKey = selected ? `${selected.owner}:${selected.page}` : ''
+  useEffect(() => {
+    setPageDraft(undefined)
+    setPageViewContext(null)
+  }, [selectedKey])
+  const handlePageAskAi = useCallback((request: StudioAskAiRequest) => {
+    if (request.prompt && request.prompt.trim()) setPageDraft({ text: request.prompt, kind: 'prompt' })
+    setPageChatSignal(value => value + 1)
+  }, [])
   async function change(action: () => Promise<unknown>) {
     setBusy(true); setError('')
     try { await action() }
@@ -99,11 +125,30 @@ export function SkillPagesView({ workspaceRoot, onBack }: { workspaceRoot: strin
               title={listOpen ? '收起插件列表' : '展开插件列表'} onClick={() => setListOpen(value => !value)}><Icon name="panel" size={16} /></button>
             <span className={styles.divider} />
             <span className={styles.crumb}>{owner.title}<Icon name="chevron" size={13} /><strong>{page.title}</strong></span>
+            <button type="button" className={styles.askAiBtn} title="打开右侧 AI 聊天侧边栏"
+              onClick={() => setPageChatSignal(value => value + 1)}><Icon name="spark" size={14} />问 AI</button>
             <button type="button" className={styles.iconButton} aria-label="关闭页面" title="关闭页面" onClick={() => { setSelected(undefined); setListOpen(true) }}><Icon name="close" size={15} /></button>
           </div>
           <div className={styles.pageBody}>
-            {Page ? <Page key={`${owner.id}:${owner.scope}:${page.id}`} owner={owner} pageId={page.id} workspaceRoot={workspaceRoot} />
-              : <p className={styles.hint}>等待插件注册页面…</p>}
+            <div className={styles.pageSplit}>
+              <div className={styles.pageHost}>
+                {Page ? <Page key={`${owner.id}:${owner.scope}:${page.id}`} owner={owner} pageId={page.id} workspaceRoot={owner.id === 'daily-report' && stateWorkspaceRoot ? stateWorkspaceRoot : workspaceRoot} theme={theme}
+                  onStudioContext={setPageViewContext} onAskAi={handlePageAskAi} />
+                  : <p className={styles.hint}>等待插件注册页面…</p>}
+              </div>
+              <CodeChatDock
+                key={`skill-page:${owner.id}:${page.id}`}
+                workspace={workspaceRoot}
+                renderSlot={renderSlot}
+                onOpenInChat={onOpenInChat}
+                onFilePreview={onFilePreview}
+                diagnostic={pageDraft}
+                viewContext={pageViewContext}
+                sessions={sessions}
+                embeddedLauncher
+                openSignal={pageChatSignal}
+              />
+            </div>
           </div>
         </> : (
         <div className={styles.empty}>

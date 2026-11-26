@@ -414,7 +414,10 @@ fn proposed_content(name: &str, args: &Value, base: Option<&[u8]>) -> Result<Vec
         "edit_file" => {
             let source = std::str::from_utf8(base.context("cannot edit a missing baseline")?)?;
             let edits: Vec<crate::tools::TextEdit> = serde_json::from_value(args["edits"].clone())?;
-            crate::tools::file_edit::text_edits(source, &edits)?.into_bytes()
+            let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+            crate::tools::file_edit::text_edits_with_ranges_replace_all(source, &edits, replace_all)?
+                .0
+                .into_bytes()
         }
         "replace_range" => {
             let source = std::str::from_utf8(base.context("cannot edit a missing baseline")?)?;

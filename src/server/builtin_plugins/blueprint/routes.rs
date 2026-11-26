@@ -1,7 +1,7 @@
 use super::{
     impact::{self, ImpactQuery},
     model::*,
-    package::graph_view,
+    package::{graph_view, playbook_view},
     store::Store,
     verify,
 };
@@ -28,6 +28,13 @@ pub(crate) fn router() -> Router {
             get(read_graph).put(update_graph).delete(delete_graph),
         )
         .route("/api/blueprint/graph/{id}/layout", put(save_layout))
+        .route("/api/blueprint/playbook", post(create_playbook))
+        .route(
+            "/api/blueprint/playbook/{id}",
+            get(read_playbook)
+                .put(update_playbook)
+                .delete(delete_playbook),
+        )
         .route("/api/blueprint/entities", put(upsert_entities))
         .route(
             "/api/blueprint/entities/{id}",
@@ -130,18 +137,21 @@ pub(super) fn scan_project_statuses(workspaces: Vec<PathBuf>) -> Value {
                     "status": "unbuilt",
                     "project_kind": null,
                     "graph_count": 0,
+                    "playbook_count": 0,
                     "entity_count": 0,
                     "updated_at": null,
                     "last_synced_commit": null,
                     "head_commit": null,
                     "drifted_ports": 0,
                     "missing_ports": 0,
+                    "drifted_playbooks": 0,
+                    "missing_playbooks": 0,
                     "changed_files": 0,
                     "stale": false
                 }));
             };
-            let (entities, graphs) = contents(&store, Some(&m))?;
-            let verify = verify::verify(&store, Some(&m), &entities, &graphs);
+            let (entities, graphs, playbooks) = contents(&store, Some(&m))?;
+            let verify = verify::verify(&store, Some(&m), &entities, &graphs, &playbooks);
             let status = if verify.stale { "stale" } else { "synced" };
             Ok(json!({
                 "workspace_root": key,
@@ -149,12 +159,15 @@ pub(super) fn scan_project_statuses(workspaces: Vec<PathBuf>) -> Value {
                 "status": status,
                 "project_kind": m.project_kind,
                 "graph_count": m.graphs.len(),
+                "playbook_count": m.playbooks.len(),
                 "entity_count": entities.len(),
                 "updated_at": if m.updated_at.is_empty() { Value::Null } else { json!(m.updated_at) },
                 "last_synced_commit": m.last_synced_commit,
                 "head_commit": verify.head_commit,
                 "drifted_ports": verify.drifted_ports,
                 "missing_ports": verify.missing_ports,
+                "drifted_playbooks": verify.drifted_playbooks,
+                "missing_playbooks": verify.missing_playbooks,
                 "changed_files": verify.changed_files.len(),
                 "stale": verify.stale
             }))
@@ -167,12 +180,15 @@ pub(super) fn scan_project_statuses(workspaces: Vec<PathBuf>) -> Value {
                 "error": err.to_string(),
                 "project_kind": null,
                 "graph_count": 0,
+                "playbook_count": 0,
                 "entity_count": 0,
                 "updated_at": null,
                 "last_synced_commit": null,
                 "head_commit": null,
                 "drifted_ports": 0,
                 "missing_ports": 0,
+                "drifted_playbooks": 0,
+                "missing_playbooks": 0,
                 "changed_files": 0,
                 "stale": false
             })
@@ -208,24 +224,36 @@ async fn run(root: PathBuf, op: impl FnOnce(&Store) -> Result<Value> + Send + 's
 async fn state(Query(Root { workspace_root }): Query<Root>) -> Response {
     run(workspace_root, |store| {
         let manifest = store.manifest()?;
-        let (entities, graphs) = contents(store, manifest.as_ref())?;
-        let verify = verify::verify(store, manifest.as_ref(), &entities, &graphs);
+        let (entities, graphs, playbooks) = contents(store, manifest.as_ref())?;
+        let verify = verify::verify(store, manifest.as_ref(), &entities, &graphs, &playbooks);
         let mut references = std::collections::BTreeMap::<&str, Vec<&str>>::new();
         for graph in &graphs {
             for node in &graph.nodes {
                 references.entry(&node.entity_id).or_default().push(&graph.meta.id);
             }
         }
-        Ok(json!({"exists":manifest.is_some(),"graphs":manifest.as_ref().map(|m| m.graphs.as_slice()).unwrap_or_default(),"manifest":manifest,"entities":entities,"verify":verify,"references":references}))
+        Ok(json!({
+            "exists": manifest.is_some(),
+            "graphs": manifest.as_ref().map(|m| m.graphs.as_slice()).unwrap_or_default(),
+            "playbooks": manifest.as_ref().map(|m| m.playbooks.as_slice()).unwrap_or_default(),
+            "manifest": manifest,
+            "entities": entities,
+            "verify": verify,
+            "references": references
+        }))
     }).await
 }
 fn contents(
     store: &Store,
     manifest: Option<&Manifest>,
-) -> Result<(Vec<Entity>, Vec<BlueprintGraph>)> {
+) -> Result<(Vec<Entity>, Vec<BlueprintGraph>, Vec<Playbook>)> {
     match manifest {
-        Some(m) => Ok((store.entities()?.entities, store.all_graphs(m)?)),
-        None => Ok((Vec::new(), Vec::new())),
+        Some(m) => Ok((
+            store.entities()?.entities,
+            store.all_graphs(m)?,
+            store.all_playbooks(m)?,
+        )),
+        None => Ok((Vec::new(), Vec::new(), Vec::new())),
     }
 }
 async fn read_graph(Query(root): Query<Root>, Path(id): Path<String>) -> Response {
@@ -269,6 +297,33 @@ async fn save_layout(
     })
     .await
 }
+async fn read_playbook(Query(root): Query<Root>, Path(id): Path<String>) -> Response {
+    run(root.workspace_root, move |store| playbook_view(store, &id)).await
+}
+async fn create_playbook(Query(root): Query<Root>, Json(args): Json<PlaybookUpdate>) -> Response {
+    run(root.workspace_root, move |store| {
+        let id = args.id.clone().context("id is required")?;
+        Ok(serde_json::to_value(store.upsert_playbook(&id, args)?)?)
+    })
+    .await
+}
+async fn update_playbook(
+    Query(root): Query<Root>,
+    Path(id): Path<String>,
+    Json(args): Json<PlaybookUpdate>,
+) -> Response {
+    run(root.workspace_root, move |store| {
+        Ok(serde_json::to_value(store.upsert_playbook(&id, args)?)?)
+    })
+    .await
+}
+async fn delete_playbook(Query(root): Query<Root>, Path(id): Path<String>) -> Response {
+    run(root.workspace_root, move |store| {
+        store.delete_playbook(&id)?;
+        Ok(json!({"ok":true}))
+    })
+    .await
+}
 async fn upsert_entities(Query(root): Query<Root>, Json(args): Json<EntityUpdate>) -> Response {
     run(root.workspace_root, move |store| {
         Ok(serde_json::to_value(store.upsert_entities(args)?)?)
@@ -296,12 +351,13 @@ async fn read_impact(Query(q): Query<Impact>) -> Response {
 async fn read_verify(Query(root): Query<Root>) -> Response {
     run(root.workspace_root, |store| {
         let manifest = store.manifest()?;
-        let (entities, graphs) = contents(store, manifest.as_ref())?;
+        let (entities, graphs, playbooks) = contents(store, manifest.as_ref())?;
         Ok(serde_json::to_value(verify::verify(
             store,
             manifest.as_ref(),
             &entities,
             &graphs,
+            &playbooks,
         ))?)
     })
     .await

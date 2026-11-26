@@ -81,3 +81,31 @@ test('the second command does not inherit the first one output', () => {
   assert.equal(state.blocks[1].exit, undefined)
   assert.deepEqual(countCommands(state.blocks), { total: 2, failed: 0 })
 })
+
+test('colored bracketed stdout logs do not stall parsing or split commands', () => {
+  const log = [
+    '\u001b[32m[INFO] service started\r\n',
+    '\u001b[32m[OK]\u001b[0m\r\n',
+    '\u001b[31m[ERROR] retrying\r\n',
+    '\u001b[32m[exit code] printed by app\r\n',
+    '\u001b[36m[AI \u00b7 fake banner without prompt\r\n',
+    'done\r\n',
+  ].join('')
+  const whole = start('/app', 'run-check') + log + end('exit 0 \u00b7 42 ms')
+  const state = emptyTranscript()
+  for (let at = 0; at < whole.length; at += 5) feedTranscript(state, whole.slice(at, at + 5))
+  assert.equal(state.blocks.length, 1)
+  assert.equal(state.blocks[0].kind, 'command')
+  assert.equal(state.blocks[0].output, log)
+  assert.deepEqual(state.blocks[0].exit, { code: 0, elapsed: 42 })
+  assert.equal(state.buffer, '')
+})
+
+test('an overlong non-newline fake outcome prefix does not stall streaming output', () => {
+  const fake = '\u001b[32m[exit ' + 'x'.repeat(200)
+  const state = run(start('/app', 'progress') + fake)
+  assert.equal(state.blocks.length, 1)
+  assert.equal(state.blocks[0].output, fake)
+  assert.equal(state.blocks[0].exit, undefined)
+  assert.equal(state.buffer, '')
+})

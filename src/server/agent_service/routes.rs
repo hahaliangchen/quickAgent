@@ -90,6 +90,16 @@ pub async fn create_draft_task(
                     .into_response();
             }
         },
+        None if kind == "chat" => match crate::context::session_browser::chat_assets_dir(&root) {
+            Ok(dir) => dir,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":"could not prepare chat assets folder"})),
+                )
+                    .into_response();
+            }
+        },
         None => root.clone(),
     };
     let model = state.default_model.clone();
@@ -740,16 +750,28 @@ pub async fn workspace_file(
     let store = state.workspace.root().to_path_buf();
     let found = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let db = open_db(&store)?;
-        let workspace = db.query_row(
-            "SELECT m.workspace FROM agent_tasks t LEFT JOIN agent_session_meta m ON m.task_id=t.id WHERE t.id=?1",
-            [&task_id], |row| row.get::<_, Option<String>>(0),
+        let (workspace, kind): (Option<String>, Option<String>) = db.query_row(
+            "SELECT m.workspace, m.kind FROM agent_tasks t LEFT JOIN agent_session_meta m ON m.task_id=t.id WHERE t.id=?1",
+            [&task_id], |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         anyhow::ensure!(crate::server::plugin_sessions::owner(&store, &task_id)?.is_none(), "plugin session");
-        let root = workspace.map(std::path::PathBuf::from).unwrap_or(store);
-        let path = file_stream::workspace_relative(&root, &query.path)
-            .ok_or_else(|| anyhow::anyhow!("invalid workspace path"))?;
-        let media = mime_guess::from_path(&path).first_or_octet_stream();
-        Ok((file_stream::open_regular(&root, &path)?, media))
+        let is_chat = kind.as_deref() == Some("chat");
+        let primary_root = if is_chat {
+            crate::context::session_browser::task_workspace(&store, &task_id)?
+        } else {
+            workspace.map(std::path::PathBuf::from).unwrap_or_else(|| store.clone())
+        };
+        let open_under = |root: &std::path::Path| -> anyhow::Result<_> {
+            let path = file_stream::workspace_relative(root, &query.path)
+                .ok_or_else(|| anyhow::anyhow!("invalid workspace path"))?;
+            let media = mime_guess::from_path(&path).first_or_octet_stream();
+            Ok((file_stream::open_regular(root, &path)?, media))
+        };
+        match open_under(&primary_root) {
+            Ok(found) => Ok(found),
+            Err(err) if is_chat && primary_root != store => open_under(&store).or(Err(err)),
+            Err(err) => Err(err),
+        }
     }).await;
     if let Ok(Ok((file, media))) = found {
         let inline = media.type_() == "image";

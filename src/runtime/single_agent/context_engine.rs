@@ -176,6 +176,10 @@ impl<'s, 'a> ContextEngine<'s, 'a> {
             Some(hint) => format!("{turn_user_text}\n\n{hint}"),
             None => turn_user_text,
         };
+        let turn_user_text = match model_call::chat_assets_hint(s) {
+            Some(hint) => format!("{turn_user_text}\n\n{hint}"),
+            None => turn_user_text,
+        };
         w.context_doc.begin_turn(turn, &turn_user_text);
         self.save_window(&w).await?;
         Ok((w, libs))

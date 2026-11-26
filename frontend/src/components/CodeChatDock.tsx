@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type DragEvent } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent } from 'react'
 import clsx from 'clsx'
-import type { PermissionMode, SettingsData } from '../api.ts'
+import type { PermissionMode, SettingsData, Task } from '../api.ts'
 import { useChatPermissionMode } from '../permissionMode.ts'
 import { AttachmentRail, useAttachmentDraft } from './Attachments.tsx'
 import { WORKSPACE_PATH_TYPE } from '../codeChat.ts'
@@ -9,13 +9,17 @@ import type { AgentSlotProps } from '../cordis/slot-contract.ts'
 import { randomId } from '../randomId.ts'
 import { extractClipboardFiles, isPasteShortcut, readFallbackClipboardImages } from '../clipboardPaste.ts'
 import { useSession, type Session } from '../useSession.ts'
+import { compactRelativeTime, isChat, taskTitle, workspaceName } from '../sidebarModel.ts'
+import { filterDockSessions, type DockSessionScope } from './dockSessions.ts'
 import { Icon } from './WorkbenchIcon.tsx'
 import { ShellSetupDialog } from './ShellSetupDialog.tsx'
 import { ModelSelect } from '../dsh/model-selection/ModelSelect.tsx'
 import { PermissionPicker } from './PermissionPicker.tsx'
 import { PREFILL_EVENT } from './RewindControl.tsx'
 import { ScrollToBottom, transcriptScroller, useScrollToBottom } from './ScrollToBottom.tsx'
-import { DB_SYNC_EVENT, EXCEL_SYNC_EVENT, type DbStudioSyncAction, type ExcelStudioSyncAction, type StudioViewContext } from '../plugins/protocol.ts'
+import type { OpenFilePreview } from '../filePreview.ts'
+import { DAILY_REPORT_SYNC_EVENT, DB_SYNC_EVENT, EXCEL_SYNC_EVENT, type DailyReportSyncAction, type DbStudioSyncAction, type ExcelStudioSyncAction, type StudioViewContext } from '../plugins/protocol.ts'
+import { extractDailyReportSyncAction, extractDbSyncAction, extractExcelSyncAction } from '../plugins/studioSync.ts'
 import { formatStudioViewContext, stripStudioViewContext } from '../plugins/studioContextText.ts'
 import css from './CodeChatDock.module.css'
 
@@ -63,103 +67,15 @@ function asNonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
-function asPositiveInt(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 1 ? Math.floor(value) : undefined
-}
-
-function extractDbSyncAction(
-  name: string,
-  args: Record<string, unknown>,
-  result: Record<string, unknown> | undefined,
-): DbStudioSyncAction | undefined {
-  const connObj = parseJsonRecord(result?.connection)
-  const connectionId = asNonEmptyString(args.connection_id) ?? asNonEmptyString(connObj?.id)
-  const sqlitePath = asNonEmptyString(args.sqlite_path) ?? asNonEmptyString(connObj?.file_path)
-  if (name === 'db__save_connection') {
-    return { action: 'save_connection', connectionId, sqlitePath }
-  }
-  if (name === 'db__inspect_schema') {
-    const schema = asNonEmptyString(args.schema)
-      ?? asNonEmptyString(result?.schema)
-      ?? asNonEmptyString(result?.default_schema)
-    const table = asNonEmptyString(args.table) ?? asNonEmptyString(result?.table)
-    return { action: 'inspect', connectionId, sqlitePath, schema, table }
-  }
-  if (name === 'db__query') {
-    const editable = parseJsonRecord(result?.editable_table)
-    return {
-      action: 'query',
-      connectionId,
-      sqlitePath,
-      sql: asNonEmptyString(args.sql),
-      schema: asNonEmptyString(editable?.schema),
-      table: asNonEmptyString(editable?.table),
-    }
-  }
-  if (name === 'db__explain') {
-    return { action: 'explain', connectionId, sqlitePath, sql: asNonEmptyString(args.sql) }
-  }
-  if (name === 'db__execute') {
-    return {
-      action: 'execute',
-      connectionId,
-      sqlitePath,
-      schema: asNonEmptyString(args.schema),
-      table: asNonEmptyString(args.table),
-    }
-  }
-  if (name === 'db__focus_view') {
-    return {
-      action: 'focus_view',
-      connectionId,
-      sqlitePath,
-      schema: asNonEmptyString(args.schema),
-      table: asNonEmptyString(args.table),
-      column: asNonEmptyString(args.column),
-      row: asPositiveInt(args.row),
-      range: asNonEmptyString(args.range),
-      findColumn: asNonEmptyString(args.find_column),
-      findValue: asNonEmptyString(args.find_value),
-    }
-  }
-  return undefined
-}
-
-function extractExcelSyncAction(
-  name: string,
-  args: Record<string, unknown>,
-): ExcelStudioSyncAction | undefined {
-  if (name === 'excel__focus_view') {
-    return {
-      path: asNonEmptyString(args.path),
-      sheet: asNonEmptyString(args.sheet),
-      range: asNonEmptyString(args.range),
-      column: asNonEmptyString(args.column),
-      row: asPositiveInt(args.row),
-      findColumn: asNonEmptyString(args.find_column),
-      findValue: asNonEmptyString(args.find_value),
-    }
-  }
-  if (name === 'excel__read_range' || name === 'excel__format_range') {
-    const range = asNonEmptyString(args.range)
-    if (!range) return undefined
-    return { path: asNonEmptyString(args.path), sheet: asNonEmptyString(args.sheet), range }
-  }
-  if (name === 'excel__search') {
-    const query = asNonEmptyString(args.query)
-    if (!query) return undefined
-    return { path: asNonEmptyString(args.path), sheet: asNonEmptyString(args.sheet), findValue: query }
-  }
-  return undefined
-}
-
 /** Chat docked beside a page, VS Code style: asks about the file in view and files dropped on it. */
-export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, viewContext, embeddedLauncher, linkedTaskId, linkedSession, openSignal }: {
+export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePreview, diagnostic, viewContext, sessions, embeddedLauncher, linkedTaskId, linkedSession, openSignal }: {
   workspace: string
   renderSlot: AgentSlotProps['renderSlot']
   onOpenInChat: (taskId: string) => void
+  onFilePreview?: ((taskId: string, path: string, options?: { line?: number; url?: string }, root?: string) => void) | undefined
   diagnostic?: { text: string; kind?: 'prompt' } | undefined
   viewContext?: StudioViewContext | null | undefined
+  sessions?: readonly Task[] | undefined
   embeddedLauncher?: boolean
   linkedTaskId?: string | undefined
   linkedSession?: Session | undefined
@@ -172,22 +88,70 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
   const [width, setWidth] = useState(savedWidth)
   const [dockMode, setDockMode] = useState<DockMode>(savedMode)
   const [ownTaskId, setTaskId] = useState(() => rememberedTask(savedMode(), workspace))
-  const taskId = linkedTaskId ?? ownTaskId
+  // Allows switching to any existing session or starting a new chat even when
+  // the dock defaults to following a linked main session (e.g. SSH / Blueprint).
+  const [sessionOverride, setSessionOverride] = useState<{ mode: 'task'; taskId: string } | { mode: 'new' } | null>(null)
+  const prevLinkedTaskId = useRef(linkedTaskId)
+  useEffect(() => {
+    if (prevLinkedTaskId.current !== linkedTaskId) {
+      prevLinkedTaskId.current = linkedTaskId
+      setSessionOverride(null)
+    }
+  }, [linkedTaskId])
+  const [sessionsOpen, setSessionsOpen] = useState(false)
+  const [sessionScope, setSessionScope] = useState<DockSessionScope>('all')
+  const [sessionQuery, setSessionQuery] = useState('')
+  const [fetchedSessions, setFetchedSessions] = useState<readonly Task[] | null>(null)
+  const [loadingSessions, setLoadingSessions] = useState(false)
+
+  const usingLinked = !!linkedTaskId && sessionOverride === null
+  const taskId = usingLinked
+    ? linkedTaskId
+    : sessionOverride?.mode === 'task'
+      ? sessionOverride.taskId
+      : sessionOverride?.mode === 'new'
+        ? undefined
+        : ownTaskId
   const [draft, setDraft] = useState('')
   const [error, setError] = useState('')
   const [sending, setSending] = useState(false)
   const [dropping, setDropping] = useState(false)
   // The current file is offered again whenever it changes.
   const [skipped, setSkipped] = useState<string>()
-  // Live studio view context (e.g. DB connection + active SQL + selected rows) is re-offered whenever the view changes.
+  // Live studio view context (e.g. DB connection + active SQL + SSH active server) is re-offered whenever the view changes.
   const [dismissedViewId, setDismissedViewId] = useState<string>()
   const activeViewContext = viewContext && viewContext.id !== dismissedViewId ? viewContext : undefined
-  const ownSession = useSession(linkedTaskId && linkedSession ? undefined : taskId, () => {})
-  const session = linkedTaskId && linkedSession ? linkedSession : ownSession
+  const ownSession = useSession(usingLinked && linkedSession ? undefined : taskId, () => {})
+  const session = usingLinked && linkedSession ? linkedSession : ownSession
   const task = session.task?.task_id === taskId ? session.task : undefined
-  const effectiveMode: DockMode = linkedTaskId ? (task?.kind === 'chat' ? 'chat' : 'code') : dockMode
+  const mergedSessions = useMemo(() => {
+    const byId = new Map<string, Task>()
+    for (const item of sessions ?? []) byId.set(item.task_id, item)
+    for (const item of fetchedSessions ?? []) {
+      const existing = byId.get(item.task_id)
+      if (!existing || item.updated_at >= existing.updated_at) byId.set(item.task_id, item)
+    }
+    if (task) byId.set(task.task_id, task)
+    return [...byId.values()]
+  }, [sessions, fetchedSessions, task])
+  const visibleSessions = useMemo(
+    () => filterDockSessions(mergedSessions, {
+      scope: sessionScope,
+      workspace,
+      query: sessionQuery,
+      activeTaskId: taskId,
+      linkedTaskId,
+    }),
+    [mergedSessions, sessionScope, workspace, sessionQuery, taskId, linkedTaskId],
+  )
+  const effectiveMode: DockMode = task
+    ? (isChat(task) ? 'chat' : 'code')
+    : !workspace
+      ? 'chat'
+      : dockMode
   const openFromSignal = useRef(0)
   const input = useRef<HTMLTextAreaElement>(null)
+  const sessionSearchInput = useRef<HTMLInputElement>(null)
   const panel = useRef<HTMLElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
   const { away: tailHidden, jump: jumpToTail, following } = useScrollToBottom(transcript, open)
@@ -197,6 +161,32 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
   useEffect(() => () => {
     if (fallbackPasteTimer.current !== null) window.clearTimeout(fallbackPasteTimer.current)
   }, [])
+  const refreshSessions = useCallback(() => {
+    if (typeof api.listTasks !== 'function') return
+    setLoadingSessions(true)
+    api.listTasks(200).then(
+      items => { setFetchedSessions(items); setLoadingSessions(false) },
+      () => { setLoadingSessions(false) },
+    )
+  }, [api])
+  useEffect(() => {
+    if (!open) { setSessionsOpen(false); return }
+    if (!sessionsOpen) return
+    refreshSessions()
+    window.requestAnimationFrame(() => sessionSearchInput.current?.focus())
+  }, [open, sessionsOpen, refreshSessions])
+  useEffect(() => {
+    if (!open || !sessionsOpen) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (panel.current === null || panel.current.offsetParent === null) return
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setSessionsOpen(false)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [open, sessionsOpen])
 
   // The dock's own box: what is pasted here waits here, whatever else is open.
   const attachments = useAttachmentDraft('code-chat')
@@ -269,7 +259,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
   }, [diagnostic])
 
   const running = task?.status === 'running' || task?.status === 'cancelling'
-  const syncTaskId = linkedTaskId ?? taskId
+  const syncTaskId = taskId
   const dbSyncRef = useRef<{ taskId: string | undefined; seq: number; seeded: boolean }>({ taskId: undefined, seq: 0, seeded: false })
   useEffect(() => {
     const events = session.events
@@ -294,7 +284,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
       if (ev.type !== 'tool/call') continue
       const callId = asNonEmptyString(ev.data.callId)
       const name = asNonEmptyString(ev.data.name)
-      if (!callId || !name || (!name.startsWith('db__') && !name.startsWith('excel__'))) continue
+      if (!callId || !name || (!name.startsWith('db__') && !name.startsWith('excel__') && !name.startsWith('daily_report__'))) continue
       calls.set(callId, { name, args: parseJsonRecord(ev.data.arguments) ?? {} })
     }
     let high = dbSyncRef.current.seq
@@ -322,6 +312,11 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
         if (action) {
           window.dispatchEvent(new CustomEvent<ExcelStudioSyncAction>(EXCEL_SYNC_EVENT, { detail: action }))
         }
+      } else if (call.name.startsWith('daily_report__')) {
+        const action = extractDailyReportSyncAction(call.name, call.args, result)
+        if (action) {
+          window.dispatchEvent(new CustomEvent<DailyReportSyncAction>(DAILY_REPORT_SYNC_EVENT, { detail: action }))
+        }
       }
     }
     dbSyncRef.current.seq = high
@@ -346,39 +341,60 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
   const current = effectiveMode === 'code' && context.current && context.current !== skipped && !context.tags.includes(context.current) ? context.current : undefined
   const tags = effectiveMode === 'code' ? (current ? [current, ...context.tags] : context.tags) : []
 
+  const handleFilePreview = useCallback<OpenFilePreview>((path, options) => {
+    if (!taskId || !onFilePreview) return
+    const previewRoot = task && isChat(task) ? '' : (task?.workspace ?? workspace)
+    onFilePreview(taskId, path, options, previewRoot)
+  }, [taskId, onFilePreview, task, workspace])
+
   function switchMode(next: DockMode) {
-    if (next === dockMode || linkedTaskId || sending) return
+    if (next === effectiveMode || usingLinked || sending) return
     setDockMode(next)
     try { localStorage.setItem(MODE_KEY, next) } catch {}
-    setTaskId(rememberedTask(next, workspace))
+    if (linkedTaskId) setSessionOverride({ mode: 'new' })
+    else setTaskId(rememberedTask(next, workspace))
     setError('')
   }
 
-  function forget() {
-    try { localStorage.removeItem(taskKey(dockMode, workspace)) } catch {}
-    setTaskId(undefined); setError('')
+  function startNewChat() {
+    if (sending) return
+    if (linkedTaskId) {
+      setSessionOverride({ mode: 'new' })
+    } else {
+      try { localStorage.removeItem(taskKey(dockMode, workspace)) } catch {}
+      setTaskId(undefined)
+    }
+    setDismissedViewId(undefined)
+    setSessionsOpen(false)
+    setError('')
+    window.requestAnimationFrame(() => input.current?.focus())
+  }
+
+  function selectSession(picked: Task) {
+    if (sending) return
+    if (linkedTaskId) {
+      if (picked.task_id === linkedTaskId) setSessionOverride(null)
+      else setSessionOverride({ mode: 'task', taskId: picked.task_id })
+    } else {
+      const nextMode: DockMode = isChat(picked) ? 'chat' : 'code'
+      try {
+        localStorage.setItem(MODE_KEY, nextMode)
+        localStorage.setItem(taskKey(nextMode, workspace), picked.task_id)
+      } catch {}
+      setDockMode(nextMode)
+      setTaskId(picked.task_id)
+    }
+    setDismissedViewId(undefined)
+    setSessionsOpen(false)
+    setError('')
+    window.requestAnimationFrame(() => input.current?.focus())
   }
 
   async function send() {
     const text = draft.trim()
-    if (!text || sending || (running && (!linkedTaskId || attachments.items.length > 0)) || (linkedTaskId && !task)) return
+    if (!text || sending || (running && (!taskId || attachments.items.length > 0)) || (usingLinked && !task)) return
     setSending(true); setError('')
     try {
-      // A remembered conversation that was deleted elsewhere is replaced.
-      if (running && linkedTaskId) {
-        await api.interject(linkedTaskId, text)
-        setDraft('')
-        session.reload()
-        return
-      }
-      let id = linkedTaskId ?? (taskId && !session.error ? taskId : undefined)
-      if (!id) {
-        id = await api.createSession(effectiveMode === 'code' ? workspace : undefined, effectiveMode)
-        try { localStorage.setItem(taskKey(effectiveMode, workspace), id) } catch {}
-        if (effectiveMode === 'code') {
-          void api.updateSession(id, { title: `代码问答 · ${baseName(workspace)}` }).catch(() => {})
-        }
-      }
       const promptParts: string[] = []
       if (activeViewContext) {
         promptParts.push(formatStudioViewContext(activeViewContext))
@@ -386,6 +402,25 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
       if (tags.length) promptParts.push(tags.map(mention).join(' '))
       promptParts.push(text)
       const prompt = promptParts.join('\n\n')
+      // Interject into a running session (linked or switched-to) while still carrying active view context.
+      if (running && taskId) {
+        await api.interject(taskId, prompt)
+        setDraft('')
+        session.reload()
+        return
+      }
+      // A remembered conversation that was deleted elsewhere is replaced.
+      let id = usingLinked ? linkedTaskId : (taskId && !session.error ? taskId : undefined)
+      if (!id) {
+        const createMode: DockMode = effectiveMode === 'code' && workspace ? 'code' : 'chat'
+        id = await api.createSession(createMode === 'code' ? workspace : undefined, createMode)
+        if (!linkedTaskId) {
+          try { localStorage.setItem(taskKey(createMode, workspace), id) } catch {}
+        }
+        if (createMode === 'code' && workspace) {
+          void api.updateSession(id, { title: `代码问答 · ${baseName(workspace)}` }).catch(() => {})
+        }
+      }
       const content = []
       for (const item of attachments.items) content.push({ type: 'file', receiptId: (await api.upload(id, item.file, new AbortController().signal, () => {})).receiptId })
       await api.prompt(id, prompt, {
@@ -395,7 +430,10 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
         fast_mode: shownFast,
       })
       setDraft(''); chat.clear(); setSkipped(undefined); attachments.clear()
-      if (id === taskId) session.reload(); else setTaskId(id)
+      if (id === taskId) session.reload()
+      else if (linkedTaskId) setSessionOverride({ mode: 'task', taskId: id })
+      else setTaskId(id)
+      refreshSessions()
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
     finally { setSending(false) }
   }
@@ -434,21 +472,32 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
     <ShellSetupDialog enabled={open && effectiveMode === 'code' && !!workspace} scope={workspace} onReady={session.reload} />
     <div className={css.resizer} title="拖动调整宽度" onPointerDown={resize} />
     <header className={css.head}>
+      <button
+        type="button"
+        className={clsx(css.iconButton, sessionsOpen && css.iconButtonActive)}
+        title="切换会话"
+        aria-label="切换会话"
+        aria-expanded={sessionsOpen}
+        data-testid="code-chat-session-switcher"
+        onClick={() => setSessionsOpen(value => !value)}
+      >
+        <Icon name="sidebarLeft" size={16} />
+      </button>
       <SparkleIcon />
-      <strong>{!linkedTaskId && effectiveMode === 'chat' ? 'AI 聊天' : '代码问答'}</strong>
+      <strong>{effectiveMode === 'chat' ? 'AI 聊天' : '代码问答'}</strong>
       <span className={css.grow} />
       {taskId && <button type="button" className={css.iconButton} title="在主界面打开这个对话" onClick={() => onOpenInChat(taskId)}><Icon name="external" size={15} /></button>}
       <button type="button" className={css.iconButton} title="收起" onClick={() => setOpen(false)}><Icon name="close" size={17} /></button>
     </header>
     <div className={css.repoRow}>
-      {!linkedTaskId && (
+      {(!taskId || !usingLinked) && (
         <div className={css.modeSwitch} role="tablist" aria-label="对话模式">
           <button
             type="button"
             role="tab"
-            aria-selected={dockMode === 'code'}
-            disabled={sending}
-            className={clsx(css.modeTab, dockMode === 'code' && css.modeTabActive)}
+            aria-selected={effectiveMode === 'code'}
+            disabled={sending || !workspace}
+            className={clsx(css.modeTab, effectiveMode === 'code' && css.modeTabActive)}
             onClick={() => switchMode('code')}
           >
             代码
@@ -456,25 +505,110 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
           <button
             type="button"
             role="tab"
-            aria-selected={dockMode === 'chat'}
+            aria-selected={effectiveMode === 'chat'}
             disabled={sending}
-            className={clsx(css.modeTab, dockMode === 'chat' && css.modeTabActive)}
+            className={clsx(css.modeTab, effectiveMode === 'chat' && css.modeTabActive)}
             onClick={() => switchMode('chat')}
           >
             聊天
           </button>
         </div>
       )}
-      {(linkedTaskId || effectiveMode === 'code') && (
-        <span className={css.repo} title={linkedTaskId ? (task?.title || linkedTaskId) : workspace}>
-          <Icon name="folder" size={14} />{linkedTaskId ? (task?.title?.trim() || '当前会话') : baseName(workspace)}
-        </span>
+      {(task || (effectiveMode === 'code' && workspace)) && (
+        <button
+          type="button"
+          className={css.repo}
+          title={task ? `${taskTitle(task)}（点击切换会话）` : workspace}
+          onClick={() => setSessionsOpen(value => !value)}
+        >
+          <Icon name={task && isChat(task) ? 'chat' : 'folder'} size={14} />
+          <span className={css.repoLabel}>{task ? taskTitle(task) : baseName(workspace)}</span>
+          <Icon name="chevronDown" size={12} />
+        </button>
       )}
     </div>
     <div className={css.chatArea}>
+      {sessionsOpen && (
+        <div className={css.sessionDrawerBackdrop} onClick={() => setSessionsOpen(false)}>
+          <aside className={css.sessionDrawer} aria-label="会话列表" data-testid="code-chat-session-drawer" onClick={event => event.stopPropagation()}>
+            <div className={css.sessionDrawerTop}>
+              <div className={css.sessionSearch}>
+                <Icon name="search" size={14} />
+                <input
+                  ref={sessionSearchInput}
+                  type="search"
+                  value={sessionQuery}
+                  placeholder="搜索会话…"
+                  aria-label="搜索会话"
+                  onChange={event => setSessionQuery(event.target.value)}
+                />
+              </div>
+              <button type="button" className={css.sessionNewBtn} disabled={sending} onClick={startNewChat}>
+                ＋ 新建
+              </button>
+            </div>
+            <div className={css.sessionFilters} role="tablist" aria-label="会话范围">
+              {([
+                ['all', '全部'],
+                ...(workspace ? [['workspace', '当前项目'] as const] : []),
+                ['chat', '聊天'],
+              ] as readonly (readonly [DockSessionScope, string])[]).map(([scope, label]) => (
+                <button
+                  key={scope}
+                  type="button"
+                  role="tab"
+                  aria-selected={sessionScope === scope}
+                  className={clsx(css.sessionFilterBtn, sessionScope === scope && css.sessionFilterActive)}
+                  onClick={() => setSessionScope(scope)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className={css.sessionList}>
+              {loadingSessions && visibleSessions.length === 0 ? (
+                <p className={css.sessionEmpty}>正在加载会话…</p>
+              ) : visibleSessions.length === 0 ? (
+                <p className={css.sessionEmpty}>{sessionQuery.trim() ? '未找到匹配的会话' : '暂无历史会话'}</p>
+              ) : visibleSessions.map(item => {
+                const active = item.task_id === taskId
+                const itemRunning = item.status === 'running' || item.status === 'cancelling'
+                const itemChat = isChat(item)
+                const rel = compactRelativeTime(item.updated_at)
+                return (
+                  <button
+                    key={item.task_id}
+                    type="button"
+                    className={clsx(css.sessionItem, active && css.sessionItemActive)}
+                    data-active={active}
+                    onClick={() => selectSession(item)}
+                  >
+                    <span className={clsx(css.sessionDot, itemRunning && css.sessionDotRunning)} aria-hidden="true" />
+                    <span className={css.sessionMeta}>
+                      <span className={css.sessionTitle}>{taskTitle(item)}</span>
+                      <span className={css.sessionSub}>
+                        {rel && <span>{rel}</span>}
+                        <span>{itemChat ? '聊天' : (item.workspace ? workspaceName(item.workspace) : '代码')}</span>
+                        {linkedTaskId && item.task_id === linkedTaskId && <span className={css.sessionLinkedTag}>当前主会话</span>}
+                      </span>
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </aside>
+        </div>
+      )}
       <div ref={transcript} className={css.body}>
         {taskId && task && (session.events.length > 0 || running)
-          ? renderSlot('agent.chat', { events: session.events, task, running, onOpenTask: onOpenInChat, onChangesUpdated: session.reload })
+          ? renderSlot('agent.chat', {
+            events: session.events,
+            task,
+            running,
+            onOpenTask: onOpenInChat,
+            onChangesUpdated: session.reload,
+            ...(onFilePreview ? { onFilePreview: handleFilePreview } : {}),
+          })
           : effectiveMode === 'chat'
             ? <div className={css.greeting}>
               <strong>👋 你好！我是 QuickAgent 助手</strong>
@@ -537,7 +671,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
             if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void send() }
           }} />
         <div className={css.actions}>
-          {!linkedTaskId && <button type="button" className={clsx(css.toolButton, css.newChat)} title="新对话" aria-label="新对话" disabled={running} onClick={forget}><span className={css.plus}>+</span></button>}
+          <button type="button" className={clsx(css.toolButton, css.newChat)} title="新对话" aria-label="新对话" disabled={sending} onClick={startNewChat}><span className={css.plus}>+</span></button>
           <button type="button" className={clsx(css.toolButton, css.attach)} title="添加附件" aria-label="添加附件" disabled={sending || running} onClick={() => filePicker.current?.click()}><Icon name="clip" size={15} /></button>
           <input ref={filePicker} type="file" multiple hidden onChange={event => { if (event.target.files) attachments.add(event.target.files); event.target.value = '' }} />
           {/* The same selector the main composer uses: one pill, one card. */}
@@ -559,10 +693,10 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, diagnostic, 
             onSelect={selectPermissionMode}
           />
           <span className={css.grow} />
-          {running && linkedTaskId && <button type="button" className={css.send} title="插话" aria-label="插话" disabled={!draft.trim() || sending || attachments.items.length > 0} onClick={() => { void send() }}><Icon name="send" size={16} /></button>}
+          {running && taskId && <button type="button" className={css.send} title="插话" aria-label="插话" disabled={!draft.trim() || sending || attachments.items.length > 0} onClick={() => { void send() }}><Icon name="send" size={16} /></button>}
           {running
             ? <button type="button" className={css.stop} onClick={() => { if (taskId) void api.cancel(taskId).then(session.reload, () => {}) }}><Icon name="stop" size={14} />停止</button>
-            : <button type="button" className={css.send} title="发送" aria-label="发送" disabled={!draft.trim() || sending || (!!linkedTaskId && !task)} onClick={() => { void send() }}><Icon name="send" size={16} /></button>}
+            : <button type="button" className={css.send} title="发送" aria-label="发送" disabled={!draft.trim() || sending || (usingLinked && !task)} onClick={() => { void send() }}><Icon name="send" size={16} /></button>}
         </div>
       </div>
       {(error || attachments.error) && <p role="alert" className={css.error}>{error || attachments.error}</p>}

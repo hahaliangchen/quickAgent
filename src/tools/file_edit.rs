@@ -840,6 +840,15 @@ fn adjust_ranges(ranges: &mut Vec<(usize, usize)>, start: usize, end: usize, new
     ranges.push((start, new_end));
 }
 
+fn old_text_preview(raw: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let escaped = raw.replace('\r', "\\r").replace('\n', "\\n");
+    let mut chars = escaped.chars();
+    let clipped: String = chars.by_ref().take(MAX_CHARS).collect();
+    let suffix = if chars.next().is_some() { "…" } else { "" };
+    format!("{:?}{suffix}", clipped)
+}
+
 /// Apply text edits sequentially in memory (atomic all-or-nothing on error).
 /// Sequential application supports both disjoint edits and adjacent/chained edits
 /// without spurious anchor-overlap failures.
@@ -866,10 +875,11 @@ pub fn text_edits_with_ranges_replace_all(
         // then uniform leading-indentation-shifted full lines (auto-reindenting new_text).
         let normalized = normalize(&edit.old_text).replace('\n', ending);
         let replacement = normalize(&edit.new_text).replace('\n', ending);
+        let old_preview = old_text_preview(&edit.old_text);
         let not_found_error = |current: &str| {
             invalid(match closest_lines(current, &edit.old_text) {
-                Some(lines) => format!("old_text not found; no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."),
-                None => "old_text not found, and no line of it appears in the file; no edits applied".into(),
+                Some(lines) => format!("old_text not found ({old_preview}); no edits applied. The closest {lines}\nCopy old_text exactly from these lines, without the line numbers."),
+                None => format!("old_text not found ({old_preview}), and no line of it appears in the file; no edits applied"),
             })
         };
         let replacements: Vec<(usize, usize, String)> = if output.contains(&edit.old_text) {
@@ -979,7 +989,9 @@ mod tests {
         let typo = error("const x = 2;\nconst y = 3;\n", "const x = 1;");
         assert!(typo.contains("1|const x = 2;"), "{typo}");
         let unrelated = error(source, "nothing like this");
-        assert!(unrelated.contains("no line of it appears in the file") && !unrelated.contains("|"), "{unrelated}");
+        assert!(unrelated.contains("no line of it appears in the file") && unrelated.contains("nothing like this") && !unrelated.contains("|"), "{unrelated}");
+        let quoted = error(source, "\"mentioned\"");
+        assert!(quoted.contains("mentioned") && quoted.contains("no line of it appears in the file"), "{quoted}");
     }
 
     #[test]

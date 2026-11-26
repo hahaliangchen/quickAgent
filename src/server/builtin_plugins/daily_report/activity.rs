@@ -9,6 +9,8 @@ use std::path::Path;
 
 /// Files listed per project before the list becomes noise in a report.
 const FILE_LIMIT: usize = 40;
+/// Files kept per session: enough to recognise the work, not the whole tree.
+const SESSION_FILE_LIMIT: usize = 20;
 /// Commits listed per project.
 const COMMIT_LIMIT: usize = 20;
 
@@ -48,11 +50,17 @@ fn project_name(workspace: &str) -> String {
         .to_owned()
 }
 
+/// Every session started today. The task id is what the page hands to the model
+/// so it can follow the work into `session.read_session_history` instead of
+/// guessing from a title.
 fn sessions(root: &Path, start: i64, end: i64) -> Result<Vec<Value>> {
     let conn = crate::server::agent_service::open_db(root)?;
     let mut statement = conn.prepare(
-        "SELECT t.id, COALESCE(m.title, t.prompt), t.status, t.created_at, COALESCE(m.workspace, '')
-         FROM agent_tasks t LEFT JOIN agent_session_meta m ON m.task_id = t.id
+        "SELECT t.id, COALESCE(m.title, t.prompt), t.status, t.created_at, t.updated_at,
+                COALESCE(m.workspace, ''), p.plugin_id
+         FROM agent_tasks t
+         LEFT JOIN agent_session_meta m ON m.task_id = t.id
+         LEFT JOIN plugin_sessions p ON p.task_id = t.id
          WHERE t.created_at >= ?1 AND t.created_at < ?2
          ORDER BY t.created_at ASC",
     )?;
@@ -62,24 +70,28 @@ fn sessions(root: &Path, start: i64, end: i64) -> Result<Vec<Value>> {
             "title": row.get::<_, String>(1)?,
             "status": row.get::<_, String>(2)?,
             "created_at": row.get::<_, i64>(3)?,
-            "workspace": row.get::<_, String>(4)?,
+            "updated_at": row.get::<_, i64>(4)?,
+            "workspace": row.get::<_, String>(5)?,
+            "plugin_id": row.get::<_, Option<String>>(6)?,
         }))
     })?;
     Ok(rows.filter_map(Result::ok).collect())
 }
 
+/// Files written today, each still tied to the session that changed it.
 fn changed_files(root: &Path, start: i64, end: i64) -> Result<Vec<Value>> {
     let conn = crate::server::agent_service::open_db(root)?;
     let mut statement = conn.prepare(
-        "SELECT workspace, path FROM agent_change_ledger WHERE created_at >= ?1 AND created_at < ?2 GROUP BY workspace, path ORDER BY workspace, path",
+        "SELECT task_id, workspace, path FROM agent_change_ledger WHERE created_at >= ?1 AND created_at < ?2 GROUP BY task_id, workspace, path ORDER BY task_id, path",
     )?;
     let rows = statement.query_map([start, end], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok(json!({
+            "task_id": row.get::<_, String>(0)?,
+            "workspace": row.get::<_, String>(1)?,
+            "path": row.get::<_, String>(2)?,
+        }))
     })?;
-    Ok(rows
-        .filter_map(Result::ok)
-        .map(|(workspace, path)| json!({ "workspace": workspace, "path": path }))
-        .collect())
+    Ok(rows.filter_map(Result::ok).collect())
 }
 
 /// Commits made today, or nothing when the project is not a git checkout.
@@ -104,43 +116,71 @@ fn commits(workspace: &str, date: &str) -> Vec<String> {
     }
 }
 
+fn push_unique(list: &mut Vec<String>, value: &str, limit: usize) {
+    if list.len() >= limit || value.is_empty() || list.iter().any(|item| item == value) {
+        return;
+    }
+    list.push(value.to_owned());
+}
+
 /// Aggregate one local day into per-project facts. A failing source is reported
 /// as empty rather than failing the whole page: a report without git is still
 /// worth writing.
 pub(super) fn today(state_root: &Path, date: Option<&str>) -> Result<Value> {
     let (day, start, end) = day_bounds(date)?;
-    let mut grouped: BTreeMap<String, ProjectDay> = BTreeMap::new();
     let mut warnings: Vec<String> = Vec::new();
 
-    match sessions(state_root, start, end) {
-        Ok(rows) => {
-            for row in rows {
-                let workspace = row["workspace"].as_str().unwrap_or_default().to_owned();
-                let entry = grouped.entry(workspace).or_default();
-                // The task id lets the model follow a session into
-                // session.read_session_history instead of guessing at details.
-                entry.sessions.push(json!({
-                    "task_id": row["task_id"],
-                    "title": row["title"],
-                    "status": row["status"],
-                    "created_at": row["created_at"],
-                }));
-            }
-        }
-        Err(error) => warnings.push(format!("sessions unavailable: {error}")),
-    }
+    // Files first: they belong to both the project and the session that wrote them.
+    let mut project_files: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut session_files: BTreeMap<String, Vec<String>> = BTreeMap::new();
     match changed_files(state_root, start, end) {
         Ok(rows) => {
             for row in rows {
                 let workspace = row["workspace"].as_str().unwrap_or_default().to_owned();
-                let path = row["path"].as_str().unwrap_or_default().to_owned();
-                let entry = grouped.entry(workspace).or_default();
-                if entry.files.len() < FILE_LIMIT && !entry.files.contains(&path) {
-                    entry.files.push(path);
+                let path = row["path"].as_str().unwrap_or_default();
+                // An empty project still groups its files, so the day is not lost.
+                push_unique(project_files.entry(workspace).or_default(), path, FILE_LIMIT);
+                let task = row["task_id"].as_str().unwrap_or_default();
+                if !task.is_empty() {
+                    push_unique(session_files.entry(task.to_owned()).or_default(), path, SESSION_FILE_LIMIT);
                 }
             }
         }
         Err(error) => warnings.push(format!("changed files unavailable: {error}")),
+    }
+
+    // A project that only shows file changes still has a row; sessions join it.
+    let mut grouped: BTreeMap<String, ProjectDay> = BTreeMap::new();
+    for (workspace, files) in project_files {
+        grouped.entry(workspace).or_default().files = files;
+    }
+
+    let mut flat: Vec<Value> = Vec::new();
+    match sessions(state_root, start, end) {
+        Ok(rows) => {
+            for row in rows {
+                let workspace = row["workspace"].as_str().unwrap_or_default().to_owned();
+                let task_id = row["task_id"].as_str().unwrap_or_default();
+                let facts = json!({
+                    "task_id": row["task_id"],
+                    "title": row["title"],
+                    "status": row["status"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "project": if workspace.is_empty() { "未归属项目".to_owned() } else { project_name(&workspace) },
+                    "workspace": workspace,
+                    "plugin_id": row["plugin_id"],
+                    "files": session_files.remove(task_id).unwrap_or_default(),
+                });
+                flat.push(facts.clone());
+                grouped
+                    .entry(workspace)
+                    .or_default()
+                    .sessions
+                    .push(facts);
+            }
+        }
+        Err(error) => warnings.push(format!("sessions unavailable: {error}")),
     }
 
     let projects = grouped
@@ -170,6 +210,8 @@ pub(super) fn today(state_root: &Path, date: Option<&str>) -> Result<Value> {
     Ok(json!({
         "date": day,
         "projects": projects,
+        // The same sessions, ungrouped: the page offers them as AI context.
+        "sessions": flat,
         "totals": { "sessions": total_sessions, "files": total_files, "commits": total_commits },
         "warnings": warnings,
     }))

@@ -52,7 +52,7 @@ fn run_js_tool_definition() -> Value {
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Readable multi-line JavaScript statements to append and execute in the live VM (no markdown code fences, no fabricated `// =>` comments). Put one statement per line with real newlines; NEVER minify long calls (>120 chars) or chained `.replace()` calls onto one line. Bind multi-line text arguments (using raw triple-double-quotes `\"\"\"...\"\"\"`) to flat variables before passing short names into object literals."
+                        "description": "Readable multi-line JavaScript statements to append and execute in the live VM (no markdown code fences, no fabricated `// =>` comments). Put one statement per line with real newlines; NEVER minify long calls (>120 chars) or chained `.replace()` calls onto one line. Bind multi-line text arguments (using Python-style `\"\"\"...\"\"\"` for standard \\t/\\n/\\\\ escapes or raw `r\"\"\"...\"\"\"` for verbatim backslashes) to flat variables before passing short names into object literals."
                     }
                 },
                 "required": ["code"],
@@ -89,11 +89,14 @@ Each response MUST be **one** of the two actions below:
 - **Lazy Resource Handles & Programmatic JS**: `io.read(...)` returns a live `ResourceHandle` (`Ref#N`) with zero-I/O methods: `f.slice(startLine, endLine)` (1-based inclusive, or multi-range `f.slice([[1, 10], [60, 75]])`), `f.grep(pattern, contextLines?)`, `f.outline()`, `f.head(n)`, `f.tail(n)`. Bind batch-read handles by name (e.g. `const [a, b] = await Promise.all([...])` or `const H = Object.fromEntries(paths.map((p, i) => [p, files[i]]))`) so you can reuse `a.slice(...)` / `H[path].grep(...)` across steps without re-reading unchanged files. Use JS loops, regexes, sets, and maps to diff, verify, or extract across multiple files in a single step.
 
 ## EDITING AND BUILDING
-- When changing multiple lines, deeply indented code, or text/commands with backticks, `${...}`, quotes, or backslashes (Go, Markdown, TS, `sed`/`awk`), prefer raw triple-double-quoted strings (`"""..."""`, verbatim with zero escaping) or multi-line template literals (`` `...` ``) instead of minifying into long single-line `'...\n...'` strings, and keep each `io.apply_edits` batch focused (typically 1–4 related files; `io.edit` applies its `edits` sequentially and atomically). Use `io.replace({ path, start_line, end_line, replacement })` for contiguous block replacements.
+- When changing multiple lines, deeply indented code, or text/commands with backticks, `${...}`, quotes, or backslashes (Go, Markdown, TS, `sed`/`awk`), prefer Python-style triple-double-quoted strings (`"""..."""` — no escaping needed for backticks/`${...}`/`"`, while standard `\t`/`\n`/`\\` escapes work as in Python) or raw `r"""..."""` (100% verbatim with zero escaping, ideal for `sed`/`awk`/regex/literal `\n`) or multi-line template literals (`` `...` ``) instead of minifying into long single-line `'...\n...'` strings, and keep each `io.apply_edits` batch focused (typically 1–4 related files; `io.edit` applies its `edits` sequentially and atomically). Use `io.replace({ path, start_line, end_line, replacement })` for contiguous block replacements.
 - Successful `io.edit` and `io.replace` responses include a line-numbered `preview` of the changed area. Once it confirms the edit, continue without an extra whole-file `io.read`.
 - Do not run multiple `cargo` or package-manager build/test commands inside `Promise.all`. Run them serially—prefer combining multiple targeted test filters or `&&`-chained checks into ONE serial command (e.g. `cargo test --bin ... -- test_a test_b && cargo check ...`) instead of spending a separate round-trip per filter. If `process.exec_command` returns `running: true` with a `session_id`, wait for it with `process.write_stdin({ session_id, yield_time_ms: 15000 })` until it exits—never re-launch a duplicate `cargo test` or build command while the first is still running.
 - For remote servers, always prefer the built-in `ssh.*` library (`host.contracts({ libraries: ["ssh"] })`: `ssh.list_servers`, `ssh.add_server`, `ssh.exec`, `ssh.list_dir`, `ssh.read_file`, `ssh.tail_log`, `ssh.edit_file`, `ssh.write_file`, `ssh.upload`, `ssh.download`) instead of spawning local `/bin/ssh` or Python `pty` scripts, so credentials stay in host `0600` storage and the SSH Workbench live terminal + SFTP tree follow your actions automatically. When patching an existing remote script or config, use `ssh.edit_file` (`old_text`/`new_text` or `edits`) instead of `ssh.read_file` + chained JS `.replace()` + `ssh.write_file`.
-- For databases (SQLite, MySQL, PostgreSQL), always prefer the built-in `db.*` library (`host.contracts({ libraries: ["db"] })`: `db.list_connections`, `db.save_connection`, `db.inspect_schema`, `db.query`, `db.explain`, `db.execute`, `db.export_xlsx`, `db.import_xlsx`) instead of spawning `mysql`/`psql` CLIs or Python database scripts, so credentials stay in host storage and saved connections appear directly in Database Studio.
+- When creating standalone documents, reports, skills, spreadsheets, or generated assets in a general chat (not bound to a specific code repository), save them with relative paths inside your current workspace (the unified general-chat assets folder) unless the user explicitly specifies another target directory, so clickable links open directly in the built-in Markdown / Excel / Word / PDF plugins.
+- For databases (SQLite, MySQL, PostgreSQL), always prefer the built-in `db.*` library (`host.contracts({ libraries: ["db"] })`: `db.list_connections`, `db.save_connection`, `db.inspect_schema`, `db.query`, `db.explain`, `db.execute`, `db.export_xlsx`, `db.import_xlsx`, `db.focus_view`) instead of spawning `mysql`/`psql` CLIs or Python database scripts, so credentials stay in host storage and saved connections appear directly in Database Studio. Treat Database Studio and Excel Studio as live interactive UI workbenches — **prefer UI navigation/locate over destructive SQL filtering whenever UI operations can accomplish the goal**:
+  - When the user asks to **open/find a table, browse data, highlight/select a whole column or row, or locate/scroll to a record**, operate the UI directly via `db.focus_view({ connection_id?, schema?, table?, column?, row?, offset?, range?, find_column?, find_value? })` or `excel.focus_view({ path?, sheet?, column?, row?, range?, find_column?, find_value? })` (after `db.inspect_schema` only if the table/column name is unknown). `db.focus_view` expands and selects the table in the left tree, keeps all columns and neighboring rows browsable (even on huge tables, pass `offset` + `find_column`/`find_value` to jump to the target page and scroll to the row rather than filtering away surrounding records), and highlights the target column/row/cell. **Do NOT** run a narrow `SELECT col` or `LIMIT 1` query to replace the full table, and never claim something is highlighted without calling `focus_view`.
+  - Use `db.query` / `db.execute` when the user explicitly asks to **filter / only show specific matching data (`WHERE`), aggregate/count/join, compute analytics, or perform writes**. Background analytical/counting/sampling `db.query` calls run silently (`show_in_ui` defaults to `false`) without hijacking the user's open table tab; pass `show_in_ui: true` **only** when the user explicitly wants to view that filtered/sorted query result in the Database Studio `AI 查询` tab (and follow with `db.focus_view` without `table` if they also want a column/row highlighted).
 - Use `browser.fill`, `browser.set_viewport`, `browser.scroll`, `browser.wait`, and `browser.screenshot` with a selector for interactive and responsive checks without shell scripts. To start a long-running dev server for browser checks, use `process.run_project_script` (and `process.stop_project_process` when done) rather than backgrounding `cmd &` inside a short-lived `exec_command`, which terminates its process group when the command exits.
 - Prefer `verify.check` and `verify.test` for supported project checks; read raw runner output through `session.read_asset` only when the structured diagnostics are insufficient.
 - For any non-trivial task with 3+ distinct steps or multiple files to modify, call `plan.set({ steps })` in your first `run_js` step to publish a concise 3–8 step checklist, then call `plan.update({ id, status })` as each step moves to `in_progress`, `done`, or `blocked`. Keep IDs stable; never mark unverified work done. Use `plan.add_substeps({ parent_id, steps })` to split a published step into sub-steps instead of resending the whole plan; a plan has at most two levels, and a parent cannot be `done` while one of its sub-steps is still open unless you pass `complete_children: true`. Before your final reply, close every finished step with `plan.update({ id, status: "done", complete_children: true })` (or mark remaining blockers `"blocked"`).
@@ -352,14 +355,23 @@ pub(super) fn build_request_body(
     libs: &Libraries,
 ) -> Value {
     let base = w.pinned_system_prompt.as_deref().unwrap_or(V2_SYSTEM_PROMPT);
-    let live_plan = (!s.scope.starts_with("virtual:")).then(|| {
-        crate::tools::plan_tools::format_turn_plan_for_context(
+    let ephemeral_tail = if s.scope.starts_with("virtual:") {
+        None
+    } else {
+        let live_plan = crate::tools::plan_tools::format_turn_plan_for_context(
             s.state.workspace.root(),
             s.task,
             s.turn,
-        )
-    }).flatten();
-    build_request_body_for_doc_with_plan(s, &w.context_doc, base, libs, live_plan.as_deref())
+        );
+        let blueprint_tail = workspace_blueprint_tail(s, libs);
+        match (blueprint_tail, live_plan) {
+            (Some(bp), Some(plan)) => Some(format!("{bp}\n\n{plan}")),
+            (Some(bp), None) => Some(bp),
+            (None, Some(plan)) => Some(plan),
+            (None, None) => None,
+        }
+    };
+    build_request_body_for_doc_with_plan(s, &w.context_doc, base, libs, ephemeral_tail.as_deref())
 }
 
 pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String {
@@ -387,14 +399,43 @@ fn model_library_header(libs: &Libraries) -> String {
     declarations::static_library_header(&listed)
 }
 
-pub(super) fn workspace_blueprint_hint(s: &Session<'_>, libs: &Libraries) -> Option<String> {
-    if !libs.contains_key("blueprint") { return None; }
+fn task_blueprint_root(s: &Session<'_>, libs: &Libraries) -> Option<std::path::PathBuf> {
+    if !libs.contains_key("blueprint") {
+        return None;
+    }
     let base = s.state.workspace.root();
-    let root = match crate::server::plugin_sessions::owner(base, s.task).ok()? {
-        Some(plugin) => crate::server::plugin_sessions::workspace_dir(base, &plugin).ok()?,
-        None => crate::context::session_browser::task_workspace(base, s.task).ok()?,
-    };
+    match crate::server::plugin_sessions::owner(base, s.task).ok()? {
+        Some(plugin) => crate::server::plugin_sessions::workspace_dir(base, &plugin).ok(),
+        None => crate::context::session_browser::task_workspace(base, s.task).ok(),
+    }
+}
+
+pub(super) fn workspace_blueprint_hint(s: &Session<'_>, libs: &Libraries) -> Option<String> {
+    let root = task_blueprint_root(s, libs)?;
     crate::server::builtin_plugins::blueprint::workspace_blueprint_hint(&root)
+}
+
+pub(super) fn workspace_blueprint_tail(s: &Session<'_>, libs: &Libraries) -> Option<String> {
+    let root = task_blueprint_root(s, libs)?;
+    crate::server::builtin_plugins::blueprint::workspace_blueprint_tail(&root)
+}
+
+pub(super) fn chat_assets_hint(s: &Session<'_>) -> Option<String> {
+    if s.turn != 1 {
+        return None;
+    }
+    let base = s.state.workspace.root();
+    if crate::server::plugin_sessions::owner(base, s.task).ok()?.is_some() {
+        return None;
+    }
+    if !crate::context::session_browser::is_general_chat(base, s.task).ok()? {
+        return None;
+    }
+    let dir = crate::context::session_browser::task_workspace(base, s.task).ok()?;
+    Some(format!(
+        "[General Chat Assets Directory: {} — save generated documents, reports, spreadsheets, and Markdown files as relative paths under this folder unless the user explicitly specifies another directory.]",
+        dir.display()
+    ))
 }
 
 const RUNTIME_IDENTITY_MARKER: &str = "/* === RUNTIME IDENTITY === */";

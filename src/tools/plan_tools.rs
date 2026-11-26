@@ -8,6 +8,8 @@ use std::{collections::BTreeSet, future::Future, path::PathBuf};
 pub const TOOLS: &[&str] = &["plan_set", "plan_update", "plan_add_substeps"];
 const MAX_STEPS: usize = 100;
 const MAX_SUBSTEP_BATCH: usize = 50;
+const MAX_PINNED_FACTS: usize = 12;
+const MAX_FACT_CHARS: usize = 200;
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +66,10 @@ pub fn schema(conn: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS agent_task_plans(
         task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
         turn INTEGER NOT NULL, steps_json TEXT NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY(task_id,turn));
+        CREATE TABLE IF NOT EXISTS agent_task_pinned_facts(
+        task_id TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+        turn INTEGER NOT NULL, facts_json TEXT NOT NULL, updated_at INTEGER NOT NULL,
         PRIMARY KEY(task_id,turn));",
     )?;
     Ok(())
@@ -108,6 +114,57 @@ fn format_step_note(note: Option<&str>) -> String {
     }
 }
 
+fn latest_facts(conn: &Connection, task: &str, turn: usize) -> Vec<String> {
+    let snapshot: Option<String> = conn
+        .query_row(
+            "SELECT facts_json FROM agent_task_pinned_facts WHERE task_id=?1 AND turn=?2",
+            params![task, turn],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    snapshot
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+fn sanitize_facts(raw: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for item in raw {
+        let clean = item.split_whitespace().collect::<Vec<_>>().join(" ");
+        if clean.is_empty() {
+            continue;
+        }
+        let mut chars = clean.chars();
+        let clipped: String = chars.by_ref().take(MAX_FACT_CHARS).collect();
+        let entry = if chars.next().is_some() {
+            format!("{clipped}…")
+        } else {
+            clipped
+        };
+        if seen.insert(entry.clone()) {
+            out.push(entry);
+            if out.len() >= MAX_PINNED_FACTS {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn format_facts_for_context(facts: &[String]) -> Option<String> {
+    if facts.is_empty() {
+        return None;
+    }
+    let mut out = String::from("[Pinned Session Facts & Pitfalls]\n");
+    for fact in facts {
+        out.push_str(&format!("- {fact}\n"));
+    }
+    Some(out.trim_end().to_owned())
+}
+
 fn format_steps_for_context(turn: usize, steps: &[Step]) -> Option<String> {
     if steps.is_empty() {
         return None;
@@ -137,16 +194,16 @@ fn format_steps_for_context(turn: usize, steps: &[Step]) -> Option<String> {
     }
     let has_open = steps.iter().any(|step| step.status != Status::Done);
     if has_open {
-        out.push_str("Keep this plan accurate via `plan.update({ id, status })` (pass `complete_children: true` when closing a parent); close finished steps before your final reply.");
+        out.push_str("Keep this plan accurate via `plan.update({ id, status })` (pass `complete_children: true` when closing a parent, or `pin_facts: [...]` to keep key environment paths/ports/pitfalls pinned at context tail); close finished steps before your final reply.");
     } else {
         out.push_str("All plan steps are marked done.");
     }
     Some(out)
 }
 
-/// Render a compact snapshot of the active turn's plan so it stays visible in
-/// model working memory across long multi-step turns and soft folds without
-/// leaking finished plans from earlier turns.
+/// Render a compact snapshot of the active turn's plan and any pinned session
+/// facts/pitfalls so they stay visible in model working memory across long
+/// multi-step turns and soft folds without leaking finished plans from earlier turns.
 pub fn format_turn_plan_for_context(
     root: &std::path::Path,
     task: &str,
@@ -162,8 +219,16 @@ pub fn format_turn_plan_for_context(
         .optional()
         .ok()
         .flatten();
-    let steps: Vec<Step> = serde_json::from_str(&snapshot?).ok()?;
-    format_steps_for_context(turn, &steps)
+    let steps_block = snapshot
+        .and_then(|s| serde_json::from_str::<Vec<Step>>(&s).ok())
+        .and_then(|steps| format_steps_for_context(turn, &steps));
+    let facts_block = format_facts_for_context(&latest_facts(&conn, task, turn));
+    match (steps_block, facts_block) {
+        (Some(p), Some(f)) => Some(format!("{p}\n\n{f}")),
+        (Some(p), None) => Some(p),
+        (None, Some(f)) => Some(f),
+        (None, None) => None,
+    }
 }
 
 /// `completed` and `total` keep counting top-level steps so older clients,
@@ -361,9 +426,36 @@ fn apply(
     settle_children(&mut steps, complete_children)?;
     let (completed, total) = progress(&steps);
     let updated = updated_id.and_then(|id| steps.iter().find(|s| s.id == id).cloned());
+    let now = crate::server::agent_service::now();
     tx.execute("INSERT INTO agent_task_plans(task_id,turn,steps_json,updated_at) VALUES (?1,?2,?3,?4)
         ON CONFLICT(task_id,turn) DO UPDATE SET steps_json=excluded.steps_json,updated_at=excluded.updated_at",
-        params![task,turn,serde_json::to_string(&steps)?,crate::server::agent_service::now()])?;
+        params![task,turn,serde_json::to_string(&steps)?,now])?;
+
+    let mut pinned_facts: Option<Vec<String>> = None;
+    if name == "plan_set" && !args["facts"].is_null() {
+        let raw: Vec<String> =
+            serde_json::from_value(args["facts"].clone()).context("invalid facts")?;
+        let facts = sanitize_facts(raw);
+        tx.execute(
+            "INSERT INTO agent_task_pinned_facts(task_id,turn,facts_json,updated_at) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(task_id,turn) DO UPDATE SET facts_json=excluded.facts_json,updated_at=excluded.updated_at",
+            params![task, turn, serde_json::to_string(&facts)?, now],
+        )?;
+        pinned_facts = Some(facts);
+    } else if name == "plan_update" && !args["pin_facts"].is_null() {
+        let extra: Vec<String> =
+            serde_json::from_value(args["pin_facts"].clone()).context("invalid pin_facts")?;
+        let mut combined = latest_facts(&tx, task, turn);
+        combined.extend(extra);
+        let facts = sanitize_facts(combined);
+        tx.execute(
+            "INSERT INTO agent_task_pinned_facts(task_id,turn,facts_json,updated_at) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(task_id,turn) DO UPDATE SET facts_json=excluded.facts_json,updated_at=excluded.updated_at",
+            params![task, turn, serde_json::to_string(&facts)?, now],
+        )?;
+        pinned_facts = Some(facts);
+    }
+
     crate::server::agent_service::append_event_tx(
         &tx,
         task,
@@ -372,13 +464,17 @@ fn apply(
         None,
     )?;
     tx.commit()?;
-    Ok(match (updated, added) {
+    let mut out = match (updated, added) {
         (Some(step), _) => json!({"step":step,"completed":completed,"total":total}),
         (None, Some(added)) => {
             json!({"steps":steps,"added":added,"completed":completed,"total":total})
         }
         (None, None) => json!({"steps":steps,"completed":completed,"total":total}),
-    })
+    };
+    if let Some(facts) = pinned_facts {
+        out["pinned_facts"] = json!(facts);
+    }
+    Ok(out)
 }
 
 pub fn step_schema() -> Value {
@@ -390,9 +486,10 @@ pub fn step_schema() -> Value {
 
 pub fn definitions() -> Vec<Value> {
     let step = step_schema();
+    let facts_schema = json!({"type":"array","maxItems":MAX_PINNED_FACTS,"items":{"type":"string","maxLength":MAX_FACT_CHARS},"description":"Compact verified environment facts (ports, venv/interpreter paths, isolation rules) or pitfalls to keep pinned at the context tail across long turns."});
     vec![
-        json!({"name":"plan_set","description":"Replace this task's progress plan. Pass an empty list to clear it. A step with parent_id becomes a sub-step of that top-level step; plans have at most two levels.","inputSchema":{"type":"object","required":["steps"],"properties":{"steps":{"type":"array","maxItems":MAX_STEPS,"items":step},"complete_children":{"type":"boolean","description":"Mark the sub-steps of a done parent done instead of rejecting the write."}}}}),
-        json!({"name":"plan_update","description":"Update a step by ID. Omit note to keep it or pass an empty string to clear it. A sub-step set to in_progress lifts a pending parent; a parent cannot be done while its sub-steps are unfinished unless complete_children is true.","inputSchema":{"type":"object","required":["id","status"],"properties":{"id":step["properties"]["id"],"status":step["properties"]["status"],"note":step["properties"]["note"],"complete_children":{"type":"boolean","description":"Close the unfinished sub-steps of this parent instead of rejecting the write."}}}}),
+        json!({"name":"plan_set","description":"Replace this task's progress plan. Pass an empty list to clear it. A step with parent_id becomes a sub-step of that top-level step; plans have at most two levels. Optionally pass `facts` to pin key environment paths, constraints, or pitfalls at the context tail.","inputSchema":{"type":"object","required":["steps"],"properties":{"steps":{"type":"array","maxItems":MAX_STEPS,"items":step},"facts":facts_schema,"complete_children":{"type":"boolean","description":"Mark the sub-steps of a done parent done instead of rejecting the write."}}}}),
+        json!({"name":"plan_update","description":"Update a step by ID. Omit note to keep it or pass an empty string to clear it. Pass `pin_facts` to append hard-won environment facts or pitfalls so they stay pinned at the context tail. A sub-step set to in_progress lifts a pending parent; a parent cannot be done while its sub-steps are unfinished unless complete_children is true.","inputSchema":{"type":"object","required":["id","status"],"properties":{"id":step["properties"]["id"],"status":step["properties"]["status"],"note":step["properties"]["note"],"pin_facts":facts_schema,"complete_children":{"type":"boolean","description":"Close the unfinished sub-steps of this parent instead of rejecting the write."}}}}),
         json!({"name":"plan_add_substeps","description":"Append sub-steps under an existing top-level step without resending the whole plan. They are inserted after that step's existing sub-steps.","inputSchema":{"type":"object","required":["parent_id","steps"],"properties":{"parent_id":step["properties"]["id"],"steps":{"type":"array","minItems":1,"maxItems":MAX_SUBSTEP_BATCH,"items":step}}}}),
     ]
 }
@@ -845,6 +942,55 @@ mod tests {
         let closed = format_turn_plan_for_context(&root, "t", 1).unwrap();
         assert!(closed.contains("(2/2 done)"), "{closed}");
         assert!(closed.contains("All plan steps are marked done."), "{closed}");
+        drop(conn);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pinned_facts_persist_deduplicate_and_render_in_context_tail() {
+        let root = std::env::temp_dir().join(format!(
+            "plan-facts-{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut conn = crate::server::agent_service::open_db(&root).unwrap();
+        fixture(&conn);
+        apply(
+            &mut conn,
+            "t",
+            1,
+            "plan_set",
+            &json!({
+                "steps": [{"id":"deploy","title":"Deploy 201","status":"in_progress"}],
+                "facts": ["201 anydoc 18133 uses Python 3.12 venv", "Never touch prod 7002"]
+            }),
+        )
+        .unwrap();
+        let updated = apply(
+            &mut conn,
+            "t",
+            1,
+            "plan_update",
+            &json!({
+                "id":"deploy",
+                "status":"in_progress",
+                "pin_facts": ["Never touch prod 7002", "Do not pip install into system python3.10"]
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            updated["pinned_facts"],
+            json!([
+                "201 anydoc 18133 uses Python 3.12 venv",
+                "Never touch prod 7002",
+                "Do not pip install into system python3.10"
+            ])
+        );
+        let rendered = format_turn_plan_for_context(&root, "t", 1).unwrap();
+        assert!(rendered.contains("[Pinned Session Facts & Pitfalls]"), "{rendered}");
+        assert!(rendered.contains("201 anydoc 18133 uses Python 3.12 venv"), "{rendered}");
+        assert!(rendered.contains("Do not pip install into system python3.10"), "{rendered}");
+        assert!(format_turn_plan_for_context(&root, "t", 2).is_none());
         drop(conn);
         std::fs::remove_dir_all(root).unwrap();
     }

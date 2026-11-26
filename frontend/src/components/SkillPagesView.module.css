@@ -487,10 +487,47 @@
   color: var(--sp-text) !important;
 }
 
+.askAiBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--sp-accent);
+  border-radius: 7px;
+  background: var(--sp-accent-bg);
+  color: var(--sp-accent-strong) !important;
+  font-size: 12.5px !important;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.askAiBtn:hover {
+  background: var(--sp-accent-soft);
+}
+
 .pageBody {
   display: flex;
   flex: 1;
+  min-width: 0;
   min-height: 0;
+}
+
+.pageSplit {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pageHost {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .empty {

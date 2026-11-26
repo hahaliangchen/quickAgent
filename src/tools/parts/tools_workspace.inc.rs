@@ -473,7 +473,7 @@ impl Workspace {
             }
         };
         let workspace = self.with_root(request.workspace_root.as_deref())?;
-        let (roots, path_globs) = workspace.resolve_search_roots(&request)?;
+        let (roots, path_globs, missing_paths) = workspace.resolve_search_roots(&request)?;
         let root_filters = workspace.search_root_filters(&roots)?;
         let globs = search_globs(&workspace.root, &request.glob, &request.exclude, &path_globs)?;
         let mut glob_for_noise = request.glob.clone();
@@ -616,6 +616,9 @@ impl Workspace {
         }
 
         let mut hints = Vec::new();
+        if !missing_paths.is_empty() {
+            hints.push("Some requested paths did not exist and were skipped (see missing_paths); search ran on the remaining existing paths.");
+        }
         if truncated_by_bytes {
             hints.push("Search output capped at ~48 KiB inline budget; narrow path/query/exclude/context_lines or read specific line ranges.");
         }
@@ -642,6 +645,7 @@ impl Workspace {
             match_mode: if regex { "regex" } else { "literal" },
             output_mode: scan.mode,
             hints,
+            missing_paths,
             query: request.query,
             index_used,
             index_matches,
@@ -702,7 +706,7 @@ impl Workspace {
         Ok((base_dir, Some(pattern)))
     }
 
-    fn resolve_search_roots(&self, request: &SearchTextRequest) -> Result<(Vec<PathBuf>, Vec<String>)> {
+    fn resolve_search_roots(&self, request: &SearchTextRequest) -> Result<(Vec<PathBuf>, Vec<String>, Vec<String>)> {
         let mut requested_paths = if request.paths.is_empty() {
             vec![request.path.clone()]
         } else {
@@ -728,14 +732,31 @@ impl Workspace {
             }
         }
 
+        let multi = requested_paths.len() > 1;
         let mut resolved = Vec::with_capacity(requested_paths.len());
+        let mut missing_paths = Vec::new();
+        let mut first_missing_err: Option<ToolError> = None;
         let mut any_glob = false;
         for raw in &requested_paths {
-            let (root, glob) = self.resolve_search_entry(raw)?;
-            if glob.is_some() {
-                any_glob = true;
+            match self.resolve_search_entry(raw) {
+                Ok((root, glob)) => {
+                    if glob.is_some() {
+                        any_glob = true;
+                    }
+                    resolved.push((root, glob));
+                }
+                Err(err @ ToolError::NotFound(_)) if multi => {
+                    missing_paths.push(raw.trim().to_owned());
+                    if first_missing_err.is_none() {
+                        first_missing_err = Some(err);
+                    }
+                }
+                Err(err) => return Err(err),
             }
-            resolved.push((root, glob));
+        }
+        if resolved.is_empty() {
+            return Err(first_missing_err
+                .unwrap_or_else(|| ToolError::NotFound(requested_paths.join(", "))));
         }
 
         let mut roots = Vec::new();
@@ -759,7 +780,7 @@ impl Workspace {
                 roots.push(root);
             }
         }
-        Ok((roots, path_globs))
+        Ok((roots, path_globs, missing_paths))
     }
 
     fn search_root_filters(&self, roots: &[PathBuf]) -> Result<Vec<String>> {

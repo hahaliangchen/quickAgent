@@ -384,6 +384,7 @@ fn normalize_edit_file_args(args: &mut Value) {
         let new_text = obj.remove("new_text").unwrap();
         let mut edit = json!({"old_text": old_text, "new_text": new_text});
         if let Some(hint) = obj.remove("line_hint") { edit["line_hint"] = hint; }
+        if let Some(replace_all) = obj.get("replace_all").cloned() { edit["replace_all"] = replace_all; }
         obj.insert("edits".into(), json!([edit]));
     }
 }
@@ -469,8 +470,17 @@ mod tests {
         assert!(!failed, "{result}");
         let text = result["declarations"].as_str().unwrap();
         let schemas = result["schemas"].as_array().unwrap();
-        assert_eq!(schemas.len(), 6);
-        for method in ["overview", "read_graph", "impact", "verify_sync", "upsert_entities", "upsert_graph"] {
+        assert_eq!(schemas.len(), 8);
+        for method in [
+            "overview",
+            "read_graph",
+            "read_playbook",
+            "impact",
+            "verify_sync",
+            "upsert_entities",
+            "upsert_graph",
+            "upsert_playbook",
+        ] {
             assert!(text.contains(&format!("function {method}(args:")), "{text}");
             let schema = schemas.iter().find(|s| s["tool"] == format!("blueprint__{method}")).unwrap();
             assert!(schema["inputSchema"]["properties"].is_object(), "{schema}");
@@ -485,13 +495,15 @@ mod tests {
             "path": "src/a.ts",
             "old_text": "foo",
             "new_text": "bar",
+            "replace_all": true,
         });
         normalize_edit_file_args(&mut args);
         assert_eq!(
             args,
             json!({
                 "path": "src/a.ts",
-                "edits": [{"old_text": "foo", "new_text": "bar"}],
+                "replace_all": true,
+                "edits": [{"old_text": "foo", "new_text": "bar", "replace_all": true}],
             })
         );
 

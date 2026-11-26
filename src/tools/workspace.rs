@@ -569,6 +569,8 @@ pub struct SearchTextResponse {
     pub output_mode: SearchOutput,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing_paths: Vec<String>,
     pub index_used: bool,
     pub index_matches: usize,
     pub text_scan_used: bool,

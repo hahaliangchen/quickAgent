@@ -61,6 +61,8 @@ pub(super) struct Manifest {
     pub last_synced_commit: Option<String>,
     pub updated_at: String,
     pub graphs: Vec<GraphSummary>,
+    #[serde(default)]
+    pub playbooks: Vec<PlaybookSummary>,
 }
 impl Default for Manifest {
     fn default() -> Self {
@@ -70,8 +72,84 @@ impl Default for Manifest {
             last_synced_commit: None,
             updated_at: String::new(),
             graphs: Vec::new(),
+            playbooks: Vec::new(),
         }
     }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct PlaybookSummary {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub anchor_count: usize,
+    #[serde(default)]
+    pub updated_at: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct Playbook {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub anchor_files: Vec<String>,
+    #[serde(default)]
+    pub related_entities: Vec<String>,
+    #[serde(default)]
+    pub related_graphs: Vec<String>,
+    #[serde(default)]
+    pub verify_commands: Vec<String>,
+    #[serde(default)]
+    pub environment: Vec<String>,
+    #[serde(default)]
+    pub pitfalls: Vec<String>,
+    #[serde(default)]
+    pub source_tasks: Vec<String>,
+    #[serde(default)]
+    pub updated_at: String,
+}
+impl Playbook {
+    pub(super) fn summary_entry(&self) -> PlaybookSummary {
+        PlaybookSummary {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            trigger: self.trigger.clone(),
+            summary: self.summary.clone(),
+            anchor_count: self.anchor_files.len(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
+}
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct PlaybookUpdate {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub trigger: Option<String>,
+    pub summary: Option<String>,
+    pub code: Option<String>,
+    pub anchor_files: Option<Vec<String>>,
+    pub related_entities: Option<Vec<String>>,
+    pub related_graphs: Option<Vec<String>>,
+    pub verify_commands: Option<Vec<String>>,
+    pub environment: Option<Vec<String>>,
+    pub pitfalls: Option<Vec<String>>,
+    pub source_tasks: Option<Vec<String>>,
+    pub project_kind: Option<ProjectKind>,
+    pub last_synced_commit: Option<String>,
+}
+#[derive(Debug, Default, Clone, Serialize)]
+pub(super) struct PlaybookStatus {
+    pub status: PortStatus,
+    pub missing_files: Vec<String>,
+    pub changed_files: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct GraphSummary {
@@ -183,9 +261,14 @@ pub(super) struct VerifyReport {
     pub changed_files: Vec<String>,
     pub affected_entities: Vec<String>,
     pub affected_graphs: Vec<String>,
+    pub affected_playbooks: Vec<String>,
     pub ok_ports: usize,
     pub drifted_ports: usize,
     pub missing_ports: usize,
+    pub ok_playbooks: usize,
+    pub drifted_playbooks: usize,
+    pub missing_playbooks: usize,
     pub stale: bool,
     pub entities: BTreeMap<String, EntityStatus>,
+    pub playbooks: BTreeMap<String, PlaybookStatus>,
 }
