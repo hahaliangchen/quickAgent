@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 mod db;
+mod office_files;
 mod routes;
 mod streaming;
 mod tools;
@@ -27,6 +28,7 @@ pub(crate) use db::{
     append_event_tx, emit, finish, next_event_seq, now, open_db, permission_mode_for,
     save_permission_mode,
 };
+pub use office_files::{office_local_file, office_recent_docs, office_reveal_folder};
 pub use routes::{
     cancel_task, continue_task, create_draft_task, create_task, get_event, get_events, get_task, list_tasks, workspace_file,
     slash_commands, stream_events, update_task, workspace_files,

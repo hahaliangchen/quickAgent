@@ -12,7 +12,7 @@
   border-left: 1px solid var(--codex-border-subtle); background: var(--codex-sidebar-bg, var(--codex-bg-main)); color: var(--codex-text-primary);
   font-family: var(--codex-font-sans); font-size: 13.5px;
 }
-.resizer { position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 2; }
+.resizer { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 6; touch-action: none; user-select: none; }
 .resizer:hover { background: var(--codex-blue-primary); }
 .dropping { outline: 2px dashed var(--codex-blue-primary); outline-offset: -3px; }
 .head { display: flex; align-items: center; gap: 8px; height: 48px; box-sizing: border-box; padding: 0 10px 0 14px; border-bottom: 1px solid var(--codex-border-subtle); }

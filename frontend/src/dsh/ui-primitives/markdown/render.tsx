@@ -33,8 +33,9 @@ import { parseFlowData } from './flow-data.ts'
 import { parseFileLink } from './file-link.ts'
 import { renderTexToReact } from './katex.tsx'
 import { LinkIconFile, LinkIconMedium, classifyLinkPath } from '../LinkIcon.tsx'
-import { useMarkdownDelegate } from './MarkdownDelegate.tsx'
+import { useMarkdownDelegate, type MarkdownFileCopyPaths } from './MarkdownDelegate.tsx'
 import { HoverCard } from '../HoverCard.tsx'
+import { writeClipboard } from '../clipboard.ts'
 import { ImageLightbox } from '../ImageLightbox.tsx'
 import { ImagePreview } from '../ImagePreview.tsx'
 import type { PositionedBlock } from './incremental.ts'
@@ -678,32 +679,79 @@ function renderAnchor(url: string, children: ReactNode[], key: Key, glyph = true
   return renderSafeLink(normalizeUri(url), children, key, glyph)
 }
 
+function FilePathCopyPopover({ paths }: { readonly paths: MarkdownFileCopyPaths }): ReactNode {
+  const [copiedKind, setCopiedKind] = useState<'abs' | 'rel' | null>(null)
+  const copy = (kind: 'abs' | 'rel', text: string) => {
+    void writeClipboard(text).then((ok) => {
+      if (!ok) return
+      setCopiedKind(kind)
+      window.setTimeout(() => {
+        setCopiedKind(current => (current === kind ? null : current))
+      }, 1200)
+    })
+  }
+  const previewPath = paths.absolutePath ?? paths.relativePath ?? ''
+  return (
+    <div className={css.fileCopyPopover} onClick={(e) => { e.stopPropagation() }}>
+      {previewPath && <div className={css.fileCopyPath} title={previewPath}>{previewPath}</div>}
+      <div className={css.fileCopyActions}>
+        {paths.absolutePath && (
+          <button
+            type="button"
+            className={clsx(css.fileCopyBtn, copiedKind === 'abs' && css.fileCopyBtnDone)}
+            onClick={(e) => { e.stopPropagation(); copy('abs', paths.absolutePath!) }}
+          >
+            {copiedKind === 'abs' ? '✓ 已复制绝对路径' : '复制绝对路径'}
+          </button>
+        )}
+        {paths.relativePath && (
+          <button
+            type="button"
+            className={clsx(css.fileCopyBtn, copiedKind === 'rel' && css.fileCopyBtnDone)}
+            onClick={(e) => { e.stopPropagation(); copy('rel', paths.relativePath!) }}
+          >
+            {copiedKind === 'rel' ? '✓ 已复制相对路径' : '复制相对路径'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function MarkdownFileLink({ file, glyph, children }: {
   readonly file: { path: string; line?: number }
   readonly glyph: boolean
   readonly children: ReactNode[]
 }): ReactNode {
-  const { openFile, fileImages } = useMarkdownDelegate()
+  const { openFile, fileImages, resolveFilePaths } = useMarkdownDelegate()
   if (openFile === undefined) return <>{children}</>
   // Pure-image anchors already contain their preview and keep one navigation target.
   const preview = glyph && classifyLinkPath(file.path) === 'image' ? fileImages : undefined
   const src = preview?.resolve(file.path)
+  const copyPaths = glyph ? resolveFilePaths?.(file.path) : undefined
+  const hasCopy = Boolean(copyPaths && (copyPaths.absolutePath || copyPaths.relativePath))
+  const hasPopover = (src !== undefined && preview !== undefined) || hasCopy
   const anchor = (
     <button
       type="button"
       className={clsx(css.fileMention, css.fileLink)}
-      title={src === undefined ? fileTitle(file) : undefined}
+      title={hasPopover ? undefined : fileTitle(file)}
       onClick={() => { openFile(file.path, file.line === undefined ? undefined : { line: file.line }) }}
     >
       {glyph && <LinkIconFile path={file.path} className={css.fileLinkIcon} />}
       {children}
     </button>
   )
-  if (src === undefined || preview === undefined) return anchor
-  return <HoverCard inline anchor={anchor}
+  if (!hasPopover) return anchor
+  return <HoverCard inline openDelayMs={src !== undefined ? 400 : 180} anchor={anchor}
     content={<>
-      <ImagePreview src={src} alt={file.path} loadingLabel={preview.labels.loading} failedLabel={preview.labels.failed} />
-      <span className={css.previewName}>{file.path.split(/[\\/]/u).pop()}</span>
+      {src !== undefined && preview !== undefined && (
+        <>
+          <ImagePreview src={src} alt={file.path} loadingLabel={preview.labels.loading} failedLabel={preview.labels.failed} />
+          <span className={css.previewName}>{file.path.split(/[\\/]/u).pop()}</span>
+        </>
+      )}
+      {hasCopy && copyPaths !== undefined && <FilePathCopyPopover paths={copyPaths} />}
     </>} />
 }
 

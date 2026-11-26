@@ -95,6 +95,7 @@ fn execute(workspace: &Path, name: &str, args: Value) -> Result<Value> {
                 .as_str()
                 .context("playbook_id is required")?,
         )?,
+        "blueprint__inspect_session" => super::session_dossier::inspect_session(workspace, &args)?,
         "blueprint__impact" => {
             serde_json::to_value(impact::impact(&store, serde_json::from_value(args)?)?)?
         }

@@ -1510,6 +1510,9 @@ pub async fn run(
                 .delete(crate::server::agent_service::cancel_task),
         )
         .route("/agent/tasks/{task_id}/workspace-file", get(crate::server::agent_service::workspace_file))
+        .route("/agent/office/local-file", get(crate::server::agent_service::office_local_file))
+        .route("/agent/office/reveal-folder", post(crate::server::agent_service::office_reveal_folder))
+        .route("/agent/office/recent-docs", get(crate::server::agent_service::office_recent_docs))
         .route(
             "/agent/tasks/{task_id}/events",
             get(crate::server::agent_service::get_events),

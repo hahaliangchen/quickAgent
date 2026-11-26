@@ -2,6 +2,17 @@ interface TauriInternals {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>
 }
 
+export interface SystemFileFilter {
+  readonly name: string
+  readonly extensions: readonly string[]
+}
+
+export interface SystemFilePickerOptions {
+  readonly title: string
+  readonly defaultPath?: string | undefined
+  readonly filters?: readonly SystemFileFilter[] | undefined
+}
+
 /**
  * The operating system's own folder chooser, or `undefined` when this page is
  * not running inside the Grow desktop shell. A browser can't hand a page a real
@@ -16,4 +27,23 @@ export function systemFolderPicker(): ((title: string) => Promise<string | null>
   const internals = (window as Window & { __TAURI_INTERNALS__?: TauriInternals }).__TAURI_INTERNALS__
   if (internals === undefined) return undefined
   return title => internals.invoke<string | null>('plugin:dialog|open', { options: { directory: true, title } })
+}
+
+/**
+ * The operating system's own single-file chooser in the Grow desktop shell,
+ * returning the real absolute path on disk (or `null` if cancelled).
+ */
+export function systemFilePicker(): ((options: SystemFilePickerOptions) => Promise<string | null>) | undefined {
+  const internals = (window as Window & { __TAURI_INTERNALS__?: TauriInternals }).__TAURI_INTERNALS__
+  if (internals === undefined) return undefined
+  return ({ title, defaultPath, filters }) =>
+    internals.invoke<string | null>('plugin:dialog|open', {
+      options: {
+        directory: false,
+        multiple: false,
+        title,
+        ...(defaultPath ? { defaultPath } : {}),
+        ...(filters ? { filters } : {}),
+      },
+    })
 }

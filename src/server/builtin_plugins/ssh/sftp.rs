@@ -1,7 +1,10 @@
 use std::{io::SeekFrom, time::Duration};
 
 use anyhow::{Context, Result, ensure};
-use russh_sftp::{client::SftpSession, protocol::OpenFlags};
+use russh_sftp::{
+    client::SftpSession,
+    protocol::{FileAttributes, OpenFlags},
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -16,9 +19,35 @@ pub(super) struct Sftp {
 
 #[derive(Serialize)]
 pub(super) struct Entry {
-    name: String,
-    kind: &'static str,
-    size: Option<u64>,
+    pub(super) name: String,
+    pub(super) kind: &'static str,
+    pub(super) size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) modified_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) modified_ms: Option<i64>,
+}
+
+pub(super) fn format_mtime(mtime_secs: Option<u32>) -> (Option<String>, Option<i64>) {
+    let Some(secs) = mtime_secs else {
+        return (None, None);
+    };
+    let secs_i64 = i64::from(secs);
+    let iso = chrono::DateTime::from_timestamp(secs_i64, 0).map(|dt| dt.to_rfc3339());
+    (iso, Some(secs_i64 * 1000))
+}
+
+pub(super) fn sort_entries(entries: &mut [Entry], sort_by: &str) {
+    match sort_by {
+        "mtime_desc" => entries.sort_by(|a, b| {
+            b.modified_ms
+                .cmp(&a.modified_ms)
+                .then_with(|| a.name.cmp(&b.name))
+        }),
+        _ => entries.sort_by(|a, b| {
+            (a.kind != "directory", &a.name).cmp(&(b.kind != "directory", &b.name))
+        }),
+    }
 }
 
 async fn copy_with_sha256(
@@ -90,6 +119,7 @@ impl Sftp {
                     return None;
                 }
                 let meta = entry.metadata();
+                let (modified_at, modified_ms) = format_mtime(meta.mtime);
                 Some(Entry {
                     name,
                     kind: if meta.is_dir() {
@@ -102,12 +132,12 @@ impl Sftp {
                         "other"
                     },
                     size: meta.size,
+                    modified_at,
+                    modified_ms,
                 })
             })
             .collect();
-        entries.sort_by(|a, b| {
-            (a.kind != "directory", &a.name).cmp(&(b.kind != "directory", &b.name))
-        });
+        sort_entries(&mut entries, "name");
         Ok((path, entries))
     }
 
@@ -210,6 +240,7 @@ impl Sftp {
         expected: u64,
         create_parents: bool,
         overwrite: bool,
+        permissions: Option<u32>,
     ) -> Result<(u64, String)> {
         ensure!(
             !path.is_empty() && !path.contains('\0') && !path.ends_with('/'),
@@ -252,6 +283,15 @@ impl Sftp {
                 let _ = self.session.remove_file(path).await;
             }
             self.session.rename(&temporary, path).await?;
+            if let Some(mode) = permissions {
+                let attrs = FileAttributes {
+                    permissions: Some(mode & 0o777),
+                    ..Default::default()
+                };
+                // Best-effort: preserve local Unix permissions (e.g. 0755 for binaries/scripts)
+                // without failing uploads on SFTP servers that reject SETSTAT.
+                let _ = self.session.set_metadata(path, attrs).await;
+            }
             Ok((count, sha256))
         }
         .await;
@@ -457,11 +497,12 @@ impl Sftp {
                 existing.len() as u64,
                 false,
                 true,
+                None,
             )
             .await?;
         }
         let (bytes, _) = self
-            .upload_with_options(path, content.as_bytes(), content.len() as u64, false, true)
+            .upload_with_options(path, content.as_bytes(), content.len() as u64, false, true, None)
             .await?;
         Ok(bytes)
     }

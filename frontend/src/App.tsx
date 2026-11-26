@@ -3,6 +3,7 @@ import { ConversationPage, HeroPage, SkillPackagesPage, type Tab } from './compo
 import { SkillWorkbench } from './components/SkillWorkbench.tsx'
 import { PluginPageHost } from './components/PluginPageHost.tsx'
 import { OfficeStudioView } from './components/OfficeStudioView.tsx'
+import { BLUEPRINT_OBSERVER_ENABLED, BlueprintObserverHost } from './experimental/blueprintObserver/index.ts'
 import type { StudioAskAiRequest, StudioViewContext } from './plugins/protocol.ts'
 import { BlueprintContext } from './builtin_plugins/blueprint/api.ts'
 import { buildDistillPlaybookPrompt } from './builtin_plugins/blueprint/playbookPrompts.ts'
@@ -16,6 +17,7 @@ import { SettingsModal } from './components/SettingsModal.tsx'
 import { WorkspaceModal } from './components/WorkspaceModal.tsx'
 import { ShellSetupDialog } from './components/ShellSetupDialog.tsx'
 import { AppDialogHost } from './components/AppDialog.tsx'
+import { startHorizontalResize } from './components/dragResize.ts'
 import { isCodeShellContext } from './shellSetup.ts'
 import type { AgentSlotProps } from './cordis/slot-contract.ts'
 import { toggleTheme } from './theme.ts'
@@ -194,7 +196,13 @@ export function App({ renderSlot }: AgentSlotProps) {
     return { ...current, files, active: current.active === url ? files[Math.min(index, files.length - 1)]?.url : current.active }
   })
   const editPreview = useCallback((slotId: string, file: PreviewFile) => {
-    setPendingOpen(prev => ({ slotId, fileUrl: file.url, filename: file.name, seq: (prev?.seq ?? 0) + 1 }))
+    setPendingOpen(prev => ({
+      slotId,
+      fileUrl: file.url,
+      filename: file.name,
+      ...(file.diskPath ? { filePath: file.diskPath } : {}),
+      seq: (prev?.seq ?? 0) + 1,
+    }))
     setOffice(true)
     setSsh(false)
     setSshDraft(undefined)
@@ -369,19 +377,15 @@ export function App({ renderSlot }: AgentSlotProps) {
           className={css.dragHandle}
           style={{ display: showHomeSidebar ? undefined : 'none' }}
           onPointerDown={(e) => {
-            e.preventDefault()
-            const startX = e.clientX
-            const startW = sidebarWidth
-            const onMove = (moveEvt: PointerEvent) => {
-              const nextW = Math.min(420, Math.max(200, startW + (moveEvt.clientX - startX)))
-              updateSidebarWidth(nextW)
-            }
-            const onUp = () => {
-              window.removeEventListener('pointermove', onMove)
-              window.removeEventListener('pointerup', onUp)
-            }
-            window.addEventListener('pointermove', onMove)
-            window.addEventListener('pointerup', onUp)
+            startHorizontalResize({
+              event: e,
+              startWidth: sidebarWidth,
+              direction: 1,
+              min: 200,
+              max: 420,
+              onWidth: setSidebarWidth,
+              onCommit: updateSidebarWidth,
+            })
           }}
         />
       )}
@@ -492,22 +496,36 @@ export function App({ renderSlot }: AgentSlotProps) {
             </div>
           })()
             : tab === 'skill-pages' ? <SkillPackagesPage workspace={workspace} renderSlot={renderSlot} theme={dark ? 'dark' : 'light'} onBack={() => setTab('chat')} onOpenInChat={id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) }} onFilePreview={openDockFile} /> : null)}
-        <div style={{ display: isHome ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
-          <HiddenFreeze hidden={!isHome}>
-            {workspace.heroPhase ? (
-              <HeroPage key={newChatVersion} workspace={workspace} renderSlot={renderSlot} />
-            ) : (
-              <ConversationPage
-                workspace={workspace}
-                renderSlot={renderSlot}
-                tab={tab}
-                setTab={setTab}
-                rightPanelOpen={rightPanelOpen}
-                onFilePreview={openPreview}
-                onToggleRightPanel={() => setRightPanelOpen(v => !v)}
-              />
-            )}
-          </HiddenFreeze>
+        <div style={{ display: isHome ? 'flex' : 'none', flex: 1, flexDirection: 'row', minHeight: 0, minWidth: 0, overflow: 'hidden', position: 'relative' }}>
+          <div style={{ display: 'flex', flex: 1, flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
+            <HiddenFreeze hidden={!isHome}>
+              {workspace.heroPhase ? (
+                <HeroPage key={newChatVersion} workspace={workspace} renderSlot={renderSlot} />
+              ) : (
+                <ConversationPage
+                  workspace={workspace}
+                  renderSlot={renderSlot}
+                  tab={tab}
+                  setTab={setTab}
+                  rightPanelOpen={rightPanelOpen}
+                  onFilePreview={openPreview}
+                  onToggleRightPanel={() => setRightPanelOpen(v => !v)}
+                />
+              )}
+            </HiddenFreeze>
+          </div>
+          {BLUEPRINT_OBSERVER_ENABLED && !workspace.heroPhase && workspace.task && (
+            <BlueprintObserverHost
+              watchedTask={workspace.task}
+              watchedEvents={workspace.session.events}
+              watchedRunning={workspace.running}
+              workspaceRoot={workspace.task.workspace ?? workspace.activeWorkspace ?? workspace.info?.workspace ?? ''}
+              renderSlot={renderSlot}
+              onMainSessionUpdated={workspace.session.reload}
+              onOpenTask={workspace.openTask}
+              onFilePreview={openDockFile}
+            />
+          )}
         </div>
       </div>
 
@@ -518,19 +536,15 @@ export function App({ renderSlot }: AgentSlotProps) {
           role="separator" aria-orientation="vertical" aria-label="调整预览抽屉宽度"
           title="拖动调整面板宽度"
           onPointerDown={(e) => {
-            e.preventDefault()
-            const startX = e.clientX
-            const startW = rightPanelWidth
-            const onMove = (moveEvt: PointerEvent) => {
-              const nextW = limitPanelWidth(startW + startX - moveEvt.clientX)
-              updateRightPanelWidth(nextW)
-            }
-            const onUp = () => {
-              window.removeEventListener('pointermove', onMove)
-              window.removeEventListener('pointerup', onUp)
-            }
-            window.addEventListener('pointermove', onMove)
-            window.addEventListener('pointerup', onUp)
+            startHorizontalResize({
+              event: e,
+              startWidth: rightPanelWidth,
+              direction: -1,
+              min: 300,
+              max: () => limitPanelWidth(1100),
+              onWidth: setRightPanelWidth,
+              onCommit: updateRightPanelWidth,
+            })
           }}
         />
       )}

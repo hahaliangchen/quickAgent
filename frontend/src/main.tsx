@@ -13,6 +13,22 @@ import { applyStoredTheme } from './theme.ts'
 
 applyStoredTheme()
 
+// Desktop WebView (Tauri/WebKitGTK) does not bind Ctrl+R / F5 by default; wire
+// a safe page reload shortcut while leaving Ctrl+R free inside SSH terminals.
+window.addEventListener('keydown', (event) => {
+  if (event.altKey) return
+  const key = event.key.toLowerCase()
+  const isF5 = event.key === 'F5'
+  const isCtrlR = (event.ctrlKey || event.metaKey) && key === 'r'
+  if (!isF5 && !isCtrlR) return
+  if (isCtrlR && !event.shiftKey) {
+    const target = event.target instanceof Element ? event.target : null
+    if (target?.closest('.xterm')) return
+  }
+  event.preventDefault()
+  window.location.reload()
+})
+
 function requireRoot(): HTMLElement {
   const element = document.getElementById('root')
   if (element === null) throw new Error('agent web: missing #root')

@@ -448,3 +448,97 @@ fn blueprint_playbook_crud_and_anchor_drift_verification() {
         assert!(store.manifest().unwrap().unwrap().playbooks.is_empty());
     }
 }
+
+#[test]
+fn blueprint_inspect_session_aggregates_sqlite_dossier() {
+    let root = Workspace::new();
+    let conn = crate::server::agent_service::open_db(&root.0).unwrap();
+    conn.execute(
+        "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at,provider_name)
+         VALUES ('task-panoramic','Deploy 201 isolation without touching prod 7002','gpt-6.2-sol','completed',1000,61000,'subapi')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_session_meta(task_id,title,workspace) VALUES ('task-panoramic','201 隔离部署','/repo/rag-go')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_task_plans(task_id,turn,steps_json,updated_at) VALUES ('task-panoramic',1,?1,2000)",
+        [json!([{"id":"s1","title":"Deploy 201","status":"done"}]).to_string()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_task_pinned_facts(task_id,turn,facts_json,updated_at) VALUES ('task-panoramic',1,?1,2000)",
+        [json!(["18133 uses Python 3.12 venv"]).to_string()],
+    )
+    .unwrap();
+    let events = [
+        (1, "step/start", json!({"step":1})),
+        (2, "program/start", json!({"step":1,"source":"io.edit(...)"})),
+        (3, "tool/call", json!({"step":1,"callId":"c1","name":"apply_edits","arguments":json!({"files":[{"path":"test_kg.py"}]}).to_string()})),
+        (4, "tool/result", json!({"step":1,"message":{"toolCallId":"c1","isError":true},"meta":{"result":{"error":"old_text not found"}}})),
+        (5, "step/start", json!({"step":2})),
+        (6, "tool/call", json!({"step":2,"callId":"c2","name":"apply_edits","arguments":json!({"files":[{"path":"test_kg.py"}]}).to_string()})),
+        (7, "tool/result", json!({"step":2,"message":{"toolCallId":"c2","isError":true},"meta":{"result":{"error":"old_text not found"}}})),
+        (8, "tool/call", json!({"step":2,"callId":"c3","name":"edit_file","arguments":json!({"path":"test_kg.py"}).to_string()})),
+        (9, "tool/result", json!({"step":2,"message":{"toolCallId":"c3","isError":false},"meta":{"result":{"path":"test_kg.py","changed":true}}})),
+        (10, "tool/call", json!({"step":3,"callId":"c4","name":"ssh__edit_file","arguments":json!({"server_id":"srv-201","path":"/opt/rag/.env"}).to_string()})),
+        (11, "tool/result", json!({"step":3,"message":{"toolCallId":"c4","isError":false},"meta":{"result":{"changed":true}}})),
+        (12, "tool/call", json!({"step":4,"callId":"c5","name":"ssh__exec","arguments":json!({"server_id":"srv-201","cwd":"/opt/rag","command":"python3 main.py"}).to_string()})),
+        (13, "tool/result", json!({"step":4,"message":{"toolCallId":"c5","isError":false},"meta":{"result":{"exit_code":1,"stderr":"ModuleNotFoundError: No module named 'rapidocr'"}}})),
+        (14, "tool/call", json!({"step":5,"callId":"c6","name":"ssh__exec","arguments":json!({"server_id":"srv-201","cwd":"/opt/rag","command":"/opt/anydoc/venv/bin/python main.py"}).to_string()})),
+        (15, "tool/result", json!({"step":5,"message":{"toolCallId":"c6","isError":false},"meta":{"result":{"exit_code":0,"stdout":"started on 127.0.0.1:18133"}}})),
+        (16, "context/usage", json!({"step":5,"cost_amount":0.25})),
+        (17, "assistant/message", json!({"step":5,"message":{"content":"All 201 checks passed."}})),
+    ];
+    for (seq, kind, data) in events {
+        conn.execute(
+            "INSERT INTO agent_task_events(task_id,seq,timestamp,kind,data) VALUES ('task-panoramic',?1,?2,?3,?4)",
+            rusqlite::params![seq, seq * 1000, kind, data.to_string()],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    let dossier = super::session_dossier::inspect_session(
+        &root.0,
+        &json!({"task_id": "task-panoramic"}),
+    )
+    .unwrap();
+    assert_eq!(dossier["task"]["status"], "completed");
+    assert_eq!(dossier["task"]["duration_sec"], 60);
+    assert_eq!(dossier["task"]["estimated_cost_usd"], 0.25);
+    assert_eq!(dossier["plan"]["pinned_facts"], json!(["18133 uses Python 3.12 venv"]));
+    assert_eq!(dossier["changed_files"]["local"], json!(["test_kg.py"]));
+    assert_eq!(dossier["changed_files"]["remote"][0]["path"], "/opt/rag/.env");
+    assert_eq!(dossier["failure_clusters"][0]["tool"], "apply_edits");
+    assert_eq!(dossier["failure_clusters"][0]["count"], 2);
+    assert_eq!(dossier["environment_signals"]["env_files_touched"], json!(["/opt/rag/.env"]));
+    assert!(
+        dossier["environment_signals"]["cues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("venv/bin/python"))
+    );
+    assert_eq!(dossier["winning_commands"][0]["scope"], "remote");
+    assert_eq!(dossier["final_outcome"], "All 201 checks passed.");
+    assert_eq!(dossier["task"]["latest_seq"], 17);
+    let tail = dossier["recent_tail"].as_array().unwrap();
+    assert!(!tail.is_empty());
+    assert_eq!(tail.last().unwrap()["seq"], 17);
+    assert_eq!(tail.last().unwrap()["kind"], "assistant/message");
+
+    // Verify `max_recent` bounds the returned tail slice to the newest events.
+    let bounded = super::session_dossier::inspect_session(
+        &root.0,
+        &json!({"task_id": "task-panoramic", "max_recent": 2}),
+    )
+    .unwrap();
+    let bounded_tail = bounded["recent_tail"].as_array().unwrap();
+    assert_eq!(bounded_tail.len(), 2);
+    assert_eq!(bounded_tail[0]["seq"], 15);
+    assert_eq!(bounded_tail[1]["seq"], 17);
+}

@@ -33,6 +33,7 @@ test('buildDistillPlaybookPrompt references session ids, existing playbooks, and
   assert.match(prompt, /排查打包与重启/)
   assert.match(prompt, /release-path/)
   assert.match(prompt, /只保留构建和验证步骤/)
+  assert.match(prompt, /blueprint\.inspect_session/)
   assert.match(prompt, /session\.read_session_history/)
   assert.match(prompt, /blueprint\.upsert_playbook/)
 })

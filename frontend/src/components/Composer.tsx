@@ -204,10 +204,10 @@ export function Composer({
     if (variant === 'hero' && !disabled) inputRef.current?.focus()
   }, [variant, disabled])
 
-  // A rewind hands the removed message back for editing.
+  // A rewind hands the removed message back for editing (scoped to this task's composer).
   useEffect(() => {
     const prefill = () => {
-      const text = recentPrefill()
+      const text = recentPrefill(draftKey, variant === 'hero')
       if (text === undefined) return
       setBrowsing(null)
       setDraft(text)
@@ -216,7 +216,7 @@ export function Composer({
     prefill()
     window.addEventListener(PREFILL_EVENT, prefill)
     return () => window.removeEventListener(PREFILL_EVENT, prefill)
-  }, [])
+  }, [draftKey, variant])
   // While a turn runs, text can still go out: into the turn (interject) or after it (queue).
   const [queued, setQueued] = useState<readonly string[]>([])
   const midTurn = running && onInterject !== undefined

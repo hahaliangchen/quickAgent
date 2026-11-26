@@ -2,6 +2,7 @@ mod impact;
 mod model;
 mod package;
 pub(crate) mod routes;
+pub(crate) mod session_dossier;
 mod store;
 #[cfg(test)]
 mod tests;

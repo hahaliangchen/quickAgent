@@ -117,6 +117,31 @@ pub(super) async fn proxy_rust_tool(
             Ok(val) => (val, false),
             Err(err) => (json!({"error": format!("{err:#}")}), true),
         },
+        "blueprint__inspect_session" => {
+            let mut inspect_args = args.clone();
+            if inspect_args["task_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_none()
+                && let Some(obj) = inspect_args.as_object_mut()
+            {
+                obj.insert("task_id".into(), json!(s.task));
+            }
+            let state_root = s.state.workspace.root().to_path_buf();
+            match tokio::task::spawn_blocking(move || {
+                crate::server::builtin_plugins::blueprint::session_dossier::inspect_session(
+                    &state_root,
+                    &inspect_args,
+                )
+            })
+            .await
+            {
+                Ok(Ok(val)) => (val, false),
+                Ok(Err(err)) => (json!({"error": format!("{err:#}")}), true),
+                Err(err) => (json!({"error": format!("inspect_session task failed: {err}")}), true),
+            }
+        }
         "list_skills" => handle_list_skills(s),
         "read_skill" => handle_read_skill(s, &args),
         "read_tool_contracts" => handle_read_tool_contracts_with_defs(libs, &args, || {
@@ -470,11 +495,12 @@ mod tests {
         assert!(!failed, "{result}");
         let text = result["declarations"].as_str().unwrap();
         let schemas = result["schemas"].as_array().unwrap();
-        assert_eq!(schemas.len(), 8);
+        assert_eq!(schemas.len(), 9);
         for method in [
             "overview",
             "read_graph",
             "read_playbook",
+            "inspect_session",
             "impact",
             "verify_sync",
             "upsert_entities",

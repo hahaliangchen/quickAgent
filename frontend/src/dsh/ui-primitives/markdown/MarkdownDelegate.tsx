@@ -9,6 +9,12 @@ import type { ImageLightboxLabels } from '../ImageLightbox.tsx'
  */
 export type MarkdownExternalLinkHandler = (href: string) => void
 
+/** Copyable absolute / workspace-relative paths resolved for one file link. */
+export interface MarkdownFileCopyPaths {
+  readonly absolutePath?: string | undefined
+  readonly relativePath?: string | undefined
+}
+
 /** Navigation capabilities supplied by the nearest Markdown owner. */
 export interface MarkdownDelegate {
   /** Image previews for decoded local paths in this owner's workspace. */
@@ -24,6 +30,12 @@ export interface MarkdownDelegate {
    * @param options - First line to reveal when the destination specifies a line or range.
    */
   readonly openFile?: ((path: string, options?: { line?: number }) => void) | undefined
+  /**
+   * Optional path-copy metadata for hover popovers on file links.
+   * Returning only `absolutePath` shows only absolute-path copy (e.g. general chat);
+   * returning both `absolutePath` and `relativePath` shows both buttons (e.g. code chat).
+   */
+  readonly resolveFilePaths?: ((path: string) => MarkdownFileCopyPaths | undefined) | undefined
 }
 
 const MarkdownDelegateContext = createContext<MarkdownDelegate>({})
@@ -44,8 +56,12 @@ export function MarkdownDelegateProvider({
   openExternalLink,
   openFile,
   fileImages,
+  resolveFilePaths,
 }: MarkdownDelegateProviderProps): ReactNode {
-  const delegate = useMemo(() => ({ openExternalLink, openFile, fileImages }), [openExternalLink, openFile, fileImages])
+  const delegate = useMemo(
+    () => ({ openExternalLink, openFile, fileImages, resolveFilePaths }),
+    [openExternalLink, openFile, fileImages, resolveFilePaths],
+  )
   return (
     <MarkdownDelegateContext.Provider value={delegate}>
       {children}

@@ -412,6 +412,18 @@ impl russh_sftp::server::Handler for MockFs {
         fs::remove_dir(self.path(&path)?).await.map_err(io_error)?;
         Ok(status(id))
     }
+    async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> FsResult<Status> {
+        let resolved = self.path(&path)?;
+        #[cfg(unix)]
+        if let Some(perms) = attrs.permissions {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(perms & 0o777);
+            fs::set_permissions(&resolved, mode).await.map_err(io_error)?;
+        }
+        #[cfg(not(unix))]
+        let _ = (&resolved, attrs);
+        Ok(status(id))
+    }
 }
 
 async fn start_http(directory: PathBuf) -> Result<(String, JoinHandle<()>)> {
@@ -829,6 +841,18 @@ async fn exercise_ai_tools() -> Result<()> {
         .collect();
     assert!(names.contains(&"config.toml"));
     assert!(names.contains(&"config.toml.bak"));
+    for entry in dir["entries"].as_array().unwrap() {
+        assert!(entry["modified_at"].as_str().is_some_and(|s| s.contains('T')), "{entry}");
+        assert!(entry["modified_ms"].as_i64().is_some_and(|ms| ms > 0), "{entry}");
+    }
+    let dir_by_mtime = package::execute_tool(
+        cfg.clone(),
+        ws.clone(),
+        "ssh__list_dir",
+        json!({ "server_id": dev_id, "path": "/deploy", "limit": 10, "sort_by": "mtime_desc" }),
+    )
+    .await?;
+    assert!(dir_by_mtime["entries"].as_array().unwrap().len() >= 2);
 
     // 5. ssh__read_file (1-based line slicing)
     let read = package::scoped(
@@ -1506,6 +1530,69 @@ async fn add_server_requires_approval_deduplicates_and_connects() -> Result<()> 
         .await?;
         assert_eq!(ran["exit_code"], 0);
         assert_eq!(ran["stdout"], "deploy-ok\n");
+        Ok(())
+    })
+    .await?
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ssh_upload_preserves_executable_permissions() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let remote_root = tempfile::tempdir()?;
+        let config = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let fixture = Fixture::start(remote_root.path().to_owned()).await?;
+
+        let cfg = config.path().to_path_buf();
+        let ws = workspace.path().to_path_buf();
+        let added = package::scoped(
+            "task-upload-mode".into(),
+            true,
+            package::execute_tool(
+                cfg.clone(),
+                ws.clone(),
+                "ssh__add_server",
+                json!({
+                    "name": "mode-test",
+                    "host": "127.0.0.1",
+                    "port": fixture.port,
+                    "username": "tester",
+                    "credential": PASSWORD,
+                }),
+            ),
+        )
+        .await?;
+        let server_id = added["server_id"].as_str().unwrap().to_owned();
+
+        let script = workspace.path().join("run.sh");
+        fs::write(&script, "#!/bin/sh\necho ok\n").await?;
+        fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).await?;
+
+        let uploaded = package::scoped(
+            "task-upload-mode".into(),
+            false,
+            package::execute_tool(
+                cfg,
+                ws,
+                "ssh__upload",
+                json!({
+                    "server_id": server_id,
+                    "local_path": "run.sh",
+                    "remote_path": "/run.sh",
+                    "overwrite": true,
+                }),
+            ),
+        )
+        .await?;
+        assert_eq!(uploaded["permissions"], "0755");
+        let remote_mode = fs::metadata(remote_root.path().join("run.sh"))
+            .await?
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(remote_mode, 0o755);
         Ok(())
     })
     .await?

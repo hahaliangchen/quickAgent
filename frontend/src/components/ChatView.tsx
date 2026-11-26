@@ -28,6 +28,8 @@ import { awaitingModel, chatItems, failedToolNames, flattenItems, formatDuration
 import { useTaskDuration } from '../useTaskDuration.ts'
 import { AssistantMessage } from './AssistantMessage.tsx'
 import type { OpenFilePreview } from '../filePreview.ts'
+import { resolveFileLinkPaths } from '../fileLinkPaths.ts'
+import { isChat } from '../sidebarModel.ts'
 import { AttachmentCards } from './AttachmentCard.tsx'
 import { ConversationTaskProvider } from './ConversationTask.tsx'
 import css from './ChatView.module.css'
@@ -603,11 +605,17 @@ export function ChatView({ events, projectedItems, task, running, onOpenTask, on
       </div>
     </div>
   )
+  const resolveFilePaths = useCallback((path: string) => {
+    return resolveFileLinkPaths(path, {
+      workspaceRoot: task?.workspace ?? undefined,
+      isChatSession: task ? isChat(task) : true,
+    })
+  }, [task])
   // Rows name this conversation's saved pictures without a prop chain; the file
   // delegate reaches every settled link inside this transcript.
   return (
     <ConversationTaskProvider taskId={task?.task_id ?? ''}>
-      <MarkdownDelegateProvider openFile={openFile}>{frame}</MarkdownDelegateProvider>
+      <MarkdownDelegateProvider openFile={openFile} resolveFilePaths={resolveFilePaths}>{frame}</MarkdownDelegateProvider>
       {fileNotice !== undefined && (
         <Toast
           key={fileNotice.seq}

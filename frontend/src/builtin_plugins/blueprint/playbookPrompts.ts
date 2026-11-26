@@ -54,7 +54,7 @@ export function buildDistillPlaybookPrompt(
   lines.push(
     '',
     '执行要求：',
-    '1. 调用 `session.read_session_history`（以及必要时 `session.list_saved_flows`）阅读上述会话中的流程代码与最终有效结果。',
+    '1. 先对每个目标 `task_id` 调用 `blueprint.inspect_session({ task_id })` 获取 SQLite 全景档案（原始任务与红线、计划与钉住事实、本地/远程改动文件、高频踩坑聚类 `failure_clusters`、环境线索 `environment_signals`、最终跑通命令 `winning_commands`）；仅在需要下钻某条关键步骤或原始 JS 编排代码时，再按 `event_seq` 调用 `session.read_session_history`。',
     '2. **剔除弯路、复盘意图**：删掉当时的盲搜、试错、编译报错重试和已经过期的旧路径；即便某些历史编排代码已过期，也请先理解它当时解决的问题，再对照**当前工作区最新源码**核实有效的文件、符号和命令。',
     '3. 调用 `blueprint.overview({})` 了解已有画布与实体；提炼出最小可复用的最短路径编排代码（清晰可读的 JS / 伪代码流程），列出关键 `anchor_files`（工作区相对路径）、`environment`（已验证的环境事实：端口、venv/解释器路径、远程目录、生产/测试隔离边界）、`pitfalls`（当时踩过的坑/红线）、`verify_commands`（最短验收命令）、`related_graphs` / `related_entities` 与 `source_tasks`。这些 `environment`、`pitfalls` 与 `verify_commands` 会在后续每次会话执行时自动挂载在 AI 上下文尾部持续提醒。',
     '4. 调用 `blueprint.upsert_playbook` 保存这份最短路径，并传入当前最新 git `head_commit` 作为 `last_synced_commit`。',

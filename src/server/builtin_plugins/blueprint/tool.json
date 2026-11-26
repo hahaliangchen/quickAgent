@@ -52,6 +52,37 @@
     }
   },
   {
+    "name": "blueprint__inspect_session",
+    "description": "Read-only SQLite panoramic X-ray of a historical or running session (task prompt & red-lines, plan & pinned facts, local/remote changed files, failure clusters, environment cues, and winning commands) in one call.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Session task ID to inspect (defaults to the current session when omitted)"
+        },
+        "max_failures": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        },
+        "max_commands": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "max_recent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60,
+          "description": "Number of most recent key live events to include in recent_tail (default 20)"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "blueprint__impact",
     "description": "Trace upstream and downstream across canvases. Provide entity_id or workspace-relative file_path; optionally constrain the first hop to port_id.",
     "inputSchema": {

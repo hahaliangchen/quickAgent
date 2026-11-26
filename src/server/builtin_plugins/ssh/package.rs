@@ -180,11 +180,15 @@ pub(super) async fn execute_tool(
                 .unwrap_or(".")
                 .to_owned();
             let limit = args["limit"].as_u64().unwrap_or(100).clamp(1, 200) as usize;
+            let sort_by = args["sort_by"].as_str().unwrap_or("name");
             let (connection, secret) =
                 client::connect_for_tool(config_dir, server.id.clone(), ctx.task_id.is_some())
                     .await?;
             let sftp = Sftp::open(connection).await?;
             let (resolved, mut entries) = sftp.list(&path).await?;
+            if sort_by != "name" {
+                super::sftp::sort_entries(&mut entries, sort_by);
+            }
             if ctx.task_id.is_some() {
                 emit_sftp(
                     &ctx,
@@ -476,10 +480,11 @@ pub(super) async fn execute_tool(
             let remote_path = required_str(&args, "remote_path")?;
             let create_parents = args["create_parents"].as_bool().unwrap_or(false);
             let overwrite = args["overwrite"].as_bool().unwrap_or(false);
-            let (std_file, size, relative_display) = tokio::task::spawn_blocking(move || {
+            let (std_file, size, relative_display, local_mode) = tokio::task::spawn_blocking(move || {
                 open_workspace_upload_file(&workspace_root, &local_path)
             })
             .await??;
+            let preserve_mode = local_mode.filter(|mode| mode & 0o111 != 0);
             let file = tokio::fs::File::from_std(std_file);
             let (connection, secret) = client::connect_for_tool(
                 config_dir.clone(),
@@ -489,7 +494,14 @@ pub(super) async fn execute_tool(
             .await?;
             let sftp = Sftp::open(connection).await?;
             let (bytes_uploaded, sha256) = sftp
-                .upload_with_options(&remote_path, file, size, create_parents, overwrite)
+                .upload_with_options(
+                    &remote_path,
+                    file,
+                    size,
+                    create_parents,
+                    overwrite,
+                    preserve_mode,
+                )
                 .await?;
             record_usage(
                 config_dir,
@@ -512,13 +524,17 @@ pub(super) async fn execute_tool(
                     |path| format!("upload {local} -> {path} ({bytes_uploaded} B)"),
                 );
             }
-            Ok(json!({
+            let mut out = json!({
                 "server_id": server.id,
                 "local_path": relative_display,
                 "remote_path": remote_path,
                 "bytes_uploaded": bytes_uploaded,
                 "sha256": sha256,
-            }))
+            });
+            if let Some(mode) = preserve_mode {
+                out["permissions"] = json!(format!("{mode:04o}"));
+            }
+            Ok(out)
         }
         "ssh__download" => {
             let server = load_server(&config_dir, &args, false, ctx.approved_protected).await?;
@@ -680,7 +696,7 @@ async fn record_usage(
 fn open_workspace_upload_file(
     workspace_root: &Path,
     local_path: &str,
-) -> Result<(std::fs::File, u64, String)> {
+) -> Result<(std::fs::File, u64, String, Option<u32>)> {
     ensure!(
         !local_path.is_empty() && !local_path.contains('\0'),
         "WORKSPACE_BOUNDARY_DENIED: invalid local_path"
@@ -721,12 +737,20 @@ fn open_workspace_upload_file(
             "WORKSPACE_BOUNDARY_DENIED: cannot open regular workspace file '{local_path}' without following symlinks: {err}"
         )
     })?;
-    let size = file.metadata()?.len();
+    let meta = file.metadata()?;
+    let size = meta.len();
     ensure!(
         size <= MAX_AI_UPLOAD_BYTES,
         "local file exceeds 512 MiB AI upload limit"
     );
-    Ok((file, size, relative.to_string_lossy().into_owned()))
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(meta.permissions().mode() & 0o777)
+    };
+    #[cfg(not(unix))]
+    let mode = None;
+    Ok((file, size, relative.to_string_lossy().into_owned(), mode))
 }
 
 fn prepare_workspace_download_target(

@@ -368,6 +368,67 @@
   text-underline-offset: 2px;
 }
 
+.fileCopyPopover {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 196px;
+}
+
+.fileCopyPath {
+  font-family: ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--dsw-alias-label-secondary, #6b7280);
+  word-break: break-all;
+  max-height: 48px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  user-select: text;
+}
+
+.fileCopyActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fileCopyBtn {
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.24));
+  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.08));
+  color: var(--dsw-alias-label-primary, inherit);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.fileCopyBtn:hover {
+  background: var(--dsw-alias-bg-hover, rgba(128, 128, 128, 0.16));
+  border-color: var(--dsw-alias-border-l1, rgba(128, 128, 128, 0.36));
+}
+
+.fileCopyBtnDone {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: rgba(16, 185, 129, 0.14);
+  color: #0f766e;
+}
+
+:global(body[data-ds-dark-theme]) .fileCopyBtnDone {
+  color: #34d399;
+}
+
 .compact {
   max-width: 100%;
   font-size: var(--dsh-content-font-size-secondary, 13px);

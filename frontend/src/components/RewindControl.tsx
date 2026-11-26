@@ -4,19 +4,26 @@ import css from './NoteProposal.module.css'
 
 export const PREFILL_EVENT = 'composer:prefill'
 
-let pending: { readonly text: string; readonly at: number } | undefined
-
-/** Put text back into the composer, e.g. the message a rewind removed. */
-export function prefillComposer(text: string): void {
-  // Kept briefly so a composer that mounts right after (a rewind to turn 1
-  // swaps in the welcome page's composer) still receives it.
-  pending = { text, at: Date.now() }
-  window.dispatchEvent(new CustomEvent<string>(PREFILL_EVENT, { detail: text }))
+export interface PrefillDetail {
+  readonly text: string
+  readonly taskId?: string | undefined
 }
 
-/** A prefill made in the last few seconds, if any. */
-export function recentPrefill(): string | undefined {
-  return pending && Date.now() - pending.at < 3000 ? pending.text : undefined
+let pending: { readonly text: string; readonly taskId?: string | undefined; readonly at: number } | undefined
+
+/** Put text back into the owning composer, e.g. the message a rewind removed. */
+export function prefillComposer(text: string, taskId?: string): void {
+  // Kept briefly so a composer that mounts right after (a rewind to turn 1
+  // swaps in the welcome page's composer) still receives it.
+  pending = { text, ...(taskId ? { taskId } : {}), at: Date.now() }
+  window.dispatchEvent(new CustomEvent<PrefillDetail>(PREFILL_EVENT, { detail: { text, ...(taskId ? { taskId } : {}) } }))
+}
+
+/** A prefill made in the last few seconds, if any, optionally filtered by owning taskId. */
+export function recentPrefill(expectedTaskId?: string, allowUnmatched = false): string | undefined {
+  if (!pending || Date.now() - pending.at >= 3000) return undefined
+  if (pending.taskId && expectedTaskId && pending.taskId !== expectedTaskId && !allowUnmatched) return undefined
+  return pending.text
 }
 
 /** "Back to here": undo this turn and everything after, then offer the message again. */
@@ -34,7 +41,7 @@ export function RewindControl({ taskId, turn, onRewound }: { taskId: string; tur
     api.rewind(taskId, turn).then(result => {
       setPhase('idle')
       onRewound()
-      if (result.prompt) prefillComposer(result.prompt)
+      if (result.prompt) prefillComposer(result.prompt, taskId)
     }, (cause: unknown) => {
       setPhase('confirm')
       setError(cause instanceof Error ? cause.message : String(cause))

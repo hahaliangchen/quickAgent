@@ -12,10 +12,11 @@ import { useSession, type Session } from '../useSession.ts'
 import { compactRelativeTime, isChat, taskTitle, workspaceName } from '../sidebarModel.ts'
 import { filterDockSessions, type DockSessionScope } from './dockSessions.ts'
 import { Icon } from './WorkbenchIcon.tsx'
+import { startHorizontalResize } from './dragResize.ts'
 import { ShellSetupDialog } from './ShellSetupDialog.tsx'
 import { ModelSelect } from '../dsh/model-selection/ModelSelect.tsx'
 import { PermissionPicker } from './PermissionPicker.tsx'
-import { PREFILL_EVENT } from './RewindControl.tsx'
+import { PREFILL_EVENT, type PrefillDetail } from './RewindControl.tsx'
 import { ScrollToBottom, transcriptScroller, useScrollToBottom } from './ScrollToBottom.tsx'
 import type { OpenFilePreview } from '../filePreview.ts'
 import { DAILY_REPORT_SYNC_EVENT, DB_SYNC_EVENT, EXCEL_SYNC_EVENT, type DailyReportSyncAction, type DbStudioSyncAction, type ExcelStudioSyncAction, type StudioViewContext } from '../plugins/protocol.ts'
@@ -244,14 +245,17 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
     if (!open) return
     const onPrefill = (event: Event) => {
       if (panel.current === null || panel.current.offsetParent === null) return
-      const text = (event as CustomEvent<string>).detail
+      const detail = (event as CustomEvent<PrefillDetail | string>).detail
+      const text = typeof detail === 'string' ? detail : detail?.text
+      const targetTaskId = typeof detail === 'string' ? undefined : detail?.taskId
+      if (targetTaskId && targetTaskId !== taskId) return
       if (typeof text !== 'string' || !text) return
       setDraft(stripStudioViewContext(text))
       window.requestAnimationFrame(() => input.current?.focus())
     }
     window.addEventListener(PREFILL_EVENT, onPrefill)
     return () => window.removeEventListener(PREFILL_EVENT, onPrefill)
-  }, [open])
+  }, [open, taskId])
   useEffect(() => {
     if (!diagnostic) return
     setOpen(true)
@@ -343,7 +347,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
 
   const handleFilePreview = useCallback<OpenFilePreview>((path, options) => {
     if (!taskId || !onFilePreview) return
-    const previewRoot = task && isChat(task) ? '' : (task?.workspace ?? workspace)
+    const previewRoot = task?.workspace ?? workspace
     onFilePreview(taskId, path, options, previewRoot)
   }, [taskId, onFilePreview, task, workspace])
 
@@ -456,16 +460,18 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
   </button>
 
   // Drag the left edge to resize; the width is remembered on this device.
-  function resize(event: React.PointerEvent) {
-    event.preventDefault()
-    const startX = event.clientX, startWidth = width
-    let next = startWidth
-    const move = (e: PointerEvent) => { next = Math.min(720, Math.max(320, startWidth + startX - e.clientX)); setWidth(next) }
-    const up = () => {
-      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up)
-      try { localStorage.setItem(WIDTH_KEY, String(next)) } catch {}
-    }
-    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)
+  function resize(event: React.PointerEvent<HTMLDivElement>) {
+    startHorizontalResize({
+      event,
+      startWidth: width,
+      direction: -1,
+      min: 320,
+      max: () => Math.min(820, Math.max(360, window.innerWidth - 280)),
+      onWidth: setWidth,
+      onCommit: next => {
+        try { localStorage.setItem(WIDTH_KEY, String(next)) } catch {}
+      },
+    })
   }
 
   return <section ref={panel} className={clsx(css.panel, dropping && css.dropping)} style={{ width }} aria-label="代码问答" data-code-chat="" {...dropProps}>

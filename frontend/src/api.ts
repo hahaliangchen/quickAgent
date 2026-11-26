@@ -514,6 +514,16 @@ export interface HistoryDates {
   readonly months: readonly string[]
 }
 
+/** A recently modified office document discovered in workspace or chat-assets. */
+export interface OfficeRecentDoc {
+  readonly path: string
+  readonly filename: string
+  readonly dir: string
+  readonly ext: string
+  readonly modified_ms: number
+  readonly source: 'workspace' | 'chat-assets'
+}
+
 /** Query string without empty values, so the server sees only real filters. */
 function historyQuery(params: Readonly<Record<string, string | number | undefined>>): string {
   const query = new URLSearchParams()
@@ -606,6 +616,12 @@ export const api = {
     post<{ models: string[] }>('/agent/settings/discover', input),
   getPlugins: () => request<PluginsSnapshot>('/agent/plugins'),
   files: (query: string) => request<{ files: readonly { path: string; kind: 'file' | 'dir' }[] }>(`/agent/workspace/files?q=${encodeURIComponent(query)}`),
+  revealOfficeFolder: (path: string) => post<{ ok: boolean; dir: string }>('/agent/office/reveal-folder', { path }),
+  recentOfficeDocs: (workspace?: string) =>
+    request<{ items: readonly OfficeRecentDoc[] }>(
+      `/agent/office/recent-docs${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''}`,
+      { cache: 'no-store' },
+    ),
   commands: () => request<{ commands: readonly { name: string; description: string }[] }>('/agent/commands'),
   /** Subscribe to events after `since`; the server replays anything newer first. */
   follow(id: string, since: number, handlers: {

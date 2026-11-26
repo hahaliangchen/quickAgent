@@ -1,11 +1,12 @@
 import type { AgentEvent, SkillPackage } from './api.ts'
+import { resolveFileLinkPaths } from './fileLinkPaths.ts'
 import { buildStudioCatalog } from './officeStudio.ts'
 
 export const TEXT_PREVIEW_LIMIT = 512 * 1024
 export type PreviewTheme = 'light' | 'dark'
 export type OpenFilePreview = (path: string, options?: { line?: number; url?: string }) => void
-export type PendingOpen = { slotId: string; fileUrl: string; filename: string; seq: number }
-export type PreviewFile = { url: string; path: string; name: string; line?: number; attachment: boolean }
+export type PendingOpen = { slotId: string; fileUrl: string; filename: string; filePath?: string | undefined; seq: number }
+export type PreviewFile = { url: string; path: string; diskPath?: string | undefined; name: string; line?: number; attachment: boolean }
 
 const images = new Set('png jpg jpeg webp gif svg avif bmp ico'.split(' '))
 const text = new Set('txt log csv tsv ts tsx js jsx mjs cjs css scss html htm xml json jsonc jsonl yaml yml toml ini cfg conf env rs go py sh bash zsh fish ps1 bat c cpp h hpp java kt kts cs swift rb php sql lua vue svelte diff patch gradle proto graphql lock makefile dockerfile gitignore gitattributes editorconfig'.split(' '))
@@ -53,7 +54,8 @@ export function previewFile(task: string, path: string, options?: { line?: numbe
   const prefix = base + '/attachments/'
   const url = options?.url ?? (base + '/workspace-file?' + new URLSearchParams({ path: relative }))
   if (!relative || (attachment && (!url.startsWith(prefix) || !/^[A-Za-z0-9_:%.-]+$/u.test(url.slice(prefix.length))))) return undefined
-  return { url, path: relative, name: relative.split(/[\\/]/u).pop() || relative,
+  const diskPath = attachment ? undefined : resolveFileLinkPaths(path, { workspaceRoot: root, isChatSession: false })?.absolutePath
+  return { url, path: relative, ...(diskPath ? { diskPath } : {}), name: relative.split(/[\\/]/u).pop() || relative,
     ...(options?.line !== undefined ? { line: options.line } : {}), attachment }
 }
 
