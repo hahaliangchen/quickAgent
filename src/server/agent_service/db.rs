@@ -37,6 +37,10 @@ fn agent_schema(conn: &rusqlite::Connection, root: &std::path::Path) -> anyhow::
             task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
             plugin_id TEXT NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS plugin_session_profiles (
+            task_id TEXT PRIMARY KEY REFERENCES agent_tasks(id) ON DELETE CASCADE,
+            prompt_profile TEXT NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS agent_observations (
             task_id TEXT NOT NULL, review_id TEXT NOT NULL, request_id INTEGER NOT NULL,
             input TEXT NOT NULL, status TEXT NOT NULL, result TEXT,

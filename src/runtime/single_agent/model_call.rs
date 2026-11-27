@@ -347,6 +347,22 @@ pub(super) fn parse_virtual_submission(reply: &ModelReply) -> RunSubmission {
     }
 }
 
+/// Compact system prompt for plugin sessions running in `"slim"` capability profile:
+/// only the minimal `run_js({ code })` execution protocol, core `host`/`session` helpers,
+/// and the plugin's own tools + inlined `SKILL.md` — no coding/shell/git/ssh/browser bloat.
+const SLIM_SYSTEM_PROMPT: &str = r#"You are a focused plugin assistant operating inside a per-turn JavaScript VM.
+Your ONLY tool is `run_js({ code })`, which executes JavaScript statements against the pre-bound plugin and core libraries declared in the `.d.ts` below and returns the real output in the `tool` response.
+
+## EXECUTION PROTOCOL
+Each response MUST be **one** of two actions:
+1. **Call `run_js({ code })`**:
+   - Emit raw, readable multi-line JavaScript statements (no markdown fences, no fabricated comments).
+   - Batch independent queries into one script (use `.promises` + `Promise.all` for concurrent calls) instead of one call per turn.
+   - Top-level `const`/`let`/`function` bindings stay live across steps in the current turn; unconsumed result variables and bare expressions are returned automatically (avoid `console.log`).
+   - If you need the full JSON input schema of any plugin method, call `host.contracts({ libraries: [...] })`. For oversized results stored as host assets, use `session.read_asset(...)` / `session.snapshot(...)`.
+2. **Reply directly to the user (without calling `run_js`)**:
+   - Once you have real observed tool output, answer directly in clear, natural Markdown grounded strictly in the returned data. Never fabricate tool results or citations."#;
+
 /// Build the provider wire body: static system prompt + `.d.ts` declarations +
 /// conversation turns + ONLY the single fixed `run_js({ code })` shell tool.
 pub(super) fn build_request_body(
@@ -355,7 +371,9 @@ pub(super) fn build_request_body(
     libs: &Libraries,
 ) -> Value {
     let base = w.pinned_system_prompt.as_deref().unwrap_or(V2_SYSTEM_PROMPT);
-    let ephemeral_tail = if s.scope.starts_with("virtual:") {
+    let is_slim = s.plugin.is_some()
+        && s.prompt_profile() == crate::server::plugin_protocol::PromptProfile::Slim;
+    let ephemeral_tail = if s.scope.starts_with("virtual:") || is_slim {
         None
     } else {
         let live_plan = crate::tools::plan_tools::format_turn_plan_for_context(
@@ -375,6 +393,24 @@ pub(super) fn build_request_body(
 }
 
 pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String {
+    if let Some(plugin_id) = s.plugin.as_deref()
+        && s.prompt_profile() == crate::server::plugin_protocol::PromptProfile::Slim
+    {
+        let mut text = String::from(SLIM_SYSTEM_PROMPT);
+        if let Some(skill_body) = s
+            .state
+            .tool_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.packages.inline_skill_body(plugin_id))
+        {
+            text.push_str("\n\n=== PLUGIN INSTRUCTIONS (SKILL.md) ===\n");
+            text.push_str(&skill_body);
+            text.push('\n');
+        }
+        text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
+        text.push_str(&declarations::static_library_header(libs));
+        return text;
+    }
     let watched_task = if s.scope.starts_with("virtual:") {
         None
     } else {
@@ -937,5 +973,105 @@ mod tests {
         assert_eq!(chat_msgs[..3], base[..3]);
         assert_eq!(chat_msgs[3]["role"], "tool");
         assert!(chat_msgs[3]["content"].as_str().unwrap().ends_with(plan));
+    }
+
+    #[test]
+    fn slim_plugin_profile_uses_compact_prompt_minimal_libs_and_inlines_skill() {
+        let root =
+            std::env::temp_dir().join(format!("slim-profile-{}", agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (runtime, catalog) = crate::server::skill_packages::test_runtime();
+        let mut state = agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        state.tool_catalog = Some(catalog);
+
+        // Seed two plugin-owned tasks in SQLite: one `"slim"`, one `"full"`.
+        let conn = agent_service::open_db(&root).unwrap();
+        for (task_id, profile) in [("task-slim", "slim"), ("task-full", "full")] {
+            conn.execute(
+                "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES (?1,'','m','draft',1,1)",
+                [task_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO plugin_sessions(task_id,plugin_id) VALUES (?1,'blueprint')",
+                [task_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO plugin_session_profiles(task_id,prompt_profile) VALUES (?1,?2)",
+                [task_id, profile],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let window = Window::default();
+
+        let slim_session = Session {
+            state: &state,
+            task: "task-slim",
+            model: "m",
+            turn: 1,
+            cancel: &cancel,
+            scope: "main".into(),
+            parent: None,
+            agent_id: None,
+            task_node_id: None,
+            plugin: Some("blueprint".into()),
+            ban_execution: false,
+            input_budget: 100_000,
+        };
+        let full_session = Session {
+            task: "task-full",
+            ..slim_session.clone()
+        };
+
+        let slim_libs = super::super::tool_executor::library_compile_scope(&slim_session, &window);
+        let full_libs = super::super::tool_executor::library_compile_scope(&full_session, &window);
+
+        // Slim exposes only minimal `host`, `session`, and the plugin's own library (`blueprint`).
+        assert!(slim_libs.contains_key("host"));
+        assert!(slim_libs.contains_key("session"));
+        assert!(slim_libs.contains_key("blueprint"));
+        for excluded in ["io", "git", "process", "vision", "attachments", "browser", "plan", "sys", "http"] {
+            assert!(
+                !slim_libs.contains_key(excluded),
+                "slim profile should exclude `{excluded}`"
+            );
+        }
+        // Full plugin session preserves vision / attachments as before.
+        assert!(full_libs.contains_key("vision"));
+        assert!(full_libs.contains_key("attachments"));
+
+        let slim_prompt = pinned_system_prompt(&slim_session, &slim_libs);
+        let full_prompt = pinned_system_prompt(&full_session, &full_libs);
+        assert!(slim_prompt.starts_with(SLIM_SYSTEM_PROMPT));
+        assert!(slim_prompt.contains("=== PLUGIN INSTRUCTIONS (SKILL.md) ==="));
+        assert!(!slim_prompt.contains("io.apply_edits"));
+        assert!(!slim_prompt.contains("calling io.workspace_info()"));
+        assert!(
+            slim_prompt.len() < full_prompt.len(),
+            "slim prompt ({}) should be shorter than full prompt ({})",
+            slim_prompt.len(),
+            full_prompt.len()
+        );
+        assert!(full_prompt.starts_with(V2_SYSTEM_PROMPT));
+
+        // Prompt prefix bytes stay identical across turns for KV cache hit stability.
+        let w = Window {
+            pinned_system_prompt: Some(slim_prompt),
+            ..Default::default()
+        };
+        let b1 = build_request_body(&slim_session, &w, &slim_libs);
+        let slim_turn2 = Session { turn: 2, ..slim_session };
+        let b2 = build_request_body(&slim_turn2, &w, &slim_libs);
+        assert_eq!(
+            b1["messages"][0]["content"].as_str().unwrap().as_bytes(),
+            b2["messages"][0]["content"].as_str().unwrap().as_bytes()
+        );
+
+        runtime.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

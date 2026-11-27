@@ -307,12 +307,20 @@ pub(crate) fn lazy_contract_library(name: &str) -> bool {
 
 pub fn static_library_header(libraries: &Libraries) -> String {
     let mut out = String::from(
-        "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n\
-         // PATHS: every io.* / git.* path is relative to the workspace root unless you pass an absolute one — write \"src/...\", \"frontend/...\" directly; calling io.workspace_info() first just to build absolute paths wastes a step.\n\
-         // IMPORTANT: Pre-bound `io.*`, `git.*`, `process.*` methods are SYNCHRONOUS.\n\
-         // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`) or `require(\"<lib>/promises\")`.\n\
-         // MANDATORY exact-text edit rule: for multi-line old_text/new_text in io.edit/io.apply_edits/io.replace/io.write, or shell commands containing backticks/backslashes (`\\1`, `sed`, Go raw strings, Markdown, TS templates), use Python-style triple-double-quoted strings (`\"\"\"...\"\"\"` — unescaped backticks/`${...}`/`\"`, with standard `\\t`/`\\n`/`\\\\` escapes decoded) or raw `r\"\"\"...\"\"\"` (100% verbatim with ZERO escaping), or standard template literals (`...`) when interpolation is needed, instead of minifying into single-line `'...\\n...'` strings.\n",
+        "// Context-as-code library declarations (pre-injected in top-level scope; import/require also supported).\n",
     );
+    if libraries.contains_key("io") || libraries.contains_key("git") || libraries.contains_key("process") {
+        out.push_str(
+            "// PATHS: every io.* / git.* path is relative to the workspace root unless you pass an absolute one — write \"src/...\", \"frontend/...\" directly; calling io.workspace_info() first just to build absolute paths wastes a step.\n\
+             // IMPORTANT: Pre-bound `io.*`, `git.*`, `process.*` methods are SYNCHRONOUS.\n\
+             // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`) or `require(\"<lib>/promises\")`.\n\
+             // MANDATORY exact-text edit rule: for multi-line old_text/new_text in io.edit/io.apply_edits/io.replace/io.write, or shell commands containing backticks/backslashes (`\\1`, `sed`, Go raw strings, Markdown, TS templates), use Python-style triple-double-quoted strings (`\"\"\"...\"\"\"` — unescaped backticks/`${...}`/`\"`, with standard `\\t`/`\\n`/`\\\\` escapes decoded) or raw `r\"\"\"...\"\"\"` (100% verbatim with ZERO escaping), or standard template literals (`...`) when interpolation is needed, instead of minifying into single-line `'...\\n...'` strings.\n",
+        );
+    } else {
+        out.push_str(
+            "// Pre-bound library methods are SYNCHRONOUS; use `<lib>.promises.<method>(...)` with `Promise.all` for concurrent batches.\n",
+        );
+    }
     out.push_str(&directory(libraries));
     let mcp = libraries.iter().filter(|(name, _)| name.starts_with("mcp_")).collect::<Vec<_>>();
     if !mcp.is_empty() {

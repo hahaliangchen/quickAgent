@@ -15,7 +15,7 @@ pub(crate) mod command;
 mod mcp_client;
 pub(crate) mod mcp_packages;
 pub(crate) mod remote;
-use crate::server::plugin_protocol::{Manifest, NativeBackend, Origin, ToolPermission};
+use crate::server::plugin_protocol::{Manifest, NativeBackend, Origin, PromptProfile, ToolPermission};
 
 static ROOT_CATALOG: std::sync::OnceLock<RwLock<std::sync::Weak<ToolCatalog>>> =
     std::sync::OnceLock::new();
@@ -75,6 +75,24 @@ fn reload_package(package: &Package) -> Result<Package> {
     }
     load_with(&package.root, package.origin, package.native.clone())
 }
+fn strip_skill_frontmatter(raw: &str) -> &str {
+    let trimmed = raw.trim_start_matches('\u{feff}');
+    let Some(rest) = trimmed
+        .strip_prefix("---\r\n")
+        .or_else(|| trimmed.strip_prefix("---\n"))
+    else {
+        return raw;
+    };
+    let mut offset = 0usize;
+    for line in rest.split_inclusive('\n') {
+        offset += line.len();
+        if line.trim_end_matches(&['\r', '\n'][..]) == "---" {
+            return &rest[offset..];
+        }
+    }
+    raw
+}
+
 fn frontmatter(raw: &str) -> Result<Value> {
     let normalized = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let front = normalized
@@ -292,6 +310,9 @@ struct Settings {
     enabled: BTreeMap<String, bool>,
     removed: std::collections::BTreeSet<String>,
     remotes: BTreeMap<String, remote::Config>,
+    /// Optional host-level capability profile override per plugin ID (`"full"` or `"slim"`).
+    /// When set to `"slim"`, acts as a hard ceiling that external plugin requests cannot escalate.
+    prompt_profiles: BTreeMap<String, PromptProfile>,
 }
 fn settings_path() -> PathBuf {
     crate::server::ai_proxy::config_path().with_file_name("skill-packages.json")
@@ -381,10 +402,68 @@ impl Registry {
             })
         })
     }
+    pub fn host_prompt_profile(&self, id: &str) -> Option<PromptProfile> {
+        settings_at(&self.settings_path())
+            .ok()
+            .and_then(|s| s.prompt_profiles.get(id).copied())
+    }
+
+    pub fn manifest_prompt_profile(&self, id: &str) -> Option<PromptProfile> {
+        self.entries
+            .read()
+            .unwrap()
+            .get(id)
+            .and_then(|package| package.manifest.prompt_profile)
+    }
+
+    /// Resolve effective capability profile for a plugin session.
+    /// Precedence:
+    /// 1. Host `skill-packages.json` `"slim"` lock (hard ceiling: plugin requests cannot escalate to `"full"`).
+    /// 2. Explicit `create` request override (`requested`, when not blocked by host `"slim"` lock).
+    /// 3. Host `skill-packages.json` `"full"` override.
+    /// 4. Plugin manifest `prompt_profile` declaration.
+    /// 5. Default `PromptProfile::Full` (zero breaking change).
+    pub fn resolve_prompt_profile(
+        &self,
+        id: &str,
+        requested: Option<PromptProfile>,
+    ) -> PromptProfile {
+        let host = self.host_prompt_profile(id);
+        if host == Some(PromptProfile::Slim) {
+            return PromptProfile::Slim;
+        }
+        if let Some(req) = requested {
+            return req;
+        }
+        if let Some(host_profile) = host {
+            return host_profile;
+        }
+        self.manifest_prompt_profile(id).unwrap_or(PromptProfile::Full)
+    }
+
+    /// Read a plugin's `SKILL.md` body for inlining into a `"slim"` session's pinned system prompt.
+    pub fn inline_skill_body(&self, id: &str) -> Option<String> {
+        let package = self.entries.read().unwrap().get(id).cloned()?;
+        if !package.available() || package.mcp.is_some() {
+            return None;
+        }
+        let raw = if let Some(remote) = &package.remote {
+            remote.skill.clone()
+        } else {
+            optional_instructions(&package.root, &package.manifest.skill)
+                .ok()
+                .flatten()
+                .map(|(_, body)| body)?
+        };
+        let body = strip_skill_frontmatter(&raw).trim();
+        (!body.is_empty()).then(|| body.to_owned())
+    }
+
     pub fn catalog(&self) -> Value {
         json!(self.entries.read().unwrap().values().map(|package|json!({
             "id":package.manifest.id,"name":package.manifest.id,"title":package.manifest.title,"library":package.manifest.library,
             "description":package.description,"enabled":package.available(),"toggleable":package.origin != Origin::Builtin || !package.manifest.enabled_by_default,"scope":package.scope,"has_skill":!package.manifest.skill.trim().is_empty(),
+            "prompt_profile":self.resolve_prompt_profile(&package.manifest.id, None),
             "tools":package.manifest.tools,"mcp":package.mcp.is_some(),"pages":package.manifest.pages,"package_root":package.root,"origin":package.origin,"inject":package.manifest.inject,"remote":package.remote.is_some(),
         })).collect::<Vec<_>>())
     }
@@ -1640,6 +1719,67 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':r['params']}))
             .unwrap();
             assert!(resolved.ends_with("helper.exe"));
         }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manifest_prompt_profile_and_inline_skill_body_resolution() {
+        let root = std::env::temp_dir().join(format!(
+            "manifest-profile-{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("SKILL.md"),
+            "---\nname: kg-demo\ndescription: Knowledge graph assistant\n---\n# KG Rules\nAlways cite node IDs.\n",
+        )
+        .unwrap();
+        let manifest = json!({
+            "version": 1,
+            "id": "kg-demo",
+            "library": "kg",
+            "title": "KG Demo",
+            "skill": "SKILL.md",
+            "prompt_profile": "slim"
+        });
+        std::fs::write(root.join("plugin.json"), manifest.to_string()).unwrap();
+
+        let mut loaded = load(&root).unwrap();
+        assert_eq!(loaded.manifest.prompt_profile, Some(PromptProfile::Slim));
+        loaded.scope = Some(1);
+
+        let registry = Registry::default();
+        let settings_path = root.join("skill-packages.json");
+        registry.use_test_settings_path(settings_path.clone());
+        registry
+            .entries
+            .write()
+            .unwrap()
+            .insert("kg-demo".into(), loaded);
+
+        // Manifest declares "slim" -> default resolved profile is Slim; explicit "full" can opt up.
+        assert_eq!(registry.resolve_prompt_profile("kg-demo", None), PromptProfile::Slim);
+        assert_eq!(
+            registry.resolve_prompt_profile("kg-demo", Some(PromptProfile::Full)),
+            PromptProfile::Full
+        );
+        // Host "slim" lock overrides explicit "full".
+        std::fs::write(
+            &settings_path,
+            json!({"prompt_profiles":{"kg-demo":"slim"}}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            registry.resolve_prompt_profile("kg-demo", Some(PromptProfile::Full)),
+            PromptProfile::Slim
+        );
+
+        // Inline SKILL.md strips frontmatter cleanly and preserves the Markdown body.
+        let body = registry.inline_skill_body("kg-demo").unwrap();
+        assert!(body.contains("# KG Rules"));
+        assert!(body.contains("Always cite node IDs."));
+        assert!(!body.contains("description: Knowledge graph assistant"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

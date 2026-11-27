@@ -162,6 +162,7 @@ pub(crate) fn mount_user_package(
             "Plugin tool manifest changed; reload plugin"
         );
         ensure!(old.manifest.library == package.manifest.library, "Plugin library changed; reload plugin");
+        ensure!(old.manifest.prompt_profile == package.manifest.prompt_profile, "Plugin prompt profile changed; reload plugin");
         ensure!(old.remote.as_ref().is_some_and(|previous| previous.skill == connection.skill), "Plugin skill changed; reload plugin");
         ensure!(old.native.as_ref().zip(package.native.as_ref()).is_some_and(|(previous, current)|
             previous.tools.iter().all(|(name, tool)| current.tools.get(name).is_some_and(|next| next.definition == tool.definition))),
@@ -363,6 +364,14 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
             )),
         "invalid remote page declaration"
     );
+    let prompt_profile = plugin
+        .get("prompt_profile")
+        .filter(|v| !v.is_null())
+        .map(|v| {
+            let raw = v.as_str().context("plugin prompt_profile must be a string")?;
+            PromptProfile::parse(raw).context("plugin prompt_profile must be \"full\" or \"slim\"")
+        })
+        .transpose()?;
     Ok(Package {
         root: PathBuf::new(),
         manifest: Manifest {
@@ -395,6 +404,7 @@ pub(crate) async fn connect_user(mut config: Config, require_binding: bool) -> R
                     .collect()
             }),
             local_service: None,
+            prompt_profile,
         },
         description,
         scope: None,

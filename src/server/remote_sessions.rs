@@ -438,10 +438,18 @@ async fn handle(
             };
             return Ok(Json(json!({"task_id":conversation,"plugin_state":extra})).into_response());
         }
+        let mut create_args = json!({"method":"create","package_scope":scope});
+        if let Some(profile) = args
+            .get("prompt_profile")
+            .filter(|v| !v.is_null())
+            .or_else(|| lookup.get("prompt_profile").filter(|v| !v.is_null()))
+        {
+            create_args["prompt_profile"] = profile.clone();
+        }
         let response = crate::server::plugin_sessions::handle(
             state.clone(),
             plugin,
-            json!({"method":"create","package_scope":scope}),
+            create_args,
         )
         .await?;
         let created: Value =
@@ -456,7 +464,7 @@ async fn handle(
             )
             .await?;
         save_binding(state.workspace.root(), task, plugin, &c)?;
-        return Ok(Json(json!({"task_id":task,"plugin_state":extra})).into_response());
+        return Ok(Json(json!({"task_id":task,"prompt_profile":created["prompt_profile"],"plugin_state":extra})).into_response());
     }
     let task = args["task_id"]
         .as_str()

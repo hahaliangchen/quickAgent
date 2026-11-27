@@ -427,6 +427,7 @@ fn package(
             pages: vec![],
             attachment_extensions: None,
             local_service: None,
+            prompt_profile: None,
         },
         description: "Standard MCP server".into(),
         scope: None,

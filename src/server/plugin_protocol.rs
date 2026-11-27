@@ -11,6 +11,35 @@ pub enum Origin {
     External,
 }
 
+/// Capability / prompt footprint profile for plugin-owned conversations.
+/// - `Full` (default): full host coding-agent prompt and all page-permitted host libraries.
+/// - `Slim`: minimal `run_js` protocol + core `host`/`session` libraries + the plugin's own
+///   library + inlined `SKILL.md` (ideal for focused Q&A / retrieval plugins like `rag-kg`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptProfile {
+    #[default]
+    Full,
+    Slim,
+}
+
+impl PromptProfile {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(Self::Full),
+            "slim" => Some(Self::Slim),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Slim => "slim",
+        }
+    }
+}
+
 fn enabled_by_default() -> bool { true }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -48,6 +77,9 @@ pub struct Manifest {
     /// Optional plugin-owned local HTTP helper process (e.g. font or format engine).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_service: Option<LocalService>,
+    /// Optional default capability profile (`"full"` or `"slim"`) for this plugin's sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_profile: Option<PromptProfile>,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

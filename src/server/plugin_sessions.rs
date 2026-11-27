@@ -1,5 +1,8 @@
 //! Page conversations use the host Agent with a durable, non-escalatable owner.
-use crate::server::agent_service::{self, AgentServiceState};
+use crate::server::{
+    agent_service::{self, AgentServiceState},
+    plugin_protocol::PromptProfile,
+};
 use anyhow::{Context, Result, ensure};
 use axum::{
     Json,
@@ -23,6 +26,39 @@ pub fn owner(root: &std::path::Path, task: &str) -> Result<Option<String>> {
             |r| r.get(0),
         )
         .optional()?)
+}
+
+/// Persisted capability profile (`"full"` or `"slim"`) for a plugin-owned conversation.
+/// Walks the same lineage CTE as `owner` so child frames inherit the parent session's profile.
+pub fn prompt_profile(root: &std::path::Path, task: &str) -> Result<PromptProfile> {
+    let conn = agent_service::open_db(root)?;
+    let stored: Option<String> = conn
+        .query_row(
+            "WITH RECURSIVE lineage(id,depth) AS (SELECT ?1,0 UNION ALL SELECT t.parent_task_id,l.depth+1 FROM agent_tasks t JOIN lineage l ON t.id=l.id WHERE t.parent_task_id IS NOT NULL AND l.depth<32) SELECT p.prompt_profile FROM lineage l JOIN plugin_session_profiles p ON p.task_id=l.id ORDER BY l.depth LIMIT 1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap_or(None);
+    Ok(stored
+        .as_deref()
+        .and_then(PromptProfile::parse)
+        .unwrap_or(PromptProfile::Full))
+}
+
+fn parse_requested_profile(args: &Value) -> Result<Option<PromptProfile>> {
+    match args.get("prompt_profile") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let raw = value
+                .as_str()
+                .context("prompt_profile must be \"full\" or \"slim\"")?;
+            Ok(Some(
+                PromptProfile::parse(raw)
+                    .context("prompt_profile must be \"full\" or \"slim\"")?,
+            ))
+        }
+    }
 }
 /// Dedicated agent workspace for one plugin's chats, kept apart from the host
 /// project. Base: `PLUGIN_WORKSPACE_BASE`, else `<root>/.codex-workspace-mcp/plugins`.
@@ -95,10 +131,13 @@ pub(crate) async fn handle(state: AgentServiceState, id: &str, args: Value) -> R
         let conn = agent_service::open_db(root)?;
         let task: Option<String> = conn.query_row("SELECT p.task_id FROM plugin_sessions p JOIN agent_tasks t ON t.id=p.task_id WHERE p.plugin_id=?1 ORDER BY t.created_at DESC, t.rowid DESC LIMIT 1", [id], |r|r.get(0)).optional()?;
         if let Some(task) = task {
-            return Ok(Json(json!({"task_id":task,"plugin_id":id})).into_response());
+            let profile = prompt_profile(root, &task)?;
+            return Ok(Json(json!({"task_id":task,"plugin_id":id,"prompt_profile":profile.as_str()})).into_response());
         }
     }
     if args["method"] == "create" || args["method"] == "open" {
+        let requested_profile = parse_requested_profile(&args)?;
+        let profile = catalog.packages.resolve_prompt_profile(id, requested_profile);
         let mut latest = state.clone().with_latest_config().await;
         crate::model::model_catalog::restrict(&mut latest, id).await?;
         let task = format!("task_{}", agent_service::uuid_like());
@@ -109,8 +148,12 @@ pub(crate) async fn handle(state: AgentServiceState, id: &str, args: Value) -> R
             "INSERT INTO plugin_sessions(task_id,plugin_id) VALUES (?1,?2)",
             params![task, id],
         )?;
+        tx.execute(
+            "INSERT INTO plugin_session_profiles(task_id,prompt_profile) VALUES (?1,?2)",
+            params![task, profile.as_str()],
+        )?;
         tx.commit()?;
-        return Ok(Json(json!({"task_id":task,"plugin_id":id})).into_response());
+        return Ok(Json(json!({"task_id":task,"plugin_id":id,"prompt_profile":profile.as_str()})).into_response());
     }
     let task = args["task_id"]
         .as_str()
@@ -357,6 +400,122 @@ mod tests {
             .await
             .is_err()
         );
+        runtime.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn prompt_profile_precedence_persistence_and_host_slim_lock() {
+        let root =
+            std::env::temp_dir().join(format!("plugin-profile-{}", agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let settings_path = root.join("skill-packages.json");
+        let (runtime, catalog) = crate::server::skill_packages::test_runtime();
+        catalog.packages.use_test_settings_path(settings_path.clone());
+        let scope = catalog.packages.catalog()[0]["scope"].clone();
+        let mut state = agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        state.tool_catalog = Some(catalog.clone());
+        state.config = Some(std::sync::Arc::new(tokio::sync::RwLock::new(
+            serde_json::from_value(json!({
+                "providers":{"test":{"url":"http://private/v1","api_key":"secret","model_map":{"m":"m"}}}
+            }))
+            .unwrap(),
+        )));
+
+        // 1. Default profile is "full".
+        let default_created = body(
+            handle(
+                state.clone(),
+                "blueprint",
+                json!({"method":"create","package_scope":scope}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(default_created["prompt_profile"], "full");
+        let full_task = default_created["task_id"].as_str().unwrap();
+        assert_eq!(prompt_profile(&root, full_task).unwrap(), PromptProfile::Full);
+
+        // 2. Explicit request override to "slim" persists and is echoed by `open`.
+        let slim_created = body(
+            handle(
+                state.clone(),
+                "blueprint",
+                json!({"method":"create","package_scope":scope,"prompt_profile":"slim"}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(slim_created["prompt_profile"], "slim");
+        let slim_task = slim_created["task_id"].as_str().unwrap();
+        assert_eq!(prompt_profile(&root, slim_task).unwrap(), PromptProfile::Slim);
+        let opened = body(
+            handle(
+                state.clone(),
+                "blueprint",
+                json!({"method":"open","package_scope":scope}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(opened["task_id"], slim_task);
+        assert_eq!(opened["prompt_profile"], "slim");
+
+        // 3. Invalid prompt_profile values are rejected cleanly.
+        assert!(
+            handle(
+                state.clone(),
+                "blueprint",
+                json!({"method":"create","package_scope":scope,"prompt_profile":"turbo"}),
+            )
+            .await
+            .is_err()
+        );
+
+        // 4. Host skill-packages.json `"slim"` acts as a hard ceiling:
+        //    even an explicit `"prompt_profile": "full"` request cannot escalate to full.
+        std::fs::write(
+            &settings_path,
+            json!({"prompt_profiles":{"blueprint":"slim"}}).to_string(),
+        )
+        .unwrap();
+        let locked_created = body(
+            handle(
+                state.clone(),
+                "blueprint",
+                json!({"method":"create","package_scope":scope,"prompt_profile":"full"}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(locked_created["prompt_profile"], "slim");
+        assert_eq!(
+            prompt_profile(&root, locked_created["task_id"].as_str().unwrap()).unwrap(),
+            PromptProfile::Slim
+        );
+
+        // 5. Host `"full"` allows per-session explicit `"slim"` opt-down while defaulting to `"full"`.
+        std::fs::write(
+            &settings_path,
+            json!({"prompt_profiles":{"blueprint":"full"}}).to_string(),
+        )
+        .unwrap();
+        let opt_down = body(
+            handle(
+                state.clone(),
+                "blueprint",
+                json!({"method":"create","package_scope":scope,"prompt_profile":"slim"}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(opt_down["prompt_profile"], "slim");
+
         runtime.shutdown().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

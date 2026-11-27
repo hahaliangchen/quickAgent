@@ -74,6 +74,14 @@ impl Session<'_> {
     pub(super) fn delegate_id(&self) -> Option<&str> {
         self.agent_id.as_deref()
     }
+
+    pub(crate) fn prompt_profile(&self) -> crate::server::plugin_protocol::PromptProfile {
+        if self.plugin.is_none() {
+            return crate::server::plugin_protocol::PromptProfile::Full;
+        }
+        crate::server::plugin_sessions::prompt_profile(self.state.workspace.root(), self.task)
+            .unwrap_or(crate::server::plugin_protocol::PromptProfile::Full)
+    }
 }
 
 /// Primary agent entry point (convenience wrapper without explicit plugin resource).

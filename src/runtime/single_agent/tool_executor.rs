@@ -77,6 +77,12 @@ pub(crate) fn library_compile_scope(
         libs.remove("process");
     }
     if s.plugin.is_some() {
+        let slim = s.prompt_profile() == crate::server::plugin_protocol::PromptProfile::Slim;
+        if slim {
+            // Slim profile exposes only the minimal `host` and `session` core libraries
+            // alongside the plugin's own declared tool library.
+            libs.retain(|name, _| matches!(name.as_str(), "host" | "session"));
+        }
         for methods in libs.values_mut() {
             methods.retain(|_, tool| host_tools::page_allows(s, tool));
         }
