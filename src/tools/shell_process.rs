@@ -18,7 +18,8 @@ use crate::{server::agent_service::AgentServiceState, tools::process_sandbox::Ex
 
 pub const TOOLS: &[&str] = &["exec_command", "write_stdin", "kill_session"];
 pub const PROGRAM_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
-const DEFAULT_YIELD_MS: u64 = 10_000;
+const DEFAULT_YIELD_MS: u64 = 25_000;
+const MAX_YIELD_MS: u64 = 60_000;
 #[derive(Debug)]
 pub struct OutputCapacityError(pub Value);
 impl std::fmt::Display for OutputCapacityError {
@@ -280,7 +281,7 @@ async fn execute_with_delivery(
         }
     }
     let duration = if name == "kill_session" { 10_000 } else {
-        args["yield_time_ms"].as_u64().unwrap_or(DEFAULT_YIELD_MS).min(30_000)
+        args["yield_time_ms"].as_u64().unwrap_or(DEFAULT_YIELD_MS).min(MAX_YIELD_MS)
     };
     tokio::select! {
         _ = wait_finished(&s, Duration::from_millis(duration)) => {},
@@ -794,15 +795,15 @@ pub async fn cleanup_frame(host: &Path, task: &str, owner: &str) {
 
 pub fn definitions() -> Vec<Value> {
     let limit = json!({"type":"integer","minimum":128,"maximum":24000,"default":4000});
-    let wait = json!({"type":"integer","minimum":0,"maximum":30000,"default":DEFAULT_YIELD_MS});
+    let wait = json!({"type":"integer","minimum":0,"maximum":MAX_YIELD_MS,"default":DEFAULT_YIELD_MS});
     let tool = |name: &str, description: &str, properties: Value, required: Value| {
         json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"outputSchema":output_schema()})
     };
     vec![
         tool("exec_command", if cfg!(windows) {
-            "Run PowerShell 7 with pipes, no profile or PTY. Use PowerShell syntax; each call starts a fresh shell. Host auto-injects discovered Node (PATH/fnm/nvm/volta/mise) when available; if a specific Node version is needed, try `fnm list` / `fnm exec --using=<ver>` or `nvm` before concluding Node is absent. Module code receives full stdout/stderr (LF normalized) and exit_code, up to the combined program-memory budget per delivery. Excess output fails with SHELL_OUTPUT_OVER_CAPACITY and a saved-output reference; no partial prefix is returned to code. max_output_tokens limits external MCP previews only. The command gets no standard input unless started with stdin:true. Waits up to 10,000 ms by default; commands still running return session_id. Same-task/turn commands may overlap in one change interval. Oversized output is fully saved as an asset and can be paged. In Grow, this method is for module deterministic code only."
+            "Run PowerShell 7 with pipes, no profile or PTY. Use PowerShell syntax; each call starts a fresh shell. Host auto-injects discovered Node (PATH/fnm/nvm/volta/mise) when available; if a specific Node version is needed, try `fnm list` / `fnm exec --using=<ver>` or `nvm` before concluding Node is absent. Module code receives full stdout/stderr (LF normalized) and exit_code, up to the combined program-memory budget per delivery. Excess output fails with SHELL_OUTPUT_OVER_CAPACITY and a saved-output reference; no partial prefix is returned to code. max_output_tokens limits external MCP previews only. The command gets no standard input unless started with stdin:true. Waits up to 25,000 ms by default (max 60,000 ms); commands still running return session_id. Same-task/turn commands may overlap in one change interval. Oversized output is fully saved as an asset and can be paged. In Grow, this method is for module deterministic code only."
         } else {
-            "Run Bash with pipes, no profile or PTY. Use Bash syntax; each call starts a fresh shell. Host auto-injects discovered Node (PATH/fnm/nvm/volta/mise) when available; if a specific Node version is needed, try `fnm` / `nvm` / `volta` before concluding Node is absent. Module code receives full stdout/stderr and exit_code, up to the combined program-memory budget per delivery. Excess output fails with SHELL_OUTPUT_OVER_CAPACITY and a saved-output reference; no partial prefix is returned to code. max_output_tokens limits external MCP previews only. The command gets no standard input unless started with stdin:true. Waits up to 10,000 ms by default; commands still running return session_id. Same-task/turn commands may overlap in one change interval. Oversized output is fully saved as an asset and can be paged. In Grow, this method is for module deterministic code only."
+            "Run Bash with pipes, no profile or PTY. Use Bash syntax; each call starts a fresh shell. Host auto-injects discovered Node (PATH/fnm/nvm/volta/mise) when available; if a specific Node version is needed, try `fnm` / `nvm` / `volta` before concluding Node is absent. Module code receives full stdout/stderr and exit_code, up to the combined program-memory budget per delivery. Excess output fails with SHELL_OUTPUT_OVER_CAPACITY and a saved-output reference; no partial prefix is returned to code. max_output_tokens limits external MCP previews only. The command gets no standard input unless started with stdin:true. Waits up to 25,000 ms by default (max 60,000 ms); commands still running return session_id. Same-task/turn commands may overlap in one change interval. Oversized output is fully saved as an asset and can be paged. In Grow, this method is for module deterministic code only."
         },
             json!({"cmd":{"type":"string","minLength":1},"workdir":{"type":"string","default":"."},"yield_time_ms":wait,"max_output_tokens":limit,
                 "stdin":{"type":"boolean","default":false,"description":"Keep standard input open so write_stdin can send chars to this command. Off by default: the command reads end-of-input at once, so tools that fall back to stdin when given no file do not wait."}}),json!(["cmd"])),
