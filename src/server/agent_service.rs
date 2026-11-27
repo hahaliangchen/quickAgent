@@ -34,7 +34,7 @@ pub use routes::{
     slash_commands, stream_events, update_task, workspace_files,
 };
 pub(crate) use streaming::consume_model_stream_observed;
-pub(crate) use tools::{execute_tool, local_tools};
+pub(crate) use tools::{execute_tool, inject_mcp_workspace_root, local_tools};
 
 pub(crate) fn model_request_slots() -> Arc<tokio::sync::Semaphore> {
     let limit = std::env::var("CODEX_AGENT_MODEL_CONCURRENCY")

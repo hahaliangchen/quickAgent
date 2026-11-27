@@ -284,13 +284,25 @@ impl Sftp {
             }
             self.session.rename(&temporary, path).await?;
             if let Some(mode) = permissions {
+                // IMPORTANT: use `FileAttributes::empty()`, NOT `Default::default()` —
+                // in `russh-sftp`, `Default::default()` sets `size: Some(0)` and
+                // `atime/mtime: Some(0)`, causing OpenSSH `SETSTAT` to truncate the
+                // uploaded file to 0 bytes and reset its timestamp to 1970-01-01.
                 let attrs = FileAttributes {
                     permissions: Some(mode & 0o777),
-                    ..Default::default()
+                    ..FileAttributes::empty()
                 };
                 // Best-effort: preserve local Unix permissions (e.g. 0755 for binaries/scripts)
                 // without failing uploads on SFTP servers that reject SETSTAT.
                 let _ = self.session.set_metadata(path, attrs).await;
+            }
+            if let Ok(meta) = self.session.metadata(path).await
+                && let Some(remote_size) = meta.size
+            {
+                ensure!(
+                    remote_size == count,
+                    "remote file size mismatch after upload: expected {count} bytes, got {remote_size} bytes"
+                );
             }
             Ok((count, sha256))
         }

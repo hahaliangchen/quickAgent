@@ -309,11 +309,38 @@ fn handle_read_tool_contracts_with_defs(
     definitions: impl FnOnce() -> Vec<Value>,
 ) -> (Value, bool) {
     let mut selection = args.clone();
-    if let Some(library) = selection.get("library").and_then(Value::as_str).map(str::to_owned) {
-        let mut libraries = selection.get("libraries").and_then(Value::as_array).cloned().unwrap_or_default();
-        libraries.push(Value::String(library));
-        selection["libraries"] = Value::Array(libraries);
+    if let Some(library) = selection
+        .get("library")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+    {
         selection.as_object_mut().unwrap().remove("library");
+        let has_methods = selection
+            .get("methods")
+            .and_then(Value::as_array)
+            .is_some_and(|v| !v.is_empty());
+        if has_methods {
+            if let Some(methods) = selection.get_mut("methods").and_then(Value::as_array_mut) {
+                for item in methods.iter_mut() {
+                    if let Some(name) = item.as_str() {
+                        let trimmed = name.trim();
+                        if !trimmed.is_empty() && !trimmed.contains('.') {
+                            *item = Value::String(format!("{library}.{trimmed}"));
+                        }
+                    }
+                }
+            }
+        } else {
+            let mut libraries = selection
+                .get("libraries")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            libraries.push(Value::String(library));
+            selection["libraries"] = Value::Array(libraries);
+        }
     }
     let has_selection = selection.get("libraries").and_then(Value::as_array).is_some_and(|v| !v.is_empty())
         || selection.get("methods").and_then(Value::as_array).is_some_and(|v| !v.is_empty());
@@ -540,5 +567,44 @@ mod tests {
         let expected = already.clone();
         normalize_edit_file_args(&mut already);
         assert_eq!(already, expected);
+    }
+
+    #[test]
+    fn read_tool_contracts_qualifies_bare_methods_with_library_param() {
+        let libs = libraries::Libraries::from([(
+            "ssh".into(),
+            [
+                ("upload".into(), "ssh__upload".into()),
+                ("exec".into(), "ssh__exec".into()),
+                ("add_server".into(), "ssh__add_server".into()),
+            ]
+            .into(),
+        )]);
+        let defs = vec![
+            json!({"function": {"name": "ssh__upload", "parameters": {"type": "object", "properties": {"local_path": {"type": "string"}}}}}),
+            json!({"function": {"name": "ssh__exec", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}}}),
+            json!({"function": {"name": "ssh__add_server", "parameters": {"type": "object", "properties": {"host": {"type": "string"}}}}}),
+        ];
+        // Bare method names combined with `library` should auto-qualify and select ONLY those methods.
+        let (result, failed) = super::handle_read_tool_contracts_with_defs(
+            &libs,
+            &json!({"library": "ssh", "methods": ["upload", "ssh.exec"]}),
+            || defs.clone(),
+        );
+        assert!(!failed, "{result}");
+        let decl = result["declarations"].as_str().unwrap();
+        assert!(decl.contains("function upload("), "{decl}");
+        assert!(decl.contains("function exec("), "{decl}");
+        assert!(!decl.contains("function add_server("), "should not pull unselected library methods: {decl}");
+        assert_eq!(result["schemas"].as_array().unwrap().len(), 2);
+
+        // `library` alone still selects the whole library.
+        let (whole, whole_failed) = super::handle_read_tool_contracts_with_defs(
+            &libs,
+            &json!({"library": "ssh"}),
+            || defs,
+        );
+        assert!(!whole_failed, "{whole}");
+        assert_eq!(whole["schemas"].as_array().unwrap().len(), 3);
     }
 }

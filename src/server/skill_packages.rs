@@ -1589,7 +1589,7 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':r['params']}))
                 .packages
                 .tools(&std::collections::BTreeSet::from(["blueprint".into()]))
                 .len(),
-            6
+            9
         );
         assert!(
             set_enabled(&runtime, &tools.packages, "blueprint", false, false).is_err(),

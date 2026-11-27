@@ -1148,23 +1148,37 @@ pub(super) fn outside_read_paths(
     let root = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
-    let base = args["workspace_root"]
+    let is_git_read = matches!(name, "git_status" | "git_diff" | "git_log");
+    let resolve_base = |raw: &str| {
+        let path = crate::tools::file_edit::strip_verbatim_prefix(std::path::Path::new(raw.trim()));
+        if (name.starts_with("blueprint__") || is_git_read) && path.is_relative() {
+            root.join(path)
+        } else {
+            path
+        }
+    };
+    let explicit_repo = is_git_read
+        .then(|| args["repo"].as_str().filter(|raw| !raw.trim().is_empty()))
+        .flatten()
+        .map(resolve_base);
+    let explicit_ws = args["workspace_root"]
         .as_str()
         .filter(|raw| !raw.trim().is_empty())
-        .map(|raw| {
-            let path = std::path::PathBuf::from(raw.trim());
-            if name.starts_with("blueprint__") && path.is_relative() { root.join(path) } else { path }
-        });
+        .map(resolve_base);
+    let base = explicit_repo.clone().or_else(|| explicit_ws.clone());
     let outside = |path: std::path::PathBuf| {
         let resolved = resolve_existing_prefix(path);
         !resolved.starts_with(&root)
             && !extra_roots.iter().any(|extra| resolved.starts_with(extra))
     };
     let mut found = Vec::new();
-    if let Some(base) = &base
-        && outside(base.clone())
-    {
-        found.push(base.to_string_lossy().into_owned());
+    for candidate in explicit_repo.iter().chain(explicit_ws.iter()) {
+        if outside(candidate.clone()) {
+            let label = candidate.to_string_lossy().into_owned();
+            if !found.contains(&label) {
+                found.push(label);
+            }
+        }
     }
     if name != "read_git" {
         for raw in args["path"].as_str().into_iter().chain(args["from"].as_str()).chain((name != "copy_path").then(|| args["to"].as_str()).flatten()).chain(
@@ -1226,6 +1240,43 @@ mod tests {
         assert!(edit.display_path.contains("new-copy.txt"));
         let _=std::fs::remove_dir_all(root);
         let _=std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn external_git_repo_alias_requires_read_scoping() {
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!(
+            "host-tools-git-repo-{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        let outside = root.with_extension("external");
+        let inside = root.join("sub");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let ext_status = super::outside_read_paths(&root, &[], "git_status", &json!({"repo": outside}));
+        assert_eq!(ext_status.len(), 1);
+        let ext_log = super::outside_read_paths(
+            &root,
+            &[],
+            "git_log",
+            &json!({"workspace_root": root, "repo": outside}),
+        );
+        assert_eq!(ext_log.len(), 1);
+        let rel_escape = super::outside_read_paths(
+            &root,
+            &[],
+            "git_diff",
+            &json!({"repo": format!("../{}", outside.file_name().unwrap().to_string_lossy())}),
+        );
+        assert_eq!(rel_escape.len(), 1);
+        let inside_ok = super::outside_read_paths(&root, &[], "git_status", &json!({"repo": "sub"}));
+        assert!(inside_ok.is_empty());
+        let approved_ok = super::outside_read_paths(&root, &[outside.clone()], "git_status", &json!({"repo": outside}));
+        assert!(approved_ok.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
 }

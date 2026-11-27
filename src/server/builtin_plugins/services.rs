@@ -139,12 +139,7 @@ impl ToolCatalog {
 fn mcp_handler() -> ToolHandler {
     Arc::new(|workspace, name, mut args| {
         Box::pin(async move {
-            if let Some(object) = args.as_object_mut() {
-                object.insert(
-                    "workspace_root".into(),
-                    json!(workspace.root().display().to_string()),
-                );
-            }
+            crate::server::agent_service::inject_mcp_workspace_root(&workspace, &name, &mut args);
             let response =
                 crate::server::mcp::call_tool(&workspace, json!({"name":name,"arguments":args})).await?;
             Ok(response

@@ -207,6 +207,47 @@ pub(crate) fn local_tools(
     }).collect()
 }
 
+pub(crate) fn inject_mcp_workspace_root(
+    workspace: &crate::tools::Workspace,
+    name: &str,
+    args: &mut Value,
+) {
+    let Some(object) = args.as_object_mut() else {
+        return;
+    };
+    let default_root = crate::tools::file_edit::display_path(workspace.root());
+    if matches!(name, "git_status" | "git_diff" | "git_log") {
+        // `Git{Status,Diff,Log}Request.workspace_root` uses `#[serde(alias = "repo")]`.
+        // Remove `repo` before writing `workspace_root` so serde never sees duplicate fields,
+        // and preserve an explicit `repo` / `workspace_root` target (already vetted by host_tools).
+        let explicit_repo = object
+            .remove("repo")
+            .and_then(|v| v.as_str().map(str::trim).map(str::to_owned))
+            .filter(|s| !s.is_empty());
+        let explicit_root = object
+            .get("workspace_root")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let chosen = match explicit_repo.or(explicit_root) {
+            Some(raw) => {
+                let cleaned = crate::tools::file_edit::strip_verbatim_prefix(std::path::Path::new(&raw));
+                let resolved = if cleaned.is_absolute() {
+                    cleaned
+                } else {
+                    crate::tools::file_edit::strip_verbatim_prefix(&workspace.root().join(cleaned))
+                };
+                crate::tools::file_edit::display_path(&resolved)
+            }
+            None => default_root,
+        };
+        object.insert("workspace_root".into(), json!(chosen));
+        return;
+    }
+    object.insert("workspace_root".into(), json!(default_root));
+}
+
 pub(crate) async fn execute_tool(
     workspace: Arc<crate::tools::Workspace>,
     catalog: Option<&crate::server::builtin_plugins::ToolCatalog>,
@@ -236,15 +277,72 @@ pub(crate) async fn execute_tool(
     if crate::tools::program_execution::is_tool(name) {
         return crate::tools::program_execution::execute(&workspace, &args).await;
     }
-    if let Some(object) = args.as_object_mut() {
-        object.insert(
-            "workspace_root".into(),
-            json!(workspace.root().display().to_string()),
-        );
-    }
+    inject_mcp_workspace_root(&workspace, name, &mut args);
     let response = crate::server::mcp::call_tool(&workspace, json!({"name":name,"arguments":args})).await?;
     Ok(response
         .get("structuredContent")
         .cloned()
         .unwrap_or(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inject_mcp_workspace_root_normalizes_git_repo_without_duplicate_field() {
+        let root = std::env::temp_dir().join(format!("git-repo-norm-{}", super::super::uuid_like()));
+        let other = root.with_extension("other");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let workspace = crate::tools::Workspace::new(&root).unwrap();
+
+        // 1. Explicit absolute `repo` is moved into `workspace_root` with `repo` removed,
+        //    so serde deserialization into GitStatusRequest / GitLogRequest / GitDiffRequest succeeds.
+        let mut status_args = json!({ "repo": other.to_string_lossy(), "include_untracked": false });
+        inject_mcp_workspace_root(&workspace, "git_status", &mut status_args);
+        assert!(status_args.get("repo").is_none());
+        let parsed: crate::tools::GitStatusRequest = serde_json::from_value(status_args).unwrap();
+        assert_eq!(
+            parsed.workspace_root.as_deref(),
+            Some(crate::tools::file_edit::display_path(&other).as_str())
+        );
+
+        // 2. Relative `repo` resolves against the session workspace root.
+        let mut log_args = json!({ "repo": "sub", "limit": 5 });
+        inject_mcp_workspace_root(&workspace, "git_log", &mut log_args);
+        assert!(log_args.get("repo").is_none());
+        let parsed_log: crate::tools::GitLogRequest = serde_json::from_value(log_args).unwrap();
+        assert_eq!(
+            parsed_log.workspace_root.as_deref(),
+            Some(crate::tools::file_edit::display_path(&workspace.root().join("sub")).as_str())
+        );
+
+        // 3. Empty `repo` falls back to workspace root without duplicate fields.
+        let mut diff_args = json!({ "repo": "   " });
+        inject_mcp_workspace_root(&workspace, "git_diff", &mut diff_args);
+        assert!(diff_args.get("repo").is_none());
+        let parsed_diff: crate::tools::GitDiffRequest = serde_json::from_value(diff_args).unwrap();
+        assert_eq!(
+            parsed_diff.workspace_root.as_deref(),
+            Some(crate::tools::file_edit::display_path(workspace.root()).as_str())
+        );
+
+        // 4. Windows `\\?\` verbatim prefix is stripped cleanly.
+        let mut verbatim_args = json!({ "repo": r"\\?\C:\Repos\demo" });
+        inject_mcp_workspace_root(&workspace, "git_status", &mut verbatim_args);
+        assert!(verbatim_args.get("repo").is_none());
+        assert!(!verbatim_args["workspace_root"].as_str().unwrap().starts_with(r"\\?\"));
+
+        // 5. Non-git tools keep workspace_root pinned to the active workspace.
+        let mut read_args = json!({ "path": "a.txt", "workspace_root": other.to_string_lossy() });
+        inject_mcp_workspace_root(&workspace, "read_file", &mut read_args);
+        assert_eq!(
+            read_args["workspace_root"].as_str(),
+            Some(crate::tools::file_edit::display_path(workspace.root()).as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(other);
+    }
 }

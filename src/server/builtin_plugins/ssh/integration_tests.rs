@@ -425,6 +425,14 @@ impl russh_sftp::server::Handler for MockFs {
     }
     async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> FsResult<Status> {
         let resolved = self.path(&path)?;
+        if let Some(size) = attrs.size {
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(&resolved)
+                .await
+                .map_err(io_error)?;
+            file.set_len(size).await.map_err(io_error)?;
+        }
         #[cfg(unix)]
         if let Some(perms) = attrs.permissions {
             use std::os::unix::fs::PermissionsExt;
@@ -432,7 +440,7 @@ impl russh_sftp::server::Handler for MockFs {
             fs::set_permissions(&resolved, mode).await.map_err(io_error)?;
         }
         #[cfg(not(unix))]
-        let _ = (&resolved, attrs);
+        let _ = (&resolved, attrs.permissions);
         Ok(status(id))
     }
 }
@@ -1598,12 +1606,12 @@ async fn ssh_upload_preserves_executable_permissions() -> Result<()> {
         )
         .await?;
         assert_eq!(uploaded["permissions"], "0755");
-        let remote_mode = fs::metadata(remote_root.path().join("run.sh"))
-            .await?
-            .permissions()
-            .mode()
-            & 0o777;
+        let remote_file = remote_root.path().join("run.sh");
+        let remote_meta = fs::metadata(&remote_file).await?;
+        let remote_mode = remote_meta.permissions().mode() & 0o777;
         assert_eq!(remote_mode, 0o755);
+        assert_eq!(remote_meta.len(), "#!/bin/sh\necho ok\n".len() as u64);
+        assert_eq!(fs::read_to_string(&remote_file).await?, "#!/bin/sh\necho ok\n");
         Ok(())
     })
     .await?
