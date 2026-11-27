@@ -18,17 +18,26 @@ export interface ResolveFileLinkOptions {
 }
 
 function decodeFileUri(input: string): string {
-  if (!input.startsWith('file://')) return input
-  const match = /^file:\/\/(?:localhost)?(\/.*)$/u.exec(input)
-  if (!match?.[1]) return input
-  let decoded = match[1]
-  try {
-    decoded = decodeURIComponent(decoded)
-  } catch {
-    return input
+  let value = input
+  if (value.startsWith('file://')) {
+    const match = /^file:\/\/(?:localhost)?(\/.*)$/u.exec(value)
+    if (match?.[1]) {
+      try {
+        value = decodeURIComponent(match[1])
+      } catch {
+        return input
+      }
+    }
   }
-  if (/^\/[A-Za-z]:\//u.test(decoded)) decoded = decoded.slice(1)
-  return decoded
+  if (value.startsWith('\\\\?\\')) value = value.slice(4)
+  if (/^\/[A-Za-z]:[/\\]/u.test(value)) value = value.slice(1)
+  // Strip optional line suffix (`#L10`, `#L10-L20`, `:10`, `:10-20`, `:10:4`) when present.
+  value = value.replace(/#L[1-9]\d*(?:-L[1-9]\d*)?$/u, '')
+  const colonMatch = /^(.*?):[1-9]\d*(?:(?:-|:)[1-9]\d*)?$/u.exec(value)
+  if (colonMatch?.[1] && /[\\/.]/u.test(colonMatch[1]) && !/^[A-Za-z]$/u.test(colonMatch[1])) {
+    value = colonMatch[1]
+  }
+  return value
 }
 
 function isWindowsDrivePath(value: string): boolean {
@@ -80,7 +89,9 @@ export function resolveFileLinkPaths(
   const trimmed = rawPath.trim()
   if (!trimmed) return undefined
   const decoded = decodeFileUri(trimmed)
-  const rawRoot = (options.workspaceRoot ?? '').trim()
+  let rawRoot = (options.workspaceRoot ?? '').trim()
+  if (rawRoot.startsWith('\\\\?\\')) rawRoot = rawRoot.slice(4)
+  if (/^\/[A-Za-z]:[/\\]/u.test(rawRoot)) rawRoot = rawRoot.slice(1)
   const winMode = isWindowsDrivePath(rawRoot) || isWindowsDrivePath(decoded)
   const root = rawRoot ? normalizePosixSegments(normalizeSlash(rawRoot, winMode)) : ''
   const path = normalizeSlash(decoded, winMode)

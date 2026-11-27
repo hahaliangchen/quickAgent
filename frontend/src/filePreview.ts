@@ -9,16 +9,41 @@ export type PendingOpen = { slotId: string; fileUrl: string; filename: string; f
 export type PreviewFile = { url: string; path: string; diskPath?: string | undefined; name: string; line?: number; attachment: boolean }
 
 const images = new Set('png jpg jpeg webp gif svg avif bmp ico'.split(' '))
-const text = new Set('txt log csv tsv ts tsx js jsx mjs cjs css scss html htm xml json jsonc jsonl yaml yml toml ini cfg conf env rs go py sh bash zsh fish ps1 bat c cpp h hpp java kt kts cs swift rb php sql lua vue svelte diff patch gradle proto graphql lock makefile dockerfile gitignore gitattributes editorconfig'.split(' '))
+const text = new Set('txt log csv tsv ts tsx mts cts js jsx mjs cjs css scss sass less html htm xhtml xml xsd xsl json jsonc jsonl ndjson yaml yml toml ini cfg conf properties env rs go py pyw pyi sh bash zsh fish ps1 bat cmd c cc cpp cxx h hh hpp hxx java kt kts groovy scala cs swift rb php sql lua dart zig r m mm vue svelte astro prisma graphql gql proto gradle cmake tf hcl nix diff patch lock jsp ftl vm makefile dockerfile gitignore dockerignore gitattributes editorconfig npmrc prettierrc eslintrc'.split(' '))
+const extensionlessCode = new Set('makefile dockerfile jenkinsfile procfile vagrantfile gemfile rakefile brewfile license notice authors codeowners'.split(' '))
 const office = new Map([['pdf','pdf'], ['xlsx','excel'], ['docx','word'], ['pptx','ppt']])
-const extension = (name: string) => name.toLowerCase().split('.').at(-1) ?? ''
+
+/** Split optional `#L10`, `#L10-L20`, `:10`, `:10-20`, `:10:4` suffix from a path. */
+export function splitPathLine(rawPath: string): { path: string; line?: number | undefined } {
+  const hashMatch = /^(.*)#L([1-9]\d*)(?:-L[1-9]\d*)?$/u.exec(rawPath)
+  if (hashMatch?.[1]) {
+    const line = Number(hashMatch[2])
+    return Number.isSafeInteger(line) ? { path: hashMatch[1], line } : { path: hashMatch[1] }
+  }
+  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(rawPath)) {
+    const colonMatch = /^(.*?):([1-9]\d*)(?:(?:-|:)[1-9]\d*)?$/u.exec(rawPath)
+    if (colonMatch?.[1] && /[\\/.]/u.test(colonMatch[1]) && !/^[A-Za-z]$/u.test(colonMatch[1])) {
+      const line = Number(colonMatch[2])
+      return Number.isSafeInteger(line) ? { path: colonMatch[1], line } : { path: colonMatch[1] }
+    }
+  }
+  return { path: rawPath }
+}
+
+const extension = (name: string) => {
+  const clean = splitPathLine(name).path
+  const base = clean.split(/[\\/]/u).pop() ?? clean
+  const dot = base.lastIndexOf('.')
+  if (dot <= 0) return base.toLowerCase()
+  return base.slice(dot + 1).toLowerCase()
+}
 
 export function previewKind(name: string) {
   const ext = extension(name)
-  if (ext === 'md' || ext === 'markdown') return 'markdown'
+  if (ext === 'md' || ext === 'markdown' || ext === 'mdx') return 'markdown'
   if (images.has(ext)) return 'image'
   if (office.has(ext)) return 'plugin'
-  return text.has(ext) ? 'code' : 'unsupported'
+  return text.has(ext) || extensionlessCode.has(ext) ? 'code' : 'unsupported'
 }
 
 export function previewModule(name: string, packages: readonly SkillPackage[]) {
@@ -35,28 +60,40 @@ export function workspacePath(path: string, root = '') {
     const match = /^file:\/\/(?:localhost)?(\/.*)$/u.exec(path)
     if (match?.[1]) {
       try { path = decodeURIComponent(match[1]) } catch { return path }
-      if (/^\/[A-Za-z]:\//u.test(path)) path = path.slice(1)
     }
   }
-  if (/^[A-Za-z]:[\\/]/u.test(root)) {
+  path = splitPathLine(path).path
+  if (path.startsWith('\\\\?\\')) path = path.slice(4)
+  if (root.startsWith('\\\\?\\')) root = root.slice(4)
+  if (/^\/[A-Za-z]:[/\\]/u.test(path)) path = path.slice(1)
+  if (/^\/[A-Za-z]:[/\\]/u.test(root)) root = root.slice(1)
+  const winMode = /^[A-Za-z]:[\\/]/u.test(root) || /^[A-Za-z]:[\\/]/u.test(path) || root.includes('\\') || path.includes('\\')
+  if (winMode) {
     root = root.replaceAll('\\', '/')
     path = path.replaceAll('\\', '/')
   }
   root = root.replace(/\/+$/u, '')
-  if (root && path.startsWith(root + '/')) path = path.slice(root.length + 1)
+  if (root) {
+    const lhs = winMode ? path.toLowerCase() : path
+    const rhs = winMode ? root.toLowerCase() : root
+    if (lhs.startsWith(rhs + '/')) path = path.slice(root.length + 1)
+  }
   return path.replace(/^(?:\.\/)+/u, '')
 }
 
 export function previewFile(task: string, path: string, options?: { line?: number; url?: string }, root = ''): PreviewFile | undefined {
   const base = '/agent/tasks/' + encodeURIComponent(task)
   const attachment = options?.url !== undefined
-  const relative = attachment ? path : workspacePath(path, root)
+  const parsed = attachment ? { path } : splitPathLine(path)
+  const cleanInput = parsed.path
+  const line = options?.line ?? parsed.line
+  const relative = attachment ? cleanInput : workspacePath(cleanInput, root)
   const prefix = base + '/attachments/'
   const url = options?.url ?? (base + '/workspace-file?' + new URLSearchParams({ path: relative }))
   if (!relative || (attachment && (!url.startsWith(prefix) || !/^[A-Za-z0-9_:%.-]+$/u.test(url.slice(prefix.length))))) return undefined
-  const diskPath = attachment ? undefined : resolveFileLinkPaths(path, { workspaceRoot: root, isChatSession: false })?.absolutePath
+  const diskPath = attachment ? undefined : resolveFileLinkPaths(cleanInput, { workspaceRoot: root, isChatSession: false })?.absolutePath
   return { url, path: relative, ...(diskPath ? { diskPath } : {}), name: relative.split(/[\\/]/u).pop() || relative,
-    ...(options?.line !== undefined ? { line: options.line } : {}), attachment }
+    ...(line !== undefined ? { line } : {}), attachment }
 }
 
 export function studioUrl(owner: string, page: string, mode?: 'edit' | 'preview', file?: string, name?: string, theme?: PreviewTheme) {

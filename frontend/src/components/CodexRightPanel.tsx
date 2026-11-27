@@ -65,7 +65,7 @@ export function CodexRightPanel({
           </div>
         </div>
       </div>
-      <FilePreviewPane files={files} active={activeFile} hidden={mode !== 'preview'} theme={theme}
+      <FilePreviewPane taskId={taskId} files={files} active={activeFile} hidden={mode !== 'preview'} theme={theme}
         events={events} root={workspacePath} onSelect={onSelectFile} onClose={onCloseFile} onEdit={onEdit} />
       {mode === 'changes' && <div className={css.content}>
         <section className={css.section}>

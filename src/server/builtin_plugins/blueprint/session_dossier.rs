@@ -809,7 +809,7 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
         },
         "user_instructions": user_instructions,
         "latest_user_instruction": latest_user_instruction,
-        "instruction_precedence_note": "When later user_instructions (user/message or user/interjection) conflict with or relax turn-1 task.prompt constraints, ALWAYS treat the latest user_instructions as authoritative.",
+        "instruction_precedence_note": "Read `user_instructions` chronologically from turn 1 to the latest turn (or from the tail backwards). Later turns supersede earlier conflicting constraints; a short follow-up like '继续' or '再连一下' inherits the previous substantive task and authorizations — NEVER revert to turn-1 `task.prompt` constraints that were already overridden.",
         "in_flight_tools": in_flight_tools,
         "recent_tail": recent_tail.into_iter().collect::<Vec<_>>(),
         "changed_files": {

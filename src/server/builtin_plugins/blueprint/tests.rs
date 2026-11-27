@@ -655,3 +655,29 @@ fn blueprint_inspect_session_tracks_user_instructions_timeline_and_in_flight_tai
         json!(["running 2 tests", "FAIL: assertion failed"])
     );
 }
+
+#[test]
+fn observer_session_meta_resolves_watched_task_only_for_observer_kind() {
+    let root = Workspace::new();
+    let conn = crate::server::agent_service::open_db(&root.0).unwrap();
+    conn.execute(
+        "INSERT INTO agent_session_meta(task_id,archived,workspace,kind,watched_task_id)
+         VALUES ('obs-1',1,'/repo','observer','main-123'),('code-1',0,'/repo','code','main-123')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        crate::context::session_browser::observer_watched_task(&root.0, "obs-1").unwrap(),
+        Some("main-123".to_owned())
+    );
+    assert_eq!(
+        crate::context::session_browser::observer_watched_task(&root.0, "code-1").unwrap(),
+        None
+    );
+    assert_eq!(
+        crate::context::session_browser::observer_watched_task(&root.0, "missing").unwrap(),
+        None
+    );
+}

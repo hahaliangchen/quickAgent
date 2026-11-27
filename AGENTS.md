@@ -10,3 +10,13 @@
 - 每份调试构建约 4 GB，按提交编译会很快占满磁盘。每个提交的测试跑完、完整日志写入 `logs/` 后，立即删除自己的 `builds/<commit>/`，只保留 `sources/<commit>/`、日志和状态文件；之后需要复查时按源码重新编译。只有接下来马上要复用，或者有进程正在运行其中的程序时，才保留这份构建。每次开始编译前用 `df` 检查可用空间，低于 20 GB 时先停止并说明情况，不要等编译失败才发现。
 - 正常构建前优先用 `sys.disk_space({})` 检查可用空间（可替代 `df -h`）。
 - 保留原始测试日志和作废原因供后续查阅，不在调查结束时顺手清理其他调用仍可能需要的证据。构建目录不算证据，日志才是。判断预期行为以 `docs/agent-design-guide.md` 为准；看提交 diff 时区分删除的旧规则和新增的规则。
+
+## 跨平台开发规范（Linux / Windows / macOS）
+
+- 本项目面向 Linux、Windows 与 macOS 三端发布；开发与修改宿主库、内置插件、外部插件、前端路径逻辑及打包脚本时，严禁以本机 Ubuntu/Linux 环境为默认假设。
+- **路径与 `\\?\` 前缀**：`std::fs::canonicalize` 产出的路径在比较（`strip_prefix`）、返回前端、传给外部命令（`explorer`、`tsc`、`git` 等）前，统一经过 `crate::tools::file_edit::strip_verbatim_prefix` / `display_path` 剥离 Windows `\\?\` 前缀。
+- **分隔符与盘符归一**：返回给前端、写入 SQLite/JSON 协议或参与匹配的相对路径统一归一化为 POSIX `/`；输入校验同时兼容 `/` 与 `\`（含末尾分隔符检查）、Windows 盘符大小写（`C:/` 与 `c:\`）以及 `file:///C:/...` URI；正则或排除模式（如 Python `compileall -x`）需同时兼容 `/` 与 `\`。
+- **后台子进程与无黑框**：Rust 后台启动任何子进程（`git`、`python`、`node`、插件本地服务等）时，在 `#[cfg(windows)]` 下必须设置 `creation_flags(0x08000000)`（`CREATE_NO_WINDOW`），避免 Windows 桌面端闪出控制台黑框；退出清理需兼顾 Windows Job Object / 进程树终止。
+- **避免 Linux 专属 Shell 依赖**：产品代码与工具实现优先使用跨平台 Rust 原生能力（`std::fs`、`sys_info`、`http_probe`、`Command::new` 静态 argv），不依赖 `df`、`ss`、`ps`、`stat`、`pkill`、`xdg-open` 等单平台命令；涉及 OS 原生能力（打开文件夹、文件选择器、凭据存储、桌面自动化、Shell 提示）必须补齐 `windows` / `macos` / `unix` 三端实现。
+- **平台特性与环境变量隔离**：Unix 专属 API（如 `std::os::unix::fs::PermissionsExt`）必须置于 `#[cfg(unix)]` 下并提供 `#[cfg(not(unix))]` 降级分支；用户目录/配置目录读取需同时兼容 `HOME` 与 Windows `USERPROFILE` / `APPDATA`。
+- **跨平台单测覆盖**：涉及路径解析、URI 解码、工作区边界校验或平台分支的新增/修改代码，须补充覆盖 Windows 盘符、反斜杠与 `\\?\` 前缀的单元测试。

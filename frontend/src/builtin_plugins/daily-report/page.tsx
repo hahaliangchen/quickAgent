@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import { DAILY_REPORT_SYNC_EVENT, type DailyReportSyncAction, type PluginPageProps } from '../../plugins/protocol.ts'
+import { usePluginPages } from '../../plugins/react.tsx'
 import {
   DailyError,
   dailyApi,
@@ -67,12 +68,20 @@ function shiftMonth(yearMonth: string, delta: number): string {
 
 function isMyReport(row: ReportRow, session: DailyStatus['session'] | undefined): boolean {
   if (!session) return false
-  if (session.user_id && row.userId !== undefined && row.userId !== null && String(row.userId) !== '') {
-    return String(row.userId) === String(session.user_id)
+  const rowUserId = row.userId ?? row.createBy
+  if (session.user_id && rowUserId !== undefined && rowUserId !== null && String(rowUserId) !== '') {
+    return String(rowUserId) === String(session.user_id)
   }
   const rowName = String(row.userName ?? row.nickName ?? '').trim()
   if (!rowName) return false
   return rowName === session.nick_name || rowName === session.user_name
+}
+
+const AUTO_SYNC_COOLDOWN_MS = 5000
+
+function formatSyncClock(now = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
 }
 
 function rowToDraft(row: ReportRow, fallbackDate: string): DailyDraft {
@@ -109,8 +118,8 @@ function factLines(entry: TodayProject): string[] {
   return lines
 }
 
-function Icon({ name }: { name: 'folder' | 'search' | 'chevron' | 'check' | 'plus' | 'spark' | 'file' | 'chat' | 'close' | 'refresh' | 'copy' }) {
-  const common = { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true }
+function Icon({ name, className }: { name: 'folder' | 'search' | 'chevron' | 'check' | 'plus' | 'spark' | 'file' | 'chat' | 'close' | 'refresh' | 'copy'; className?: string | undefined }) {
+  const common = { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true, className }
   if (name === 'folder') return <svg {...common}><path d="M1.8 4.2h4l1.3 1.6h7.1v6.6a.8.8 0 0 1-.8.8H2.6a.8.8 0 0 1-.8-.8Z" /><path d="M1.8 4.2V3a.8.8 0 0 1 .8-.8h2.6l1.2 1.6" /></svg>
   if (name === 'search') return <svg {...common}><circle cx="7" cy="7" r="4.3" /><path d="m10.2 10.2 3.3 3.3" /></svg>
   if (name === 'chevron') return <svg {...common}><path d="m4 6 4 4 4-4" /></svg>
@@ -502,7 +511,113 @@ function HistoryRow({ row, onLoad }: { row: ReportRow; onLoad: () => void }) {
   </button>
 }
 
+function EmbeddedMarkdownGuide({
+  ownerId,
+  pageId,
+  value,
+  saved,
+  theme,
+  onChange,
+  onSave,
+}: {
+  ownerId: string
+  pageId: string
+  value: string
+  saved: boolean
+  theme?: 'light' | 'dark' | undefined
+  onChange: (next: string) => void
+  onSave: (next: string) => Promise<void>
+}) {
+  const frameRef = useRef<HTMLIFrameElement>(null)
+  const readyRef = useRef(false)
+  const valueRef = useRef(value)
+  valueRef.current = value
+  const savedRef = useRef(saved)
+  savedRef.current = saved
+  const lastFromIframeRef = useRef<string | null>(null)
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
+  const onSaveRef = useRef(onSave)
+  onSaveRef.current = onSave
+
+  // Keep iframe src stable across theme/value changes; live updates flow over postMessage.
+  const initialThemeRef = useRef(theme)
+  const src = useMemo(() => {
+    const query = new URLSearchParams({ mode: 'embed', name: 'guide.md' })
+    if (initialThemeRef.current) query.set('theme', initialThemeRef.current)
+    return `/agent/skill-packages/${encodeURIComponent(ownerId)}/pages/${encodeURIComponent(pageId)}/index?${query.toString()}`
+  }, [ownerId, pageId])
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== frameRef.current?.contentWindow || event.origin !== location.origin) return
+      const msg = event.data as Record<string, unknown> | null | undefined
+      if (!msg || typeof msg.type !== 'string') return
+      if (msg.type === 'quickagent:md-ready') {
+        readyRef.current = true
+        lastFromIframeRef.current = valueRef.current
+        frameRef.current?.contentWindow?.postMessage(
+          { type: 'quickagent:md-set-content', text: valueRef.current, title: 'guide.md', markSaved: savedRef.current },
+          location.origin,
+        )
+        return
+      }
+      if (msg.type === 'quickagent:md-change' && typeof msg.text === 'string') {
+        lastFromIframeRef.current = msg.text
+        onChangeRef.current(msg.text)
+        return
+      }
+      if (msg.type === 'quickagent:md-save' && typeof msg.text === 'string') {
+        lastFromIframeRef.current = msg.text
+        void onSaveRef.current(msg.text)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+
+  useEffect(() => {
+    if (!readyRef.current) return
+    if (value === lastFromIframeRef.current) return
+    lastFromIframeRef.current = value
+    frameRef.current?.contentWindow?.postMessage(
+      { type: 'quickagent:md-set-content', text: value, title: 'guide.md', markSaved: saved },
+      location.origin,
+    )
+  }, [value, saved])
+
+  useEffect(() => {
+    if (!readyRef.current || !saved) return
+    frameRef.current?.contentWindow?.postMessage({ type: 'quickagent:md-mark-saved' }, location.origin)
+  }, [saved])
+
+  useEffect(() => {
+    if (!readyRef.current || !theme) return
+    frameRef.current?.contentWindow?.postMessage({ type: 'quickagent:theme', theme }, location.origin)
+  }, [theme])
+
+  return (
+    <div className={css.guideFrameWrap}>
+      <iframe
+        ref={frameRef}
+        src={src}
+        title="写作规范 Markdown 编辑器"
+        sandbox="allow-scripts allow-same-origin"
+        className={css.guideFrame}
+      />
+    </div>
+  )
+}
+
 export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, onStudioContext }: PluginPageProps) {
+  const { packages: pluginPackages } = usePluginPages()
+  const markdownEmbed = useMemo(() => {
+    const pkg = pluginPackages.find(
+      item => item.enabled && !item.remote && item.id === 'markdown' && item.pages.some(p => p.renderer === 'html'),
+    )
+    const page = pkg?.pages.find(p => p.renderer === 'html')
+    return pkg && page ? { ownerId: pkg.id, pageId: page.id } : null
+  }, [pluginPackages])
   const [status, setStatus] = useState<DailyStatus>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -513,6 +628,8 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
   const [monthRows, setMonthRows] = useState<readonly ReportRow[]>([])
   const [calendarMonth, setCalendarMonth] = useState(() => today().slice(0, 7))
   const [historyBusy, setHistoryBusy] = useState(false)
+  const [syncing, setSyncing] = useState(false)
+  const [lastSyncedAt, setLastSyncedAt] = useState('')
   const [showValidation, setShowValidation] = useState(false)
   const [customOvertime, setCustomOvertime] = useState(false)
   const [activity, setActivity] = useState<TodayActivity>()
@@ -521,16 +638,45 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
   const [guide, setGuide] = useState('')
   const [guideSaved, setGuideSaved] = useState(true)
   const formColumnRef = useRef<HTMLElement>(null)
+  const statusRef = useRef<DailyStatus | undefined>(status)
+  statusRef.current = status
+  const calendarMonthRef = useRef(calendarMonth)
+  calendarMonthRef.current = calendarMonth
+  const guideSavedRef = useRef(guideSaved)
+  guideSavedRef.current = guideSaved
+  const draftDirtyRef = useRef(false)
+  const lastTodayRef = useRef(today())
+  const syncInFlightRef = useRef(false)
+  const lastSyncMsRef = useRef(0)
 
   const loggedIn = !!status?.session.logged_in
   const sessions = useMemo(() => todaySessions(activity), [activity])
   const canAsk = typeof onAskAi === 'function'
   const isFullDayLeave = Number(draft.leave_hours || 0) >= 8
 
+  const editDraft = useCallback((updater: (current: DailyDraft) => DailyDraft) => {
+    draftDirtyRef.current = true
+    setDraft(updater)
+  }, [])
+
   useEffect(() => {
     const h = Number(draft.overtime_hours || 0)
     setCustomOvertime(!(Number.isInteger(h) && h >= 0 && h <= 12))
   }, [draft.overtime_hours])
+
+  const handleRemoteError = useCallback((cause: unknown, prefix: string, baseStatus?: DailyStatus) => {
+    if (cause instanceof DailyError && cause.authExpired) {
+      const current = baseStatus ?? statusRef.current
+      if (current) {
+        setStatus({ ...current, session: { ...current.session, logged_in: false } })
+      }
+      setMonthRows([])
+      setError(`登录状态已过期，请重新登录：${cause.message}`)
+      return true
+    }
+    setError(`${prefix}：${message(cause)}`)
+    return false
+  }, [])
 
   const loadMonth = useCallback(async (yearMonth: string, session: DailyStatus['session'] | undefined) => {
     const [reportYear] = yearMonth.split('-')
@@ -538,52 +684,179 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
     const page = await dailyApi.reports({
       ...(reportYear ? { reportYear } : {}),
       reportMonth: yearMonth,
-      pageSize: '60',
+      pageSize: '100',
       ...(userId ? { userId } : {}),
     })
     const rows = (page.rows ?? []).filter(row => !session || isMyReport(row, session))
     setMonthRows(rows)
+    setLastSyncedAt(formatSyncClock())
     return rows
   }, [])
 
   /** A day already filed BY THE CURRENT USER is an update, not a second report. */
   const reconcile = useCallback((date: string, rows: readonly ReportRow[], session: DailyStatus['session'] | undefined) => {
     const mine = rows.find(row => String(row.reportDate ?? '').slice(0, 10) === date && (!session || isMyReport(row, session)))
-    setDraft(current => mine && mine.id !== undefined && mine.id !== null
-      ? { ...current, action: 'update', report_id: String(mine.id) }
-      : { ...current, action: 'create', report_id: null })
+    setDraft(current => {
+      if (current.report_date !== date) return current
+      return mine && mine.id !== undefined && mine.id !== null
+        ? { ...current, action: 'update', report_id: String(mine.id) }
+        : { ...current, action: 'create', report_id: null }
+    })
     return mine
   }, [])
 
-  const open = useCallback(async (next: DailyStatus) => {
-    setStatus(next)
-    const targetDate = next.draft?.report_date || today()
-    const targetMonth = targetDate.slice(0, 7)
-    setCalendarMonth(targetMonth)
-    if (next.draft) setDraft({ ...next.draft })
-    if (!next.session.logged_in) return
-    void dailyApi.projects().then(page => setProjects(page.projects), () => {})
-    const rows = await loadMonth(targetMonth, next.session).catch(() => [] as ReportRow[])
-    const existingToday = reconcile(targetDate, rows, next.session)
-    if (!next.draft && existingToday) {
-      setDraft(rowToDraft(existingToday, targetDate))
+  const syncRemote = useCallback(async (options?: {
+    mode?: 'open' | 'refresh'
+    initialStatus?: DailyStatus
+    showNotice?: boolean
+    force?: boolean
+  }) => {
+    const mode = options?.mode ?? 'refresh'
+    if (syncInFlightRef.current) return
+    if (!options?.force && mode === 'refresh' && Date.now() - lastSyncMsRef.current < AUTO_SYNC_COOLDOWN_MS) {
+      return
     }
-  }, [reconcile, loadMonth])
+    syncInFlightRef.current = true
+    setSyncing(true)
+    setHistoryBusy(true)
+    if (options?.showNotice || mode === 'open') {
+      setError('')
+    }
+    try {
+      const next = options?.initialStatus ?? await dailyApi.status()
+      setStatus(next)
+      if (!next.session.logged_in) {
+        setMonthRows([])
+        return
+      }
 
+      const currentToday = today()
+      const rolledOver = currentToday !== lastTodayRef.current
+      const prevToday = lastTodayRef.current
+      lastTodayRef.current = currentToday
+
+      let targetDate = mode === 'open'
+        ? (next.draft?.report_date || currentToday)
+        : draftRef.current.report_date
+      let targetMonth = mode === 'open'
+        ? targetDate.slice(0, 7)
+        : calendarMonthRef.current
+
+      if (mode === 'refresh' && rolledOver && !draftDirtyRef.current && targetDate === prevToday) {
+        targetDate = currentToday
+        targetMonth = currentToday.slice(0, 7)
+        setDraft(emptyDraft(currentToday))
+      }
+
+      setCalendarMonth(targetMonth)
+
+      if (mode === 'open' && next.draft) {
+        draftDirtyRef.current = false
+        setDraft({ ...next.draft })
+      }
+
+      const [projectsRes, rowsRes, guideRes] = await Promise.allSettled([
+        dailyApi.projects(),
+        loadMonth(targetMonth, next.session),
+        guideSavedRef.current ? dailyApi.guide() : Promise.resolve(null),
+      ])
+
+      if (projectsRes.status === 'fulfilled') {
+        setProjects(projectsRes.value.projects)
+      }
+      if (guideRes.status === 'fulfilled' && guideRes.value) {
+        setGuide(guideRes.value.content)
+        setGuideSaved(true)
+      }
+
+      if (rowsRes.status === 'rejected') {
+        handleRemoteError(rowsRes.reason, '同步远程日报失败', next)
+        return
+      }
+      if (projectsRes.status === 'rejected') {
+        if (handleRemoteError(projectsRes.reason, '同步项目列表失败', next)) return
+      }
+
+      const rows = rowsRes.value
+      lastSyncMsRef.current = Date.now()
+      setError('')
+
+      if (targetDate.slice(0, 7) === targetMonth) {
+        const existingForDate = reconcile(targetDate, rows, next.session)
+        if (!draftDirtyRef.current && !next.draft) {
+          if (existingForDate) {
+            setDraft(rowToDraft(existingForDate, targetDate))
+          } else if (mode === 'open') {
+            setDraft({ ...emptyDraft(targetDate), projects: [emptyProject()] })
+          }
+        }
+      }
+
+      if (options?.showNotice) {
+        setNotice(`已同步远程日报数据（${targetMonth} 共 ${rows.length} 条）`)
+      }
+    } catch (cause) {
+      handleRemoteError(cause, '同步远程日报失败')
+    } finally {
+      syncInFlightRef.current = false
+      setSyncing(false)
+      setHistoryBusy(false)
+    }
+  }, [handleRemoteError, loadMonth, reconcile])
+
+  const refreshMonth = useCallback(async (yearMonth: string, options?: { showNotice?: boolean | undefined; reconcileDate?: string | undefined }) => {
+    const session = statusRef.current?.session
+    if (!session?.logged_in) return [] as ReportRow[]
+    setHistoryBusy(true)
+    try {
+      const rows = await loadMonth(yearMonth, session)
+      setError('')
+      if (options?.reconcileDate) {
+        const found = reconcile(options.reconcileDate, rows, session)
+        if (found && !draftDirtyRef.current) {
+          setDraft(rowToDraft(found, options.reconcileDate))
+        }
+      }
+      if (options?.showNotice) {
+        setNotice(`已刷新 ${yearMonth} 日报（共 ${rows.length} 条）`)
+      }
+      return rows
+    } catch (cause) {
+      handleRemoteError(cause, '刷新本月日报失败')
+      return [] as ReportRow[]
+    } finally {
+      setHistoryBusy(false)
+    }
+  }, [handleRemoteError, loadMonth, reconcile])
+
+  // Auto-sync remote status, projects, and monthly reports every time the page is entered.
   useEffect(() => {
     setLoading(true)
-    void dailyApi.status().then(next => open(next), cause => setError(message(cause))).finally(() => setLoading(false))
-  }, [open])
+    void syncRemote({ mode: 'open', force: true }).finally(() => setLoading(false))
+  }, [syncRemote])
+
+  // Re-sync automatically when returning to the app window / tab (throttled by AUTO_SYNC_COOLDOWN_MS).
+  useEffect(() => {
+    if (!loggedIn) return
+    const triggerAutoSync = () => {
+      if (document.visibilityState === 'hidden') return
+      void syncRemote({ mode: 'refresh' })
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') triggerAutoSync()
+    }
+    window.addEventListener('focus', triggerAutoSync)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('focus', triggerAutoSync)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [loggedIn, syncRemote])
 
   // The AI tool stored a draft and brought this page forward; read it again.
   useEffect(() => onDraftReady(() => {
-    void dailyApi.status().then(next => open(next), () => {})
-  }), [open])
-
-  useEffect(() => {
-    if (!loggedIn) return
-    void dailyApi.guide().then(page => setGuide(page.content), () => {})
-  }, [loggedIn])
+    void syncRemote({ mode: 'open', force: true })
+  }), [syncRemote])
 
   const loadActivity = useCallback(async (date: string) => {
     if (!workspaceRoot) return
@@ -600,12 +873,11 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
       setError('')
       if (detail.action === 'prepare_draft') {
         setTab('fill')
-        void dailyApi.status().then(async next => {
-          await open(next)
-          const dateLabel = next.draft?.report_date || detail.reportDate || ''
+        void syncRemote({ mode: 'open', force: true }).then(() => {
+          const dateLabel = draftRef.current.report_date || detail.reportDate || ''
           setNotice(`已同步 AI 填写的日报草稿${dateLabel ? ' · ' + dateLabel : ''}`)
           formColumnRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
-        }, cause => setError(message(cause)))
+        })
         return
       }
       if (detail.action === 'write_guide') {
@@ -624,10 +896,10 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
       }
       if (detail.action === 'submit') {
         setTab('fill')
-        void dailyApi.status().then(async next => {
-          await open(next)
+        draftDirtyRef.current = false
+        void syncRemote({ mode: 'open', force: true }).then(() => {
           setNotice(`已同步 AI 提交的日报${detail.reportDate ? ' · ' + detail.reportDate : ''}`)
-        }, () => {})
+        })
         return
       }
       if (detail.action === 'today_activity') {
@@ -642,15 +914,12 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
         const targetDate = detail.reportDate || draftRef.current.report_date
         const targetMonth = targetDate.slice(0, 7)
         setCalendarMonth(targetMonth)
-        setHistoryBusy(true)
-        void loadMonth(targetMonth, status?.session)
-          .then(rows => reconcile(targetDate, rows, status?.session), () => {})
-          .finally(() => setHistoryBusy(false))
+        void refreshMonth(targetMonth, { reconcileDate: targetDate })
       }
     }
     window.addEventListener(DAILY_REPORT_SYNC_EVENT, onSync)
     return () => window.removeEventListener(DAILY_REPORT_SYNC_EVENT, onSync)
-  }, [open, loadActivity, loadMonth, reconcile, status?.session])
+  }, [syncRemote, loadActivity, refreshMonth])
 
   // The chat beside this page is offered today's facts and live form state, so a follow-up needs no re-explaining.
   const publish = useRef(onStudioContext)
@@ -686,6 +955,7 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
   const pickDate = (date: string, existingRow?: ReportRow) => {
     setShowValidation(false)
     setError(''); setNotice('')
+    draftDirtyRef.current = false
     const nextMonth = date.slice(0, 7)
     setActivity(undefined)
     if (existingRow) {
@@ -702,30 +972,21 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
     setDraft({ ...emptyDraft(date), projects: [emptyProject()] })
     if (nextMonth !== calendarMonth) {
       setCalendarMonth(nextMonth)
-      setHistoryBusy(true)
-      void loadMonth(nextMonth, status?.session)
-        .then(rows => {
-          const found = reconcile(date, rows, status?.session)
-          if (found) setDraft(rowToDraft(found, date))
-        }, () => {})
-        .finally(() => setHistoryBusy(false))
+      void refreshMonth(nextMonth, { reconcileDate: date })
     }
   }
 
   const switchCalendarMonth = (delta: number) => {
     const nextMonth = shiftMonth(calendarMonth, delta)
     setCalendarMonth(nextMonth)
-    setHistoryBusy(true)
-    void loadMonth(nextMonth, status?.session)
-      .catch(() => [] as ReportRow[])
-      .finally(() => setHistoryBusy(false))
+    void refreshMonth(nextMonth)
   }
 
   /** Turn one aggregated project into a structured form row: facts only, no invented verbs. */
   const addFacts = (entry: TodayProject) => {
     const lines = factLines(entry)
     const content = formatWorkContentGroups([{ task: entry.project, today: lines.join('\n'), progress: '' }])
-    setDraft(current => ({
+    editDraft(current => ({
       ...current,
       projects: [...current.projects.filter(project => project.project_name.trim() || project.work_content.trim()),
         { project_id: null, project_name: entry.project, work_content: content }],
@@ -745,7 +1006,7 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
   const applyCarryOver = () => {
     if (!latestCarryOver) return
     setShowValidation(false)
-    setDraft(current => ({ ...current, projects: latestCarryOver.projects }))
+    editDraft(current => ({ ...current, projects: latestCarryOver.projects }))
     setNotice(`已带入 ${latestCarryOver.date} 未完成（<100%）的 ${latestCarryOver.projects.length} 个项目，补充今日进展即可。`)
   }
 
@@ -779,13 +1040,13 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
     setBusy(true)
     try {
       const answer = await dailyApi.submit({ ...draft, projects: projectsToSend })
+      draftDirtyRef.current = false
       setShowValidation(false)
       setNotice(answer.action === 'update' ? `已更新 ${draft.report_date} 日报` : `已提交 ${draft.report_date} 日报`)
       const rows = await loadMonth(draft.report_date.slice(0, 7), status?.session)
       reconcile(draft.report_date, rows, status?.session)
     } catch (cause) {
-      setError(message(cause))
-      if (cause instanceof DailyError && cause.authExpired) void dailyApi.status().then(setStatus, () => {})
+      handleRemoteError(cause, '提交日报失败')
     } finally { setBusy(false) }
   }
 
@@ -801,8 +1062,8 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
   if (loading) return <div className={css.root} data-theme={theme}><p className={css.placeholder}>正在读取日报状态…</p></div>
   if (!status) return <div className={css.root} data-theme={theme}><p className={css.placeholder} role="alert">{error || '无法读取日报状态'}</p></div>
   if (!loggedIn) return <div className={css.root} data-theme={theme}>
-    <Login initialBase={status.session.base_url} onDone={next => { void open(next) }} />
-    {error && <p className={css.error} role="alert">{error}</p>}
+    {error && <p className={css.loginErrorBanner} role="alert">{error}</p>}
+    <Login initialBase={status.session.base_url} onDone={next => { void syncRemote({ mode: 'open', initialStatus: next, force: true }) }} />
   </div>
 
   return <div className={css.root} data-theme={theme}>
@@ -815,16 +1076,27 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
         </span>
       </div>
       <div className={css.tabs} role="tablist" aria-label="日报页">
-        <button type="button" role="tab" aria-selected={tab === 'fill'} className={clsx(css.tab, tab === 'fill' && css.tabActive)} onClick={() => setTab('fill')}>日报填报</button>
+        <button type="button" role="tab" aria-selected={tab === 'fill'} className={clsx(css.tab, tab === 'fill' && css.tabActive)} onClick={() => {
+          if (tab !== 'fill') {
+            setTab('fill')
+            void syncRemote({ mode: 'refresh', force: true })
+          }
+        }}>日报填报</button>
         <button type="button" role="tab" aria-selected={tab === 'guide'} className={clsx(css.tab, tab === 'guide' && css.tabActive)} onClick={() => setTab('guide')}>写作规范</button>
       </div>
+      <button type="button" className={css.secondary} disabled={syncing}
+        onClick={() => void syncRemote({ mode: 'refresh', showNotice: true, force: true })}
+        title="从远程服务器重新同步本月日报、项目列表与写作规范">
+        <Icon name="refresh" className={syncing ? css.spin : undefined} />{syncing ? '同步中…' : '刷新'}
+      </button>
       {canAsk && <button type="button" className={css.secondary} onClick={() => onAskAi?.({ plugin: 'daily-report' })} title="打开右侧通用 AI 聊天侧边栏">
         <Icon name="spark" />问 AI
       </button>}
       <button type="button" className={css.ghost} onClick={async () => {
         await dailyApi.logout().catch(() => {})
+        draftDirtyRef.current = false
         setStatus({ ...status, session: { ...status.session, logged_in: false } })
-        setDraft(emptyDraft()); setMonthRows([]); setGuide(''); setActivity(undefined)
+        setDraft(emptyDraft()); setMonthRows([]); setGuide(''); setActivity(undefined); setLastSyncedAt('')
       }}>退出 / 切换账号</button>
     </header>
 
@@ -861,11 +1133,11 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
             facts={factsOf(project.project_name)}
             showValidation={showValidation && !isFullDayLeave}
             removable={draft.projects.length > 1}
-            onChange={next => setDraft(current => ({ ...current, projects: current.projects.map((row, at) => at === index ? next : row) }))}
-            onRemove={() => setDraft(current => ({ ...current, projects: current.projects.filter((_, at) => at !== index) }))} />)}
+            onChange={next => editDraft(current => ({ ...current, projects: current.projects.map((row, at) => at === index ? next : row) }))}
+            onRemove={() => editDraft(current => ({ ...current, projects: current.projects.filter((_, at) => at !== index) }))} />)}
         </div>
         <div className={css.projectBarActions}>
-          <button type="button" className={css.addProject} onClick={() => setDraft(current => ({ ...current, projects: [...current.projects, emptyProject()] }))}>
+          <button type="button" className={css.addProject} onClick={() => editDraft(current => ({ ...current, projects: [...current.projects, emptyProject()] }))}>
             <Icon name="plus" />添加项目
           </button>
           {latestCarryOver && (
@@ -877,21 +1149,21 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
         </div>
 
         <section className={css.common}>
-          <Field label="遇到的问题" wide><textarea rows={2} value={draft.problems} placeholder="没有就留空；写清楚卡在哪、需要谁配合。" onChange={event => setDraft(current => ({ ...current, problems: event.target.value }))} /></Field>
+          <Field label="遇到的问题" wide><textarea rows={2} value={draft.problems} placeholder="没有就留空；写清楚卡在哪、需要谁配合。" onChange={event => editDraft(current => ({ ...current, problems: event.target.value }))} /></Field>
           <Field label="加班时长">
             {customOvertime ? (
               <div className={css.inlineInputGroup}>
                 <input type="number" min={0} max={24} step={0.5} value={draft.overtime_hours}
-                  onChange={event => setDraft(current => ({ ...current, overtime_hours: Number(event.target.value) || 0 }))} />
-                <button type="button" className={css.chipButton} onClick={() => { setCustomOvertime(false); setDraft(current => ({ ...current, overtime_hours: 0 })) }}>快捷</button>
+                  onChange={event => editDraft(current => ({ ...current, overtime_hours: Number(event.target.value) || 0 }))} />
+                <button type="button" className={css.chipButton} onClick={() => { setCustomOvertime(false); editDraft(current => ({ ...current, overtime_hours: 0 })) }}>快捷</button>
               </div>
             ) : (
               <select value={draft.overtime_hours} onChange={event => {
                 if (event.target.value === 'custom') {
                   setCustomOvertime(true)
-                  setDraft(current => ({ ...current, overtime_hours: current.overtime_hours > 0 ? current.overtime_hours : 1.5 }))
+                  editDraft(current => ({ ...current, overtime_hours: current.overtime_hours > 0 ? current.overtime_hours : 1.5 }))
                 } else {
-                  setDraft(current => ({ ...current, overtime_hours: Number(event.target.value) }))
+                  editDraft(current => ({ ...current, overtime_hours: Number(event.target.value) }))
                 }
               }}>
                 {OVERTIME_PRESETS.map(h => <option key={h} value={h}>{h === 0 ? '无加班' : `${h} 小时`}</option>)}
@@ -900,14 +1172,14 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
             )}
           </Field>
           <Field label="请假时长">
-            <select value={draft.leave_hours} onChange={event => setDraft(current => ({ ...current, leave_hours: Number(event.target.value) }))}>
+            <select value={draft.leave_hours} onChange={event => editDraft(current => ({ ...current, leave_hours: Number(event.target.value) }))}>
               {LEAVE_PRESETS.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
             </select>
           </Field>
           <Field label="报销费用（元）">
             <input type="number" min={0} step={0.01} value={draft.reimbursement} onChange={event => {
               const amount = Math.max(0, Number(event.target.value) || 0)
-              setDraft(current => ({
+              editDraft(current => ({
                 ...current,
                 reimbursement: amount,
                 ...(amount <= 0 ? { reimbursement_reason: '' } : {}),
@@ -917,10 +1189,10 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
           {Number(draft.reimbursement || 0) > 0 && (
             <Field label="报销事由（必填）" wide>
               <input value={draft.reimbursement_reason} placeholder="请填写报销事由，例如：项目出差打车费"
-                onChange={event => setDraft(current => ({ ...current, reimbursement_reason: event.target.value }))} />
+                onChange={event => editDraft(current => ({ ...current, reimbursement_reason: event.target.value }))} />
             </Field>
           )}
-          <Field label="备注" wide><textarea rows={2} value={draft.remark} placeholder="选填" onChange={event => setDraft(current => ({ ...current, remark: event.target.value }))} /></Field>
+          <Field label="备注" wide><textarea rows={2} value={draft.remark} placeholder="选填" onChange={event => editDraft(current => ({ ...current, remark: event.target.value }))} /></Field>
         </section>
 
         <div className={css.submitBar}>
@@ -934,7 +1206,7 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
           </button>
           <button type="button" className={css.ghost} disabled={busy} onClick={async () => {
             setError('')
-            try { await dailyApi.saveDraft({ ...draft, origin: 'manual' }); setNotice('草稿已保存到本机，刷新页面也不会丢。') } catch (cause) { setError(message(cause)) }
+            try { await dailyApi.saveDraft({ ...draft, origin: 'manual' }); draftDirtyRef.current = false; setNotice('草稿已保存到本机，刷新页面也不会丢。') } catch (cause) { setError(message(cause)) }
           }}>保存草稿</button>
         </div>
       </main>
@@ -947,8 +1219,8 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
               <button type="button" className={css.iconButton} onClick={() => switchCalendarMonth(-1)} title="上个月" aria-label="上个月">‹</button>
               <button type="button" className={css.iconButton} onClick={() => switchCalendarMonth(1)} title="下个月" aria-label="下个月">›</button>
               <button type="button" className={css.iconButton} disabled={historyBusy}
-                onClick={() => { setHistoryBusy(true); void loadMonth(calendarMonth, status.session).catch(() => []).finally(() => setHistoryBusy(false)) }}
-                title="刷新本月记录" aria-label="刷新本月记录"><Icon name="refresh" /></button>
+                onClick={() => void refreshMonth(calendarMonth, { showNotice: true, reconcileDate: draft.report_date.slice(0, 7) === calendarMonth ? draft.report_date : undefined })}
+                title="刷新本月记录" aria-label="刷新本月记录"><Icon name="refresh" className={historyBusy ? css.spin : undefined} /></button>
             </div>
           </header>
           <div className={css.calStats}>
@@ -1000,9 +1272,14 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
         <section className={css.history} aria-label="本月我的日报">
           <header className={css.historyHead}>
             <strong>本月我的日报</strong>
+            {lastSyncedAt && <span className={css.syncTime} title="最近一次从远程服务器同步成功的时间">同步于 {lastSyncedAt}</span>}
             <span className={css.historyCount}>{monthRows.length} 条</span>
           </header>
-          {historyRows.length === 0 && <p className={css.placeholder}>本月还没有已提交的日报。</p>}
+          {historyRows.length === 0 && (
+            <p className={css.placeholder}>
+              {historyBusy ? '正在同步远程日报数据…' : '本月还没有已提交的日报。'}
+            </p>
+          )}
           {historyRows.map((row, index) => <HistoryRow key={String(row.id ?? index)} row={row} onLoad={() => pickDate(String(row.reportDate ?? draft.report_date).slice(0, 10), row)} />)}
         </section>
       </aside>
@@ -1019,14 +1296,36 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
       </div>
       {notice && <p className={css.ok} role="status">{notice}</p>}
       {error && <p className={css.error} role="alert">{error}</p>}
-      <div className={css.guideSplit}>
-        <textarea className={css.guideEditor} value={guide} spellCheck={false}
-          placeholder={'# 日报写作规范\n\n- 按项目分段，每段先写任务再写今天完成的事情\n- 不写无法核实的内容'}
-          onChange={event => { setGuide(event.target.value); setGuideSaved(false) }} />
-        <div className={css.guidePreview}>
-          {guide.trim() ? <MarkdownText text={guide} variant="compact" labels={MARKDOWN_LABELS} /> : <p className={css.placeholder}>这份规范还是空的，AI 会先询问你想要的口径。</p>}
+      {markdownEmbed ? (
+        <EmbeddedMarkdownGuide
+          ownerId={markdownEmbed.ownerId}
+          pageId={markdownEmbed.pageId}
+          value={guide}
+          saved={guideSaved}
+          theme={theme}
+          onChange={next => { setGuide(next); setGuideSaved(false) }}
+          onSave={async next => {
+            setError('')
+            setGuide(next)
+            try {
+              await dailyApi.saveGuide(next)
+              setGuideSaved(true)
+              setNotice('写作规范已保存。')
+            } catch (cause) {
+              setError(message(cause))
+            }
+          }}
+        />
+      ) : (
+        <div className={css.guideSplit}>
+          <textarea className={css.guideEditor} value={guide} spellCheck={false}
+            placeholder={'# 日报写作规范\n\n- 按项目分段，每段先写任务再写今天完成的事情\n- 不写无法核实的内容'}
+            onChange={event => { setGuide(event.target.value); setGuideSaved(false) }} />
+          <div className={css.guidePreview}>
+            {guide.trim() ? <MarkdownText text={guide} variant="compact" labels={MARKDOWN_LABELS} /> : <p className={css.placeholder}>这份规范还是空的，AI 会先询问你想要的口径。</p>}
+          </div>
         </div>
-      </div>
+      )}
       <p className={css.guidePath}>文件位置：{status.guide_dir}</p>
     </div>}
   </div>

@@ -210,6 +210,7 @@ pub struct CreateTaskRequest {
 pub struct DraftSessionInput {
     pub workspace: Option<String>,
     pub kind: Option<String>,
+    pub watched_task_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

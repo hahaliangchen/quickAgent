@@ -375,10 +375,36 @@ pub(super) fn build_request_body(
 }
 
 pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String {
+    let watched_task = if s.scope.starts_with("virtual:") {
+        None
+    } else {
+        crate::context::session_browser::observer_watched_task(s.state.workspace.root(), s.task)
+            .ok()
+            .flatten()
+    };
     let mut text = String::from(V2_SYSTEM_PROMPT);
+    if let Some(target_task_id) = watched_task.as_deref() {
+        text.push_str(&format!(
+            "\n\n=== OBSERVER AGENT ROLE ===\n\
+你是专属于主会话 `{target_task_id}` 的只读观察者 Agent（严格只读，禁止修改任何文件或执行写操作）。\n\
+- 收到巡检信号或用户提问时，优先从尾部查看主会话最近在干什么：先调用 `blueprint.inspect_session({{ task_id: \"{target_task_id}\", max_recent: 20 }})` 查看最新多轮 `user_instructions`、运行中工具 `in_flight_tools`（含实时终端 `tail_lines`）和最新 20 条事件 `recent_tail`。\n\
+- 需要更多前因后果或细节时，可自由翻阅 SQLite 历史（`session.read_session_history`）或使用只读文件/搜索/Git 工具核对代码真相。\n\
+- 判断主会话目标与授权边界时，必须按时间顺序串联全部 `user_instructions`：后续轮次覆盖早先冲突限制；简短续跑指令（如“继续”“再连一下”）延续最近一条实质任务与授权，绝不回退套用已被覆盖的首轮旧限制。\n\
+- 工具偶尔报错但主会话自行修正的属于正常执行波动，无需小题大做；仅在发现明确跑偏、长时间卡死或需止损时建议介入。\n\
+- 每次回复末尾附如下 JSON 代码块供界面渲染确认卡片：\n\
+```observer-suggestion\n\
+{{\"should_interject\": false, \"action\": \"interject\", \"severity\": \"tip\", \"title\": \"\", \"reason\": \"当前进展正常\", \"interject\": \"\"}}\n\
+```\n\
+（`action` 可选 `\"interject\"` | `\"stop\"` | `\"stop_and_continue\"`；`severity` 可选 `\"tip\"` | `\"warn\"` | `\"blocker\"`；`interject` 为用户确认后发送给主会话的精炼指令。）\n"
+        ));
+    }
     text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
-    text.push_str(&model_library_header(libs));
-    if !s.scope.starts_with("virtual:") {
+    if watched_task.is_some() {
+        text.push_str(&declarations::static_library_header(libs));
+    } else {
+        text.push_str(&model_library_header(libs));
+    }
+    if !s.scope.starts_with("virtual:") && watched_task.is_none() {
         let orch = crate::runtime::flow_libraries::list_libraries(s);
         if !orch.is_empty() {
             text.push_str("\n// Reusable JS orchestration libraries via `require(\"<name>\")`:\n");

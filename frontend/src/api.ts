@@ -628,7 +628,13 @@ export const api = {
   changes: (id: string, turn: number) => request<ChangesSummary>(`${task(id)}/changes/${turn}`),
   changeDiff: (id: string, turn: number, index: number, path?: string) => request<FileDiff>(`${task(id)}/changes/${turn}/files/${index}${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`, { cache: 'no-store' }),
   undoChanges: (id: string, turn: number) => post<ChangesSummary>(`${task(id)}/changes/${turn}/undo`, {}),
-  createSession: async (workspace?: string, kind: 'chat' | 'code' = 'code') => (await post<{ task_id: string }>('/agent/sessions', {workspace, kind})).task_id,
+  createSession: async (workspace?: string, kind: 'chat' | 'code' | 'observer' = 'code', watchedTaskId?: string) => (
+    await post<{ task_id: string }>('/agent/sessions', {
+      workspace,
+      kind,
+      ...(watchedTaskId ? { watched_task_id: watchedTaskId } : {}),
+    })
+  ).task_id,
   prompt: (id: string, prompt: string, options?: { permission_mode?: PermissionMode | undefined; model?: string | undefined; provider?: string | undefined; reasoning_effort?: string | undefined; fast_mode?: boolean | undefined; content?: readonly unknown[]; requestId?: string }) =>
     post<{ task_id: string }>(`${task(id)}/messages`, { prompt, ...options }),
   cancel: (id: string) => request<unknown>(task(id), { method: 'DELETE' }),

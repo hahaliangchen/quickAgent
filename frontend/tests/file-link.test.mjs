@@ -20,6 +20,11 @@ test('file:/// destinations resolve to the same local path as a bare path', () =
   assert.deepEqual(parseFileLink('file:///workspace/src/a.rs#L10-L20'), { path: '/workspace/src/a.rs', line: 10 })
   assert.deepEqual(parseFileLink('file:///C:/drop/a.ts'), { path: 'C:/drop/a.ts' })
   assert.deepEqual(parseFileLink('file://localhost/drop/a.ts#L2-L4'), { path: '/drop/a.ts', line: 2 })
+  // Colon line suffixes and leading-slash Windows drive paths (e.g. `/C:/.../InOutController.java:50`).
+  assert.deepEqual(parseFileLink('/C:/Users/29563/Desktop/Project3/backend/InOutController.java:50'), { path: 'C:/Users/29563/Desktop/Project3/backend/InOutController.java', line: 50 })
+  assert.deepEqual(parseFileLink('file:///C:/Users/29563/InOutPage.tsx:29-40'), { path: 'C:/Users/29563/InOutPage.tsx', line: 29 })
+  assert.deepEqual(parseFileLink('src/InOutController.java:50:12'), { path: 'src/InOutController.java', line: 50 })
+  assert.deepEqual(parseFileLink('InOutController.java:50'), { path: 'InOutController.java', line: 50 })
   // A remote file host names no local file.
   assert.equal(parseFileLink('file://server/share/a.ts'), undefined)
   assert.equal(parseFileLink('file://'), undefined)
@@ -27,13 +32,16 @@ test('file:/// destinations resolve to the same local path as a bare path', () =
 
 test('non-file URLs, fragments, queries and malformed escapes are refused', () => {
   assert.equal(parseFileLink('https://example.com/a.ts#L10-L20'), undefined)
+  assert.equal(parseFileLink('https://example.com/a.ts:50'), undefined)
   assert.equal(parseFileLink('mailto:a@b.c'), undefined)
+  assert.equal(parseFileLink('tel:12345'), undefined)
   assert.equal(parseFileLink('#L10'), undefined)
   assert.equal(parseFileLink(''), undefined)
   assert.equal(parseFileLink('//host/share/a.ts'), undefined)
   assert.equal(parseFileLink('a.ts?raw=1'), undefined)
   assert.equal(parseFileLink('a%zz.ts'), undefined)
   assert.equal(parseFileLink('src/a.rs#L20-L10'), undefined, 'reversed range')
+  assert.equal(parseFileLink('src/a.rs:20-10'), undefined, 'reversed colon range')
   assert.equal(parseFileLink('src/a.rs#L0'), undefined, 'lines are 1-based')
   assert.equal(parseFileLink('src/a.rs#nope'), undefined)
 })

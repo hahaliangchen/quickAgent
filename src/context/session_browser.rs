@@ -26,6 +26,7 @@ fn schema_with_default_project(conn: &Connection, root: &FsPath, default_project
     conn.execute_batch("CREATE TABLE IF NOT EXISTS agent_projects(path TEXT PRIMARY KEY,title TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS agent_session_meta(task_id TEXT PRIMARY KEY,title TEXT,pinned INTEGER NOT NULL DEFAULT 0,archived INTEGER NOT NULL DEFAULT 0,workspace TEXT);")?;
     crate::context::database::add_column(conn, "agent_session_meta", "kind", "TEXT NOT NULL DEFAULT 'code'")?;
+    crate::context::database::add_column(conn, "agent_session_meta", "watched_task_id", "TEXT")?;
     if fresh && default_project {
         conn.execute(
             "INSERT OR IGNORE INTO agent_projects(path,title) VALUES (?1,?2)",
@@ -116,6 +117,23 @@ pub fn is_general_chat(root: &FsPath, task: &str) -> Result<bool> {
         )
         .optional()?;
     Ok(kind.as_deref() == Some("chat"))
+}
+
+/// If `task` is a dedicated read-only observer session (`kind == "observer"`),
+/// return the main `watched_task_id` it observes.
+pub fn observer_watched_task(root: &FsPath, task: &str) -> Result<Option<String>> {
+    let conn = agent_service::open_db(root)?;
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT COALESCE(kind, 'code'), watched_task_id FROM agent_session_meta WHERE task_id=?1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((kind, Some(target))) if kind == "observer" && !target.trim().is_empty() => Some(target),
+        _ => None,
+    })
 }
 
 pub fn task_workspace(root: &FsPath, task: &str) -> Result<PathBuf> {

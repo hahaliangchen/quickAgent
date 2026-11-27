@@ -247,9 +247,9 @@ function BlueprintObserverInner({
 
   const createOrReuseObserverSession = useCallback(async (): Promise<string> => {
     if (observerTaskId && !observerSession.error) return observerTaskId
-    const id = await api.createSession(workspaceRoot || undefined, workspaceRoot ? 'code' : 'chat')
+    const id = await api.createSession(workspaceRoot || undefined, 'observer', watchedTaskId)
     setObserverSessionId(watchedTaskId, id)
-    // Archive immediately so Observer sessions stay dedicated to this drawer and never clutter the main sidebar.
+    // Set title while keeping the observer session archived and isolated from the main sidebar.
     void api.updateSession(id, {
       title: `${OBSERVER_TITLE_PREFIX}${watchedTitle.slice(0, 36)}`,
       archived: true,
@@ -311,16 +311,31 @@ function BlueprintObserverInner({
   const triggerInspectRef = useRef(triggerInspect)
   triggerInspectRef.current = triggerInspect
 
-  // Automatic milestone / error / failure watcher (ONLY active when prefs.enabled && prefs.autoInspect).
+  // Automatic milestone / failure watcher (ONLY active when prefs.enabled && prefs.autoInspect).
+  // Never auto-inspect when the user or Observer cancelled/aborted the main session.
   useEffect(() => {
+    const latestSeq = watchedEvents.at(-1)?.seq ?? 0
+    if (watchedTask.status === 'cancelled' || watchedTask.status === 'cancelling') {
+      lastInspectedSeqRef.current = Math.max(lastInspectedSeqRef.current, latestSeq)
+      return
+    }
     if (!prefs.enabled || !prefs.autoInspect) return
     if (sending || observerRunning) return
     const trigger = detectObserverTrigger(watchedEvents, lastInspectedSeqRef.current, watchedRunning)
-    if (!trigger) return
+    if (!trigger) {
+      // Advance baseline past aborted/cancelled turn/end events so they never re-trigger later.
+      const sawCancel = watchedEvents.some(ev => {
+        if (ev.seq <= lastInspectedSeqRef.current || ev.type !== 'turn/end') return false
+        const reason = ev.data.reason as Record<string, unknown> | undefined
+        return reason?.kind === 'aborted' || reason?.kind === 'cancelled'
+      })
+      if (sawCancel) lastInspectedSeqRef.current = Math.max(lastInspectedSeqRef.current, latestSeq)
+      return
+    }
     const elapsed = Date.now() - lastAutoInspectAtRef.current
     if (trigger.kind !== 'turn_failed' && elapsed < OBSERVER_COOLDOWN_MS) return
     void triggerInspect(trigger)
-  }, [prefs.enabled, prefs.autoInspect, watchedEvents, watchedRunning, sending, observerRunning, triggerInspect])
+  }, [prefs.enabled, prefs.autoInspect, watchedEvents, watchedRunning, watchedTask.status, sending, observerRunning, triggerInspect])
 
   // Zero-cost local silent-stall watchdog: wakes the Observer AT MOST ONCE per in-flight callId
   // when the main session is running with 0 new events for >= 3 minutes (never loops).
@@ -432,6 +447,8 @@ function BlueprintObserverInner({
     setError('')
     try {
       await api.cancel(watchedTaskId)
+      const latestSeq = watchedEventsRef.current.at(-1)?.seq ?? 0
+      lastInspectedSeqRef.current = Math.max(lastInspectedSeqRef.current, latestSeq)
       if (activeSuggestion) markSuggestionHandled(activeSuggestion.id)
       onMainSessionUpdated()
       showToast('已向主会话发出停止指令')
@@ -456,6 +473,8 @@ function BlueprintObserverInner({
           const latest = await api.getTask(watchedTaskId).catch(() => null)
           if (latest && latest.status !== 'running' && latest.status !== 'cancelling') break
         }
+        const latestSeq = watchedEventsRef.current.at(-1)?.seq ?? 0
+        lastInspectedSeqRef.current = Math.max(lastInspectedSeqRef.current, latestSeq)
       }
       if (text) {
         await api.prompt(watchedTaskId, text, { requestId: randomId() })

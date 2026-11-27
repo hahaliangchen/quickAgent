@@ -4,6 +4,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 import { previewFile, previewKind, previewModule, previewRevision, studioUrl } from '../src/filePreview.ts'
+import { buildInlineCodeDiff, findSessionFileChange } from '../src/filePreviewDiff.ts'
 
 const base = '/agent/tasks/task%20id'
 const workspaceCode = previewFile('task id', 'file:///work/src/main.ts', { line: 8 }, '/work')
@@ -15,6 +16,17 @@ test('preview dispatch, scoped attachment URLs and targeted refresh', () => {
   assert.equal(previewKind('x.svg'), 'image')
   assert.equal(previewKind('x.pptx'), 'plugin')
   assert.equal(previewKind('x.zip'), 'unsupported')
+  assert.equal(previewKind('InOutController.java:50'), 'code')
+  assert.equal(previewKind('Makefile'), 'code')
+  const winColonFile = previewFile(
+    'task id',
+    '/C:/Users/29563/Desktop/Project3/warehouse-supervision-system/backend/InOutController.java:50',
+    undefined,
+    '\\\\?\\c:\\Users\\29563\\Desktop\\Project3\\warehouse-supervision-system',
+  )
+  assert.equal(winColonFile.path, 'backend/InOutController.java')
+  assert.equal(winColonFile.name, 'InOutController.java')
+  assert.equal(winColonFile.line, 50)
   assert.equal(previewFile('task id','x.pdf',{url:base+'/attachments/sha256%3Aa'}).attachment, true)
   for (const url of ['https://evil.example/agent/x','/agent/tasks/wrong/attachments/x']) {
     assert.equal(previewFile('task id','x.pdf',{url}), undefined)
@@ -25,6 +37,41 @@ test('preview dispatch, scoped attachment URLs and targeted refresh', () => {
   assert.equal(new URL(studioUrl('pdf','studio','preview',workspaceCode.url,'main.ts','dark'),'http://localhost').searchParams.get('file'),workspaceCode.url)
   assert.equal(previewRevision(workspaceCode,[{type:'workspace/changes',seq:2,data:{turn:1,files:[{path:'/work/src/main.ts'}]}},{type:'turn/end',seq:3,data:{turn:1}}],'/work'),2)
   assert.equal(previewRevision(workspaceCode,[{type:'workspace/changes',seq:2,data:{turn:1,files:[{path:'other.ts'}]}},{type:'turn/end',seq:3,data:{turn:1}}],'/work'),0)
+})
+
+test('inline code diff tracks line numbers, hunks, and session change lookup across platforms', () => {
+  const diff = buildInlineCodeDiff('line1\nold2\nline3\n', 'line1\nnew2a\nnew2b\nline3\n')
+  assert.equal(diff.hasChanges, true)
+  assert.equal(diff.added, 2)
+  assert.equal(diff.deleted, 1)
+  assert.deepEqual(diff.hunkIndices, [1])
+  assert.deepEqual(
+    diff.rows.map(r => [r.kind, r.oldLine, r.newLine, r.text]),
+    [
+      ['context', 1, 1, 'line1'],
+      ['del', 2, null, 'old2'],
+      ['add', null, 2, 'new2a'],
+      ['add', null, 3, 'new2b'],
+      ['context', 3, 4, 'line3'],
+    ],
+  )
+  assert.equal(buildInlineCodeDiff('same\n', 'same\r\n').hasChanges, false)
+  const created = buildInlineCodeDiff(null, 'a\nb\n')
+  assert.equal(created.added, 2)
+  assert.equal(created.deleted, 0)
+
+  const change = findSessionFileChange(
+    [
+      { seq: 1, type: 'workspace/changes', data: { turn: 1, total: 1, files: [{ path: 'backend\\InOutController.java', added: 2, deleted: 1, reverted: false }] } },
+      { seq: 2, type: 'workspace/changes', data: { turn: 2, total: 1, files: [{ path: 'backend/InOutController.java', added: 1, deleted: 0, reverted: false }] } },
+    ],
+    'backend/InOutController.java',
+    'C:\\Users\\29563\\app',
+  )
+  assert.equal(change.earliestTurn, 1)
+  assert.equal(change.latestTurn, 2)
+  assert.equal(change.added, 3)
+  assert.equal(change.deleted, 1)
 })
 
 const fallback = fileURLToPath(new URL('../../../ai-ppt-view/node_modules/playwright/index.mjs', import.meta.url))

@@ -83,4 +83,13 @@ test('handles Windows drive paths cleanly in code and chat sessions', () => {
   assert.deepEqual(chat, {
     absolutePath: 'C:/Users/dev/app/src/index.ts',
   })
+
+  const withLineAndVerbatim = resolveFileLinkPaths('/C:/Users/dev/app/backend/InOutController.java:50', {
+    workspaceRoot: '\\\\?\\c:\\Users\\dev\\app',
+    isChatSession: false,
+  })
+  assert.deepEqual(withLineAndVerbatim, {
+    absolutePath: 'C:/Users/dev/app/backend/InOutController.java',
+    relativePath: 'backend/InOutController.java',
+  })
 })

@@ -27,26 +27,41 @@ function memoryStorage() {
   }
 }
 
-test('detectObserverTrigger prioritizes turn_failed and tool/compile errors', () => {
+test('detectObserverTrigger ignores minor tool errors and user/observer cancellations, waking only on real failures/milestones', () => {
+  // Single tool errors or program typos are normal self-correcting noise and must NOT wake the Observer.
   const errEvents = [
     { seq: 1, time: 1, type: 'tool/call', data: { name: 'read_file' } },
     { seq: 2, time: 2, type: 'tool/result', data: { message: { isError: true, content: [{ text: 'old_text not found' }] } } },
+    { seq: 3, time: 3, type: 'program/error', data: { message: 'syntax typo' } },
   ]
-  const trigger = detectObserverTrigger(errEvents, 0, true)
-  assert.equal(trigger?.kind, 'error')
-  assert.equal(trigger?.latestSeq, 2)
-  assert.match(trigger?.detail ?? '', /old_text not found/)
+  assert.equal(detectObserverTrigger(errEvents, 0, true), null)
 
-  // Already inspected seq >= 2 yields no duplicate trigger.
-  assert.equal(detectObserverTrigger(errEvents, 2, true), null)
+  // User-initiated or observer-initiated cancellation must NEVER wake the Observer.
+  const abortedEvents = [
+    ...errEvents,
+    { seq: 4, time: 4, type: 'tool/result', data: { message: { isError: true, content: [{ text: '{"error":"task cancelled during skill tool execution"}' }] } } },
+    { seq: 5, time: 5, type: 'turn/end', data: { reason: { kind: 'aborted' } } },
+  ]
+  assert.equal(detectObserverTrigger(abortedEvents, 0, false), null)
 
+  const cancelledEvents = [
+    ...errEvents,
+    { seq: 6, time: 6, type: 'turn/end', data: { reason: { kind: 'cancelled' } } },
+  ]
+  assert.equal(detectObserverTrigger(cancelledEvents, 0, false), null)
+
+  // Genuine turn failure (reason.kind === 'error') still wakes the Observer immediately.
   const failEvents = [
     ...errEvents,
-    { seq: 3, time: 3, type: 'turn/end', data: { reason: { kind: 'error', message: 'HTTP 503 overloaded' } } },
+    { seq: 7, time: 7, type: 'turn/end', data: { reason: { kind: 'error', message: 'HTTP 503 overloaded' } } },
   ]
-  const failTrigger = detectObserverTrigger(failEvents, 2, false)
+  const failTrigger = detectObserverTrigger(failEvents, 3, false)
   assert.equal(failTrigger?.kind, 'turn_failed')
+  assert.equal(failTrigger?.latestSeq, 7)
   assert.match(failTrigger?.detail ?? '', /503/)
+
+  // Already inspected seq >= 7 yields no duplicate trigger.
+  assert.equal(detectObserverTrigger(failEvents, 7, false), null)
 })
 
 test('detectObserverTrigger fires on semantic plan phase transitions and turn completion without step thresholds', () => {
@@ -113,37 +128,28 @@ test('parseObserverSuggestion supports interject, stop, stop_and_continue, and N
   assert.equal(parsedNoop?.interject, '')
 })
 
-test('buildObserverInspectPrompt and buildObserverUserChatPrompt include SQLite inspection & action schema', () => {
+test('buildObserverInspectPrompt emits concise signal and buildObserverUserChatPrompt keeps raw user text clean', () => {
   const prompt = buildObserverInspectPrompt({
     watchedTaskId: 'task_abc123',
-    watchedTitle: 'rag-go 分块验证',
+    watchedTitle: '第1轮：不要改代码也不要重启服务',
     watchedStatus: 'running',
     workspaceRoot: '/home/goodtime/project/rag-go',
     trigger: { kind: 'manual', label: '用户手动触发巡检', latestSeq: 15 },
   })
-  assert.match(prompt, /blueprint\.inspect_session/)
-  assert.match(prompt, /user_instructions/)
-  assert.match(prompt, /latest_user_instruction/)
-  assert.match(prompt, /in_flight_tools/)
-  assert.match(prompt, /tail_lines/)
-  assert.match(prompt, /最新授权优先/)
-  assert.match(prompt, /recent_tail/)
-  assert.match(prompt, /task_abc123/)
-  assert.match(prompt, /stop_and_continue/)
-  assert.match(prompt, /严格只读/)
+  assert.match(prompt, /巡检信号/)
+  assert.match(prompt, /用户手动触发巡检/)
+  assert.match(prompt, /从尾部检查/)
+  // Must NOT inject Turn-1 title or giant instruction boilerplate into user messages.
+  assert.doesNotMatch(prompt, /不要改代码/)
+  assert.ok(prompt.length < 200)
 
   const chatPrompt = buildObserverUserChatPrompt({
     watchedTaskId: 'task_abc123',
     watchedStatus: 'running',
-    userText: '帮我确认要不要先停掉它',
+    userText: '  帮我确认要不要先停掉它  ',
     isFirstMessage: true,
   })
-  assert.match(chatPrompt, /task_abc123/)
-  assert.match(chatPrompt, /blueprint\.inspect_session/)
-  assert.match(chatPrompt, /user_instructions/)
-  assert.match(chatPrompt, /in_flight_tools/)
-  assert.match(chatPrompt, /最新授权优先/)
-  assert.match(chatPrompt, /帮我确认要不要先停掉它/)
+  assert.equal(chatPrompt, '帮我确认要不要先停掉它')
 
   const followUpChatPrompt = buildObserverUserChatPrompt({
     watchedTaskId: 'task_abc123',
@@ -151,8 +157,7 @@ test('buildObserverInspectPrompt and buildObserverUserChatPrompt include SQLite 
     userText: '再看一下终端尾巴',
     isFirstMessage: false,
   })
-  assert.match(followUpChatPrompt, /user_instructions/)
-  assert.match(followUpChatPrompt, /in_flight_tools/)
+  assert.equal(followUpChatPrompt, '再看一下终端尾巴')
 })
 
 test('findStalledInFlightTool detects silent unclosed tool/call once threshold elapses and respects turn/end & single-shot dedupe', () => {

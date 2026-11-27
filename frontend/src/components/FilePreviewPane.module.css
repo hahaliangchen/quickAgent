@@ -11,14 +11,49 @@
 .tab span, .toolbar > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toolbar { justify-content: space-between; gap: 8px; padding: 4px 10px; min-height: 31px; font-size: 12px; color: var(--codex-text-secondary); }
 .actions, .zoom { display: flex; align-items: center; gap: 4px; flex: none; }
+
+/* Diff toggle controls in toolbar */
+.diffControls { display: inline-flex; align-items: center; gap: 6px; margin-right: 4px; padding-right: 6px; border-right: 1px solid var(--codex-border-subtle, #ddd); }
+.diffStats { display: inline-flex; align-items: center; gap: 4px; font-family: var(--ds-font-family-code, monospace); font-size: 11px; font-weight: 600; }
+.statAdd { color: var(--codex-diff-add, #16a34a); }
+.statDel { color: var(--codex-diff-del, #dc2626); }
+.hunkNav { display: inline-flex; align-items: center; gap: 1px; }
+.hunkNav button { padding: 2px 5px; font-size: 11px; }
+.diffSwitch { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px !important; border-radius: 999px !important; border: 1px solid var(--codex-border-subtle, #d1d5db) !important; background: var(--codex-panel-bg, #f7f9fb) !important; color: var(--codex-text-secondary) !important; font-size: 11.5px !important; font-weight: 500; transition: background 120ms ease, border-color 120ms ease, color 120ms ease; }
+.diffSwitch:hover { border-color: var(--codex-blue-primary, #1d9e75) !important; color: var(--codex-text-primary) !important; }
+.diffSwitchOn { border-color: color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 55%, transparent) !important; background: color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 12%, transparent) !important; color: var(--codex-blue-primary, #1d9e75) !important; }
+.switchTrack { position: relative; display: inline-flex; align-items: center; width: 22px; height: 12px; border-radius: 999px; background: var(--codex-border-strong, #cbd5e1); transition: background 120ms ease; }
+.diffSwitchOn .switchTrack { background: var(--codex-blue-primary, #1d9e75); }
+.switchThumb { position: absolute; left: 2px; width: 8px; height: 8px; border-radius: 50%; background: #ffffff; transition: transform 120ms ease; }
+.diffSwitchOn .switchThumb { transform: translateX(10px); }
+.diffNoneTag { font-size: 10.5px; opacity: 0.72; font-weight: 400; }
+
 .scroller { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .notice { color: var(--codex-text-secondary); padding: 14px; overflow-wrap: anywhere; margin: 0; }
 .markdown { padding: 14px 18px; overflow-wrap: anywhere; }
+
+/* Normal syntax-highlighted code view */
 .code { width: max-content; min-width: 100%; font: 12px/1.6 var(--ds-font-family-code, monospace); padding-block: 8px; }
 .code > div { display: flex; white-space: pre; scroll-margin-block: 12px; }
 .code > div[data-highlighted] { background: color-mix(in srgb, #d39a25 23%, transparent); }
-.code span { flex: 0 0 6em; position: sticky; left: 0; box-sizing: border-box; text-align: right; padding-right: 1em; color: var(--codex-text-secondary); background: var(--codex-panel-bg, #fbfbfb); user-select: none; }
+.lineNo { flex: 0 0 4.5em; position: sticky; left: 0; box-sizing: border-box; text-align: right; padding-right: 1em; color: var(--codex-text-secondary); background: var(--codex-panel-bg, #fbfbfb); user-select: none; }
 .code code { font: inherit; padding-right: 14px; }
+
+/* Inline full-file diff view */
+.diffCode { width: max-content; min-width: 100%; font: 12px/1.6 var(--ds-font-family-code, monospace); padding-block: 8px; }
+.diffRow { display: flex; white-space: pre; scroll-margin-block: 12px; }
+.diffRow[data-highlighted] { background: color-mix(in srgb, #d39a25 23%, transparent); }
+.diffAdd { background: var(--dsw-alias-code-diff-added, color-mix(in srgb, #16a34a 14%, transparent)); box-shadow: inset 3px 0 0 var(--codex-diff-add, #16a34a); }
+.diffDel { background: var(--dsw-alias-code-diff-deleted, color-mix(in srgb, #dc2626 14%, transparent)); box-shadow: inset 3px 0 0 var(--codex-diff-del, #dc2626); }
+.diffGutter { display: inline-flex; align-items: stretch; flex: none; position: sticky; left: 0; user-select: none; background: var(--codex-panel-bg, #fbfbfb); border-right: 1px solid var(--codex-border-subtle, #e5e7eb); margin-right: 10px; }
+.diffAdd .diffGutter { background: color-mix(in srgb, #16a34a 14%, var(--codex-panel-bg, #fbfbfb)); }
+.diffDel .diffGutter { background: color-mix(in srgb, #dc2626 14%, var(--codex-panel-bg, #fbfbfb)); }
+.diffLineNo { width: 3.4em; padding-right: 0.55em; text-align: right; color: var(--codex-text-secondary); opacity: 0.78; box-sizing: border-box; }
+.diffSign { width: 1.5em; text-align: center; font-weight: 700; color: var(--codex-text-secondary); }
+.diffAdd .diffSign { color: var(--codex-diff-add, #16a34a); }
+.diffDel .diffSign { color: var(--codex-diff-del, #dc2626); }
+.diffRow code { font: inherit; padding-right: 14px; }
+
 .frame { display: block; flex: 1; min-height: 0; width: 100%; border: 0; }
 .zoom { justify-content: center; padding-block: 4px; position: sticky; left: 0; top: 0; background: var(--codex-panel-bg, #fbfbfb); }
 .image { display: grid; justify-items: center; padding: 12px; }

@@ -51,7 +51,8 @@ export const OBSERVER_COOLDOWN_MS = 45_000
 export const OBSERVER_STALL_THRESHOLD_MS = 180_000
 
 const PREFS_KEY = 'blueprint_observer_prefs_v1'
-const SESSION_MAP_KEY = 'blueprint_observer_sessions_v1'
+// v2 sessions are created with backend `kind: "observer"` + dedicated pinned system prompt.
+const SESSION_MAP_KEY = 'blueprint_observer_sessions_v2'
 const DISMISSED_KEY = 'blueprint_observer_dismissed_v1'
 
 const DEFAULT_PREFS: ObserverPrefs = {
@@ -187,7 +188,13 @@ function clipText(raw: string, maxLen: number): string {
 }
 
 /**
- * Decide whether newly arrived main-session events warrant an automatic Observer DB inspection.
+ * Decide whether newly arrived main-session events warrant waking the Observer Agent.
+ *
+ * Rules:
+ * - Never trigger on user-initiated or observer-initiated cancellation (`aborted` / `cancelled`).
+ * - Do NOT trigger on routine single tool/command errors (the main agent routinely fixes typos on its own).
+ * - Wake only on real lifecycle signals: turn failure (`error`), plan phase transition (`plan/updated`),
+ *   or natural turn completion (`completed`). (Stalled tools are handled separately by the single-shot watchdog.)
  */
 export function detectObserverTrigger(
   events: readonly AgentEvent[],
@@ -199,13 +206,17 @@ export function detectObserverTrigger(
   if (fresh.length === 0) return null
   const latestSeq = fresh[fresh.length - 1]!.seq
 
-  // Priority 1: turn ended with an error (e.g. WORKER_FAILED / HTTP 503).
+  // Priority 1: inspect turn/end first — ignore user/observer cancellations, wake on genuine failure.
   for (let i = fresh.length - 1; i >= 0; i--) {
     const ev = fresh[i]!
     if (ev.type === 'turn/end') {
       const reason = asRecord(ev.data.reason)
-      if (reason?.kind === 'error') {
-        const msg = typeof reason.message === 'string' ? reason.message : '主会话本轮运行失败'
+      const reasonKind = typeof reason?.kind === 'string' ? reason.kind : ''
+      if (reasonKind === 'aborted' || reasonKind === 'cancelled') {
+        return null
+      }
+      if (reasonKind === 'error') {
+        const msg = typeof reason?.message === 'string' ? reason.message : '主会话本轮运行失败'
         return {
           kind: 'turn_failed',
           label: '主会话本轮报错中断',
@@ -213,38 +224,17 @@ export function detectObserverTrigger(
           detail: clipText(msg, 180),
         }
       }
-    }
-  }
-
-  // Priority 2: tool execution error or TS program compile error while active.
-  for (let i = fresh.length - 1; i >= 0; i--) {
-    const ev = fresh[i]!
-    if (ev.type === 'tool/result') {
-      const msg = asRecord(ev.data.message)
-      if (msg?.isError === true) {
-        const content = Array.isArray(msg.content) ? asRecord(msg.content[0]) : undefined
-        const text = typeof content?.text === 'string' ? content.text : '工具调用失败'
+      if (!running && reasonKind === 'completed') {
         return {
-          kind: 'error',
-          label: '检测到工具或编译报错',
+          kind: 'turn_completed',
+          label: '主会话本轮结束复核',
           latestSeq,
-          detail: clipText(text, 180),
         }
       }
     }
-    if (ev.type === 'program/error' || ev.type === 'workspace/changes_error') {
-      const msg = typeof ev.data.message === 'string' ? ev.data.message : ev.type
-      return {
-        kind: 'error',
-        label: '检测到编排脚本报错',
-        latestSeq,
-        detail: clipText(msg, 180),
-      }
-    }
   }
 
-  // Priority 3: semantic plan phase boundary (`plan/updated`) — driven by the
-  // main Agent's own plan transitions rather than any hardcoded step count.
+  // Priority 2: semantic plan phase boundary (`plan/updated`).
   for (let i = fresh.length - 1; i >= 0; i--) {
     const ev = fresh[i]!
     if (ev.type === 'plan/updated') {
@@ -258,20 +248,6 @@ export function detectObserverTrigger(
         label: '主会话计划阶段变更',
         latestSeq,
         ...(detail ? { detail } : {}),
-      }
-    }
-  }
-
-  // Priority 4: natural turn completion checkpoint.
-  if (!running) {
-    for (let i = fresh.length - 1; i >= 0; i--) {
-      const ev = fresh[i]!
-      if (ev.type === 'turn/end') {
-        return {
-          kind: 'turn_completed',
-          label: '主会话本轮结束复核',
-          latestSeq,
-        }
       }
     }
   }
@@ -353,7 +329,9 @@ export function findStalledInFlightTool(
 }
 
 /**
- * Build the SQLite-first inspection prompt sent to the Observer AI session.
+ * Build a concise factual wake-up signal for the dedicated Observer Agent.
+ * Role, inspection methodology, and output schema live ONCE in the backend
+ * `pinned_system_prompt` for `kind: "observer"`, never repeated inside user turns.
  */
 export function buildObserverInspectPrompt(input: {
   readonly watchedTaskId: string
@@ -363,46 +341,17 @@ export function buildObserverInspectPrompt(input: {
   readonly trigger: ObserverTrigger
   readonly recentSummary?: string | undefined
 }): string {
-  const lines = [
-    `你是「蓝图全景观察者（只读）」，专属于主会话 \`${input.watchedTaskId}\`。`,
-    `- 主会话标题：${input.watchedTitle || '未命名会话'}`,
-    `- 当前状态：${input.watchedStatus}`,
-    ...(input.workspaceRoot ? [`- 工作区：${input.workspaceRoot}`] : []),
-    `- 触发原因：${input.trigger.label}${input.trigger.detail ? `（${input.trigger.detail}）` : ''}`,
-    ...(input.recentSummary ? [`- 最新进展摘要：${input.recentSummary}`] : []),
-    '',
-    '请按以下步骤高效执行（严格只读，禁止修改任何文件或执行写操作）：',
-    `1. **一步拿到全局快照 + 多轮指令时间线 + 实时终端尾巴**：直接调用 \`blueprint.inspect_session({ task_id: "${input.watchedTaskId}", max_recent: 20 })\`（注意用点号 \`blueprint.inspect_session\`）。一次即可读出 SQLite 全量摘要（含按时间排序的多轮 \`user_instructions\` 与 \`latest_user_instruction\`、运行中工具 \`in_flight_tools\` 及实时 SSH/Shell 终端最后 30 行 \`tail_lines\`、计划进度、钉住事实、失败聚类、改动文件、环境线索、费用）以及 \`recent_tail\`（最新 20 条关键实时事件）。**严禁**用 \`after_seq\` 从头逐页翻历史浪费时间；如需看某条报错的完整内容，仅按 \`event_seq\` 点查 \`session.read_session_history({ task_id: "${input.watchedTaskId}", event_seq })\`。`,
-    '2. **核心判据（必须严格遵守）**：',
-    '   - **最新授权优先**：判定主会话「是否越界/跑偏」必须对照 `user_instructions` 全量时间线与 `latest_user_instruction`；当后续轮次的 `user/message` 或 `user/interjection` 明确放宽或覆盖了第 1 轮红线（如允许改代码、允许重启指定服务）时，以最新轮次用户授权为准，**严禁**拿第 1 轮已被覆盖的旧约束误报越界。',
-    '   - **先看运行中终端尾巴**：优先检查 `in_flight_tools` 的 `elapsed_sec`、`idle_sec` 与 `tail_lines`；若终端尾部已明确报错（如 HTTP 4xx/5xx、异常堆栈、进程退出）或长时间零新输出卡死，直接建议 `action: "stop"` 或 `"stop_and_continue"` 并引用终端报错原文，不要凭空猜测进程是否还在后台。',
-    '3. **源码真相双视野核验**：你拥有当前工作区的只读权限，如发现主会话怀疑某个源码逻辑或改动异常，可直接用 `read_file` / `search_text` / 只读 `git diff` 对照本地源码真相，并按需查 `blueprint.overview()` / `blueprint.read_playbook` 对照蓝图最短路径。',
-    '4. **高信噪比决断**：如果主会话进展正常、无需打断，则设置 `"should_interject": false`；只有在发现**明确风险、踩坑、偏航、重复报错或需止损**时，才设置 `"should_interject": true`。',
-    '',
-    '请在回复末尾**必须**附上如下 JSON 代码块（前端会自动渲染为确认推送卡片，隐藏原始 JSON）：',
-    '```observer-suggestion',
-    '{',
-    '  "should_interject": true,',
-    '  "action": "interject",',
-    '  "severity": "warn",',
-    '  "title": "15字以内的简短提醒标题",',
-    '  "reason": "结合 SQLite 记录与源码核验的一两句话诊断",',
-    '  "interject": "用户确认后将直接插嘴发送给主会话的精炼指令（若 action 为 stop 可留空）"',
-    '}',
-    '```',
-    '- `action` 取值：`"interject"`（向主会话插嘴/续发）、`"stop"`（建议立即停止主会话运行）、`"stop_and_continue"`（先停止当前跑偏轮次，再发送纠偏指令）。',
-    '- 无需介入时输出 `{"should_interject": false, "action": "interject", "severity": "tip", "title": "", "reason": "当前进展正常", "interject": ""}`。',
-  ]
-  return lines.join('\n')
+  const detail = input.trigger.detail ? `（${input.trigger.detail}）` : ''
+  const extra = input.recentSummary ? ` ${input.recentSummary}` : ''
+  return `[巡检信号] ${input.trigger.label}${detail}（主会话状态：${input.watchedStatus}）。请从尾部检查最近在做什么任务，必要时可翻阅历史 DB 记录。${extra}`
 }
 
 export const OBSERVER_META_START = '<!--observer-meta-start-->'
 export const OBSERVER_META_END = '<!--observer-meta-end-->'
 
 /**
- * Wrap a user's conversational message in the Observer side chat so the Observer
- * always knows which main task it is watching and emits an updated confirmation card
- * whenever a concrete action is agreed upon.
+ * Pass the user's message straight to the dedicated Observer Agent without
+ * injecting hidden boilerplate paragraphs.
  */
 export function buildObserverUserChatPrompt(input: {
   readonly watchedTaskId: string
@@ -410,15 +359,7 @@ export function buildObserverUserChatPrompt(input: {
   readonly userText: string
   readonly isFirstMessage: boolean
 }): string {
-  const metaBody = input.isFirstMessage
-    ? [
-        `[观察者上下文] 你是专属于主会话 \`${input.watchedTaskId}\`（当前状态：${input.watchedStatus}）的只读蓝图观察者。`,
-        `查主会话进展请直接一步调用 \`blueprint.inspect_session({ task_id: "${input.watchedTaskId}", max_recent: 20 })\`（含完整多轮 \`user_instructions\` / \`latest_user_instruction\`、运行中工具 \`in_flight_tools\` 实时终端 \`tail_lines\` 与最新 20 条事件 \`recent_tail\`），不要从头按 \`after_seq\` 翻页；需要核对代码真相可直接用只读 \`read_file\` / \`search_text\` / \`git diff\`。`,
-        '判据铁律：①「最新授权优先」：判定是否越界/跑偏必须以 `user_instructions` 全量时间线与 `latest_user_instruction` 为准，禁止拿第 1 轮已被后续轮次覆盖的旧约束误报越界；②「先看运行中终端尾巴」：优先核对 `in_flight_tools` 的 `elapsed_sec`、`idle_sec` 与 `tail_lines`，若已报错或长时间零新输出，直接建议 `action: "stop"` 或 `"stop_and_continue"` 并引用终端报错原文。',
-        '如果和用户讨论后形成了可直接执行的插嘴或停止决断方案，请在回复末尾附上 ```observer-suggestion JSON 块（含 should_interject, action: "interject"|"stop"|"stop_and_continue", severity, title, reason, interject），方便用户一键确认执行。',
-      ].join('\n')
-    : `[当前主会话 \`${input.watchedTaskId}\` 状态：${input.watchedStatus}；如需刷新进展请一步调用 blueprint.inspect_session({ task_id: "${input.watchedTaskId}", max_recent: 20 })，注意最新授权优先（以 user_instructions/latest_user_instruction 为准）并先看 in_flight_tools 实时终端 tail_lines，可配合只读 read_file/search_text 核验源码；形成新方案请在末尾附 \`\`\`observer-suggestion JSON 块]`
-  return `${OBSERVER_META_START}\n${metaBody}\n${OBSERVER_META_END}\n\n${input.userText.trim()}`
+  return input.userText.trim()
 }
 
 function normalizeSeverity(raw: unknown): ObserverSeverity {

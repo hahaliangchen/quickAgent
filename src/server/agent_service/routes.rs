@@ -74,14 +74,21 @@ pub async fn create_draft_task(
     let task_id = format!("task_{}", uuid_like());
     let root = state.workspace.root().to_path_buf();
     let input = input.map(|Json(input)| input).unwrap_or_default();
-    let kind = if input.kind.as_deref() == Some("chat") {
-        "chat"
-    } else {
-        "code"
+    let kind = match input.kind.as_deref() {
+        Some("chat") => "chat",
+        Some("observer") => "observer",
+        _ => "code",
     };
+    let watched_task_id = input
+        .watched_task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let archived = i32::from(kind == "observer");
     let selected_workspace = match input.workspace {
         Some(path) => match std::fs::canonicalize(path) {
-            Ok(path) if path.is_dir() => path,
+            Ok(path) if path.is_dir() => crate::tools::file_edit::strip_verbatim_prefix(&path),
             _ => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -114,7 +121,10 @@ pub async fn create_draft_task(
             "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at,provider_name,reasoning_effort,fast_mode) VALUES (?1,'',?2,'draft',?3,?3,?4,?5,?6)",
             params![id, model, now(), provider_name, reasoning_effort, fast_mode],
         )?;
-        tx.execute("INSERT INTO agent_session_meta(task_id,workspace,kind) VALUES (?1,?2,?3)",params![id,selected_workspace.to_string_lossy(),kind])?;
+        tx.execute(
+            "INSERT INTO agent_session_meta(task_id,archived,workspace,kind,watched_task_id) VALUES (?1,?2,?3,?4,?5)",
+            params![id, archived, selected_workspace.to_string_lossy(), kind, watched_task_id],
+        )?;
         tx.commit()?;
         Ok(())
     }).await;
