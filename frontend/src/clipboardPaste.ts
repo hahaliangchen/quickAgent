@@ -14,6 +14,15 @@ function normalizeFile(file: File, index: number): File {
   })
 }
 
+function decodeBase64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i += 1) {
+    out[i] = bin.charCodeAt(i)
+  }
+  return out
+}
+
 /**
  * Extract files from both `clipboardData.files` and `clipboardData.items`.
  * WebKitGTK and several screenshot tools expose bitmap images only via `items`.
@@ -38,6 +47,55 @@ export function extractClipboardFiles(data: DataTransfer | null | undefined): Fi
     }
   }
   return collected
+}
+
+/**
+ * Detect whether the OS clipboard carries copied file URIs (e.g. `.pptx`, `.pdf`,
+ * `.docx` copied from Dolphin / Nautilus / Explorer / Finder) even when WebView
+ * exposes `clipboardData.files` as empty and populates `text/plain` with the path.
+ */
+export function clipboardHasFileUriList(data: DataTransfer | null | undefined): boolean {
+  if (!data) return false
+  const types = Array.from(data.types ?? [])
+  if (types.some(type => type === 'text/uri-list' || type === 'x-special/gnome-copied-files' || type === 'application/x-kde4-urilist')) {
+    return true
+  }
+  const uriList = data.getData?.('text/uri-list') ?? ''
+  return /(?:^|\n)file:\/\//i.test(uriList.trim())
+}
+
+/**
+ * Fallback for desktop WebViews (WebKitGTK / WebView2 / WKWebView) where pasting
+ * copied files (`.pptx`, `.pdf`, `.docx`, etc.) from the OS file manager does not
+ * populate `ClipboardEvent.clipboardData.files`. Queries the local host helper
+ * `/agent/clipboard-files` first, then falls back to `/agent/clipboard-image`.
+ */
+export async function readFallbackClipboardFiles(
+  fetchImpl: typeof fetch = fetch,
+): Promise<File[]> {
+  try {
+    const response = await fetchImpl('/agent/clipboard-files', { cache: 'no-store' })
+    if (response.status === 200) {
+      const payload = await response.json() as {
+        files?: readonly { name?: string; mime?: string; base64?: string }[]
+      }
+      const files: File[] = []
+      for (const entry of payload.files ?? []) {
+        if (!entry?.name || !entry.base64) continue
+        const bytes = decodeBase64ToBytes(entry.base64)
+        if (bytes.length === 0) continue
+        files.push(new File([bytes as BlobPart], entry.name, {
+          type: entry.mime || 'application/octet-stream',
+          lastModified: Date.now(),
+        }))
+      }
+      if (files.length > 0) return files
+    }
+  } catch {
+    // Fall through to clipboard image lookup.
+  }
+
+  return readFallbackClipboardImages(fetchImpl)
 }
 
 /**

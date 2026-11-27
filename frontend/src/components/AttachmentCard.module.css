@@ -1,81 +1,71 @@
-/* Attachment previews a user message carries: the image itself, or a file's
-   name beside a glyph. They sit above the bubble in the same right-aligned
-   column, so a card borrows the bubble's 14px radius and hairline border and
-   keeps the accent colour for hover and focus only. Colours are design-platform
-   and codex-theme tokens, so both themes follow without an override. */
+/* Rich attachment previews above user message bubbles:
+   - Images: rounded thumbnail cards with subtle elevation & colorful caption bar.
+   - Files: modern two-line document cards with colorful Material icon tiles,
+     type pills, and integrated download action. */
 
 .attachments {
   display: flex;
   flex-wrap: wrap;
-  /* Each card is only as tall as its own thumbnail: stretching them to the
-     tallest sibling left a short preview floating above empty space. */
   align-items: flex-start;
   justify-content: flex-end;
   gap: 8px;
   max-width: 100%;
 }
 
+/* ---------- Image attachment card ---------- */
 .card {
   display: flex;
   flex-direction: column;
-  width: fit-content;
-  max-width: min(240px, 100%);
+  width: 224px;
+  max-width: 100%;
   padding: 0;
   overflow: hidden;
-  border: 1px solid var(--codex-card-border, #d0d5dd);
+  border: 1px solid var(--codex-card-border, #d8dde6);
   border-radius: 14px;
   background: var(--codex-card-bg, #ffffff);
   color: inherit;
   font: inherit;
   text-align: left;
   text-decoration: none;
-  cursor: pointer;
-  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
-}
-
-/* Images share one width so footers line up when a turn carries several. */
-.card[data-kind='image'] {
-  width: 220px;
   cursor: zoom-in;
-}
-
-/* A white screenshot glares next to a dark transcript: the thumbnail is dimmed
-   here only, and the image opened from it stays untouched. */
-:global(body[data-ds-dark-theme]) .card {
-  background: #2a2c31;
-  border-color: #3d4048;
-}
-
-:global(body[data-ds-dark-theme]) .thumb {
-  filter: brightness(0.78);
-}
-
-/* A file that is not an image is one row tall: glyph, name. */
-.card[data-kind='file'] {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
 
 .card:hover {
   border-color: var(--codex-blue-primary, #1d9e75);
-  box-shadow: 0 6px 18px rgb(17 24 39 / 10%);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.1);
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .card:hover {
+  .card:hover,
+  .fileCardShell:hover,
+  .fileCardLink:hover {
     transform: translateY(-1px);
   }
 }
 
-.card:focus-visible {
+.card:focus-visible,
+.fileCardMain:focus-visible,
+.fileCardLink:focus-visible,
+.fileDownloadBtn:focus-visible {
   outline: 2px solid var(--codex-blue-primary, #1d9e75);
   outline-offset: 2px;
 }
 
-/* The thumbnail fills the card width at its own aspect ratio. Only a page-long
-   screenshot is cropped, and it keeps its top, where the content starts. */
+:global(body[data-ds-dark-theme]) .card {
+  background: #252830;
+  border-color: #3a3f4a;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
+.thumbWrap {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  background: var(--dsw-alias-markdown-code-block, #f5f7fa);
+}
+
 .thumb {
   display: block;
   width: 100%;
@@ -83,24 +73,28 @@
   max-height: 180px;
   object-fit: cover;
   object-position: top center;
-  background: var(--dsw-alias-markdown-code-block, #fafafa);
+  transition: transform 220ms ease;
+}
+
+.card:hover .thumb {
+  transform: scale(1.02);
+}
+
+:global(body[data-ds-dark-theme]) .thumb {
+  filter: brightness(0.84);
 }
 
 .foot {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
-  max-width: 100%;
-  padding: 6px 10px;
+  padding: 7px 10px;
+  border-top: 1px solid var(--codex-border-subtle, #e6e9ef);
 }
 
-.card[data-kind='image'] .foot {
-  border-top: 1px solid var(--codex-border-subtle, #e2e5ea);
-}
-
-.card[data-kind='file'] .foot {
-  padding: 0;
+:global(body[data-ds-dark-theme]) .foot {
+  border-top-color: #353944;
 }
 
 .glyph {
@@ -108,34 +102,194 @@
   flex: none;
 }
 
-/* A file type without its own colour falls back to a gray too faint to read as
-   an attachment; this builds the same glyph one tier darker. */
-.glyphPlain {
-  --dsh-file-type-icon-color: var(--dsw-alias-label-tertiary);
+/* ---------- Rich non-image document / code cards ---------- */
+.fileCardShell,
+.fileCardLink {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(286px, 100%);
+  min-width: 196px;
+  border-radius: 14px;
+  border: 1px solid var(--codex-card-border, #d8dde6);
+  background: var(--codex-card-bg, #ffffff);
+  color: inherit;
+  text-decoration: none;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.045);
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease, background 140ms ease;
+  overflow: hidden;
 }
 
-/* Names arrive already shortened in the middle (see AttachmentCard.tsx), so
-   the date or version that tells two screenshots apart survives; the ellipsis
-   here is only the last resort when a name is still too wide. */
-.name {
+.fileCardLink {
+  gap: 10px;
+  padding: 9px 11px 9px 10px;
+  cursor: pointer;
+}
+
+.fileCardShell:hover,
+.fileCardLink:hover {
+  border-color: color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 60%, var(--codex-card-border, #d8dde6));
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.09);
+}
+
+:global(body[data-ds-dark-theme]) .fileCardShell,
+:global(body[data-ds-dark-theme]) .fileCardLink {
+  background: #252830;
+  border-color: #3a3f4a;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
+:global(body[data-ds-dark-theme]) .fileCardShell:hover,
+:global(body[data-ds-dark-theme]) .fileCardLink:hover {
+  background: #2b2f39;
+  border-color: rgba(52, 211, 153, 0.5);
+}
+
+.fileCardMain {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
   min-width: 0;
-  font-size: var(--dsh-content-font-size-secondary, 13px);
-  line-height: calc(18px + var(--dsh-content-font-delta-secondary, 0px));
-  color: var(--dsw-alias-label-primary);
+  padding: 9px 6px 9px 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.nameBase {
+.fileIconTile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  flex: none;
+  background: rgba(100, 116, 139, 0.1);
+}
+
+.fileIconTile[data-tone='pdf'] { background: rgba(239, 83, 80, 0.12); }
+.fileIconTile[data-tone='word'] { background: rgba(37, 99, 235, 0.12); }
+.fileIconTile[data-tone='excel'] { background: rgba(22, 163, 74, 0.13); }
+.fileIconTile[data-tone='ppt'] { background: rgba(234, 88, 12, 0.12); }
+.fileIconTile[data-tone='markdown'] { background: rgba(56, 189, 248, 0.14); }
+.fileIconTile[data-tone='database'] { background: rgba(245, 158, 11, 0.15); }
+.fileIconTile[data-tone='image'] { background: rgba(16, 185, 129, 0.13); }
+.fileIconTile[data-tone='code'] { background: rgba(99, 102, 241, 0.12); }
+.fileIconTile[data-tone='archive'] { background: rgba(217, 119, 6, 0.14); }
+.fileIconTile[data-tone='media'] { background: rgba(168, 85, 247, 0.13); }
+
+:global(body[data-ds-dark-theme]) .fileIconTile { background: rgba(148, 163, 184, 0.16); }
+:global(body[data-ds-dark-theme]) .fileIconTile[data-tone='pdf'] { background: rgba(239, 83, 80, 0.2); }
+:global(body[data-ds-dark-theme]) .fileIconTile[data-tone='word'] { background: rgba(59, 130, 246, 0.2); }
+:global(body[data-ds-dark-theme]) .fileIconTile[data-tone='excel'] { background: rgba(34, 197, 94, 0.2); }
+:global(body[data-ds-dark-theme]) .fileIconTile[data-tone='ppt'] { background: rgba(249, 115, 22, 0.2); }
+:global(body[data-ds-dark-theme]) .fileIconTile[data-tone='markdown'] { background: rgba(56, 189, 248, 0.2); }
+:global(body[data-ds-dark-theme]) .fileIconTile[data-tone='database'] { background: rgba(245, 158, 11, 0.22); }
+:global(body[data-ds-dark-theme]) .fileIconTile[data-tone='code'] { background: rgba(129, 140, 248, 0.2); }
+
+.fileInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.name {
+  display: block;
   min-width: 0;
   overflow: hidden;
-  white-space: nowrap;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1.35;
+  color: var(--codex-text-primary, #111827);
 }
 
-.card:hover .name {
+:global(body[data-ds-dark-theme]) .name {
+  color: #f4f4f5;
+}
+
+.card:hover .name,
+.fileCardMain:hover .name,
+.fileCardLink:hover .name {
   color: var(--codex-blue-primary, #1d9e75);
 }
 
-.fileActions { display: flex; min-width: 0; align-items: center; gap: 2px; }
-.download { padding: 4px; color: inherit; text-decoration: none; }
+.fileMetaRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fileTypePill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  background: rgba(100, 116, 139, 0.1);
+  color: var(--codex-text-secondary, #4b5563);
+  white-space: nowrap;
+}
+
+.fileTypePill[data-tone='pdf'] { background: rgba(239, 83, 80, 0.12); color: #dc2626; }
+.fileTypePill[data-tone='word'] { background: rgba(37, 99, 235, 0.12); color: #2563eb; }
+.fileTypePill[data-tone='excel'] { background: rgba(22, 163, 74, 0.12); color: #15803d; }
+.fileTypePill[data-tone='ppt'] { background: rgba(234, 88, 12, 0.12); color: #c2410c; }
+.fileTypePill[data-tone='markdown'] { background: rgba(14, 165, 233, 0.13); color: #0284c7; }
+.fileTypePill[data-tone='database'] { background: rgba(245, 158, 11, 0.14); color: #b45309; }
+.fileTypePill[data-tone='code'] { background: rgba(99, 102, 241, 0.12); color: #4f46e5; }
+
+:global(body[data-ds-dark-theme]) .fileTypePill { background: rgba(148, 163, 184, 0.16); color: #cbd5e1; }
+:global(body[data-ds-dark-theme]) .fileTypePill[data-tone='pdf'] { background: rgba(239, 83, 80, 0.22); color: #fca5a5; }
+:global(body[data-ds-dark-theme]) .fileTypePill[data-tone='word'] { background: rgba(59, 130, 246, 0.22); color: #93c5fd; }
+:global(body[data-ds-dark-theme]) .fileTypePill[data-tone='excel'] { background: rgba(34, 197, 94, 0.22); color: #86efac; }
+:global(body[data-ds-dark-theme]) .fileTypePill[data-tone='ppt'] { background: rgba(249, 115, 22, 0.22); color: #fdba74; }
+:global(body[data-ds-dark-theme]) .fileTypePill[data-tone='markdown'] { background: rgba(56, 189, 248, 0.22); color: #7dd3fc; }
+:global(body[data-ds-dark-theme]) .fileTypePill[data-tone='database'] { background: rgba(245, 158, 11, 0.22); color: #fcd34d; }
+:global(body[data-ds-dark-theme]) .fileTypePill[data-tone='code'] { background: rgba(129, 140, 248, 0.22); color: #c7d2fe; }
+
+.fileActionHint {
+  font-size: 11px;
+  color: var(--codex-text-muted, #6b7280);
+  white-space: nowrap;
+}
+
+.fileDownloadBtn,
+.fileDownloadGlyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 6px;
+  border-radius: 8px;
+  color: var(--codex-text-muted, #6b7280);
+  text-decoration: none;
+  flex: none;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.fileDownloadGlyph {
+  margin-right: 0;
+  width: 24px;
+  height: 24px;
+}
+
+.fileDownloadBtn:hover {
+  background: var(--codex-hover-bg, #eef1f5);
+  color: var(--codex-text-primary, #111827);
+}
+
+:global(body[data-ds-dark-theme]) .fileDownloadBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}

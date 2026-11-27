@@ -7,7 +7,7 @@ import { WORKSPACE_PATH_TYPE } from '../codeChat.ts'
 import { useAgentApi, useCordis } from '../cordis/react.tsx'
 import type { AgentSlotProps } from '../cordis/slot-contract.ts'
 import { randomId } from '../randomId.ts'
-import { extractClipboardFiles, isPasteShortcut, readFallbackClipboardImages } from '../clipboardPaste.ts'
+import { clipboardHasFileUriList, extractClipboardFiles, isPasteShortcut, readFallbackClipboardFiles } from '../clipboardPaste.ts'
 import { useSession, type Session } from '../useSession.ts'
 import { compactRelativeTime, isChat, taskTitle, workspaceName } from '../sidebarModel.ts'
 import { filterDockSessions, type DockSessionScope } from './dockSessions.ts'
@@ -679,11 +679,13 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
             }
             const files = extractClipboardFiles(event.clipboardData)
             const plainText = event.clipboardData?.getData('text/plain') ?? ''
+            const hasUriFiles = clipboardHasFileUriList(event.clipboardData)
             if (files.length && !sending) {
-              if (!plainText) event.preventDefault()
+              if (!plainText || hasUriFiles) event.preventDefault()
               attachments.add(files)
-            } else if (!files.length && !plainText && !sending) {
-              void readFallbackClipboardImages().then(fallbackFiles => {
+            } else if (!files.length && (hasUriFiles || !plainText) && !sending) {
+              if (hasUriFiles) event.preventDefault()
+              void readFallbackClipboardFiles().then(fallbackFiles => {
                 if (fallbackFiles.length) attachments.add(fallbackFiles)
               })
             }
@@ -695,7 +697,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
               fallbackPasteTimer.current = window.setTimeout(() => {
                 fallbackPasteTimer.current = null
                 if (pasteEventSeen.current) return
-                void readFallbackClipboardImages().then(fallbackFiles => {
+                void readFallbackClipboardFiles().then(fallbackFiles => {
                   if (fallbackFiles.length) attachments.add(fallbackFiles)
                 })
               }, 40)

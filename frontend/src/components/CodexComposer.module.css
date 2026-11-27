@@ -196,6 +196,45 @@
   box-shadow: 0 2px 12px rgba(29, 158, 117, 0.08);
 }
 
+.cardDragActive {
+  border-color: var(--codex-blue-primary, #1d9e75) !important;
+  border-style: dashed !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 16%, transparent) !important;
+}
+
+.dropOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--codex-card-bg, #ffffff) 90%, var(--codex-blue-primary, #1d9e75) 10%);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+:global(body[data-ds-dark-theme]) .dropOverlay {
+  background: rgba(24, 34, 31, 0.9);
+}
+
+.dropOverlayInner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 14%, transparent);
+  color: var(--codex-blue-primary, #0f6e56);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+:global(body[data-ds-dark-theme]) .dropOverlayInner {
+  color: #5dcaa5;
+}
+
 :global(body[data-ds-dark-theme]) .card {
   background: var(--codex-card-bg, #1e2025);
   border-color: var(--codex-card-border, #363a44);
@@ -271,25 +310,47 @@
   gap: 12px;
 }
 
-/* Bare Plus Button matching media_1791084397752.png */
-.barePlusBtn {
-  display: flex;
+/* Single clean '+' upload button */
+.uploadPlusBtn {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 2px;
-  border: none;
-  background: transparent;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--codex-border-subtle, #e2e6ed);
+  border-radius: 50%;
+  background: var(--codex-panel-bg, #f7f8fa);
   color: var(--codex-text-primary, #18181b);
   cursor: pointer;
-  transition: opacity 0.15s;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 100ms ease;
 }
 
-:global(body[data-ds-dark-theme]) .barePlusBtn {
+.uploadPlusBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 11%, transparent);
+  border-color: color-mix(in srgb, var(--codex-blue-primary, #1d9e75) 45%, transparent);
+  color: var(--codex-blue-primary, #0f6e56);
+}
+
+.uploadPlusBtn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.uploadPlusBtn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+:global(body[data-ds-dark-theme]) .uploadPlusBtn {
+  background: #272a32;
+  border-color: #3a3f4b;
   color: #f4f4f5;
 }
 
-.barePlusBtn:hover {
-  opacity: 0.7;
+:global(body[data-ds-dark-theme]) .uploadPlusBtn:hover:not(:disabled) {
+  background: rgba(52, 211, 153, 0.16);
+  border-color: rgba(52, 211, 153, 0.45);
+  color: #5dcaa5;
 }
 
 /* Permission Pill: (!) 完全访问 / 🛡️ 只读 / 📝 工作区写入 (media_1791084397752.png & media_1791085181305.png) */

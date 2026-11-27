@@ -1550,6 +1550,10 @@ pub async fn run(
             get(crate::server::agent_web::clipboard_image),
         )
         .route(
+            "/agent/clipboard-files",
+            get(crate::server::agent_web::clipboard_files),
+        )
+        .route(
             "/agent/workspace/files",
             get(crate::server::agent_service::workspace_files),
         )

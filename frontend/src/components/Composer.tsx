@@ -1,5 +1,5 @@
 import { randomId } from '../randomId.ts'
-import { extractClipboardFiles, isPasteShortcut, readFallbackClipboardImages } from '../clipboardPaste.ts'
+import { clipboardHasFileUriList, extractClipboardFiles, isPasteShortcut, readFallbackClipboardFiles } from '../clipboardPaste.ts'
 import {AttachmentRail,useAttachmentDraft,type AttachmentSubmission} from './Attachments.tsx'
 import { PREFILL_EVENT, recentPrefill } from './RewindControl.tsx'
 import { draftFor, draftOf, keepDraft, type HeldDraft } from '../composerDraft.ts'
@@ -19,7 +19,6 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { Menu } from '../dsh/ui-primitives/Menu.tsx'
 import { ModelSelect } from '../dsh/model-selection/ModelSelect.tsx'
-import { IconPaperclipOutlineMedium } from '../dsh/ui-primitives/icons/index.tsx'
 import heroShellCss from '../dsh/conversation/HeroShell.module.css'
 import type { SettingsData } from '../api.ts'
 import { useAgentApi } from '../cordis/react.tsx'
@@ -179,6 +178,8 @@ export function Composer({
   const uploadAbort=useRef<AbortController|null>(null)
   const requestId=useRef(randomId())
   const [uploadLabel,setUploadLabel]=useState('')
+  const [dragActive, setDragActive] = useState(false)
+  const dragDepthRef = useRef(0)
   useEffect(()=>{requestId.current=randomId()},[draft,attachments.items])
   useEffect(()=>()=>uploadAbort.current?.abort(),[])
 
@@ -411,7 +412,7 @@ export function Composer({
       fallbackPasteTimer.current = window.setTimeout(() => {
         fallbackPasteTimer.current = null
         if (pasteEventSeen.current) return
-        void readFallbackClipboardImages().then(files => {
+        void readFallbackClipboardFiles().then(files => {
           if (files.length) attachments.add(files)
         })
       }, 40)
@@ -530,7 +531,46 @@ export function Composer({
         )}
 
         {/* Layer 2: White Floating Input Card */}
-        <div className={codexCss.card} data-composer-card onDragOver={event=>{if(event.dataTransfer.types.includes('Files'))event.preventDefault()}} onDrop={event=>{event.preventDefault();if(!disabled&&!running&&!submitting)attachments.add(event.dataTransfer.files)}}>
+        <div
+          className={clsx(codexCss.card, dragActive && codexCss.cardDragActive)}
+          data-composer-card
+          onDragEnter={event => {
+            if (!event.dataTransfer.types.includes('Files')) return
+            event.preventDefault()
+            dragDepthRef.current += 1
+            if (!disabled && !running && !submitting) setDragActive(true)
+          }}
+          onDragOver={event => {
+            if (!event.dataTransfer.types.includes('Files')) return
+            event.preventDefault()
+            event.dataTransfer.dropEffect = (!disabled && !running && !submitting) ? 'copy' : 'none'
+          }}
+          onDragLeave={event => {
+            if (!event.dataTransfer.types.includes('Files')) return
+            dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+            if (dragDepthRef.current === 0) setDragActive(false)
+          }}
+          onDrop={event => {
+            event.preventDefault()
+            dragDepthRef.current = 0
+            setDragActive(false)
+            if (!disabled && !running && !submitting && event.dataTransfer.files?.length) {
+              attachments.add(event.dataTransfer.files)
+            }
+          }}
+        >
+          {dragActive && (
+            <div className={codexCss.dropOverlay} aria-hidden="true">
+              <div className={codexCss.dropOverlayInner}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+                <span>松开即可上传文件（支持图片、文档、表格、代码等）</span>
+              </div>
+            </div>
+          )}
           <input ref={fileInput} type='file' multiple hidden aria-label='上传附件' onChange={event=>{if(event.target.files)attachments.add(event.target.files);event.target.value=''}}/>
           {queued.length > 0 && <div className={codexCss.queueList} aria-label="排队中的消息">
             {queued.map((text, index) => <div key={index} className={codexCss.queueItem}>
@@ -557,11 +597,13 @@ export function Composer({
                 }
                 const files = extractClipboardFiles(event.clipboardData)
                 const plainText = event.clipboardData?.getData('text/plain') ?? ''
+                const hasUriFiles = clipboardHasFileUriList(event.clipboardData)
                 if (files.length && !running) {
                   attachments.add(files)
-                  if (!plainText) event.preventDefault()
-                } else if (!files.length && !plainText && !running && !disabled && !submitting) {
-                  void readFallbackClipboardImages().then(fallbackFiles => {
+                  if (!plainText || hasUriFiles) event.preventDefault()
+                } else if (!files.length && (hasUriFiles || !plainText) && !running && !disabled && !submitting) {
+                  if (hasUriFiles) event.preventDefault()
+                  void readFallbackClipboardFiles().then(fallbackFiles => {
                     if (fallbackFiles.length) attachments.add(fallbackFiles)
                   })
                 }
@@ -583,24 +625,14 @@ export function Composer({
 
           <div className={codexCss.toolbar}>
             <div className={codexCss.leftControls}>
-              <button type='button' title='添加附件（支持拖拽、粘贴图片）' aria-label='添加附件' disabled={disabled||running||submitting} onClick={()=>fileInput.current?.click()} className={codexCss.micBtn}><IconPaperclipOutlineMedium size={16}/></button>
-
-              {/* Bare Plus Button matching media_1791084397752.png */}
-              <Tooltip label="添加上下文或文件 (@)" side="top" delayMs={500}>
+              <Tooltip label="上传文件（支持拖拽或粘贴图片/文件）" side="top" delayMs={400}>
                 <button
                   type="button"
-                  className={codexCss.barePlusBtn}
-                  title="添加上下文"
-                  onClick={() => {
-                    const next = draft ? `${draft} @` : '@'
-                    setDraft(next)
-                    setCaret(next.length)
-                    setMenuIndex(0)
-                    window.requestAnimationFrame(() => {
-                      inputRef.current?.focus()
-                      inputRef.current?.setSelectionRange(next.length, next.length)
-                    })
-                  }}
+                  className={codexCss.uploadPlusBtn}
+                  title="上传文件（支持拖拽、粘贴图片或文件）"
+                  aria-label="添加附件"
+                  disabled={disabled || running || submitting}
+                  onClick={() => fileInput.current?.click()}
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinejoin="round" strokeWidth="2.2" strokeLinecap="round">
                     <line x1="12" y1="5" x2="12" y2="19" />

@@ -1,6 +1,6 @@
 import type { SkillPackage } from './api.ts'
 
-export type StudioModuleIcon = 'ppt' | 'word' | 'markdown' | 'excel' | 'pdf' | 'app'
+export type StudioModuleIcon = 'ppt' | 'word' | 'markdown' | 'excel' | 'pdf' | 'database' | 'app'
 
 export interface StudioModuleCard {
   readonly key: string
@@ -11,7 +11,7 @@ export interface StudioModuleCard {
   readonly subtitle: string
   readonly formats: readonly string[]
   readonly icon: StudioModuleIcon
-  readonly accent: 'ppt' | 'word' | 'markdown' | 'excel' | 'pdf' | 'default'
+  readonly accent: 'ppt' | 'word' | 'markdown' | 'excel' | 'pdf' | 'database' | 'default'
   readonly ready: boolean
   readonly bundleDir: string
   readonly toolCount: number
@@ -88,6 +88,7 @@ function inferIconAndAccent(id: string): { icon: StudioModuleIcon; accent: Studi
   if (lower.includes('markdown') || lower === 'md' || lower.startsWith('md-')) return { icon: 'markdown', accent: 'markdown' }
   if (lower.includes('excel') || lower.includes('sheet') || lower.includes('xlsx')) return { icon: 'excel', accent: 'excel' }
   if (lower.includes('pdf')) return { icon: 'pdf', accent: 'pdf' }
+  if (lower.includes('db') || lower.includes('database') || lower.includes('sql')) return { icon: 'database', accent: 'database' }
   return { icon: 'app', accent: 'default' }
 }
 

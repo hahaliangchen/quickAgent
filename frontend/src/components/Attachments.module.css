@@ -1,0 +1,174 @@
+.rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 8px;
+}
+
+.imageChip {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  border-radius: 12px;
+  overflow: visible;
+  flex: none;
+}
+
+.imageThumb {
+  display: block;
+  width: 60px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 1px solid var(--codex-card-border, #d8dde6);
+  background: var(--codex-panel-bg, #f6f7f9);
+}
+
+:global(body[data-ds-dark-theme]) .imageThumb {
+  border-color: #3a3f4a;
+  background: #252830;
+}
+
+.fileChip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 170px;
+  max-width: 248px;
+  padding: 7px 28px 7px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--codex-card-border, #dfe3ea);
+  background: var(--codex-panel-bg, #f8f9fb);
+  color: var(--codex-text-primary, #18181b);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.fileChip:hover {
+  border-color: var(--codex-border-hover, #bfc7d4);
+  background: var(--codex-card-bg, #ffffff);
+}
+
+:global(body[data-ds-dark-theme]) .fileChip {
+  background: #252830;
+  border-color: #383c46;
+  color: #f4f4f5;
+}
+
+:global(body[data-ds-dark-theme]) .fileChip:hover {
+  background: #2c303a;
+  border-color: #4a505e;
+}
+
+.iconTile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  flex: none;
+  background: rgba(100, 116, 139, 0.1);
+}
+
+.iconTile[data-tone='pdf'] { background: rgba(239, 83, 80, 0.12); }
+.iconTile[data-tone='word'] { background: rgba(37, 99, 235, 0.12); }
+.iconTile[data-tone='excel'] { background: rgba(22, 163, 74, 0.13); }
+.iconTile[data-tone='ppt'] { background: rgba(234, 88, 12, 0.12); }
+.iconTile[data-tone='markdown'] { background: rgba(56, 189, 248, 0.14); }
+.iconTile[data-tone='database'] { background: rgba(245, 158, 11, 0.14); }
+.iconTile[data-tone='image'] { background: rgba(16, 185, 129, 0.13); }
+.iconTile[data-tone='code'] { background: rgba(99, 102, 241, 0.12); }
+.iconTile[data-tone='archive'] { background: rgba(217, 119, 6, 0.13); }
+.iconTile[data-tone='media'] { background: rgba(168, 85, 247, 0.13); }
+
+:global(body[data-ds-dark-theme]) .iconTile { background: rgba(148, 163, 184, 0.15); }
+:global(body[data-ds-dark-theme]) .iconTile[data-tone='pdf'] { background: rgba(239, 83, 80, 0.2); }
+:global(body[data-ds-dark-theme]) .iconTile[data-tone='word'] { background: rgba(59, 130, 246, 0.2); }
+:global(body[data-ds-dark-theme]) .iconTile[data-tone='excel'] { background: rgba(34, 197, 94, 0.2); }
+:global(body[data-ds-dark-theme]) .iconTile[data-tone='ppt'] { background: rgba(249, 115, 22, 0.2); }
+:global(body[data-ds-dark-theme]) .iconTile[data-tone='markdown'] { background: rgba(56, 189, 248, 0.2); }
+:global(body[data-ds-dark-theme]) .iconTile[data-tone='database'] { background: rgba(245, 158, 11, 0.22); }
+:global(body[data-ds-dark-theme]) .iconTile[data-tone='code'] { background: rgba(129, 140, 248, 0.2); }
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.name {
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+}
+
+.sub {
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--codex-text-muted, #6b7280);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:global(body[data-ds-dark-theme]) .sub {
+  color: #9ca3af;
+}
+
+.removeBtn {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--codex-text-muted, #6b7280);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.removeBtn:hover:not(:disabled) {
+  background: rgba(15, 23, 42, 0.1);
+  color: var(--codex-text-primary, #111827);
+}
+
+:global(body[data-ds-dark-theme]) .removeBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.imageRemoveBtn {
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  background: rgba(17, 24, 39, 0.78);
+  color: #ffffff;
+  border: 1.5px solid var(--codex-card-bg, #ffffff);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.22);
+}
+
+.imageRemoveBtn:hover:not(:disabled) {
+  background: #dc2626;
+  color: #ffffff;
+}
+
+:global(body[data-ds-dark-theme]) .imageRemoveBtn {
+  border-color: #1e2025;
+}

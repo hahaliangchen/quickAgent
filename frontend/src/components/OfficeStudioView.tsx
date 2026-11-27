@@ -23,69 +23,11 @@ import { buildStudioCatalog, type StudioModuleCard, type StudioModuleIcon } from
 import type { StudioAskAiRequest, StudioViewContext } from '../plugins/protocol.ts'
 import { usePluginPages } from '../plugins/react.tsx'
 import { PluginPageHost } from './PluginPageHost.tsx'
+import { StudioModuleIconImg } from './RichFileIcon.tsx'
 import css from './OfficeStudioView.module.css'
 
-const ICON_STROKE = {
-  width: 22,
-  height: 22,
-  viewBox: '0 0 24 24',
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.9,
-  strokeLinecap: 'round',
-  strokeLinejoin: 'round',
-} as const
-
-function ModuleGlyph({ kind, size = 22 }: { kind: StudioModuleIcon; size?: number }) {
-  const props = { ...ICON_STROKE, width: size, height: size, 'aria-hidden': true as const }
-  switch (kind) {
-    case 'ppt':
-      return (
-        <svg {...props}>
-          <rect x="3" y="4" width="18" height="12" rx="2" />
-          <path d="M8 20h8M12 16v4" />
-          <path d="M7.5 9h4M7.5 12h7.5" />
-        </svg>
-      )
-    case 'word':
-      return (
-        <svg {...props}>
-          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
-          <path d="M14 3v5h5M8.5 13h7M8.5 16.5h5" />
-        </svg>
-      )
-    case 'markdown':
-      return (
-        <svg {...props}>
-          <rect x="3" y="5" width="18" height="14" rx="2" />
-          <path d="M6.5 15V9l2.5 3 2.5-3v6" />
-          <path d="M16 9v6m0 0-2-2m2 2 2-2" />
-        </svg>
-      )
-    case 'excel':
-      return (
-        <svg {...props}>
-          <rect x="3.5" y="4" width="17" height="16" rx="2" />
-          <path d="M3.5 9.5h17M3.5 14.5h17M9.5 4v16" />
-        </svg>
-      )
-    case 'pdf':
-      return (
-        <svg {...props}>
-          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
-          <path d="M14 3v5h5" />
-          <path d="M8.5 14.5h2a1.25 1.25 0 0 0 0-2.5h-2v4.5" />
-          <path d="M13.5 12h1.2a1.8 1.8 0 0 1 0 3.6h-1.2z" />
-        </svg>
-      )
-    default:
-      return (
-        <svg {...props}>
-          <rect x="4" y="4" width="16" height="16" rx="3" />
-          <path d="M8 9h8M8 13h8M8 17h5" />
-        </svg>
-      )
-  }
+function ModuleGlyph({ kind, size = 26 }: { kind: StudioModuleIcon; size?: number }) {
+  return <StudioModuleIconImg kind={kind} size={size} />
 }
 
 function accentClass(accent: StudioModuleCard['accent']): string | undefined {
@@ -95,6 +37,7 @@ function accentClass(accent: StudioModuleCard['accent']): string | undefined {
     case 'markdown': return css.accentMarkdown
     case 'excel': return css.accentExcel
     case 'pdf': return css.accentPdf
+    case 'database': return css.accentDatabase
     default: return css.accentDefault
   }
 }
