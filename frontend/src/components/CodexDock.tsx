@@ -1,5 +1,6 @@
 import clsx from 'clsx'
 import css from './CodexDock.module.css'
+import { ParchmentQuillIcon } from './ParchmentQuillIcon.tsx'
 
 /** The rail's icons: a 2px round stroke on a 24px grid, like the workbench's. */
 const STROKE = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { display: 'block' } } as const
@@ -49,10 +50,7 @@ export function CodexDock({
           aria-label="流程与蓝图工作台"
           onClick={() => onSelectTab?.('skills')}
         >
-          <svg {...STROKE} aria-hidden="true">
-            <rect x="4" y="4" width="6.5" height="6.5" rx="2" /><rect x="13.5" y="4" width="6.5" height="6.5" rx="2" />
-            <rect x="4" y="13.5" width="6.5" height="6.5" rx="2" /><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="2" />
-          </svg>
+          <ParchmentQuillIcon size={20} variant="line" />
         </button>
 
         <button

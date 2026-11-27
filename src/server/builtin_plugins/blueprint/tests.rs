@@ -681,3 +681,63 @@ fn observer_session_meta_resolves_watched_task_only_for_observer_kind() {
         None
     );
 }
+
+#[test]
+fn observer_inbox_submit_dedup_status_and_delete() {
+    let root = Workspace::new();
+    let store = root.open();
+    let first = store
+        .submit_observer_note(ObserverSubmissionCreate {
+            id: None,
+            source_task_id: "task-battle-1".into(),
+            source_task_title: "部署 201 验证端口".into(),
+            observer_task_id: Some("obs-1".into()),
+            source_seq: Some(42),
+            title: "201 端口 3002 升级避坑".into(),
+            trigger: "升级 201 QuickAgent 时".into(),
+            summary: "必须同步更新 builtin_plugins 清单且不碰 3001".into(),
+            anchor_files: vec![r"src\server\skill_packages.rs".into(), "src/server/skill_packages.rs".into()],
+            environment: vec!["201 :3002 为验证实例，:3001 为生产".into()],
+            pitfalls: vec!["不要漏更新 resources/src/server/builtin_plugins".into()],
+            verify_commands: vec!["curl -s http://127.0.0.1:3002/agent/skill-packages".into()],
+        })
+        .unwrap();
+    assert_eq!(first.status, ObserverSubmissionStatus::Pending);
+    assert_eq!(first.anchor_files, vec!["src/server/skill_packages.rs"]);
+
+    // Duplicate (source_task_id, source_seq) updates in place instead of creating duplicates.
+    let updated = store
+        .submit_observer_note(ObserverSubmissionCreate {
+            id: None,
+            source_task_id: "task-battle-1".into(),
+            source_task_title: "部署 201 验证端口".into(),
+            observer_task_id: Some("obs-1".into()),
+            source_seq: Some(42),
+            title: "201 端口 3002 升级完整避坑".into(),
+            trigger: "升级 201 QuickAgent 时".into(),
+            summary: "同步清单 + 校验 glibc loader".into(),
+            anchor_files: vec!["src/server/skill_packages.rs".into()],
+            environment: vec![],
+            pitfalls: vec![],
+            verify_commands: vec![],
+        })
+        .unwrap();
+    assert_eq!(updated.id, first.id);
+    assert_eq!(updated.title, "201 端口 3002 升级完整避坑");
+    assert_eq!(store.inbox().unwrap().len(), 1);
+
+    let merged = store
+        .update_observer_note_status(
+            &first.id,
+            ObserverSubmissionPatch {
+                status: ObserverSubmissionStatus::Merged,
+                merged_playbook_id: Some("deploy-201-3002".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(merged.status, ObserverSubmissionStatus::Merged);
+    assert_eq!(merged.merged_playbook_id.as_deref(), Some("deploy-201-3002"));
+
+    store.delete_observer_note(&first.id).unwrap();
+    assert!(store.inbox().unwrap().is_empty());
+}

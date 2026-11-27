@@ -21,6 +21,17 @@ export interface ObserverSuggestion {
   readonly sourceSeq?: number | undefined
 }
 
+export interface ObserverBlueprintNote {
+  readonly title: string
+  readonly trigger: string
+  readonly summary: string
+  readonly anchor_files: string[]
+  readonly environment: string[]
+  readonly pitfalls: string[]
+  readonly verify_commands: string[]
+  readonly sourceSeq?: number | undefined
+}
+
 export interface ObserverTrigger {
   readonly kind: 'manual' | 'error' | 'turn_failed' | 'plan_phase' | 'turn_completed' | 'stalled_tool'
   readonly label: string
@@ -362,6 +373,58 @@ export function buildObserverUserChatPrompt(input: {
   return input.userText.trim()
 }
 
+export function buildObserverBlueprintReportPrompt(): string {
+  return '请复盘主会话截至目前的实战进展、关键改动的锚点文件、环境约束（端口/目录/服务隔离）、踩过的坑与有效验收命令，提炼成一份精炼的战地蓝图呈报，并在回复末尾附 ```blueprint-note``` JSON 代码块呈报给架构蓝图工作台。'
+}
+
+function toStringList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      const t = item.trim()
+      if (t && !out.includes(t)) out.push(t)
+    }
+  }
+  return out
+}
+
+/**
+ * Extract the latest `blueprint-note` JSON block from an Observer assistant message.
+ */
+export function parseObserverBlueprintNote(
+  assistantText: string,
+  sourceSeq?: number,
+): ObserverBlueprintNote | null {
+  const regex = /```blueprint-note\s*([\s\S]*?)```/gu
+  let lastParsed: Record<string, unknown> | null = null
+  for (const match of assistantText.matchAll(regex)) {
+    const body = match[1]?.trim()
+    if (!body || !body.startsWith('{')) continue
+    try {
+      const rec = asRecord(JSON.parse(body))
+      if (rec && typeof rec.title === 'string' && rec.title.trim()) {
+        lastParsed = rec
+      }
+    } catch {
+      // Skip malformed blocks.
+    }
+  }
+  if (!lastParsed) return null
+  const title = typeof lastParsed.title === 'string' ? lastParsed.title.trim() : ''
+  if (!title) return null
+  return {
+    title,
+    trigger: typeof lastParsed.trigger === 'string' ? lastParsed.trigger.trim() : '',
+    summary: typeof lastParsed.summary === 'string' ? lastParsed.summary.trim() : '',
+    anchor_files: toStringList(lastParsed.anchor_files),
+    environment: toStringList(lastParsed.environment),
+    pitfalls: toStringList(lastParsed.pitfalls),
+    verify_commands: toStringList(lastParsed.verify_commands),
+    sourceSeq,
+  }
+}
+
 function normalizeSeverity(raw: unknown): ObserverSeverity {
   if (raw === 'blocker' || raw === 'error' || raw === 'high') return 'blocker'
   if (raw === 'warn' || raw === 'warning' || raw === 'medium') return 'warn'
@@ -529,10 +592,16 @@ export function stripObserverUserPromptMeta(raw: string): string {
  * so the user sees clean prose + our styled confirmation push card (not a 1-line JSON dump).
  */
 export function stripObserverSuggestionFence(raw: string): string {
-  const stripped = raw
+  const note = parseObserverBlueprintNote(raw)
+  let stripped = raw
     .replace(/\n*```observer-suggestion\s*[\s\S]*?```\s*/gu, '\n')
+    .replace(/\n*```blueprint-note\s*[\s\S]*?```\s*/gu, '\n')
     .replace(/\n*```json\s*\{[\s\S]*?"should_interject"[\s\S]*?\}\s*```\s*/gu, '\n')
     .trim()
+  if (note) {
+    const line = `> 已呈报战地蓝图线索：**${note.title}**`
+    stripped = stripped ? `${stripped}\n\n${line}` : line
+  }
   return stripped
 }
 

@@ -50,6 +50,25 @@ export type PlaybookView = {
   playbook: Playbook
   status: PlaybookStatus
 }
+export type ObserverSubmissionStatus = 'pending' | 'merged' | 'dismissed'
+export type ObserverSubmission = {
+  id: string
+  source_task_id: string
+  source_task_title: string
+  observer_task_id?: string | null
+  source_seq?: number | null
+  title: string
+  trigger: string
+  summary: string
+  anchor_files: string[]
+  environment: string[]
+  pitfalls: string[]
+  verify_commands: string[]
+  status: ObserverSubmissionStatus
+  merged_playbook_id?: string | null
+  created_at: string
+  updated_at: string
+}
 export type Manifest = { version: number; project_kind: ProjectKind; last_synced_commit: string | null; updated_at: string; graphs: GraphSummary[]; playbooks?: PlaybookSummary[] }
 export type Anchor = { status: 'ok' | 'drifted' | 'missing'; suggested_line?: number }
 export type EntityStatus = { status: Anchor['status']; ports: Record<string, Anchor> }
@@ -71,7 +90,7 @@ export type Verify = {
   entities: Record<string, EntityStatus>
   playbooks?: Record<string, PlaybookStatus>
 }
-export type BlueprintState = { exists: boolean; manifest: Manifest | null; graphs: GraphSummary[]; playbooks?: PlaybookSummary[]; entities: Entity[]; references: Record<string, string[]>; verify: Verify }
+export type BlueprintState = { exists: boolean; manifest: Manifest | null; graphs: GraphSummary[]; playbooks?: PlaybookSummary[]; inbox?: ObserverSubmission[]; entities: Entity[]; references: Record<string, string[]>; verify: Verify }
 export type GraphView = { graph: Graph; entities: Entity[]; statuses: Record<string, EntityStatus> }
 export type Reach = { graph_id: string; entity_id: string; port_id: string; depth: number; edge: GraphEdge }
 export type Impact = { matches: { entity: Entity; graphs: string[] }[]; graphs: string[]; upstream: Reach[]; downstream: Reach[]; invariants: { text: string; severity: GraphEdge['severity'] }[]; test_guards: Entity[] }
@@ -83,6 +102,7 @@ export type BlueprintProjectStatus = {
   project_kind: ProjectKind | null
   graph_count: number
   playbook_count?: number
+  pending_inbox?: number
   entity_count: number
   updated_at: string | null
   last_synced_commit: string | null

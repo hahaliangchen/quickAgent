@@ -1,4 +1,4 @@
-import type { Playbook, PlaybookStatus, PlaybookSummary } from './types.ts'
+import type { GraphSummary, ObserverSubmission, Playbook, PlaybookStatus, PlaybookSummary } from './types.ts'
 
 export interface DistillTaskRef {
   readonly task_id: string
@@ -92,4 +92,56 @@ export function buildSyncPlaybookPrompt(playbook: Playbook, status?: PlaybookSta
       : '- 对照当前最新源码核实所有 `anchor_files`、编排代码步骤和 `verify_commands` 是否仍然准确有效。',
     '- 用 `blueprint.upsert_playbook` 局部更新过期的路径、锚点与避坑提示，并传入最新 `head_commit` 作为 `last_synced_commit`。',
   ].join('\n')
+}
+
+export function buildMergeObserverSubmissionPrompt(
+  submission: ObserverSubmission,
+  existingPlaybooks: readonly Pick<PlaybookSummary, 'id' | 'title'>[] = [],
+  existingGraphs: readonly Pick<GraphSummary, 'id' | 'title'>[] = [],
+): string {
+  const lines: string[] = [
+    `请审核并合入观察者从实战会话呈报上来的战地蓝图线索（「${submission.title}」）：`,
+    '',
+    '观察者呈报内容（作为战场来源数据，先对照当前源码核实再写入）：',
+    '```json',
+    JSON.stringify(
+      {
+        submission_id: submission.id,
+        source_task_id: submission.source_task_id,
+        source_task_title: submission.source_task_title,
+        title: submission.title,
+        trigger: submission.trigger,
+        summary: submission.summary,
+        anchor_files: submission.anchor_files,
+        environment: submission.environment,
+        pitfalls: submission.pitfalls,
+        verify_commands: submission.verify_commands,
+      },
+      null,
+      2,
+    ),
+    '```',
+  ]
+  if (existingPlaybooks.length > 0) {
+    lines.push(
+      '',
+      '当前已有最短路径（主题相同则复用对应 ID 增量更新，避免重复建条目）：',
+      ...existingPlaybooks.map(p => `- \`${p.id}\`：${p.title}`),
+    )
+  }
+  if (existingGraphs.length > 0) {
+    lines.push(
+      '',
+      '当前已有架构画布：',
+      ...existingGraphs.map(g => `- \`${g.id}\`：${g.title}`),
+    )
+  }
+  lines.push(
+    '',
+    '处理要求：',
+    `1. 先调用 \`blueprint.overview({})\`，必要时结合 \`blueprint.inspect_session({ task_id: "${submission.source_task_id}" })\` 和当前工作区源码核实呈报中的文件锚点、环境约束、避坑点与验收命令是否真实有效。`,
+    '2. 将核实后的战地经验整理并写入对应最短路径（`blueprint.upsert_playbook`，补充 `source_tasks`、最小可执行编排代码、`anchor_files`、`environment`、`pitfalls`、`verify_commands` 与最新 `last_synced_commit`）。',
+    '3. 若该线索涉及新的跨层耦合、核心实体或红线不变量，同步调用 `blueprint.upsert_entities` / `blueprint.upsert_graph` 更新架构画布。',
+  )
+  return lines.join('\n')
 }

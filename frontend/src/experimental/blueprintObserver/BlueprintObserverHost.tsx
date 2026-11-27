@@ -21,6 +21,7 @@ import { startHorizontalResize } from '../../components/dragResize.ts'
 import { PREFILL_EVENT, type PrefillDetail } from '../../components/RewindControl.tsx'
 import { ScrollToBottom, transcriptScroller, useScrollToBottom } from '../../components/ScrollToBottom.tsx'
 import { Icon } from '../../components/WorkbenchIcon.tsx'
+import { ParchmentQuillIcon } from '../../components/ParchmentQuillIcon.tsx'
 import { ModelSelect } from '../../dsh/model-selection/ModelSelect.tsx'
 import { randomId } from '../../randomId.ts'
 import { taskTitle } from '../../sidebarModel.ts'
@@ -29,6 +30,7 @@ import {
   OBSERVER_COOLDOWN_MS,
   OBSERVER_STALL_THRESHOLD_MS,
   OBSERVER_TITLE_PREFIX,
+  buildObserverBlueprintReportPrompt,
   buildObserverInspectPrompt,
   buildObserverUserChatPrompt,
   detectObserverTrigger,
@@ -38,6 +40,7 @@ import {
   isObserverOwnTask,
   loadDismissedSuggestionIds,
   loadObserverPrefs,
+  parseObserverBlueprintNote,
   parseObserverSuggestion,
   sanitizeObserverEventsForDisplay,
   saveDismissedSuggestionIds,
@@ -228,13 +231,49 @@ function BlueprintObserverInner({
   useEffect(() => {
     if (!latestAssistant || observerRunning) return
     const parsed = parseObserverSuggestion(latestAssistant.text, latestAssistant.seq)
-    if (!parsed || !parsed.shouldInterject) return
-    setActiveSuggestion(prev => {
-      if (prev?.id === parsed.id) return prev
-      setDecisionText(parsed.interject)
-      return parsed
+    if (parsed && parsed.shouldInterject) {
+      setActiveSuggestion(prev => {
+        if (prev?.id === parsed.id) return prev
+        setDecisionText(parsed.interject)
+        return parsed
+      })
+    }
+    const note = parseObserverBlueprintNote(latestAssistant.text, latestAssistant.seq)
+    if (!note || !workspaceRoot) return
+    const submitKey = `${watchedTaskId}:${latestAssistant.seq}`
+    const storageKey = 'blueprint_observer_submitted_v1'
+    try {
+      const raw = localStorage.getItem(storageKey)
+      const seen = new Set<string>(raw ? (JSON.parse(raw) as string[]) : [])
+      if (seen.has(submitKey)) return
+      seen.add(submitKey)
+      localStorage.setItem(storageKey, JSON.stringify([...seen].slice(-200)))
+    } catch {
+      // Proceed best-effort; backend also deduplicates by (source_task_id, source_seq).
+    }
+    const params = new URLSearchParams({ workspace_root: workspaceRoot })
+    void fetch(`/api/blueprint/inbox?${params}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_task_id: watchedTaskId,
+        source_task_title: watchedTitle,
+        observer_task_id: observerTaskId ?? null,
+        source_seq: latestAssistant.seq,
+        title: note.title,
+        trigger: note.trigger,
+        summary: note.summary,
+        anchor_files: note.anchor_files,
+        environment: note.environment,
+        pitfalls: note.pitfalls,
+        verify_commands: note.verify_commands,
+      }),
     })
-  }, [latestAssistant, observerRunning])
+      .then(res => {
+        if (res.ok) showToast(`已呈报蓝图线索：${note.title}`)
+      })
+      .catch(() => {})
+  }, [latestAssistant, observerRunning, observerTaskId, showToast, watchedTaskId, watchedTitle, workspaceRoot])
 
   const providerId = prefs.model?.providerId ?? settings?.orchestrator_provider ?? ''
   const modelId = prefs.model?.modelId ?? settings?.orchestrator_model ?? ''
@@ -649,6 +688,7 @@ function BlueprintObserverInner({
 
           <header className={css.drawerHeader}>
             <div className={css.headerTitle}>
+              <ParchmentQuillIcon size={16} />
               <span className={clsx(css.eyeDot, prefs.enabled && css.eyeDotLive, observerRunning && css.eyeDotPulse)} />
               <strong>蓝图观察者</strong>
               <span className={css.readonlyTag}>只读 · 看 DB</span>
@@ -702,6 +742,38 @@ function BlueprintObserverInner({
                 title="让观察者立刻读取 SQLite 数据库检查当前会话全局进展"
               >
                 {observerRunning ? '正在查库分析…' : '立即巡检 DB'}
+              </button>
+              <button
+                type="button"
+                className={css.subtleBtn}
+                disabled={sending || observerRunning || !workspaceRoot}
+                onClick={() => {
+                  if (!prefs.enabled) updatePrefs({ enabled: true })
+                  void (async () => {
+                    setSending(true)
+                    setError('')
+                    setLastTriggerLabel('整理战地总结并呈报蓝图')
+                    try {
+                      const id = await createOrReuseObserverSession()
+                      await api.prompt(id, buildObserverBlueprintReportPrompt(), {
+                        permission_mode: 'read_only',
+                        requestId: randomId(),
+                        ...(modelId ? { provider: providerId, model: modelId } : {}),
+                        ...(shownEffort ? { reasoning_effort: shownEffort } : {}),
+                        fast_mode: shownFast,
+                      })
+                      if (id === observerTaskId) observerSession.reload()
+                      else setObserverTaskId(id)
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : String(err))
+                    } finally {
+                      setSending(false)
+                    }
+                  })()
+                }}
+                title="让观察者总结当前会话的实战经验、坑点与验收命令，自动呈报到蓝图工作台待审收件箱"
+              >
+                呈报蓝图
               </button>
               <label className={css.autoCheck} title="主会话报错、中断、计划阶段变更、本轮结束或运行中工具静默卡死超 3 分钟时自动巡检（单次唤醒，绝不循环）">
                 <input

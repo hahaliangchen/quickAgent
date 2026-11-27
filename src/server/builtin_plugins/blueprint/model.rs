@@ -272,3 +272,76 @@ pub(super) struct VerifyReport {
     pub entities: BTreeMap<String, EntityStatus>,
     pub playbooks: BTreeMap<String, PlaybookStatus>,
 }
+
+kind!(ObserverSubmissionStatus, Pending, Merged, Dismissed);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ObserverSubmission {
+    pub id: String,
+    pub source_task_id: String,
+    #[serde(default)]
+    pub source_task_title: String,
+    #[serde(default)]
+    pub observer_task_id: Option<String>,
+    #[serde(default)]
+    pub source_seq: Option<i64>,
+    pub title: String,
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub anchor_files: Vec<String>,
+    #[serde(default)]
+    pub environment: Vec<String>,
+    #[serde(default)]
+    pub pitfalls: Vec<String>,
+    #[serde(default)]
+    pub verify_commands: Vec<String>,
+    #[serde(default)]
+    pub status: ObserverSubmissionStatus,
+    #[serde(default)]
+    pub merged_playbook_id: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(super) struct ObserverInboxStore {
+    #[serde(default)]
+    pub submissions: Vec<ObserverSubmission>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ObserverSubmissionCreate {
+    pub id: Option<String>,
+    pub source_task_id: String,
+    #[serde(default)]
+    pub source_task_title: String,
+    #[serde(default)]
+    pub observer_task_id: Option<String>,
+    #[serde(default)]
+    pub source_seq: Option<i64>,
+    pub title: String,
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub anchor_files: Vec<String>,
+    #[serde(default)]
+    pub environment: Vec<String>,
+    #[serde(default)]
+    pub pitfalls: Vec<String>,
+    #[serde(default)]
+    pub verify_commands: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ObserverSubmissionPatch {
+    pub status: ObserverSubmissionStatus,
+    #[serde(default)]
+    pub merged_playbook_id: Option<String>,
+}

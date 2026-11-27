@@ -431,7 +431,11 @@ pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String 
 ```observer-suggestion\n\
 {{\"should_interject\": false, \"action\": \"interject\", \"severity\": \"tip\", \"title\": \"\", \"reason\": \"当前进展正常\", \"interject\": \"\"}}\n\
 ```\n\
-（`action` 可选 `\"interject\"` | `\"stop\"` | `\"stop_and_continue\"`；`severity` 可选 `\"tip\"` | `\"warn\"` | `\"blocker\"`；`interject` 为用户确认后发送给主会话的精炼指令。）\n"
+（`action` 可选 `\"interject\"` | `\"stop\"` | `\"stop_and_continue\"`；`severity` 可选 `\"tip\"` | `\"warn\"` | `\"blocker\"`；`interject` 为用户确认后发送给主会话的精炼指令。）\n\
+- **战地蓝图呈报（可选，有实质沉淀时才附）**：当主会话完成一轮实质改动、踩过值得记录的真实环境/架构坑、或用户要求呈报蓝图时，额外在末尾附一个 `blueprint-note` JSON 代码块，系统会自动呈报到当前项目的「架构蓝图 → 观察者呈报」收件箱供蓝图页审阅合入；普通进行中巡检若无新沉淀则不要附此块：\n\
+```blueprint-note\n\
+{{\"title\": \"简明主题\", \"trigger\": \"何时需要参考这条经验\", \"summary\": \"战地结论与架构/流程要点\", \"anchor_files\": [\"相对路径\"], \"environment\": [\"端口/路径/服务隔离约定\"], \"pitfalls\": [\"踩过的坑与红线\"], \"verify_commands\": [\"有效验收命令\"]}}\n\
+```\n"
         ));
     }
     text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");

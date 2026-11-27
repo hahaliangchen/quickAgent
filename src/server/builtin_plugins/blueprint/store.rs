@@ -551,6 +551,135 @@ impl Store {
             &graph,
         )
     }
+    pub fn inbox(&self) -> Result<Vec<ObserverSubmission>> {
+        let Some(dir) = self.dir(false)? else {
+            return Ok(Vec::new());
+        };
+        let mut store: ObserverInboxStore = read(&dir, "inbox.json")?.unwrap_or_default();
+        store
+            .submissions
+            .sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+        Ok(store.submissions)
+    }
+    pub fn submit_observer_note(
+        &self,
+        input: ObserverSubmissionCreate,
+    ) -> Result<ObserverSubmission> {
+        let title = input.title.trim().to_owned();
+        ensure!(!title.is_empty(), "submission title is required");
+        let source_task_id = input.source_task_id.trim().to_owned();
+        ensure!(!source_task_id.is_empty(), "source_task_id is required");
+        let id = match input.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(id) => {
+                graph_id(id)?;
+                id.to_owned()
+            }
+            None => format!(
+                "obs-{}",
+                &crate::server::agent_service::uuid_like()[..8]
+            ),
+        };
+        let clean_list = |items: Vec<String>, posix_paths: bool| -> Vec<String> {
+            let mut out = Vec::new();
+            for item in items {
+                let mut trimmed = item.trim().to_owned();
+                if posix_paths {
+                    trimmed = trimmed.replace('\\', "/");
+                }
+                if !trimmed.is_empty() && !out.contains(&trimmed) {
+                    out.push(trimmed);
+                }
+            }
+            out
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let dir = self.dir(true)?.unwrap();
+        let mut store: ObserverInboxStore = read(&dir, "inbox.json")?.unwrap_or_default();
+        if let Some(existing) = store.submissions.iter_mut().find(|item| {
+            item.id == id
+                || (input.source_seq.is_some()
+                    && item.source_task_id == source_task_id
+                    && item.source_seq == input.source_seq)
+        }) {
+            existing.title = title;
+            existing.trigger = input.trigger.trim().to_owned();
+            existing.summary = input.summary.trim().to_owned();
+            existing.anchor_files = clean_list(input.anchor_files, true);
+            existing.environment = clean_list(input.environment, false);
+            existing.pitfalls = clean_list(input.pitfalls, false);
+            existing.verify_commands = clean_list(input.verify_commands, false);
+            if !input.source_task_title.trim().is_empty() {
+                existing.source_task_title = input.source_task_title.trim().to_owned();
+            }
+            if input.observer_task_id.is_some() {
+                existing.observer_task_id = input.observer_task_id;
+            }
+            existing.updated_at = now;
+            let updated = existing.clone();
+            write(&dir, "inbox.json", &store)?;
+            return Ok(updated);
+        }
+        let submission = ObserverSubmission {
+            id,
+            source_task_id,
+            source_task_title: input.source_task_title.trim().to_owned(),
+            observer_task_id: input.observer_task_id,
+            source_seq: input.source_seq,
+            title,
+            trigger: input.trigger.trim().to_owned(),
+            summary: input.summary.trim().to_owned(),
+            anchor_files: clean_list(input.anchor_files, true),
+            environment: clean_list(input.environment, false),
+            pitfalls: clean_list(input.pitfalls, false),
+            verify_commands: clean_list(input.verify_commands, false),
+            status: ObserverSubmissionStatus::Pending,
+            merged_playbook_id: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        store.submissions.push(submission.clone());
+        store
+            .submissions
+            .sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+        store.submissions.truncate(80);
+        write(&dir, "inbox.json", &store)?;
+        Ok(submission)
+    }
+    pub fn update_observer_note_status(
+        &self,
+        id: &str,
+        patch: ObserverSubmissionPatch,
+    ) -> Result<ObserverSubmission> {
+        graph_id(id)?;
+        let dir = self.dir(false)?.context("blueprint inbox not found")?;
+        let mut store: ObserverInboxStore = read(&dir, "inbox.json")?.unwrap_or_default();
+        let entry = store
+            .submissions
+            .iter_mut()
+            .find(|item| item.id == id)
+            .context("observer submission not found")?;
+        entry.status = patch.status;
+        if let Some(pb) = patch.merged_playbook_id {
+            entry.merged_playbook_id = Some(pb);
+        }
+        entry.updated_at = chrono::Utc::now().to_rfc3339();
+        let updated = entry.clone();
+        write(&dir, "inbox.json", &store)?;
+        Ok(updated)
+    }
+    pub fn delete_observer_note(&self, id: &str) -> Result<()> {
+        graph_id(id)?;
+        let Some(dir) = self.dir(false)? else {
+            return Ok(());
+        };
+        let mut store: ObserverInboxStore = read(&dir, "inbox.json")?.unwrap_or_default();
+        let before = store.submissions.len();
+        store.submissions.retain(|item| item.id != id);
+        if store.submissions.len() != before {
+            write(&dir, "inbox.json", &store)?;
+        }
+        Ok(())
+    }
 }
 fn edge_ports(all: &BTreeMap<String, Entity>, edge: &BlueprintEdge) -> bool {
     all.get(&edge.source_entity).is_some_and(|e| {

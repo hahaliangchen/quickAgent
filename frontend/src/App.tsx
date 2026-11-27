@@ -12,6 +12,7 @@ import { CodeChatDock } from './components/CodeChatDock.tsx'
 import { type AiFocus, type RemoteTool, remoteTools, SshContext } from './builtin_plugins/ssh/api.ts'
 import { announceDraftReady } from './builtin_plugins/daily-report/api.ts'
 import { CodexDock } from './components/CodexDock.tsx'
+import { ParchmentQuillIcon } from './components/ParchmentQuillIcon.tsx'
 import { CodexRightPanel } from './components/CodexRightPanel.tsx'
 import { SettingsModal } from './components/SettingsModal.tsx'
 import { WorkspaceModal } from './components/WorkspaceModal.tsx'
@@ -462,7 +463,8 @@ export function App({ renderSlot }: AgentSlotProps) {
                     className={css.workbenchTab}
                     onClick={() => setWorkbenchMode('blueprint')}
                   >
-                    架构蓝图与最短路径
+                    <ParchmentQuillIcon size={14} variant="line" />
+                    <span>架构蓝图与最短路径</span>
                   </button>
                 </div>
                 <span className={css.workbenchHint}>

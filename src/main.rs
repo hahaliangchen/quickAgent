@@ -64,9 +64,14 @@ async fn run_server(listener: TcpListener, workspace: Arc<Workspace>) -> anyhow:
         addr,
         process_sandbox::local_http_guard,
     ));
-    axum::serve(
+    ai_proxy::serve_with_bounded_shutdown(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        app,
+        ai_proxy::shutdown_signal(),
+        std::time::Duration::from_secs(3),
+        || {
+            info!("Shutdown signal received; draining MCP HTTP connections");
+        },
     )
     .await?;
     Ok(())
@@ -305,30 +310,37 @@ async fn async_main(isolated: Option<IsolatedOptions>) -> anyhow::Result<()> {
         });
         return ai_proxy::run(listener, &ai_config_path, workspace).await;
     }
-    {
+    let agent_handle = {
         let agent_bind = env::var("AGENT_BIND").unwrap_or_else(|_| "127.0.0.1:41201".to_string());
         match TcpListener::bind(&agent_bind).await {
             Ok(listener) => {
                 info!(path = %ai_config_path.display(), bind = %agent_bind, "Agent service starting");
                 let workspace_for_proxy = workspace.clone();
-                tokio::spawn(async move {
+                Some(tokio::spawn(async move {
                     if let Err(e) =
                         ai_proxy::run(listener, &ai_config_path, workspace_for_proxy).await
                     {
                         error!(%e, "Agent service exited with error");
                     }
-                });
+                }))
             }
-            Err(e) => warn!(%e, bind = %agent_bind, "could not start Agent service"),
+            Err(e) => {
+                warn!(%e, bind = %agent_bind, "could not start Agent service");
+                None
+            }
         }
-    }
+    };
 
     let bind = env::var("MCP_BIND").unwrap_or_else(|_| "127.0.0.1:41200".to_string());
     let addr: SocketAddr = bind.parse()?;
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, mode = "http", "listening");
 
-    run_server(listener, workspace).await
+    let mcp_result = run_server(listener, workspace).await;
+    if let Some(handle) = agent_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(4), handle).await;
+    }
+    mcp_result
 }
 
 #[cfg(test)]
@@ -403,5 +415,64 @@ mod isolated_mode_tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn bounded_shutdown_runs_hook_and_exits_promptly_with_hung_stream() {
+        use axum::routing::get;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::AsyncWriteExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let hook_ran = Arc::new(AtomicBool::new(false));
+        let hook_flag = hook_ran.clone();
+
+        let app = Router::new().route(
+            "/hang",
+            get(|| async {
+                std::future::pending::<()>().await;
+                "never"
+            }),
+        );
+
+        let server = tokio::spawn(async move {
+            ai_proxy::serve_with_bounded_shutdown(
+                listener,
+                app,
+                async move {
+                    let _ = rx.await;
+                },
+                std::time::Duration::from_millis(120),
+                move || {
+                    hook_flag.store(true, Ordering::SeqCst);
+                },
+            )
+            .await
+        });
+
+        // Open a real TCP connection holding an active hung HTTP request.
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /hang HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let started = std::time::Instant::now();
+        let _ = tx.send(());
+        let res = tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("server must not hang past bounded drain timeout")
+            .unwrap();
+        assert!(res.is_ok());
+        assert!(hook_ran.load(Ordering::SeqCst));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "shutdown took too long: {:?}",
+            started.elapsed()
+        );
+        drop(client);
     }
 }

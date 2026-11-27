@@ -1807,18 +1807,65 @@ pub async fn run(
     ));
     info!(%addr, "Agent service starting");
 
-    let served = axum::serve(
+    let served = serve_with_bounded_shutdown(
         listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app,
+        shutdown_signal(),
+        std::time::Duration::from_secs(3),
+        || {
+            info!("Shutdown signal received; stopping plugin runtime and draining Agent HTTP connections");
+            let _ = runtime.shutdown();
+        },
     )
-    .with_graceful_shutdown(shutdown_signal())
     .await;
-    runtime.shutdown()?;
+    let _ = runtime.shutdown();
     served?;
     Ok(())
 }
 
-async fn shutdown_signal() {
+/// Serve an Axum router with graceful shutdown that runs `on_shutdown` immediately
+/// when `signal` fires (before waiting for active sockets) and caps connection drain
+/// at `drain_timeout` so long-lived SSE / WebSocket / keep-alive connections never
+/// stall process termination (e.g. systemd's 90s SIGTERM timeout).
+pub(crate) async fn serve_with_bounded_shutdown(
+    listener: tokio::net::TcpListener,
+    app: axum::Router,
+    signal: impl std::future::Future<Output = ()>,
+    drain_timeout: std::time::Duration,
+    on_shutdown: impl FnOnce(),
+) -> std::io::Result<()> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let serve_fut = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        }),
+    );
+    tokio::pin!(serve_fut);
+
+    tokio::select! {
+        res = &mut serve_fut => res,
+        () = signal => {
+            let _ = shutdown_tx.send(());
+            on_shutdown();
+            match tokio::time::timeout(drain_timeout, &mut serve_fut).await {
+                Ok(res) => res,
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_ms = drain_timeout.as_millis() as u64,
+                        "Graceful HTTP drain timed out; closing server without waiting for idle/SSE sockets"
+                    );
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
         let ctrl_c = async {

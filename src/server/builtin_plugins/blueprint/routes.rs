@@ -43,6 +43,11 @@ pub(crate) fn router() -> Router {
         .route("/api/blueprint/impact", get(read_impact))
         .route("/api/blueprint/verify", get(read_verify))
         .route("/api/blueprint/source", get(read_source))
+        .route("/api/blueprint/inbox", post(submit_inbox))
+        .route(
+            "/api/blueprint/inbox/{id}",
+            put(update_inbox).delete(delete_inbox),
+        )
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn(local_browser))
 }
@@ -129,6 +134,12 @@ pub(super) fn scan_project_statuses(workspaces: Vec<PathBuf>) -> Value {
         }
         let summary = (|| -> Result<Value> {
             let store = Store::open(&root)?;
+            let pending_inbox = store
+                .inbox()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|item| item.status == ObserverSubmissionStatus::Pending)
+                .count();
             let manifest = store.manifest()?;
             let Some(m) = manifest else {
                 return Ok(json!({
@@ -138,6 +149,7 @@ pub(super) fn scan_project_statuses(workspaces: Vec<PathBuf>) -> Value {
                     "project_kind": null,
                     "graph_count": 0,
                     "playbook_count": 0,
+                    "pending_inbox": pending_inbox,
                     "entity_count": 0,
                     "updated_at": null,
                     "last_synced_commit": null,
@@ -160,6 +172,7 @@ pub(super) fn scan_project_statuses(workspaces: Vec<PathBuf>) -> Value {
                 "project_kind": m.project_kind,
                 "graph_count": m.graphs.len(),
                 "playbook_count": m.playbooks.len(),
+                "pending_inbox": pending_inbox,
                 "entity_count": entities.len(),
                 "updated_at": if m.updated_at.is_empty() { Value::Null } else { json!(m.updated_at) },
                 "last_synced_commit": m.last_synced_commit,
@@ -232,10 +245,12 @@ async fn state(Query(Root { workspace_root }): Query<Root>) -> Response {
                 references.entry(&node.entity_id).or_default().push(&graph.meta.id);
             }
         }
+        let inbox = store.inbox()?;
         Ok(json!({
             "exists": manifest.is_some(),
             "graphs": manifest.as_ref().map(|m| m.graphs.as_slice()).unwrap_or_default(),
             "playbooks": manifest.as_ref().map(|m| m.playbooks.as_slice()).unwrap_or_default(),
+            "inbox": inbox,
             "manifest": manifest,
             "entities": entities,
             "verify": verify,
@@ -371,6 +386,34 @@ async fn read_source(Query(q): Query<SourceQuery>) -> Response {
             q.line_end.unwrap_or(q.line_start),
             q.context_lines.unwrap_or(4),
         )?)?)
+    })
+    .await
+}
+async fn submit_inbox(
+    Query(root): Query<Root>,
+    Json(args): Json<ObserverSubmissionCreate>,
+) -> Response {
+    run(root.workspace_root, move |store| {
+        Ok(serde_json::to_value(store.submit_observer_note(args)?)?)
+    })
+    .await
+}
+async fn update_inbox(
+    Query(root): Query<Root>,
+    Path(id): Path<String>,
+    Json(args): Json<ObserverSubmissionPatch>,
+) -> Response {
+    run(root.workspace_root, move |store| {
+        Ok(serde_json::to_value(
+            store.update_observer_note_status(&id, args)?,
+        )?)
+    })
+    .await
+}
+async fn delete_inbox(Query(root): Query<Root>, Path(id): Path<String>) -> Response {
+    run(root.workspace_root, move |store| {
+        store.delete_observer_note(&id)?;
+        Ok(json!({"ok":true}))
     })
     .await
 }

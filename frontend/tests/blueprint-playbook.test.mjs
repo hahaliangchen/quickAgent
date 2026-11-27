@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   buildDistillPlaybookPrompt,
+  buildMergeObserverSubmissionPrompt,
   buildRunPlaybookPrompt,
   buildSyncPlaybookPrompt,
   filterWorkspaceSessions,
@@ -72,4 +73,31 @@ test('buildRunPlaybookPrompt warns when anchor files are drifted or missing', ()
   })
   assert.match(syncPrompt, /src\/old\.rs/)
   assert.match(syncPrompt, /blueprint\.upsert_playbook/)
+})
+
+test('buildMergeObserverSubmissionPrompt carries battlefield submission payload and merge targets', () => {
+  const prompt = buildMergeObserverSubmissionPrompt(
+    {
+      id: 'obs-12345678',
+      source_task_id: 'task-battle-9',
+      source_task_title: '201 端口升级',
+      title: '201 :3002 升级清单同步',
+      trigger: '更新 201 QuickAgent 时',
+      summary: '替换二进制时必须同步内置插件清单',
+      anchor_files: ['src/server/skill_packages.rs'],
+      environment: ['201 :3002 验证端口'],
+      pitfalls: ['不要漏更新 builtin_plugins 清单'],
+      verify_commands: ['curl -s http://127.0.0.1:3002/agent/skill-packages'],
+      status: 'pending',
+      created_at: '2026-11-27T05:00:00Z',
+      updated_at: '2026-11-27T05:00:00Z',
+    },
+    [{ id: 'deploy-201', title: '201 部署最短路径' }],
+    [{ id: 'plugin-host', title: '插件宿主画布' }],
+  )
+  assert.match(prompt, /obs-12345678/)
+  assert.match(prompt, /task-battle-9/)
+  assert.match(prompt, /deploy-201/)
+  assert.match(prompt, /plugin-host/)
+  assert.match(prompt, /blueprint\.upsert_playbook/)
 })

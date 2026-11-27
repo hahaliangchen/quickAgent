@@ -11,6 +11,7 @@ import {
   getObserverSessionId,
   isObserverOwnTask,
   loadObserverPrefs,
+  parseObserverBlueprintNote,
   parseObserverSuggestion,
   sanitizeObserverEventsForDisplay,
   saveObserverPrefs,
@@ -264,4 +265,28 @@ test('extractLatestAssistantMessage reads durable message.content blocks and san
   const legacy = '[观察者上下文] 你是专属于主会话 `task_1` 的只读蓝图观察者。\n方便用户一键确认执行。\n\n帮我看看有没有跑偏'
   assert.equal(stripObserverUserPromptMeta(legacy), '帮我看看有没有跑偏')
   assert.equal(stripObserverSuggestionFence(assistantRaw), '截至当前快照，主会话出现轻微扩散。')
+})
+
+test('parseObserverBlueprintNote extracts battlefield blueprint submissions and formats display notice', () => {
+  const reply = [
+    '主会话已完成 201 :3002 升级。',
+    '```observer-suggestion',
+    '{"should_interject":false,"action":"interject","severity":"tip","title":"","reason":"进展正常","interject":""}',
+    '```',
+    '```blueprint-note',
+    '{"title":"201 :3002 升级规范","trigger":"升级 201 验证端口时","summary":"必须同步内置插件清单并保留 3001","anchor_files":["src/server/skill_packages.rs"],"environment":["201 :3002 验证端口"],"pitfalls":["不要漏同步 builtin_plugins 清单"],"verify_commands":["curl -s http://127.0.0.1:3002/agent/skill-packages"]}',
+    '```',
+  ].join('\n')
+
+  const note = parseObserverBlueprintNote(reply, 88)
+  assert.ok(note)
+  assert.equal(note.title, '201 :3002 升级规范')
+  assert.equal(note.sourceSeq, 88)
+  assert.deepEqual(note.anchor_files, ['src/server/skill_packages.rs'])
+  assert.deepEqual(note.pitfalls, ['不要漏同步 builtin_plugins 清单'])
+
+  const stripped = stripObserverSuggestionFence(reply)
+  assert.match(stripped, /主会话已完成 201 :3002 升级/)
+  assert.match(stripped, /已呈报战地蓝图线索：\*\*201 :3002 升级规范\*\*/)
+  assert.doesNotMatch(stripped, /blueprint-note/)
 })

@@ -1,6 +1,6 @@
 import { createContext } from 'react'
 import type { Task } from '../../api.ts'
-import type { BlueprintProjectStatus, BlueprintState, Entity, Graph, GraphNode, GraphView, Impact, Playbook, PlaybookUpdate, PlaybookView, ProjectKind, Source, Verify } from './types.ts'
+import type { BlueprintProjectStatus, BlueprintState, Entity, Graph, GraphNode, GraphView, Impact, ObserverSubmission, ObserverSubmissionStatus, Playbook, PlaybookUpdate, PlaybookView, ProjectKind, Source, Verify } from './types.ts'
 
 export interface BlueprintProjectOption {
   readonly path: string
@@ -55,6 +55,12 @@ export function blueprintApi(workspaceRoot: string) {
     impact: (entity: string, port?: string) => request<Impact>('/impact', 'GET', undefined, { entity_id: entity, ...(port ? { port_id: port } : {}) }),
     verify: () => request<Verify>('/verify'),
     source: (file: string, start: number, end: number) => request<Source>('/source', 'GET', undefined, { file_path: file, line_start: String(start), line_end: String(Math.min(end, start + 299)) }),
+    updateInboxStatus: (id: string, status: ObserverSubmissionStatus, mergedPlaybookId?: string) =>
+      request<ObserverSubmission>('/inbox/' + encodeURIComponent(id), 'PUT', {
+        status,
+        ...(mergedPlaybookId ? { merged_playbook_id: mergedPlaybookId } : {}),
+      }),
+    deleteInbox: (id: string) => request('/inbox/' + encodeURIComponent(id), 'DELETE'),
   }
 }
 export type BlueprintApi = ReturnType<typeof blueprintApi>
