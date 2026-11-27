@@ -7,11 +7,187 @@ use anyhow::{Context, Result, ensure};
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    http::{HeaderMap, StatusCode},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
+use futures::stream;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
+use std::{collections::VecDeque, convert::Infallible, time::Duration};
+
+/// Allowed event kinds exposed to plugin sessions (both JSON `events` and SSE `stream`).
+const PLUGIN_EVENT_KINDS: &[&str] = &[
+    "user/message",
+    "assistant/message",
+    "assistant/delta",
+    "task/node_started",
+    "task/node_returned",
+    "tool/call",
+    "tool/result",
+    "turn/start",
+    "turn/end",
+    "subagent/start",
+    "subagent/event",
+    "subagent/end",
+    "subagent/review",
+];
+
+fn sanitize_plugin_event(
+    e: crate::context::session_history::StoredEvent,
+) -> Result<agent_service::AgentEvent> {
+    let mut data = e.data()?;
+    // Plugin pages need frame identity and the returned value, not
+    // the potentially huge source HTML or captured inputs.
+    if matches!(e.kind.as_str(), "task/node_started" | "task/node_returned") {
+        data = json!({
+            "node_id": data["node_id"],
+            "task_node_id": data["task_node_id"],
+            "parent_id": data["parent_id"],
+            "metadata": data["metadata"],
+            "title": data["title"],
+            "goal": data["goal"],
+            "result": data["result"],
+            "turn": data["turn"]
+        });
+    }
+    Ok(agent_service::AgentEvent {
+        seq: e.seq,
+        time: e.time,
+        data,
+        kind: e.kind,
+        surface_op: e.surface_op,
+    })
+}
+
+fn latest_event_seq(root: &std::path::Path, task: &str) -> Result<i64> {
+    let conn = agent_service::open_db(root)?;
+    let seq: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(seq), -1) FROM agent_task_events WHERE task_id=?1",
+        [task],
+        |r| r.get(0),
+    )?;
+    Ok(seq)
+}
+
+fn scope_is_active(state: &AgentServiceState, plugin_id: &str, package_scope: u64) -> bool {
+    !state.plugin_cancel.is_cancelled()
+        && state.tool_catalog.as_ref().is_some_and(|catalog| {
+            catalog
+                .packages
+                .scopes(&std::collections::BTreeSet::from([plugin_id.to_owned()]))
+                .get(plugin_id)
+                .copied()
+                == Some(package_scope)
+        })
+}
+
+fn stream_plugin_events(
+    state: AgentServiceState,
+    plugin_id: String,
+    package_scope: u64,
+    task: String,
+    after_seq: i64,
+) -> Response {
+    let events = stream::unfold(
+        (
+            state,
+            plugin_id,
+            package_scope,
+            task,
+            after_seq,
+            VecDeque::<agent_service::AgentEvent>::new(),
+            false,
+        ),
+        |(state, plugin_id, package_scope, task, mut last_seq, mut pending, done_sent)| async move {
+            if done_sent {
+                return None;
+            }
+            loop {
+                if let Some(event) = pending.pop_front() {
+                    last_seq = event.seq;
+                    let id = event.seq.to_string();
+                    let payload = serde_json::to_string(&event).ok()?;
+                    let sse = Event::default().event("session/event").id(id).data(payload);
+                    return Some((
+                        Ok::<Event, Infallible>(sse),
+                        (state, plugin_id, package_scope, task, last_seq, pending, false),
+                    ));
+                }
+                if !scope_is_active(&state, &plugin_id, package_scope) {
+                    let sse = Event::default().event("session/done").data(
+                        json!({"task_id": task, "status": "cancelled"}).to_string(),
+                    );
+                    return Some((
+                        Ok::<Event, Infallible>(sse),
+                        (state, plugin_id, package_scope, task, last_seq, pending, true),
+                    ));
+                }
+                let root = state.workspace.root().to_path_buf();
+                let read_id = task.clone();
+                let read = tokio::task::spawn_blocking(
+                    move || -> Result<(VecDeque<agent_service::AgentEvent>, Option<String>)> {
+                        let mut conn = agent_service::open_db(&root)?;
+                        // Status and events must come from the same snapshot; otherwise a
+                        // concurrent finish could close the stream before its final event.
+                        let tx = conn.transaction()?;
+                        let batch = crate::context::session_history::load_events(
+                            &tx,
+                            &read_id,
+                            &crate::context::session_history::EventQuery {
+                                after: Some(last_seq),
+                                oldest: Some(64),
+                                kinds: PLUGIN_EVENT_KINDS,
+                                ..Default::default()
+                            },
+                        )?
+                        .into_iter()
+                        .map(sanitize_plugin_event)
+                        .collect::<Result<VecDeque<_>>>()?;
+                        let status: Option<String> = tx
+                            .query_row(
+                                "SELECT status FROM agent_tasks WHERE id=?1",
+                                [&read_id],
+                                |row| row.get(0),
+                            )
+                            .optional()?;
+                        Ok((batch, status))
+                    },
+                )
+                .await;
+                let (batch, status) = match read {
+                    Ok(Ok(pair)) => pair,
+                    _ => return None,
+                };
+                pending = batch;
+                if pending.is_empty() {
+                    if !matches!(status.as_deref(), Some("running" | "cancelling")) {
+                        let sse = Event::default().event("session/done").data(
+                            json!({
+                                "task_id": task,
+                                "status": status.unwrap_or_else(|| "unknown".into())
+                            })
+                            .to_string(),
+                        );
+                        return Some((
+                            Ok::<Event, Infallible>(sse),
+                            (state, plugin_id, package_scope, task, last_seq, pending, true),
+                        ));
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(120)) => {}
+                        _ = state.plugin_cancel.cancelled() => {}
+                    }
+                }
+            }
+        },
+    );
+    Sse::new(events)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
 
 /// What the host appends to a page's prompt before the page's selection: it is
 /// the page's data, not the user's words.
@@ -93,8 +269,19 @@ pub fn check(root: &std::path::Path, task: &str, plugin: &str) -> Result<()> {
 pub async fn request(
     State(state): State<AgentServiceState>,
     Path(id): Path<String>,
-    Json(args): Json<Value>,
+    headers: HeaderMap,
+    Json(mut args): Json<Value>,
 ) -> Response {
+    if args.get("after_seq").is_none()
+        && let Some(last_seq) = headers
+            .get("last-event-id")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|seq| *seq >= 0)
+        && let Some(obj) = args.as_object_mut()
+    {
+        obj.insert("after_seq".into(), json!(last_seq));
+    }
     match handle(state, &id, args).await {
         Ok(response) => response,
         Err(error) => (
@@ -113,14 +300,16 @@ pub(crate) async fn handle(state: AgentServiceState, id: &str, args: Value) -> R
         .tool_catalog
         .as_ref()
         .context("tool registry unavailable")?;
+    let package_scope = args["package_scope"]
+        .as_u64()
+        .context("plugin page is unavailable or stale")?;
     ensure!(
-        args["package_scope"].is_u64()
-            && catalog
-                .packages
-                .scopes(&std::collections::BTreeSet::from([id.to_owned()]))
-                .get(id)
-                .copied()
-                == args["package_scope"].as_u64(),
+        catalog
+            .packages
+            .scopes(&std::collections::BTreeSet::from([id.to_owned()]))
+            .get(id)
+            .copied()
+            == Some(package_scope),
         "plugin page is unavailable or stale"
     );
     let root = state.workspace.root();
@@ -185,12 +374,34 @@ pub(crate) async fn handle(state: AgentServiceState, id: &str, args: Value) -> R
             } else {
                 prompt.to_owned()
             };
+            let wants_stream = args["stream"].as_bool().unwrap_or(false);
+            let stream_after = if wants_stream {
+                match args["after_seq"].as_i64() {
+                    Some(seq) => seq,
+                    None => latest_event_seq(root, &task)?,
+                }
+            } else {
+                -1
+            };
             let input = serde_json::from_value(
                 json!({"prompt":prompt,"content":args["content"].as_array().cloned().unwrap_or_default(),"requestId":args["requestId"],"provider":args["provider"],"model":args["model"],"reasoning_effort":args["reasoning_effort"],"program_resource":args["program_resource"]}),
             )?;
-            agent_service::continue_task(State(state), Path(task), Json(input))
-                .await
-                .into_response()
+            let response = agent_service::continue_task(
+                State(state.clone()),
+                Path(task.clone()),
+                Json(input),
+            )
+            .await
+            .into_response();
+            if wants_stream && response.status().is_success() {
+                stream_plugin_events(state, id.to_owned(), package_scope, task, stream_after)
+            } else {
+                response
+            }
+        }
+        "stream" => {
+            let after_seq = args["after_seq"].as_i64().unwrap_or(-1);
+            stream_plugin_events(state, id.to_owned(), package_scope, task, after_seq)
         }
         "events" => {
             let root = state.workspace.root().to_path_buf();
@@ -203,40 +414,12 @@ pub(crate) async fn handle(state: AgentServiceState, id: &str, args: Value) -> R
                         &task,
                         &crate::context::session_history::EventQuery {
                             after,
-                            kinds: &[
-                                "user/message",
-                                "assistant/message",
-                                "assistant/delta",
-                                "task/node_started",
-                                "task/node_returned",
-                                "tool/call",
-                                "tool/result",
-                                "turn/start",
-                                "turn/end",
-                                "subagent/start",
-                                "subagent/event",
-                                "subagent/end",
-                                "subagent/review",
-                            ],
+                            kinds: PLUGIN_EVENT_KINDS,
                             ..Default::default()
                         },
                     )?
                     .into_iter()
-                    .map(|e| {
-                        let mut data = e.data()?;
-                        // Plugin pages need frame identity and the returned value, not
-                        // the potentially huge source HTML or captured inputs.
-                        if matches!(e.kind.as_str(), "task/node_started" | "task/node_returned") {
-                            data = json!({"node_id":data["node_id"],"task_node_id":data["task_node_id"],"parent_id":data["parent_id"],"metadata":data["metadata"],"title":data["title"],"goal":data["goal"],"result":data["result"],"turn":data["turn"]});
-                        }
-                        Ok(agent_service::AgentEvent {
-                            seq: e.seq,
-                            time: e.time,
-                            data,
-                            kind: e.kind,
-                            surface_op: e.surface_op,
-                        })
-                    })
+                    .map(sanitize_plugin_event)
                     .collect()
                 })
                 .await??;
@@ -515,6 +698,168 @@ mod tests {
         )
         .await;
         assert_eq!(opt_down["prompt_profile"], "slim");
+
+        runtime.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn text_body(response: Response) -> String {
+        String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stream_emits_live_deltas_filters_internal_events_and_sends_done() {
+        let root =
+            std::env::temp_dir().join(format!("plugin-sse-live-{}", agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (runtime, catalog) = crate::server::skill_packages::test_runtime();
+        let scope = catalog.packages.catalog()[0]["scope"].clone();
+        let mut state = agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        state.tool_catalog = Some(catalog);
+        state.config = Some(std::sync::Arc::new(tokio::sync::RwLock::new(
+            serde_json::from_value(json!({
+                "providers":{"test":{"url":"http://private/v1","api_key":"secret","model_map":{"m":"m"}}}
+            }))
+            .unwrap(),
+        )));
+
+        let created = body(
+            handle(
+                state.clone(),
+                "blueprint",
+                json!({"method":"create","package_scope":scope}),
+            )
+            .await
+            .unwrap(),
+        )
+        .await;
+        let task = created["task_id"].as_str().unwrap().to_owned();
+        {
+            let conn = agent_service::open_db(&root).unwrap();
+            conn.execute(
+                "UPDATE agent_tasks SET status='running' WHERE id=?1",
+                [&task],
+            )
+            .unwrap();
+        }
+
+        let response = handle(
+            state.clone(),
+            "blueprint",
+            json!({"method":"stream","package_scope":scope,"task_id":task,"after_seq":-1}),
+        )
+        .await
+        .unwrap();
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "unexpected content-type: {content_type}"
+        );
+
+        let writer_root = root.clone();
+        let writer_task = task.clone();
+        let producer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            agent_service::emit(
+                &writer_root,
+                &writer_task,
+                "assistant/delta",
+                json!({"turn":1,"step":1,"text":"实时吐字片段"}),
+            )
+            .await
+            .unwrap();
+            agent_service::emit(
+                &writer_root,
+                &writer_task,
+                "debug/context_request",
+                json!({"secret":"internal_only"}),
+            )
+            .await
+            .unwrap();
+            agent_service::emit(
+                &writer_root,
+                &writer_task,
+                "task/node_started",
+                json!({"node_id":"n1","title":"step","inputs":{"html":"private_secret_html"}}),
+            )
+            .await
+            .unwrap();
+            agent_service::emit(
+                &writer_root,
+                &writer_task,
+                "assistant/message",
+                json!({"message":{"content":"实时吐字片段-完成"}}),
+            )
+            .await
+            .unwrap();
+            agent_service::emit(&writer_root, &writer_task, "turn/end", json!({"turn":1}))
+                .await
+                .unwrap();
+            let conn = agent_service::open_db(&writer_root).unwrap();
+            conn.execute(
+                "UPDATE agent_tasks SET status='completed' WHERE id=?1",
+                [&writer_task],
+            )
+            .unwrap();
+        });
+
+        let sse = tokio::time::timeout(Duration::from_secs(5), text_body(response))
+            .await
+            .expect("SSE stream should terminate after task completion");
+        producer.await.unwrap();
+
+        assert!(sse.contains("event: session/event"), "{sse}");
+        assert!(sse.contains("assistant/delta"), "{sse}");
+        assert!(sse.contains("实时吐字片段"), "{sse}");
+        assert!(sse.contains("assistant/message"), "{sse}");
+        assert!(sse.contains("turn/end"), "{sse}");
+        assert!(!sse.contains("debug/context_request"), "{sse}");
+        assert!(!sse.contains("internal_only"), "{sse}");
+        assert!(!sse.contains("private_secret_html"), "{sse}");
+        assert!(sse.contains("event: session/done"), "{sse}");
+        assert!(sse.contains("\"status\":\"completed\""), "{sse}");
+
+        // Resuming with Last-Event-ID via `request(...)` skips already-seen events and emits done.
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "3".parse().unwrap());
+        let resumed = request(
+            State(state.clone()),
+            Path("blueprint".into()),
+            headers,
+            Json(json!({"method":"stream","package_scope":scope,"task_id":task})),
+        )
+        .await;
+        let resumed_sse = tokio::time::timeout(Duration::from_secs(3), text_body(resumed))
+            .await
+            .expect("resumed completed SSE stream should close immediately");
+        assert!(!resumed_sse.contains("assistant/delta"), "{resumed_sse}");
+        assert!(resumed_sse.contains("turn/end"), "{resumed_sse}");
+        assert!(resumed_sse.contains("event: session/done"), "{resumed_sse}");
+
+        // `method: "prompt"` with `stream: true` still returns JSON error when continue_task fails.
+        let mut no_provider_state = state.clone();
+        no_provider_state.provider_url.clear();
+        no_provider_state.config = None;
+        let err_resp = handle(
+            no_provider_state,
+            "blueprint",
+            json!({"method":"prompt","package_scope":scope,"task_id":task,"prompt":"hello","stream":true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(err_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let err_json = body(err_resp).await;
+        assert!(err_json["error"].as_str().is_some());
 
         runtime.shutdown().unwrap();
         std::fs::remove_dir_all(root).unwrap();

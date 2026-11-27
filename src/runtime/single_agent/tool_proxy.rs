@@ -522,12 +522,15 @@ mod tests {
         assert!(!failed, "{result}");
         let text = result["declarations"].as_str().unwrap();
         let schemas = result["schemas"].as_array().unwrap();
-        assert_eq!(schemas.len(), 9);
+        assert_eq!(schemas.len(), 12);
         for method in [
             "overview",
+            "open",
             "read_graph",
             "read_playbook",
             "inspect_session",
+            "list_inbox",
+            "resolve_inbox",
             "impact",
             "verify_sync",
             "upsert_entities",

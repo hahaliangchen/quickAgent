@@ -293,7 +293,7 @@
   },
   {
     "name": "ssh__upload",
-    "description": "将当前本地工作区内的文件流式 SFTP 上传到远程服务器并返回 bytes_uploaded 与 sha256（严禁上传工作区外或符号链接逃逸文件）；prod 或需审批服务器强制人工审批。",
+    "description": "将本地普通文件流式 SFTP 上传到远程服务器并返回 bytes_uploaded 与 sha256（工作区内文件可直接上传；工作区外绝对路径需完全权限或用户审批，严禁上传符号链接或 .codex-workspace-mcp/.ssh 等敏感凭据）；prod 或需审批服务器强制人工审批。",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -302,7 +302,7 @@
         },
         "local_path": {
           "type": "string",
-          "description": "当前本地工作区内的相对路径（不得越出工作区或经符号链接逃逸）"
+          "description": "本地文件路径（支持工作区内相对路径，或在完全权限/用户审批后使用工作区外绝对路径；不得含 .. 或符号链接逃逸）"
         },
         "remote_path": {
           "type": "string",

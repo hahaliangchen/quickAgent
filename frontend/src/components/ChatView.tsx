@@ -6,6 +6,7 @@ import {
   IconChevronRightOutlineRegular,
   IconCopyOutlineRegular,
   MarkdownDelegateProvider,
+  MarkdownText,
   StateDot,
   TextShimmer,
   Toast,
@@ -39,6 +40,7 @@ import { NoteProposal } from './NoteProposal.tsx'
 import { ApprovalCards } from './ApprovalCards.tsx'
 import { RewindControl } from './RewindControl.tsx'
 import { SmoothMarkdown } from './SmoothMarkdown.tsx'
+import { hasUserMarkdownSyntax, preserveUserLineBreaks } from './userMarkdown.ts'
 
 /** What the AI reviewer decided in "approve for me" mode. */
 const REVIEW_LABELS: Record<string, string> = { allow: 'AI 审批 · 已允许', deny: 'AI 审批 · 已拒绝', ask: 'AI 审批 · 转交给你' }
@@ -68,6 +70,90 @@ function UserCopyButton({ text }: { text: string }) {
         {copied ? <IconCheckOutlineRegular size={15} /> : <IconCopyOutlineRegular size={15} />}
       </button>
     </Tooltip>
+  )
+}
+
+/** User message row with automatic Markdown rendering + Raw/MD toggle and raw copy. */
+function UserTurnRow({
+  item,
+  turn,
+  canRewind,
+  taskId,
+  slashNames,
+  onFilePreview,
+  onChangesUpdated,
+}: {
+  item: Extract<ChatItem, { kind: 'user' }>
+  turn: number
+  canRewind: boolean
+  taskId?: string | undefined
+  slashNames: readonly string[]
+  onFilePreview?: OpenFilePreview | undefined
+  onChangesUpdated?: (() => void) | undefined
+}) {
+  const parsed = useMemo(() => splitStudioViewContext(item.text), [item.text])
+  const isMarkdown = useMemo(() => hasUserMarkdownSyntax(parsed.body), [parsed.body])
+  const [showRaw, setShowRaw] = useState(false)
+  const labels = useMemo(() => markdownLabels(t), [])
+  const renderedMarkdown = useMemo(
+    () => (isMarkdown && !showRaw ? preserveUserLineBreaks(parsed.body) : ''),
+    [isMarkdown, showRaw, parsed.body],
+  )
+  const hasText = parsed.body.trim() !== ''
+
+  return (
+    <div
+      className={`${chatCss.flowItem} ${css.userWithRewind}`}
+      data-chat-flow-kind="user"
+      data-chat-turn-message={item.key}
+      data-event-seq={item.key}
+      data-turn={turn}
+      tabIndex={-1}
+    >
+      <div className={messageCss.userRow}>
+        <div className={messageCss.userStack}>
+          {item.attachments?.length ? <AttachmentCards items={item.attachments} onFilePreview={onFilePreview} /> : null}
+          {parsed.context && (
+            <details className={css.viewContextPill}>
+              <summary className={css.viewContextSummary}>
+                <span className={css.viewContextDot} aria-hidden="true" />
+                <span className={css.viewContextLabel}>{parsed.context.label}</span>
+                <span className={css.viewContextTag}>视图上下文</span>
+              </summary>
+              <pre className={css.viewContextBody}>{parsed.context.text}</pre>
+            </details>
+          )}
+          {parsed.body && (
+            isMarkdown && !showRaw ? (
+              <div className={clsx(messageCss.bubble, css.userMarkdownBubble)}>
+                <MarkdownText text={renderedMarkdown} labels={labels} />
+              </div>
+            ) : (
+              <div className={messageCss.bubble}>
+                {projectUserText(parsed.body, [], slashNames, 'skill', onFilePreview ? { openFile: onFilePreview } : undefined)}
+              </div>
+            )
+          )}
+        </div>
+      </div>
+      {(hasText || canRewind) && (
+        <div className={clsx(actionsCss.actions, css.userActions)}>
+          {hasText && <UserCopyButton text={parsed.body} />}
+          {isMarkdown && (
+            <Tooltip label={showRaw ? '切换为 Markdown 渲染' : '查看 Markdown 原文'}>
+              <button
+                type="button"
+                className={css.userRawToggle}
+                onClick={() => setShowRaw(v => !v)}
+              >
+                {showRaw ? 'MD' : '原文'}
+              </button>
+            </Tooltip>
+          )}
+          {canRewind && taskId && <RewindControl taskId={taskId} turn={turn} onRewound={() => onChangesUpdated?.()} />}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -532,24 +618,17 @@ export function ChatView({ events, projectedItems, task, running, onOpenTask, on
             {nodes.map((node) => {
               if (node.kind === 'user') {
                 const canRewind = Boolean(task && !running && task.parent_task_id === null)
-                const cleanUserText = splitStudioViewContext(node.item.text).body
-                const hasText = cleanUserText.trim() !== ''
                 return (
-                  <div key={node.item.key} className={`${chatCss.flowItem} ${css.userWithRewind}`} data-chat-flow-kind="user" data-chat-turn-message={node.item.key} data-event-seq={node.item.key} data-turn={node.turn} tabIndex={-1}>
-                    <Item
-                      item={node.item}
-                      turnClosed={true}
-                      slashNames={slashNames}
-                      onOpenTask={onOpenTask}
-                      onFilePreview={onFilePreview}
-                    />
-                    {(hasText || canRewind) && (
-                      <div className={clsx(actionsCss.actions, css.userActions)}>
-                        {hasText && <UserCopyButton text={cleanUserText} />}
-                        {canRewind && task && <RewindControl taskId={task.task_id} turn={node.turn} onRewound={() => onChangesUpdated?.()} />}
-                      </div>
-                    )}
-                  </div>
+                  <UserTurnRow
+                    key={node.item.key}
+                    item={node.item}
+                    turn={node.turn}
+                    canRewind={canRewind}
+                    taskId={task?.task_id}
+                    slashNames={slashNames}
+                    onFilePreview={onFilePreview}
+                    onChangesUpdated={onChangesUpdated}
+                  />
                 )
               }
 

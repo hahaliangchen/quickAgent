@@ -475,6 +475,11 @@ pub(super) async fn business_tool_inner(
         ))
         .await;
     }
+    let allow_outside_ssh_upload = s.plugin.is_none()
+        && name == "ssh__upload"
+        && (s.state.permission_mode == agent_service::PermissionMode::FullAccess
+            || !outside.is_empty()
+            || !extra_roots.is_empty());
     crate::tools::process_sandbox::scope_tool_sandbox(sandbox_boundary, extra_roots, async {
         let destructive = name == "git_restore";
         if destructive {
@@ -667,9 +672,10 @@ pub(super) async fn business_tool_inner(
                 let mut output = tokio::select! {
                     result = async {
                         if crate::server::builtin_plugins::ssh::is_tool(name) {
-                            crate::server::builtin_plugins::ssh::scoped(
+                            crate::server::builtin_plugins::ssh::scoped_with_policy(
                                 s.task.to_owned(),
                                 ssh_protected,
+                                allow_outside_ssh_upload,
                                 crate::server::plugin_io::execute(
                                     s.state,
                                     s.task,
@@ -1115,9 +1121,13 @@ pub(super) fn outside_read_paths(
             | "search_text"
             | "stat_paths"
             | "copy_path"
+            | "ssh__upload"
             | "read_git"
             | "blueprint__overview"
+            | "blueprint__open"
             | "blueprint__read_graph"
+            | "blueprint__read_playbook"
+            | "blueprint__list_inbox"
             | "blueprint__impact"
             | "blueprint__verify_sync"
             | "workspace_info"
@@ -1181,20 +1191,34 @@ pub(super) fn outside_read_paths(
         }
     }
     if name != "read_git" {
-        for raw in args["path"].as_str().into_iter().chain(args["from"].as_str()).chain((name != "copy_path").then(|| args["to"].as_str()).flatten()).chain(
-            (name == "blueprint__impact").then(|| args["file_path"].as_str()).flatten(),
-        ).chain(
-            args["paths"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str),
-        ) {
-            let path = std::path::Path::new(raw);
-            let full = if path.is_absolute() {
-                path.to_path_buf()
+        for raw in args["path"]
+            .as_str()
+            .into_iter()
+            .chain(args["from"].as_str())
+            .chain((name != "copy_path").then(|| args["to"].as_str()).flatten())
+            .chain(
+                (name == "blueprint__impact")
+                    .then(|| args["file_path"].as_str())
+                    .flatten(),
+            )
+            .chain(
+                (name == "ssh__upload")
+                    .then(|| args["local_path"].as_str())
+                    .flatten(),
+            )
+            .chain(
+                args["paths"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str),
+            )
+        {
+            let clean = crate::tools::file_edit::strip_verbatim_prefix(std::path::Path::new(raw));
+            let full = if clean.is_absolute() {
+                clean
             } else {
-                base.clone().unwrap_or_else(|| root.clone()).join(path)
+                base.clone().unwrap_or_else(|| root.clone()).join(clean)
             };
             if outside(full) && !found.iter().any(|known| known == raw) {
                 found.push(raw.to_owned());
@@ -1274,6 +1298,49 @@ mod tests {
         assert!(inside_ok.is_empty());
         let approved_ok = super::outside_read_paths(&root, &[outside.clone()], "git_status", &json!({"repo": outside}));
         assert!(approved_ok.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn external_ssh_upload_local_path_requires_read_scoping() {
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!(
+            "host-tools-ssh-upload-{}",
+            crate::server::agent_service::uuid_like()
+        ));
+        let outside = root.with_extension("external");
+        let inside_file = root.join("dist").join("app.bin");
+        let outside_file = outside.join("part_00");
+        std::fs::create_dir_all(inside_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(&inside_file, b"in").unwrap();
+        std::fs::write(&outside_file, b"out").unwrap();
+
+        let ext = super::outside_read_paths(
+            &root,
+            &[],
+            "ssh__upload",
+            &json!({"server_id": "s1", "local_path": outside_file, "remote_path": "/tmp/part_00"}),
+        );
+        assert_eq!(ext.len(), 1);
+
+        let inside_rel = super::outside_read_paths(
+            &root,
+            &[],
+            "ssh__upload",
+            &json!({"server_id": "s1", "local_path": "dist/app.bin", "remote_path": "/tmp/app.bin"}),
+        );
+        assert!(inside_rel.is_empty());
+
+        let approved_ext = super::outside_read_paths(
+            &root,
+            &[outside.clone()],
+            "ssh__upload",
+            &json!({"server_id": "s1", "local_path": outside_file, "remote_path": "/tmp/part_00"}),
+        );
+        assert!(approved_ext.is_empty());
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(outside);

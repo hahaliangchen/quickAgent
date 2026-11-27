@@ -28,6 +28,7 @@ const MAX_AI_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 struct SshToolContext {
     task_id: Option<String>,
     approved_protected: bool,
+    allow_outside_upload: bool,
 }
 
 tokio::task_local! {
@@ -83,9 +84,19 @@ pub(super) fn requires_approval_in(config_dir: &Path, name: &str, args: &Value) 
     }
 }
 
-pub(crate) async fn scoped<F: Future>(
+#[cfg(test)]
+pub(super) async fn scoped<F: Future>(
     task_id: String,
     approved_protected: bool,
+    f: F,
+) -> F::Output {
+    scoped_with_policy(task_id, approved_protected, false, f).await
+}
+
+pub(crate) async fn scoped_with_policy<F: Future>(
+    task_id: String,
+    approved_protected: bool,
+    allow_outside_upload: bool,
     f: F,
 ) -> F::Output {
     SSH_TOOL_CONTEXT
@@ -93,6 +104,7 @@ pub(crate) async fn scoped<F: Future>(
             SshToolContext {
                 task_id: Some(task_id),
                 approved_protected,
+                allow_outside_upload,
             },
             f,
         )
@@ -507,10 +519,18 @@ pub(super) async fn execute_tool(
             let remote_path = required_str(&args, "remote_path")?;
             let create_parents = args["create_parents"].as_bool().unwrap_or(false);
             let overwrite = args["overwrite"].as_bool().unwrap_or(false);
-            let (std_file, size, relative_display, local_mode) = tokio::task::spawn_blocking(move || {
-                open_workspace_upload_file(&workspace_root, &local_path)
-            })
-            .await??;
+            let upload_config_dir = config_dir.clone();
+            let allow_outside_upload = ctx.allow_outside_upload;
+            let (std_file, size, relative_display, local_mode) =
+                tokio::task::spawn_blocking(move || {
+                    open_workspace_upload_file(
+                        &workspace_root,
+                        &upload_config_dir,
+                        &local_path,
+                        allow_outside_upload,
+                    )
+                })
+                .await??;
             let preserve_mode = local_mode.filter(|mode| mode & 0o111 != 0);
             let file = tokio::fs::File::from_std(std_file);
             let (connection, secret) = client::connect_for_tool(
@@ -720,9 +740,64 @@ async fn record_usage(
     .await?
 }
 
+fn has_forbidden_upload_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(name)
+                if name.eq_ignore_ascii_case(".codex-workspace-mcp")
+                    || name.eq_ignore_ascii_case(".ssh")
+                    || name.eq_ignore_ascii_case(".gnupg")
+        )
+    })
+}
+
+fn path_starts_with_normalized(path: &Path, prefix: &Path) -> bool {
+    let clean_path = crate::tools::file_edit::strip_verbatim_prefix(path);
+    let clean_prefix = crate::tools::file_edit::strip_verbatim_prefix(prefix);
+    #[cfg(windows)]
+    {
+        let p = clean_path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+        let pre = clean_prefix
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase();
+        p == pre || p.starts_with(&format!("{pre}/"))
+    }
+    #[cfg(not(windows))]
+    {
+        clean_path.starts_with(&clean_prefix)
+    }
+}
+
+fn is_forbidden_upload_path(path: &Path, config_dir: &Path) -> bool {
+    if has_forbidden_upload_component(path) {
+        return true;
+    }
+    let clean_cfg = config_dir
+        .canonicalize()
+        .map(|p| crate::tools::file_edit::strip_verbatim_prefix(&p))
+        .unwrap_or_else(|_| crate::tools::file_edit::strip_verbatim_prefix(config_dir));
+    if path_starts_with_normalized(path, &clean_cfg) {
+        return true;
+    }
+    if let Ok(canon) = path.canonicalize() {
+        let clean_canon = crate::tools::file_edit::strip_verbatim_prefix(&canon);
+        if has_forbidden_upload_component(&clean_canon)
+            || path_starts_with_normalized(&clean_canon, &clean_cfg)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn open_workspace_upload_file(
     workspace_root: &Path,
+    config_dir: &Path,
     local_path: &str,
+    allow_outside_upload: bool,
 ) -> Result<(std::fs::File, u64, String, Option<u32>)> {
     ensure!(
         !local_path.is_empty() && !local_path.contains('\0'),
@@ -736,38 +811,66 @@ fn open_workspace_upload_file(
             .any(|component| matches!(component, Component::ParentDir)),
         "WORKSPACE_BOUNDARY_DENIED: local_path cannot contain parent traversal (..)"
     );
-    let relative = if raw.is_absolute() {
+    let inside_relative = if raw.is_absolute() {
         raw.strip_prefix(workspace_root)
             .or_else(|_| raw.strip_prefix(&clean_root))
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "WORKSPACE_BOUNDARY_DENIED: local_path must be inside the active workspace"
-                )
-            })?
+            .ok()
     } else {
-        raw
+        Some(raw)
     };
-    ensure!(
-        !relative.components().any(|component| {
-            matches!(
-                component,
-                Component::RootDir | Component::Prefix(_) | Component::ParentDir
-            )
-        }),
-        "WORKSPACE_BOUNDARY_DENIED: local_path must stay inside the active workspace"
-    );
-    ensure!(
-        !relative.components().any(|component| matches!(
-            component,
-            Component::Normal(name) if name.eq_ignore_ascii_case(".codex-workspace-mcp")
-        )),
-        "WORKSPACE_BOUNDARY_DENIED: cannot upload internal host state"
-    );
-    let file = crate::server::file_stream::open_regular(workspace_root, relative).map_err(|err| {
-        anyhow::anyhow!(
-            "WORKSPACE_BOUNDARY_DENIED: cannot open regular workspace file '{local_path}' without following symlinks: {err}"
-        )
-    })?;
+    let (file, display_path) = if let Some(relative) = inside_relative {
+        ensure!(
+            !relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::RootDir | Component::Prefix(_) | Component::ParentDir
+                )
+            }),
+            "WORKSPACE_BOUNDARY_DENIED: local_path must stay inside the active workspace"
+        );
+        ensure!(
+            !has_forbidden_upload_component(relative),
+            "WORKSPACE_BOUNDARY_DENIED: cannot upload internal host state or credential files"
+        );
+        let file = crate::server::file_stream::open_regular(workspace_root, relative).map_err(
+            |err| {
+                anyhow::anyhow!(
+                    "WORKSPACE_BOUNDARY_DENIED: cannot open regular workspace file '{local_path}' without following symlinks: {err}"
+                )
+            },
+        )?;
+        (file, relative.to_string_lossy().replace('\\', "/"))
+    } else {
+        ensure!(
+            allow_outside_upload,
+            "WORKSPACE_BOUNDARY_DENIED: local_path must be inside the active workspace"
+        );
+        ensure!(
+            !is_forbidden_upload_path(raw, config_dir),
+            "WORKSPACE_BOUNDARY_DENIED: cannot upload internal host state or credential files"
+        );
+        let parent = raw.parent().filter(|p| !p.as_os_str().is_empty()).context(
+            "WORKSPACE_BOUNDARY_DENIED: invalid outside local_path without parent directory",
+        )?;
+        let file_name = raw
+            .file_name()
+            .context("WORKSPACE_BOUNDARY_DENIED: invalid outside local_path filename")?;
+        if let Ok(canon_parent) = parent.canonicalize() {
+            ensure!(
+                !is_forbidden_upload_path(&canon_parent.join(file_name), config_dir),
+                "WORKSPACE_BOUNDARY_DENIED: cannot upload internal host state or credential files"
+            );
+        }
+        let file =
+            crate::server::file_stream::open_regular(parent, Path::new(file_name)).map_err(
+                |err| {
+                    anyhow::anyhow!(
+                        "WORKSPACE_BOUNDARY_DENIED: cannot open regular file '{local_path}' without following symlinks: {err}"
+                    )
+                },
+            )?;
+        (file, raw.to_string_lossy().replace('\\', "/"))
+    };
     let meta = file.metadata()?;
     let size = meta.len();
     ensure!(
@@ -781,7 +884,7 @@ fn open_workspace_upload_file(
     };
     #[cfg(not(unix))]
     let mode = None;
-    Ok((file, size, relative.to_string_lossy().replace('\\', "/"), mode))
+    Ok((file, size, display_path, mode))
 }
 
 fn prepare_workspace_download_target(

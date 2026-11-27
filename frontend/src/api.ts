@@ -628,7 +628,7 @@ export const api = {
   changes: (id: string, turn: number) => request<ChangesSummary>(`${task(id)}/changes/${turn}`),
   changeDiff: (id: string, turn: number, index: number, path?: string) => request<FileDiff>(`${task(id)}/changes/${turn}/files/${index}${path === undefined ? '' : `?path=${encodeURIComponent(path)}`}`, { cache: 'no-store' }),
   undoChanges: (id: string, turn: number) => post<ChangesSummary>(`${task(id)}/changes/${turn}/undo`, {}),
-  createSession: async (workspace?: string, kind: 'chat' | 'code' | 'observer' = 'code', watchedTaskId?: string) => (
+  createSession: async (workspace?: string, kind: 'chat' | 'code' | 'observer' | 'blueprint' = 'code', watchedTaskId?: string) => (
     await post<{ task_id: string }>('/agent/sessions', {
       workspace,
       kind,

@@ -119,6 +119,18 @@ pub fn is_general_chat(root: &FsPath, task: &str) -> Result<bool> {
     Ok(kind.as_deref() == Some("chat"))
 }
 
+pub fn is_blueprint_session(root: &FsPath, task: &str) -> Result<bool> {
+    let conn = agent_service::open_db(root)?;
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT kind FROM agent_session_meta WHERE task_id=?1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(kind.as_deref() == Some("blueprint"))
+}
+
 /// If `task` is a dedicated read-only observer session (`kind == "observer"`),
 /// return the main `watched_task_id` it observes.
 pub fn observer_watched_task(root: &FsPath, task: &str) -> Result<Option<String>> {

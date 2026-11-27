@@ -241,6 +241,12 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
     let mut env_cues = Vec::<String>::new();
     let mut env_cues_seen = BTreeSet::<String>::new();
     let mut remote_servers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut file_activity: BTreeMap<String, FileActivity> = BTreeMap::new();
+    let mut step_files: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    let ws_prefix = workspace
+        .as_deref()
+        .map(|w| w.trim().replace('\\', "/").trim_end_matches('/').to_owned())
+        .filter(|w| !w.is_empty());
 
     let mut failures = Vec::<Value>::new();
     let mut cluster_map: BTreeMap<(String, String), (usize, i64, i64, String)> = BTreeMap::new();
@@ -475,6 +481,15 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
                         push_unique_capped(&mut env_cues, &mut env_cues_seen, clip_inline(cmd, 180), 15);
                     }
                 }
+                // Record coarse file-level read/edit activity & symbol cues for Blueprint class extraction.
+                record_tool_call_activity(
+                    &name,
+                    &args,
+                    step,
+                    ws_prefix.as_deref(),
+                    &mut file_activity,
+                    &mut step_files,
+                );
             }
             "program/error" => {
                 let msg = data["error"]["error"]
@@ -785,6 +800,14 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
         .collect();
 
     let duration_sec = ((updated_at - created_at).max(0)) / 1000;
+    let (class_candidates, candidate_chains) = build_class_candidates(
+        &file_activity,
+        &step_files,
+        &local_files,
+        &remote_files,
+        &env_files,
+        &pinned_facts,
+    );
 
     Ok(json!({
         "task": {
@@ -816,6 +839,8 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
             "local": local_files,
             "remote": remote_files,
         },
+        "class_candidates": class_candidates,
+        "candidate_chains": candidate_chains,
         "failure_clusters": failure_clusters,
         "failures": failures,
         "environment_signals": {
@@ -827,4 +852,683 @@ pub(crate) fn inspect_session(state_root: &Path, args: &Value) -> Result<Value> 
         "final_outcome": clip(&last_assistant_text, 1_500),
         "drilldown_hint": "Call `session.read_session_history({ task_id, event_seq })` to inspect any specific failure/step in full, or `{ task_id, programs: true }` for raw JS code.",
     }))
+}
+
+#[derive(Default)]
+struct FileActivity {
+    reads: usize,
+    edits: usize,
+    first_step: i64,
+    last_step: i64,
+    symbols: BTreeSet<String>,
+    is_remote: bool,
+    server_id: Option<String>,
+}
+
+fn normalize_session_path(raw: &str, ws_prefix: Option<&str>, is_remote: bool) -> Option<String> {
+    let mut p = raw.trim().replace('\\', "/");
+    if p.is_empty() {
+        return None;
+    }
+    if !is_remote {
+        if let Some(ws) = ws_prefix {
+            if let Some(rest) = p.strip_prefix(ws).and_then(|s| s.strip_prefix('/')) {
+                p = rest.to_owned();
+            }
+        }
+        while let Some(rest) = p.strip_prefix("./") {
+            p = rest.to_owned();
+        }
+        // Ignore obvious noise/build artifacts/scratch/logs outside source tree.
+        let lower = p.to_ascii_lowercase();
+        if p.starts_with('/')
+            || lower.starts_with("target/")
+            || lower.starts_with("tmp/")
+            || lower.starts_with("temp/")
+            || lower.starts_with("node_modules/")
+            || lower.starts_with(".git/")
+            || lower.starts_with(".codex-workspace-mcp/")
+            || lower.starts_with(".quickagent/")
+            || lower.contains("/node_modules/")
+            || lower.contains("/dist/")
+            || lower.contains("/.staging/")
+            || lower.ends_with(".log")
+            || lower.ends_with("package-lock.json")
+            || lower.ends_with("cargo.lock")
+            || lower.ends_with(".png")
+            || lower.ends_with(".jpg")
+            || lower.ends_with(".svg")
+        {
+            return None;
+        }
+    } else {
+        // Ignore remote upload staging chunks / tmp logs.
+        let lower = p.to_ascii_lowercase();
+        if lower.contains("/.staging/")
+            || lower.contains("/part-")
+            || lower.ends_with(".tar.gz")
+            || lower.ends_with(".gz")
+            || lower.ends_with(".log")
+        {
+            return None;
+        }
+    }
+    Some(p)
+}
+
+fn is_boilerplate_symbol(sym: &str) -> bool {
+    let lower = sym.to_ascii_lowercase();
+    sym.len() < 4
+        || sym.len() > 48
+        || sym.starts_with("__")
+        || matches!(
+            lower.as_str(),
+            "new"
+                | "main"
+                | "drop"
+                | "fmt"
+                | "clone"
+                | "from"
+                | "into"
+                | "default"
+                | "init"
+                | "test"
+                | "setup"
+                | "teardown"
+                | "call"
+                | "server"
+                | "source"
+                | "agent"
+                | "helper"
+        )
+}
+
+fn extract_symbols_from_snippet(text: &str, out: &mut BTreeSet<String>) {
+    if out.len() >= 8 {
+        return;
+    }
+    for line in text.lines().take(60) {
+        let t = line.trim();
+        let sym = if let Some(rest) = t
+            .strip_prefix("pub async fn ")
+            .or_else(|| t.strip_prefix("pub(crate) async fn "))
+            .or_else(|| t.strip_prefix("pub(super) async fn "))
+            .or_else(|| t.strip_prefix("pub fn "))
+            .or_else(|| t.strip_prefix("pub(crate) fn "))
+            .or_else(|| t.strip_prefix("pub(super) fn "))
+            .or_else(|| t.strip_prefix("async fn "))
+            .or_else(|| t.strip_prefix("fn "))
+            .or_else(|| t.strip_prefix("export async function "))
+            .or_else(|| t.strip_prefix("export function "))
+            .or_else(|| t.strip_prefix("async function "))
+            .or_else(|| t.strip_prefix("function "))
+            .or_else(|| t.strip_prefix("async def "))
+            .or_else(|| t.strip_prefix("def "))
+        {
+            rest.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .next()
+        } else if let Some(rest) = t.strip_prefix("func ") {
+            // Only strip receiver when line actually starts with `func (recv ...)` (not `func foo(...) (bool, error)`).
+            let after_recv = if rest.starts_with('(')
+                && let Some(idx) = rest.find(") ")
+            {
+                &rest[idx + 2..]
+            } else {
+                rest
+            };
+            after_recv
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .next()
+        } else {
+            None
+        };
+        if let Some(s) = sym.filter(|s| {
+            !is_boilerplate_symbol(s)
+                && !matches!(*s, "bool" | "string" | "error" | "int64" | "uint64" | "float64")
+        }) {
+            out.insert(s.to_owned());
+            if out.len() >= 8 {
+                break;
+            }
+        }
+    }
+}
+
+fn collect_edit_snippets(obj: &Value) -> String {
+    let mut buf = String::new();
+    for key in ["new_text", "content", "old_text"] {
+        if let Some(s) = obj[key].as_str() {
+            buf.push_str(s);
+            buf.push('\n');
+        }
+    }
+    if let Some(edits) = obj["edits"].as_array() {
+        for edit in edits.iter().take(6) {
+            for key in ["new_text", "old_text"] {
+                if let Some(s) = edit[key].as_str() {
+                    buf.push_str(s);
+                    buf.push('\n');
+                }
+            }
+        }
+    }
+    buf
+}
+
+fn record_tool_call_activity(
+    name: &str,
+    args: &Value,
+    step: i64,
+    ws_prefix: Option<&str>,
+    activity: &mut BTreeMap<String, FileActivity>,
+    step_files: &mut BTreeMap<i64, Vec<String>>,
+) {
+    let mut touch = |raw: &str, is_edit: bool, is_remote: bool, server_id: Option<&str>, snippet: Option<&str>| {
+        let Some(norm) = normalize_session_path(raw, ws_prefix, is_remote) else {
+            return;
+        };
+        let key = if is_remote {
+            format!("remote:{}:{}", server_id.unwrap_or("ssh"), norm)
+        } else {
+            norm
+        };
+        let entry = activity.entry(key.clone()).or_insert_with(|| FileActivity {
+            first_step: step,
+            last_step: step,
+            is_remote,
+            server_id: server_id.map(str::to_owned),
+            ..Default::default()
+        });
+        if is_edit {
+            entry.edits += 1;
+        } else {
+            entry.reads += 1;
+        }
+        if entry.first_step == 0 || (step > 0 && step < entry.first_step) {
+            entry.first_step = step;
+        }
+        entry.last_step = entry.last_step.max(step);
+        if let Some(code) = snippet {
+            extract_symbols_from_snippet(code, &mut entry.symbols);
+        }
+        let list = step_files.entry(step).or_default();
+        if !list.contains(&key) && list.len() < 16 {
+            list.push(key);
+        }
+    };
+
+    match name {
+        "read_file" | "read_file_lines" | "read_file_chunk" => {
+            if let Some(p) = args["path"].as_str() {
+                touch(p, false, false, None, None);
+            }
+        }
+        "parallel_read_batch" => {
+            if let Some(paths) = args["paths"].as_array() {
+                for p in paths.iter().filter_map(Value::as_str) {
+                    touch(p, false, false, None, None);
+                }
+            }
+        }
+        "edit_file" | "write_file" | "replace_range" => {
+            if let Some(p) = args["path"].as_str() {
+                let snippet = collect_edit_snippets(args);
+                touch(p, true, false, None, (!snippet.is_empty()).then_some(snippet.as_str()));
+            }
+        }
+        "apply_edits" => {
+            if let Some(files) = args["files"].as_array() {
+                for f in files {
+                    if let Some(p) = f["path"].as_str() {
+                        let snippet = collect_edit_snippets(f);
+                        touch(p, true, false, None, (!snippet.is_empty()).then_some(snippet.as_str()));
+                    }
+                }
+            }
+        }
+        "ssh__read_file" => {
+            let sid = args["server_id"].as_str();
+            if let Some(p) = args["path"].as_str().or_else(|| args["remote_path"].as_str()) {
+                touch(p, false, true, sid, None);
+            }
+        }
+        "ssh__edit_file" | "ssh__write_file" | "ssh__upload" => {
+            let sid = args["server_id"].as_str();
+            if let Some(p) = args["path"].as_str().or_else(|| args["remote_path"].as_str()) {
+                let snippet = collect_edit_snippets(args);
+                touch(p, true, true, sid, (!snippet.is_empty()).then_some(snippet.as_str()));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn to_pascal(raw: &str) -> String {
+    let mut out = String::new();
+    let mut cap = true;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if cap {
+                out.push(ch.to_ascii_uppercase());
+                cap = false;
+            } else {
+                out.push(ch);
+            }
+        } else {
+            cap = true;
+        }
+    }
+    if out.is_empty() { "Module".into() } else { out }
+}
+
+fn to_slug(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_sep = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_sep = false;
+        } else if !prev_sep && !out.is_empty() {
+            out.push('_');
+            prev_sep = true;
+        }
+    }
+    out.trim_end_matches('_').to_owned()
+}
+
+fn classify_file_module(path: &str, is_remote: bool, server_id: Option<&str>) -> (String, String, &'static str) {
+    if is_remote {
+        let sid = server_id.unwrap_or("remote");
+        let name = format!("Remote{}", to_pascal(sid));
+        return (format!("ext.{}", to_slug(sid)), name, "external");
+    }
+    let lower = path.to_ascii_lowercase();
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let file_name = parts.last().copied().unwrap_or(path);
+    let stem = file_name.split('.').next().unwrap_or(file_name);
+
+    let is_test = lower.contains("/tests/")
+        || lower.starts_with("tests/")
+        || lower.ends_with("_test.go")
+        || lower.ends_with("_test.rs")
+        || lower.ends_with("_tests.rs")
+        || lower.ends_with("_tests.inc.rs")
+        || lower.ends_with("_test.inc.rs")
+        || lower.ends_with(".test.ts")
+        || lower.ends_with(".test.tsx")
+        || lower.ends_with(".test.mjs")
+        || lower.ends_with(".spec.mjs")
+        || lower.ends_with(".spec.ts")
+        || lower.starts_with("test_")
+        || lower.contains("/test_");
+    if is_test {
+        let dir = parts.get(parts.len().saturating_sub(2)).copied().unwrap_or("suite");
+        let area = if matches!(dir, "tests" | "parts") {
+            parts.get(parts.len().saturating_sub(3)).copied().unwrap_or(stem)
+        } else {
+            dir
+        };
+        let cls = format!("{}Tests", to_pascal(area));
+        return (format!("test.{}", to_slug(&cls)), cls, "test_guard");
+    }
+
+    let is_frontend = lower.starts_with("frontend/")
+        || lower.ends_with(".tsx")
+        || lower.ends_with(".jsx")
+        || lower.ends_with(".vue");
+    if is_frontend {
+        if let Some(pos) = parts.iter().position(|&p| p == "builtin_plugins")
+            && let Some(&plugin) = parts.get(pos + 1)
+        {
+            let cls = format!("{}Ui", to_pascal(plugin));
+            return (format!("ui.{}", to_slug(plugin)), cls, "trigger_ui");
+        }
+        let cls = format!("{}View", to_pascal(stem));
+        return (format!("ui.{}", to_slug(stem)), cls, "trigger_ui");
+    }
+
+    let is_api = lower.contains("route")
+        || lower.contains("handler")
+        || lower.contains("controller")
+        || lower.contains("endpoint")
+        || lower.contains("proxy")
+        || lower.contains("/api/");
+    let is_store = lower.contains("store")
+        || lower.contains("database")
+        || lower.contains("sqlite")
+        || lower.contains("repo")
+        || lower.contains("ledger")
+        || lower.contains("schema")
+        || lower.contains("migration")
+        || lower.contains(".env")
+        || lower.contains("config");
+
+    let kind = if is_api {
+        "trigger_api"
+    } else if is_store {
+        "store"
+    } else {
+        "service"
+    };
+
+    // Coarse-grained business module grouping (cover business areas rather than 1-file-per-class fragmentation).
+    let group_label = if let Some(pos) = parts.iter().position(|&p| p == "builtin_plugins")
+        && let Some(&plugin) = parts.get(pos + 1)
+    {
+        format!("{}_{}", plugin, if is_api { "api" } else if is_store { "store" } else { "service" })
+    } else if parts.len() == 2 && !matches!(parts[0], "src" | "internal" | "pkg" | "cmd" | "app" | "lib" | "docs") {
+        // Feature top-level package like `lightrag_service/{service.py, kg_engine.py, main.py, SKILL.md}` -> one cohesive class!
+        parts[0].to_owned()
+    } else if parts.len() >= 3 {
+        let dir = parts[parts.len() - 2];
+        if matches!(dir, "src" | "internal" | "pkg" | "cmd" | "app" | "lib" | "parts") {
+            stem.to_owned()
+        } else if let Some((prefix, _)) = stem.split_once('_')
+            && prefix.len() >= 2
+            && matches!(prefix, "kg" | "es" | "ssh" | "db" | "auth" | "session" | "workspace" | "agent")
+        {
+            // Group sibling feature files like `internal/server/kg_{wire,agent,backlink,tools}.go` -> `ServerKg`.
+            format!("{dir}_{prefix}")
+        } else {
+            format!("{dir}_{stem}")
+        }
+    } else {
+        stem.to_owned()
+    };
+
+    let cls = to_pascal(&group_label);
+    let prefix = match kind {
+        "trigger_api" => "api",
+        "store" => "store",
+        _ => "svc",
+    };
+    (format!("{prefix}.{}", to_slug(&group_label)), cls, kind)
+}
+
+fn layer_order(kind: &str) -> u8 {
+    match kind {
+        "trigger_ui" => 0,
+        "trigger_api" | "trigger_job" => 1,
+        "service" => 2,
+        "store" | "external" => 3,
+        "test_guard" => 4,
+        _ => 2,
+    }
+}
+
+fn build_class_candidates(
+    activity: &BTreeMap<String, FileActivity>,
+    step_files: &BTreeMap<i64, Vec<String>>,
+    local_changed: &[String],
+    remote_changed: &[Value],
+    env_files: &[String],
+    pinned_facts: &[String],
+) -> (Vec<Value>, Vec<Value>) {
+    struct Cluster {
+        id: String,
+        name: String,
+        kind: &'static str,
+        files: BTreeSet<String>,
+        symbols: BTreeSet<String>,
+        reads: usize,
+        edits: usize,
+        first_step: i64,
+        last_step: i64,
+    }
+
+    let mut clusters: BTreeMap<String, Cluster> = BTreeMap::new();
+    let mut file_to_cluster: BTreeMap<String, String> = BTreeMap::new();
+
+    for (key, act) in activity {
+        let raw_path = if act.is_remote {
+            key.splitn(3, ':').nth(2).unwrap_or(key)
+        } else {
+            key.as_str()
+        };
+        let (cid, cname, ckind) = classify_file_module(raw_path, act.is_remote, act.server_id.as_deref());
+        file_to_cluster.insert(key.clone(), cid.clone());
+        let entry = clusters.entry(cid.clone()).or_insert_with(|| Cluster {
+            id: cid,
+            name: cname,
+            kind: ckind,
+            files: BTreeSet::new(),
+            symbols: BTreeSet::new(),
+            reads: 0,
+            edits: 0,
+            first_step: act.first_step,
+            last_step: act.last_step,
+        });
+        entry.files.insert(raw_path.to_owned());
+        for sym in &act.symbols {
+            entry.symbols.insert(format!("{raw_path}#{sym}"));
+        }
+        entry.reads += act.reads;
+        entry.edits += act.edits;
+        if act.first_step > 0 && (entry.first_step == 0 || act.first_step < entry.first_step) {
+            entry.first_step = act.first_step;
+        }
+        entry.last_step = entry.last_step.max(act.last_step);
+    }
+
+    // Also ensure changed local/remote files appear even if they came only from workspace/changes.
+    for p in local_changed {
+        if let Some(norm) = normalize_session_path(p, None, false)
+            && !file_to_cluster.contains_key(&norm)
+        {
+            let (cid, cname, ckind) = classify_file_module(&norm, false, None);
+            file_to_cluster.insert(norm.clone(), cid.clone());
+            let entry = clusters.entry(cid.clone()).or_insert_with(|| Cluster {
+                id: cid,
+                name: cname,
+                kind: ckind,
+                files: BTreeSet::new(),
+                symbols: BTreeSet::new(),
+                reads: 0,
+                edits: 1,
+                first_step: 0,
+                last_step: 0,
+            });
+            entry.files.insert(norm);
+        }
+    }
+    for r in remote_changed {
+        if let Some(p) = r["path"].as_str()
+            && let Some(norm) = normalize_session_path(p, None, true)
+        {
+            let sid = r["server_id"].as_str();
+            let key = format!("remote:{}:{norm}", sid.unwrap_or("ssh"));
+            if !file_to_cluster.contains_key(&key) {
+                let (cid, cname, ckind) = classify_file_module(&norm, true, sid);
+                file_to_cluster.insert(key, cid.clone());
+                let entry = clusters.entry(cid.clone()).or_insert_with(|| Cluster {
+                    id: cid,
+                    name: cname,
+                    kind: ckind,
+                    files: BTreeSet::new(),
+                    symbols: BTreeSet::new(),
+                    reads: 0,
+                    edits: 1,
+                    first_step: 0,
+                    last_step: 0,
+                });
+                entry.files.insert(norm);
+            }
+        }
+    }
+
+    let mut ranked: Vec<Cluster> = clusters.into_values().collect();
+    ranked.sort_by(|a, b| {
+        let score_a = a.edits * 5 + a.reads;
+        let score_b = b.edits * 5 + b.reads;
+        score_b
+            .cmp(&score_a)
+            .then_with(|| layer_order(a.kind).cmp(&layer_order(b.kind)))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    ranked.truncate(10);
+
+    let kept_ids: BTreeSet<String> = ranked.iter().map(|c| c.id.clone()).collect();
+    let cluster_meta: BTreeMap<String, (String, &'static str)> = ranked
+        .iter()
+        .map(|c| (c.id.clone(), (c.name.clone(), c.kind)))
+        .collect();
+
+    // Observe cross-class co-access & step transitions to propose coarse method chains.
+    let mut pair_weights: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let mut prev_step_clusters: Vec<String> = Vec::new();
+    for files in step_files.values() {
+        let mut cur_clusters: Vec<String> = Vec::new();
+        for f in files {
+            if let Some(cid) = file_to_cluster.get(f)
+                && kept_ids.contains(cid)
+                && !cur_clusters.contains(cid)
+            {
+                cur_clusters.push(cid.clone());
+            }
+        }
+        // Within-step pairs & consecutive-step pairs, oriented by architectural layer.
+        for a in &cur_clusters {
+            for b in cur_clusters.iter().chain(&prev_step_clusters) {
+                if a == b {
+                    continue;
+                }
+                let ka = layer_order(cluster_meta[a].1);
+                let kb = layer_order(cluster_meta[b].1);
+                let edge = if ka < kb || (ka == kb && a < b) {
+                    (a.clone(), b.clone())
+                } else {
+                    (b.clone(), a.clone())
+                };
+                *pair_weights.entry(edge).or_insert(0) += 1;
+            }
+        }
+        if !cur_clusters.is_empty() {
+            prev_step_clusters = cur_clusters;
+        }
+    }
+
+    let mut edges: Vec<((String, String), usize)> = pair_weights.into_iter().collect();
+    edges.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    edges.truncate(14);
+
+    let mut candidates = Vec::with_capacity(ranked.len());
+    let mut first_method_by_cluster: BTreeMap<String, String> = BTreeMap::new();
+    let mut attached_pinned_rules = false;
+    for c in &ranked {
+        let mut properties = Vec::new();
+        for (idx, f) in c.files.iter().take(5).enumerate() {
+            properties.push(json!({
+                "id": format!("file_{}", idx + 1),
+                "name": if idx == 0 { "source".to_owned() } else { format!("source_{}", idx + 1) },
+                "kind": if c.kind == "external" { "config" } else { "file" },
+                "value": f,
+            }));
+        }
+        for (idx, sym) in c.symbols.iter().take(3).enumerate() {
+            properties.push(json!({
+                "id": format!("sym_{}", idx + 1),
+                "name": sym.split('#').nth(1).unwrap_or("symbol"),
+                "kind": "symbol",
+                "value": sym,
+            }));
+        }
+        if c.kind == "store" || c.kind == "external" {
+            for (idx, ef) in env_files.iter().take(2).enumerate() {
+                properties.push(json!({
+                    "id": format!("env_{}", idx + 1),
+                    "name": "env_file",
+                    "kind": "env",
+                    "value": ef,
+                }));
+            }
+        }
+        // Attach pinned facts once on the primary service/external class instead of duplicating onto every class.
+        if !attached_pinned_rules && !pinned_facts.is_empty() && matches!(c.kind, "service" | "external") {
+            attached_pinned_rules = true;
+            for (idx, fact) in pinned_facts.iter().take(3).enumerate() {
+                properties.push(json!({
+                    "id": format!("rule_{}", idx + 1),
+                    "name": format!("constraint_{}", idx + 1),
+                    "kind": "rule",
+                    "value": clip_inline(fact, 160),
+                }));
+            }
+        }
+
+        let mut methods = Vec::new();
+        for sym_ref in c.symbols.iter().take(3) {
+            if let Some(sym) = sym_ref.split('#').nth(1) {
+                let mid = to_slug(sym);
+                if !mid.is_empty() {
+                    methods.push(json!({
+                        "id": mid,
+                        "name": sym,
+                        "symbol": sym,
+                        "reads": ["source"],
+                    }));
+                }
+            }
+        }
+        if methods.is_empty() {
+            let default_m = match c.kind {
+                "trigger_ui" => ("trigger", "触发交互"),
+                "trigger_api" => ("handle", "处理接口请求"),
+                "store" => ("persist", "读写存储"),
+                "external" => ("invoke", "远端交互"),
+                "test_guard" => ("verify", "执行验证"),
+                _ => ("execute", "核心处理"),
+            };
+            methods.push(json!({
+                "id": default_m.0,
+                "name": default_m.1,
+                "reads": ["source"],
+            }));
+        }
+        first_method_by_cluster.insert(
+            c.id.clone(),
+            methods[0]["id"].as_str().unwrap_or("execute").to_owned(),
+        );
+        candidates.push(json!({
+            "id": c.id,
+            "name": c.name,
+            "kind": c.kind,
+            "file_path": if c.kind == "external" { Value::Null } else { json!(c.files.iter().next()) },
+            "properties": properties,
+            "methods": methods,
+            "activity": {
+                "reads": c.reads,
+                "edits": c.edits,
+                "first_step": c.first_step,
+                "last_step": c.last_step,
+            }
+        }));
+    }
+
+    let chains: Vec<Value> = edges
+        .into_iter()
+        .map(|((from_id, to_id), weight)| {
+            let from_name = &cluster_meta[&from_id].0;
+            let to_name = &cluster_meta[&to_id].0;
+            let from_m = first_method_by_cluster
+                .get(&from_id)
+                .map(String::as_str)
+                .unwrap_or("execute");
+            let to_m = first_method_by_cluster
+                .get(&to_id)
+                .map(String::as_str)
+                .unwrap_or("execute");
+            json!({
+                "source_class": from_id,
+                "source_class_name": from_name,
+                "source_method": from_m,
+                "target_class": to_id,
+                "target_class_name": to_name,
+                "target_method": to_m,
+                "expression": format!("bp.{from_name}.{from_m}().{to_m}()"),
+                "co_access_weight": weight,
+            })
+        })
+        .collect();
+
+    (candidates, chains)
 }

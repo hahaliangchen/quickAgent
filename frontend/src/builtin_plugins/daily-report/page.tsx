@@ -267,6 +267,193 @@ function ProjectPicker({ value, options, onPick }: {
   </div>
 }
 
+interface SelectOption<T extends string | number> {
+  readonly value: T
+  readonly label: string
+  readonly hint?: string
+}
+
+function StyledSelect<T extends string | number>({
+  value,
+  options,
+  accentTone,
+  ariaLabel,
+  onChange,
+}: {
+  value: T
+  options: readonly SelectOption<T>[]
+  accentTone?: 'overtime' | 'leave'
+  ariaLabel: string
+  onChange: (value: T) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(0)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const selectedIndex = options.findIndex(opt => opt.value === value)
+  const selected = selectedIndex >= 0 ? options[selectedIndex] : undefined
+  const activeValue = typeof value === 'number' ? value > 0 : value !== '0' && value !== ''
+
+  useEffect(() => {
+    if (open) {
+      setActiveIndex(selectedIndex >= 0 ? selectedIndex : 0)
+    }
+  }, [open, selectedIndex])
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [open])
+
+  const commit = (next: T) => {
+    onChange(next)
+    setOpen(false)
+  }
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      if (!open) setOpen(true)
+      else setActiveIndex(idx => Math.min(idx + 1, options.length - 1))
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (!open) setOpen(true)
+      else setActiveIndex(idx => Math.max(idx - 1, 0))
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      if (open) {
+        event.preventDefault()
+        const hit = options[activeIndex]
+        if (hit) commit(hit.value)
+      }
+    } else if (event.key === 'Escape') {
+      if (open) {
+        event.preventDefault()
+        setOpen(false)
+      }
+    }
+  }
+
+  return (
+    <div className={css.selectWrap} ref={wrapRef}>
+      <button
+        type="button"
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        className={clsx(
+          css.selectTrigger,
+          open && css.selectTriggerOpen,
+          activeValue && accentTone === 'overtime' && css.selectTriggerOvertime,
+          activeValue && accentTone === 'leave' && css.selectTriggerLeave,
+        )}
+        onClick={() => setOpen(v => !v)}
+        onKeyDown={onKeyDown}
+      >
+        <span className={css.selectTriggerLead}>
+          {activeValue && accentTone && (
+            <i className={clsx(css.selectDot, accentTone === 'overtime' ? css.dotOvertime : css.dotLeave)} />
+          )}
+          <span className={clsx(css.selectTriggerValue, !activeValue && css.selectTriggerMuted)}>
+            {selected?.label ?? (typeof value === 'number' ? `${value} 小时` : String(value))}
+          </span>
+        </span>
+        <span className={clsx(css.selectChevron, open && css.selectChevronOpen)}>
+          <Icon name="chevron" />
+        </span>
+      </button>
+      {open && (
+        <div className={clsx(css.menu, css.selectMenuUp)} role="listbox" aria-label={ariaLabel}>
+          <div className={css.selectMenuList}>
+            {options.map((opt, idx) => {
+              const isSelected = opt.value === value
+              return (
+                <button
+                  key={String(opt.value)}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  className={clsx(
+                    css.selectOption,
+                    idx === activeIndex && css.optionActive,
+                    isSelected && css.selectOptionSelected,
+                  )}
+                  onMouseDown={event => event.preventDefault()}
+                  onMouseEnter={() => setActiveIndex(idx)}
+                  onClick={() => commit(opt.value)}
+                >
+                  <span className={css.optionName}>{opt.label}</span>
+                  {opt.hint && <span className={css.selectOptionHint}>{opt.hint}</span>}
+                  {isSelected && <span className={css.selectCheck} aria-hidden="true">✓</span>}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AutoGrowTextarea({
+  value,
+  minRows = 2,
+  maxRows = 12,
+  className,
+  onChange,
+  ...rest
+}: Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, 'rows'> & {
+  value: string
+  minRows?: number
+  maxRows?: number
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null)
+
+  const syncHeight = useCallback(() => {
+    const el = ref.current
+    if (!el) return
+    const style = window.getComputedStyle(el)
+    const lineHeight = parseFloat(style.lineHeight) || 20
+    const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0)
+    const borderY = (parseFloat(style.borderTopWidth) || 0) + (parseFloat(style.borderBottomWidth) || 0)
+    const chrome = padY + borderY
+    const minHeight = Math.ceil(lineHeight * minRows + chrome)
+    const maxHeight = Math.ceil(lineHeight * maxRows + chrome)
+    el.style.height = 'auto'
+    const nextHeight = Math.max(minHeight, Math.min(el.scrollHeight + borderY, maxHeight))
+    el.style.height = `${nextHeight}px`
+    el.style.overflowY = el.scrollHeight + borderY > maxHeight + 1 ? 'auto' : 'hidden'
+  }, [minRows, maxRows])
+
+  useEffect(() => {
+    syncHeight()
+  }, [value, syncHeight])
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => syncHeight())
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [syncHeight])
+
+  return (
+    <textarea
+      ref={ref}
+      rows={minRows}
+      value={value}
+      className={clsx(css.autoGrowTextarea, className)}
+      onChange={onChange}
+      {...rest}
+    />
+  )
+}
+
 /** One project row: name from the server list, plus structured WorkContentInput blocks matching report_vue. */
 function ProjectCard({ index, project, options, facts, showValidation, onChange, onRemove, removable }: {
   index: number
@@ -348,12 +535,12 @@ function ProjectCard({ index, project, options, facts, showValidation, onChange,
             </div>
             <label className={css.featureRow}>
               <span className={css.featureLabel}>1. 具体任务或功能</span>
-              <textarea rows={1} value={group.task} placeholder="负责这个项目中的具体任务或功能模块"
+              <AutoGrowTextarea minRows={1} maxRows={4} value={group.task} placeholder="负责这个项目中的具体任务或功能模块"
                 onChange={event => updateGroup(gIndex, { task: event.target.value })} />
             </label>
             <label className={css.featureRow}>
               <span className={css.featureLabel}>2. 今日完成工作</span>
-              <textarea rows={2} value={group.today} placeholder="今天具体做了什么、达到什么可验收结果"
+              <AutoGrowTextarea minRows={2} maxRows={12} value={group.today} placeholder="今天具体做了什么、达到什么可验收结果"
                 onChange={event => updateGroup(gIndex, { today: event.target.value })} />
             </label>
             <div className={css.featureRowInline}>
@@ -873,10 +1060,22 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
       setError('')
       if (detail.action === 'prepare_draft') {
         setTab('fill')
-        void syncRemote({ mode: 'open', force: true }).then(() => {
-          const dateLabel = draftRef.current.report_date || detail.reportDate || ''
+        void dailyApi.status().then(next => {
+          setStatus(next)
+          if (next.draft) {
+            draftDirtyRef.current = false
+            setDraft({ ...next.draft })
+            const ot = Number(next.draft.overtime_hours || 0)
+            setCustomOvertime(ot > 0 && !OVERTIME_PRESETS.includes(ot as (typeof OVERTIME_PRESETS)[number]))
+            const nextMonth = next.draft.report_date.slice(0, 7)
+            if (nextMonth) setCalendarMonth(nextMonth)
+          }
+          const dateLabel = next.draft?.report_date || detail.reportDate || draftRef.current.report_date || ''
           setNotice(`已同步 AI 填写的日报草稿${dateLabel ? ' · ' + dateLabel : ''}`)
           formColumnRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+          void syncRemote({ mode: 'refresh', initialStatus: next, force: true })
+        }, () => {
+          void syncRemote({ mode: 'open', force: true })
         })
         return
       }
@@ -1153,28 +1352,49 @@ export default function DailyReportWorkbench({ workspaceRoot, theme, onAskAi, on
           <Field label="加班时长">
             {customOvertime ? (
               <div className={css.inlineInputGroup}>
-                <input type="number" min={0} max={24} step={0.5} value={draft.overtime_hours}
-                  onChange={event => editDraft(current => ({ ...current, overtime_hours: Number(event.target.value) || 0 }))} />
-                <button type="button" className={css.chipButton} onClick={() => { setCustomOvertime(false); editDraft(current => ({ ...current, overtime_hours: 0 })) }}>快捷</button>
+                <div className={css.unitInput}>
+                  <input type="number" min={0} max={24} step={0.5} value={draft.overtime_hours}
+                    onChange={event => editDraft(current => ({ ...current, overtime_hours: Number(event.target.value) || 0 }))} />
+                  <span className={css.unitSuffix}>小时</span>
+                </div>
+                <button type="button" className={css.chipButton} onClick={() => { setCustomOvertime(false); editDraft(current => ({ ...current, overtime_hours: 0 })) }}>预设</button>
               </div>
             ) : (
-              <select value={draft.overtime_hours} onChange={event => {
-                if (event.target.value === 'custom') {
-                  setCustomOvertime(true)
-                  editDraft(current => ({ ...current, overtime_hours: current.overtime_hours > 0 ? current.overtime_hours : 1.5 }))
-                } else {
-                  editDraft(current => ({ ...current, overtime_hours: Number(event.target.value) }))
-                }
-              }}>
-                {OVERTIME_PRESETS.map(h => <option key={h} value={h}>{h === 0 ? '无加班' : `${h} 小时`}</option>)}
-                <option value="custom">自定义…</option>
-              </select>
+              <StyledSelect<string>
+                ariaLabel="加班时长"
+                accentTone="overtime"
+                value={String(draft.overtime_hours)}
+                options={[
+                  ...OVERTIME_PRESETS.map(h => ({
+                    value: String(h),
+                    label: h === 0 ? '无加班' : `${h} 小时`,
+                    ...(h === 0 ? {} : { hint: `${h}h` }),
+                  })),
+                  { value: 'custom', label: '自定义时长…', hint: '0.5h 步进' },
+                ]}
+                onChange={next => {
+                  if (next === 'custom') {
+                    setCustomOvertime(true)
+                    editDraft(current => ({ ...current, overtime_hours: current.overtime_hours > 0 ? current.overtime_hours : 1.5 }))
+                  } else {
+                    editDraft(current => ({ ...current, overtime_hours: Number(next) || 0 }))
+                  }
+                }}
+              />
             )}
           </Field>
           <Field label="请假时长">
-            <select value={draft.leave_hours} onChange={event => editDraft(current => ({ ...current, leave_hours: Number(event.target.value) }))}>
-              {LEAVE_PRESETS.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </select>
+            <StyledSelect<number>
+              ariaLabel="请假时长"
+              accentTone="leave"
+              value={Number(draft.leave_hours) || 0}
+              options={LEAVE_PRESETS.map(item => ({
+                value: item.value,
+                label: item.label,
+                ...(item.value > 0 ? { hint: `${item.value}h` } : {}),
+              }))}
+              onChange={next => editDraft(current => ({ ...current, leave_hours: next }))}
+            />
           </Field>
           <Field label="报销费用（元）">
             <input type="number" min={0} step={0.01} value={draft.reimbursement} onChange={event => {

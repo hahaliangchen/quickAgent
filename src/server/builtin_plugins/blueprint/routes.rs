@@ -128,8 +128,15 @@ pub(super) fn scan_project_statuses(workspaces: Vec<PathBuf>) -> Value {
         if !root.is_absolute() {
             continue;
         }
-        let key = root.to_string_lossy().into_owned();
-        if !seen.insert(key.clone()) {
+        let key = crate::tools::file_edit::strip_verbatim_prefix(&root)
+            .to_string_lossy()
+            .into_owned();
+        let dedup_key = if cfg!(windows) {
+            key.replace('\\', "/").to_ascii_lowercase()
+        } else {
+            key.clone()
+        };
+        if !seen.insert(dedup_key) {
             continue;
         }
         let summary = (|| -> Result<Value> {

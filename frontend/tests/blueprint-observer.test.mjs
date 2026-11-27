@@ -129,20 +129,39 @@ test('parseObserverSuggestion supports interject, stop, stop_and_continue, and N
   assert.equal(parsedNoop?.interject, '')
 })
 
-test('buildObserverInspectPrompt emits concise signal and buildObserverUserChatPrompt keeps raw user text clean', () => {
-  const prompt = buildObserverInspectPrompt({
+test('buildObserverInspectPrompt emits pure factual signals (no tail micromanagement) and propagates dismissed feedback', () => {
+  const manualPrompt = buildObserverInspectPrompt({
     watchedTaskId: 'task_abc123',
     watchedTitle: '第1轮：不要改代码也不要重启服务',
     watchedStatus: 'running',
     workspaceRoot: '/home/goodtime/project/rag-go',
     trigger: { kind: 'manual', label: '用户手动触发巡检', latestSeq: 15 },
   })
-  assert.match(prompt, /巡检信号/)
-  assert.match(prompt, /用户手动触发巡检/)
-  assert.match(prompt, /从尾部检查/)
+  assert.match(manualPrompt, /主会话动态/)
+  assert.match(manualPrompt, /用户手动触发巡检/)
+  assert.doesNotMatch(manualPrompt, /从尾部检查/)
   // Must NOT inject Turn-1 title or giant instruction boilerplate into user messages.
-  assert.doesNotMatch(prompt, /不要改代码/)
-  assert.ok(prompt.length < 200)
+  assert.doesNotMatch(manualPrompt, /不要改代码/)
+  assert.ok(manualPrompt.length < 200)
+
+  const planPrompt = buildObserverInspectPrompt({
+    watchedTaskId: 'task_abc123',
+    watchedTitle: '部署任务',
+    watchedStatus: 'running',
+    trigger: { kind: 'plan_phase', label: '主会话计划阶段变更', detail: '验证持久化', latestSeq: 20 },
+    dismissedTitles: ['即将违反只重启一次约束'],
+  })
+  assert.match(planPrompt, /验证持久化/)
+  assert.match(planPrompt, /用户已忽略此前建议「即将违反只重启一次约束」/)
+  assert.doesNotMatch(planPrompt, /从尾部检查/)
+
+  const donePrompt = buildObserverInspectPrompt({
+    watchedTaskId: 'task_abc123',
+    watchedTitle: '部署任务',
+    watchedStatus: 'completed',
+    trigger: { kind: 'turn_completed', label: '主会话本轮结束复核', latestSeq: 30 },
+  })
+  assert.match(donePrompt, /blueprint-note/)
 
   const chatPrompt = buildObserverUserChatPrompt({
     watchedTaskId: 'task_abc123',

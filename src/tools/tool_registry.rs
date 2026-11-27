@@ -6,7 +6,6 @@ use crate::{runtime::agent_program::libraries::Libraries, server::agent_service:
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CatalogKind {
     File,
-    Memory,
     Process,
     Verify,
     Plan,
@@ -141,17 +140,6 @@ const SPECS: &[ToolSpec] = tool_specs! {
         io.delete => delete_path, workspace_write, tracked, written_path("已删除");
         io.rename => rename_path, workspace_write, tracked, written_path("已移动");
         io.mkdir => create_dir, workspace_write, tracked, written_path("已创建目录");
-    }
-    Memory {
-        memory.record_work_memory;
-        memory.list_work_memory;
-        memory.search_work_memory;
-        memory.record_architecture_memory;
-        memory.list_architecture_memory;
-        memory.search_architecture_memory;
-        memory.record_symbol_business_context;
-        memory.list_symbol_business_context;
-        memory.search_symbol_business_context;
     }
     Process {
         process.install_dependencies, workspace_write, approval, tracked;

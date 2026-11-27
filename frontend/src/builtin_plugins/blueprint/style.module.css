@@ -506,6 +506,59 @@
 }
 .nodeSub { display: grid; padding: 6px 10px 7px; font-size: 11px; color: var(--bp-muted); gap: 2px; }
 .nodeSub > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.propsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 8px 6px;
+  border-top: 1px dashed var(--bp-line);
+  background: color-mix(in srgb, var(--bp-soft) 55%, var(--bp-card));
+}
+.workbench .propRow {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  width: 100%;
+  min-height: 22px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  font-size: 11px;
+  text-align: left;
+}
+.propTag {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bp-hover);
+  color: var(--bp-second);
+}
+.propTag[data-kind='file'] { background: var(--bp-accent-soft); color: var(--bp-accent-hover); }
+.propTag[data-kind='rule'] { background: var(--bp-danger-soft); color: var(--bp-danger); }
+.propTag[data-kind='env'] { background: var(--bp-amber-soft); color: var(--bp-amber); }
+.propName { flex: none; max-width: 82px; font-weight: 600; color: var(--bp-second); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.propVal { flex: 1; min-width: 0; font-size: 10.5px; color: var(--bp-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chainList { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.workbench .chainItem {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--bp-line);
+  background: var(--bp-card);
+  text-align: left;
+}
+.workbench .chainItem:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--bp-accent) 45%, var(--bp-line));
+  background: var(--bp-hover);
+}
+.chainExpr { font-size: 11px; color: var(--bp-accent-hover); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chainMeta { font-size: 10.5px; color: var(--bp-muted); }
 .port { position: relative; padding: 0 8px; border-top: 1px solid var(--bp-line); }
 .port[data-active] { background: var(--bp-accent-soft); }
 .workbench .portButton {

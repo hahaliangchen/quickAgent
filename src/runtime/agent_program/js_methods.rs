@@ -68,7 +68,7 @@ pub(super) fn method_arity(name: &str) -> Option<(usize, usize)> {
         "concat" | "push" | "unshift" | "splice" => (0, 64),
         "fill" => (1, 3),
         "sort" | "toSorted" => (0, 1),
-        "getTime" | "toISOString" | "toJSON" | "getFullYear" | "getMonth" | "getDate"
+        "getTime" | "getTimezoneOffset" | "toISOString" | "toJSON" | "getFullYear" | "getMonth" | "getDate"
         | "getDay" | "getHours" | "getMinutes" | "getSeconds" | "getMilliseconds"
         | "getUTCFullYear" | "getUTCMonth" | "getUTCDate" | "getUTCDay" | "getUTCHours"
         | "getUTCMinutes" | "getUTCSeconds" | "getUTCMilliseconds" => (0, 0),

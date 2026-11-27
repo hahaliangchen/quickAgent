@@ -63,7 +63,8 @@ export const OBSERVER_STALL_THRESHOLD_MS = 180_000
 
 const PREFS_KEY = 'blueprint_observer_prefs_v1'
 // v2 sessions are created with backend `kind: "observer"` + dedicated pinned system prompt.
-const SESSION_MAP_KEY = 'blueprint_observer_sessions_v2'
+// v3: start fresh pure read-only observer sessions after prompt/capability separation (old DB logs stay intact).
+const SESSION_MAP_KEY = 'blueprint_observer_sessions_v3'
 const DISMISSED_KEY = 'blueprint_observer_dismissed_v1'
 
 const DEFAULT_PREFS: ObserverPrefs = {
@@ -340,9 +341,8 @@ export function findStalledInFlightTool(
 }
 
 /**
- * Build a concise factual wake-up signal for the dedicated Observer Agent.
- * Role, inspection methodology, and output schema live ONCE in the backend
- * `pinned_system_prompt` for `kind: "observer"`, never repeated inside user turns.
+ * Build a pure, factual wake-up signal for the independent Observer Agent.
+ * Never micromanage how it queries the DB; let it analyze with full global visibility.
  */
 export function buildObserverInspectPrompt(input: {
   readonly watchedTaskId: string
@@ -351,10 +351,27 @@ export function buildObserverInspectPrompt(input: {
   readonly workspaceRoot?: string | undefined
   readonly trigger: ObserverTrigger
   readonly recentSummary?: string | undefined
+  readonly dismissedTitles?: readonly string[] | undefined
 }): string {
   const detail = input.trigger.detail ? `（${input.trigger.detail}）` : ''
   const extra = input.recentSummary ? ` ${input.recentSummary}` : ''
-  return `[巡检信号] ${input.trigger.label}${detail}（主会话状态：${input.watchedStatus}）。请从尾部检查最近在做什么任务，必要时可翻阅历史 DB 记录。${extra}`
+  const dismissed = (input.dismissedTitles ?? []).map(t => t.trim()).filter(Boolean)
+  const dismissedNote = dismissed.length
+    ? `（注：用户已忽略此前建议「${dismissed.join('」「')}」，请勿重复提醒。）`
+    : ''
+
+  switch (input.trigger.kind) {
+    case 'plan_phase':
+      return `[主会话动态] 计划推进${detail}（状态：${input.watchedStatus}）。请围绕本轮核心目标与验收重点轻量查看进展；正常推进则简述主线进度即可，仅在明显偏离核心目标、触碰硬红线或卡死时介入。${extra}${dismissedNote}`
+    case 'turn_completed':
+      return `[主会话动态] 主会话本轮已完成（状态：${input.watchedStatus}）。请对照本轮核心目标复盘结果；如本次沉淀了值得复用的业务模块/锚点文件/环境约束或踩坑经验，请在末尾附 blueprint-note 呈报给蓝图工作台。${extra}${dismissedNote}`
+    case 'turn_failed':
+      return `[主会话动态] 主会话本轮报错中断${detail}（状态：${input.watchedStatus}）。请自主分析根因并判断是否需要给主会话提供纠偏建议。${extra}${dismissedNote}`
+    case 'stalled_tool':
+      return `[主会话动态] ${input.trigger.label}${detail}（状态：${input.watchedStatus}）。请自主判断是正常耗时还是已卡死，必要时给出处置建议。${extra}${dismissedNote}`
+    default:
+      return `[主会话动态] ${input.trigger.label}${detail}（状态：${input.watchedStatus}）。请围绕本轮核心目标自主判断主会话当前主线进展与是否需要提醒。${extra}${dismissedNote}`
+  }
 }
 
 export const OBSERVER_META_START = '<!--observer-meta-start-->'
@@ -594,9 +611,9 @@ export function stripObserverUserPromptMeta(raw: string): string {
 export function stripObserverSuggestionFence(raw: string): string {
   const note = parseObserverBlueprintNote(raw)
   let stripped = raw
-    .replace(/\n*```observer-suggestion\s*[\s\S]*?```\s*/gu, '\n')
-    .replace(/\n*```blueprint-note\s*[\s\S]*?```\s*/gu, '\n')
-    .replace(/\n*```json\s*\{[\s\S]*?"should_interject"[\s\S]*?\}\s*```\s*/gu, '\n')
+    .replace(/\r?\n*```observer-suggestion\s*[\s\S]*?```\s*/giu, '\n')
+    .replace(/\r?\n*```blueprint-note\s*[\s\S]*?```\s*/giu, '\n')
+    .replace(/\r?\n*```json\s*\{[\s\S]*?"should_interject"[\s\S]*?\}\s*```\s*/giu, '\n')
     .trim()
   if (note) {
     const line = `> 已呈报战地蓝图线索：**${note.title}**`

@@ -299,7 +299,6 @@ pub(crate) fn lazy_contract_library(name: &str) -> bool {
             | "vision"
             | "host"
             | "attachments"
-            | "memory"
             | "session"
             | "previous"
     )
@@ -313,9 +312,20 @@ pub fn static_library_header(libraries: &Libraries) -> String {
         out.push_str(
             "// PATHS: every io.* / git.* path is relative to the workspace root unless you pass an absolute one — write \"src/...\", \"frontend/...\" directly; calling io.workspace_info() first just to build absolute paths wastes a step.\n\
              // IMPORTANT: Pre-bound `io.*`, `git.*`, `process.*` methods are SYNCHRONOUS.\n\
-             // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`) or `require(\"<lib>/promises\")`.\n\
-             // MANDATORY exact-text edit rule: for multi-line old_text/new_text in io.edit/io.apply_edits/io.replace/io.write, or shell commands containing backticks/backslashes (`\\1`, `sed`, Go raw strings, Markdown, TS templates), use Python-style triple-double-quoted strings (`\"\"\"...\"\"\"` — unescaped backticks/`${...}`/`\"`, with standard `\\t`/`\\n`/`\\\\` escapes decoded) or raw `r\"\"\"...\"\"\"` (100% verbatim with ZERO escaping), or standard template literals (`...`) when interpolation is needed, instead of minifying into single-line `'...\\n...'` strings.\n",
+             // For concurrent Promise.all / Promise.allSettled batches, use the async `.promises` sub-namespace (`io.promises.read`, `git.promises.status`) or `require(\"<lib>/promises\")`.\n",
         );
+        let has_edit_or_shell = libraries.contains_key("process")
+            || libraries.get("io").is_some_and(|m| {
+                m.contains_key("edit")
+                    || m.contains_key("apply_edits")
+                    || m.contains_key("replace")
+                    || m.contains_key("write")
+            });
+        if has_edit_or_shell {
+            out.push_str(
+                "// MANDATORY exact-text edit rule: for multi-line old_text/new_text in io.edit/io.apply_edits/io.replace/io.write, or shell commands containing backticks/backslashes (`\\1`, `sed`, Go raw strings, Markdown, TS templates), use Python-style triple-double-quoted strings (`\"\"\"...\"\"\"` — unescaped backticks/`${...}`/`\"`, with standard `\\t`/`\\n`/`\\\\` escapes decoded) or raw `r\"\"\"...\"\"\"` (100% verbatim with ZERO escaping), or standard template literals (`...`) when interpolation is needed, instead of minifying into single-line `'...\\n...'` strings.\n",
+            );
+        }
     } else {
         out.push_str(
             "// Pre-bound library methods are SYNCHRONOUS; use `<lib>.promises.<method>(...)` with `Promise.all` for concurrent batches.\n",
@@ -450,15 +460,6 @@ pub fn static_library_header(libraries: &Libraries) -> String {
                 "image_analysis_results" => "args?: { wait_ms?: number }): unknown",
                 "register_image" => "args: { path: string }): { artifact_id: string; visual_artifact: Record<string, unknown>; path: string; width: number; height: number; source_width: number; source_height: number; normalization: Record<string, unknown> }",
                 "generate_image" => "args: { prompt: string; model?: string; reference_paths?: string[]; reference_artifact_ids?: string[]; size?: string; quality?: 'low' | 'medium' | 'high' | 'auto'; background?: 'opaque' | 'transparent' | 'auto'; output_path?: string }): { artifact_id: string; visual_artifact: Record<string, unknown>; model: string; mode: 'generate' | 'edit'; size: string; width: number; height: number; bytes: number; output_path?: string; revised_prompt?: string }",
-                "record_work_memory" => "args: { summary: string; files_changed?: string[]; implementation?: string; tests?: string; risks?: string; source_task_id?: string; kind?: string; applies_to?: string; source_refs?: string[] }): { memory_path: string; recorded: unknown }",
-                "list_work_memory" => "args?: { limit?: number }): { memory_path: string; memories: unknown[] }",
-                "search_work_memory" => "args: { query: string; limit?: number }): { memory_path: string; query: string; matches: unknown[] }",
-                "record_architecture_memory" => "args: { area: string; summary: string; key_symbols?: string[]; key_files?: string[]; boundaries?: string; common_tasks?: string[]; risks?: string }): { memory_path: string; recorded: unknown }",
-                "list_architecture_memory" => "args?: { limit?: number }): { memory_path: string; memories: unknown[] }",
-                "search_architecture_memory" => "args: { query: string; limit?: number }): { memory_path: string; query: string; matches: unknown[] }",
-                "record_symbol_business_context" => "args: { business_role: string; symbol_id?: string; symbol_name?: string; language?: string; file_path?: string; belongs_to_area?: string; common_tasks?: string[]; read_when?: string; avoid_when?: string; risks?: string; confidence?: number }): { memory_path: string; recorded: unknown }",
-                "list_symbol_business_context" => "args?: { belongs_to_area?: string; limit?: number }): { memory_path: string; contexts: unknown[] }",
-                "search_symbol_business_context" => "args: { query: string; limit?: number }): { memory_path: string; query: string; matches: unknown[] }",
                 _ => "args?: Record<string, unknown>): unknown",
             };
             out.push_str(&format!("  function {method}({sig};\n"));
@@ -506,7 +507,7 @@ pub fn directory(libraries: &Libraries) -> String {
             ("browser", "Open, inspect, and interact with browser pages."),
             ("desktop", "Inspect and operate the local desktop; discover contracts on demand."),
             ("web", "Search the web and fetch remote pages; discover contracts on demand."),
-            ("blueprint", "Inspect or maintain this project's trigger-first architecture blueprint and distilled shortest-path playbooks (.quickagent/blueprint), trace cross-layer impact/invariants, and verify sync against git diff; discover full schemas on demand with `host.contracts({ libraries: [\"blueprint\"] })`."),
+            ("blueprint", "Project architecture & relational memory (.quickagent/blueprint): open live class/property/method-chain handles (`const bp = blueprint.open({})`, `bp.find(keyword)`, `bp.chains()`), trace cross-layer impact/invariants, manage shortest-path playbooks, and verify sync against git diff; discover full schemas on demand with `host.contracts({ libraries: [\"blueprint\"] })`."),
             ("code_index", "Query indexed code symbols and call graphs; discover contracts on demand."),
             ("vision", "View and analyze images."),
         ]),
@@ -519,7 +520,6 @@ pub fn directory(libraries: &Libraries) -> String {
         ("Conversation and saved material", &[
             ("host", "Inspect library/tool contracts, search methods, read language guide, load skills, or ask the user."),
             ("attachments", "Read user attachments."),
-            ("memory", "Look up and record work, architecture, or symbol knowledge."),
             ("session", "Read conversation history, saved flows, and saved tool results."),
             ("previous", "Resume a previous program that was paused."),
         ]),

@@ -1,4 +1,4 @@
-use super::{impact, model::*, store::Store, verify};
+use super::{impact, model::*, runtime_graph, store::Store, verify};
 use crate::server::{
     builtin_plugins::ToolHandler,
     plugin_protocol::{NativeContributions, NativeTool, ToolPermission},
@@ -36,11 +36,12 @@ pub(super) fn graph_view(store: &Store, id: &str, canvas: bool) -> Result<Value>
         std::slice::from_ref(&graph),
         &[],
     );
+    let chains = runtime_graph::compute_chains(std::slice::from_ref(&graph), &entities);
     let mut value = serde_json::to_value(graph)?;
     if !canvas {
         value.as_object_mut().unwrap().remove("nodes");
     }
-    Ok(json!({"graph":value,"entities":entities,"statuses":verification.entities}))
+    Ok(json!({"graph":value,"entities":entities,"statuses":verification.entities,"chains":chains}))
 }
 
 pub(super) fn playbook_view(store: &Store, id: &str) -> Result<Value> {
@@ -62,7 +63,7 @@ pub(super) fn playbook_view(store: &Store, id: &str) -> Result<Value> {
 }
 
 fn execute(workspace: &Path, name: &str, args: Value) -> Result<Value> {
-    let writable = name.starts_with("blueprint__upsert_");
+    let writable = name.starts_with("blueprint__upsert_") || name == "blueprint__resolve_inbox";
     ensure!(
         !writable || args.get("workspace_root").is_none(),
         "blueprint writes are limited to the current workspace"
@@ -82,7 +83,16 @@ fn execute(workspace: &Path, name: &str, args: Value) -> Result<Value> {
     Ok(match name {
         "blueprint__overview" => {
             let manifest = store.manifest()?;
-            json!({"exists":manifest.is_some(),"manifest":manifest})
+            let pending_inbox = store
+                .inbox()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|item| item.status == ObserverSubmissionStatus::Pending)
+                .count();
+            json!({"exists":manifest.is_some(),"manifest":manifest,"pending_inbox":pending_inbox})
+        }
+        "blueprint__open" => {
+            runtime_graph::build_runtime_graph(&store, args["graph_id"].as_str())?
         }
         "blueprint__read_graph" => graph_view(
             &store,
@@ -95,7 +105,33 @@ fn execute(workspace: &Path, name: &str, args: Value) -> Result<Value> {
                 .as_str()
                 .context("playbook_id is required")?,
         )?,
-        "blueprint__inspect_session" => super::session_dossier::inspect_session(workspace, &args)?,
+        "blueprint__inspect_session" => {
+            ensure!(
+                workspace.join(".codex-workspace-mcp/codex_state.db").is_file(),
+                "blueprint__inspect_session requires host state database context"
+            );
+            super::session_dossier::inspect_session(workspace, &args)?
+        }
+        "blueprint__list_inbox" => {
+            let status_filter = args["status"].as_str().map(str::trim).filter(|s| !s.is_empty());
+            let items: Vec<ObserverSubmission> = store
+                .inbox()?
+                .into_iter()
+                .filter(|item| match status_filter {
+                    Some("pending") => item.status == ObserverSubmissionStatus::Pending,
+                    Some("merged") => item.status == ObserverSubmissionStatus::Merged,
+                    Some("dismissed") => item.status == ObserverSubmissionStatus::Dismissed,
+                    _ => true,
+                })
+                .collect();
+            json!({"submissions": items, "count": items.len()})
+        }
+        "blueprint__resolve_inbox" => {
+            let id = args["id"].as_str().context("id is required")?;
+            let patch: ObserverSubmissionPatch = serde_json::from_value(args.clone())?;
+            let updated = store.update_observer_note_status(id, patch)?;
+            serde_json::to_value(updated)?
+        }
         "blueprint__impact" => {
             serde_json::to_value(impact::impact(&store, serde_json::from_value(args)?)?)?
         }
@@ -157,11 +193,12 @@ pub(in crate::server::builtin_plugins) fn package() -> Result<Package> {
                 .as_str()
                 .expect("blueprint tool name")
                 .to_owned();
-            let permission = if name.starts_with("blueprint__upsert_") {
-                ToolPermission::WorkspaceWrite
-            } else {
-                ToolPermission::ReadOnly
-            };
+            let permission =
+                if name.starts_with("blueprint__upsert_") || name == "blueprint__resolve_inbox" {
+                    ToolPermission::WorkspaceWrite
+                } else {
+                    ToolPermission::ReadOnly
+                };
             let target = name.clone();
             let handler: ToolHandler = Arc::new(move |workspace, _, args| {
                 let target = target.clone();

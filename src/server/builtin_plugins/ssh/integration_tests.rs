@@ -1001,6 +1001,76 @@ async fn exercise_ai_tools() -> Result<()> {
         );
     }
 
+    // 7a-2. Approved / FullAccess outside-workspace regular upload succeeds,
+    //       while sensitive directories (.ssh, .codex-workspace-mcp, config_dir),
+    //       parent traversal (..), and symlinks remain strictly forbidden.
+    let outside_approved = package::scoped_with_policy(
+        "task-deploy-1".into(),
+        false,
+        true,
+        package::execute_tool(
+            cfg.clone(),
+            ws.clone(),
+            "ssh__upload",
+            json!({
+                "server_id": dev_id,
+                "local_path": outside_secret.to_string_lossy(),
+                "remote_path": "/releases/outside-approved.txt",
+                "overwrite": true,
+            }),
+        ),
+    )
+    .await?;
+    assert!(outside_approved["bytes_uploaded"].as_u64().unwrap() > 0);
+    assert_eq!(
+        fs::read(remote_root.path().join("releases/outside-approved.txt")).await?,
+        fs::read(&outside_secret).await?
+    );
+
+    let ssh_dir_secret = outside_secret.parent().unwrap().join(".ssh/id_test_key");
+    fs::create_dir_all(ssh_dir_secret.parent().unwrap()).await?;
+    fs::write(&ssh_dir_secret, b"private-key").await?;
+    let cfg_secret = cfg.join("credentials.yaml");
+    fs::write(&cfg_secret, b"secret-token").await?;
+    let outside_symlink = outside_secret.parent().unwrap().join("outside-link.bin");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside_secret, &outside_symlink)?;
+
+    let mut forbidden_even_when_approved = vec![
+        "../outside.txt".to_owned(),
+        ".codex-workspace-mcp/secret.db".to_owned(),
+        "dist/escape.link".to_owned(),
+        ssh_dir_secret.to_string_lossy().into_owned(),
+        cfg_secret.to_string_lossy().into_owned(),
+    ];
+    #[cfg(unix)]
+    forbidden_even_when_approved.push(outside_symlink.to_string_lossy().into_owned());
+
+    for bad_path in forbidden_even_when_approved {
+        let err = package::scoped_with_policy(
+            "task-deploy-1".into(),
+            false,
+            true,
+            package::execute_tool(
+                cfg.clone(),
+                ws.clone(),
+                "ssh__upload",
+                json!({
+                    "server_id": dev_id,
+                    "local_path": bad_path,
+                    "remote_path": "/releases/leak2.bin",
+                    "overwrite": true,
+                }),
+            ),
+        )
+        .await
+        .expect_err("sensitive/traversal/symlink upload must stay denied even with outside approval");
+        assert!(
+            err.to_string().contains("WORKSPACE_BOUNDARY_DENIED"),
+            "unexpected error for {bad_path}: {err:#}"
+        );
+    }
+
     // 7b. ssh__download (success, overwrite conflict/override, and workspace boundary rejections)
     let dl = package::scoped(
         "task-deploy-1".into(),

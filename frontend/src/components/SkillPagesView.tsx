@@ -146,6 +146,7 @@ export function SkillPagesView({ workspaceRoot, stateWorkspaceRoot, onBack, rend
                 viewContext={pageViewContext}
                 sessions={sessions}
                 embeddedLauncher
+                hideLauncher
                 openSignal={pageChatSignal}
               />
             </div>

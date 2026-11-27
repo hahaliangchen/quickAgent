@@ -6,6 +6,7 @@ import { OfficeStudioView } from './components/OfficeStudioView.tsx'
 import { BLUEPRINT_OBSERVER_ENABLED, BlueprintObserverHost } from './experimental/blueprintObserver/index.ts'
 import type { StudioAskAiRequest, StudioViewContext } from './plugins/protocol.ts'
 import { BlueprintContext } from './builtin_plugins/blueprint/api.ts'
+import { BlueprintAgentDock, type BlueprintAgentCommand } from './builtin_plugins/blueprint/BlueprintAgentDock.tsx'
 import { buildDistillPlaybookPrompt } from './builtin_plugins/blueprint/playbookPrompts.ts'
 import type { Task } from './api.ts'
 import { CodeChatDock } from './components/CodeChatDock.tsx'
@@ -45,22 +46,21 @@ export function App({ renderSlot }: AgentSlotProps) {
   const [workbenchMode, setWorkbenchMode] = useState<'flows' | 'blueprint'>('flows')
   const [git, setGit] = useState(false)
   const [blueprintWorkspace, setBlueprintWorkspace] = useState('')
-  const [blueprintDraft, setBlueprintDraft] = useState<{ text: string; kind: 'prompt' }>()
-  const [blueprintChatOpenSignal, setBlueprintChatOpenSignal] = useState(0)
-  const sendBlueprintDraft = useCallback((text: string) => {
-    setBlueprintDraft({ text, kind: 'prompt' })
-    setBlueprintChatOpenSignal(value => value + 1)
+  const [blueprintCommand, setBlueprintCommand] = useState<BlueprintAgentCommand>()
+  const [blueprintRefreshSeq, setBlueprintRefreshSeq] = useState(0)
+  const blueprintCommandSeq = useRef(0)
+  const sendBlueprintCommand = useCallback((prompt: string) => {
+    setBlueprintCommand({ id: ++blueprintCommandSeq.current, prompt })
   }, [])
   const selectBlueprintWorkspace = useCallback((path: string) => {
     setBlueprintWorkspace(path)
-    setBlueprintDraft(undefined)
   }, [])
   const distillTaskToBlueprint = useCallback((task: Task) => {
     const targetWorkspace = task.workspace || workspace.activeWorkspace || workspace.info?.workspace || ''
     if (targetWorkspace) setBlueprintWorkspace(targetWorkspace)
     setOffice(false); setSsh(false); setGit(false); setWorkbench(true); setWorkbenchMode('blueprint')
-    sendBlueprintDraft(buildDistillPlaybookPrompt([task]))
-  }, [workspace.activeWorkspace, workspace.info?.workspace, sendBlueprintDraft])
+    sendBlueprintCommand(buildDistillPlaybookPrompt([task]))
+  }, [workspace.activeWorkspace, workspace.info?.workspace, sendBlueprintCommand])
   const [ssh, setSsh] = useState(false)
   const [sshMounted, setSshMounted] = useState(false)
   const [followAi, setFollowAi] = useState(() => {
@@ -261,7 +261,6 @@ export function App({ renderSlot }: AgentSlotProps) {
   }
 
   const handleNewChat = () => {
-    setBlueprintDraft(undefined)
     setOffice(false)
     setWorkbench(false)
     setGit(false)
@@ -328,17 +327,16 @@ export function App({ renderSlot }: AgentSlotProps) {
     titleFor: titleForTask,
     ...(gitWorkspace ? { diagnose: diagnoseSsh } : {}),
   }), [taskId, openSshChat, aiFocus, followAi, toggleFollowAi, titleForTask, gitWorkspace, diagnoseSsh])
-  const showHomeSidebar = !sidebarCollapsed && !workbench && !git && !ssh && !office
   const isHome = !office && !ssh && !git && !workbench && tab !== 'skill-pages'
+  const showHomeSidebar = !sidebarCollapsed && isHome
 
   return (
     <div className={css.appFrame} data-ds-dark-theme={dark ? '' : undefined}>
       {/* 1. Activity Dock (48px fixed on left) */}
       <CodexDock
-        activeTab={office ? 'office' : ssh ? 'ssh' : git ? 'git' : workbench || tab === 'skill-pages' ? 'skills' : 'home'}
+        activeTab={office ? 'office' : ssh ? 'ssh' : git ? 'git' : workbench ? 'skills' : tab === 'skill-pages' ? 'plugins' : 'home'}
         onSelectTab={selected => {
           setSsh(selected === 'ssh')
-          if (selected !== 'skills') setBlueprintDraft(undefined)
           if (selected === 'ssh') setSshMounted(true)
           if (selected !== 'ssh') setSshDraft(undefined)
           if (selected === 'office') {
@@ -347,12 +345,19 @@ export function App({ renderSlot }: AgentSlotProps) {
             setOfficeMounted(true)
             setGit(false)
             setWorkbench(false)
+            if (tab === 'skill-pages') setTab('chat')
             return
           }
           setOffice(false)
           setGit(selected === 'git')
+          if (selected === 'plugins') {
+            setWorkbench(false)
+            setTab('skill-pages')
+            return
+          }
+          if (tab === 'skill-pages') setTab('chat')
           if (selected === 'skills') setWorkbench(true)
-          else if (selected === 'home') { setWorkbench(false); if (tab === 'skill-pages') handleNewChat() }
+          else if (selected === 'home') setWorkbench(false)
         }}
         dark={dark}
         onNewChat={handleNewChat}
@@ -477,22 +482,29 @@ export function App({ renderSlot }: AgentSlotProps) {
                 {workbenchMode === 'blueprint' ? (
                   <div className={css.dockedView}>
                     <BlueprintContext.Provider value={{
-                      sendToAi: sendBlueprintDraft,
-                      refreshSignal: workspace.session.task?.status,
+                      sendToAi: sendBlueprintCommand,
+                      refreshSignal: `${workspace.session.task?.status ?? ''}:${blueprintRefreshSeq}`,
                       projects: knownProjects,
                       selectWorkspace: selectBlueprintWorkspace,
                       sessions: workspace.allTasks,
-                      openSession: id => { setBlueprintDraft(undefined); setWorkbench(false); setTab('chat'); workspace.openTask(id) },
+                      openSession: id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) },
                     }}>
                       <div className={css.dockedPage}><PluginPageHost owner="blueprint" page="workbench" workspaceRoot={activeBlueprintWorkspace} theme={dark ? 'dark' : 'light'} /></div>
                     </BlueprintContext.Provider>
-                    {activeBlueprintWorkspace && <CodeChatDock key={`blueprint:${activeBlueprintWorkspace}`} workspace={activeBlueprintWorkspace} renderSlot={renderSlot}
-                      onOpenInChat={id => { setBlueprintDraft(undefined); setWorkbench(false); setTab('chat'); workspace.openTask(id) }}
-                      onFilePreview={openDockFile}
-                      diagnostic={blueprintDraft} sessions={workspace.allTasks} embeddedLauncher linkedTaskId={activeBlueprintWorkspace === gitWorkspace ? taskId : undefined} linkedSession={activeBlueprintWorkspace === gitWorkspace ? workspace.session : undefined} openSignal={blueprintChatOpenSignal} />}
+                    {activeBlueprintWorkspace && (
+                      <BlueprintAgentDock
+                        key={`blueprint-agent:${activeBlueprintWorkspace}`}
+                        workspace={activeBlueprintWorkspace}
+                        renderSlot={renderSlot}
+                        command={blueprintCommand}
+                        onFinished={() => setBlueprintRefreshSeq(n => n + 1)}
+                        onFilePreview={openDockFile}
+                        onOpenTask={id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) }}
+                      />
+                    )}
                   </div>
                 ) : (
-                  <SkillWorkbench tasks={workspace.allTasks} projects={workspace.projects} defaultWorkspace={workspace.info?.workspace ?? ''} onOpenChat={id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) }} onDistillToBlueprint={distillTaskToBlueprint} onFilePreview={openDockFile} onPackages={() => { setWorkbench(false); setTab('skill-pages') }} pageRequest={dailyReportPage} renderSlot={renderSlot} theme={dark ? 'dark' : 'light'} />
+                  <SkillWorkbench tasks={workspace.allTasks} projects={workspace.projects} defaultWorkspace={workspace.info?.workspace ?? ''} onOpenChat={id => { setWorkbench(false); setTab('chat'); workspace.openTask(id) }} onDistillToBlueprint={distillTaskToBlueprint} onFilePreview={openDockFile} pageRequest={dailyReportPage} renderSlot={renderSlot} theme={dark ? 'dark' : 'light'} />
                 )}
               </div>
             </div>

@@ -77,6 +77,7 @@ pub async fn create_draft_task(
     let kind = match input.kind.as_deref() {
         Some("chat") => "chat",
         Some("observer") => "observer",
+        Some("blueprint") => "blueprint",
         _ => "code",
     };
     let watched_task_id = input
@@ -85,7 +86,7 @@ pub async fn create_draft_task(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let archived = i32::from(kind == "observer");
+    let archived = i32::from(matches!(kind, "observer" | "blueprint"));
     let selected_workspace = match input.workspace {
         Some(path) => match std::fs::canonicalize(path) {
             Ok(path) if path.is_dir() => crate::tools::file_edit::strip_verbatim_prefix(&path),

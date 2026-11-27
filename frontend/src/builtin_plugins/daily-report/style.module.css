@@ -212,6 +212,7 @@
 .featureDel:hover { text-decoration: underline; }
 .featureRow { display: flex; flex-direction: column; gap: 4px; }
 .featureRow textarea { width: 100%; padding: 7px 9px; border-radius: 8px; border: 1px solid var(--d-line-strong); background: var(--d-card); font-size: 12.5px; line-height: 1.6; resize: vertical; }
+.autoGrowTextarea { resize: none !important; box-sizing: border-box; }
 .featureRow textarea:focus { outline: none; border-color: var(--d-accent); box-shadow: 0 0 0 2px var(--d-accent-soft); }
 .featureRowInline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .featureLabel { font-size: 11.5px; font-weight: 600; color: var(--d-second); }
@@ -256,10 +257,32 @@
 
 /* ---------- common fields + sticky bar ---------- */
 .common { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 12px; padding: 13px 14px; border: 1px solid var(--d-line); border-radius: 12px; background: var(--d-card); }
-.common select { height: 34px; padding: 0 9px; border-radius: 9px; border: 1px solid var(--d-line-strong); background: var(--d-soft); font-size: 13px; color: inherit; }
-.common select:focus { outline: none; border-color: var(--d-accent); background: var(--d-card); box-shadow: 0 0 0 3px var(--d-accent-soft); }
 .inlineInputGroup { display: flex; align-items: center; gap: 6px; }
-.inlineInputGroup input { flex: 1; min-width: 0; }
+.unitInput { flex: 1; min-width: 0; display: flex; align-items: center; height: 34px; border-radius: 9px; border: 1px solid var(--d-line-strong); background: var(--d-soft); overflow: hidden; transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease; }
+.unitInput:focus-within { border-color: var(--d-accent); background: var(--d-card); box-shadow: 0 0 0 3px var(--d-accent-soft); }
+.unitInput input { flex: 1; min-width: 0; height: 100%; padding: 0 6px 0 10px; border: 0; outline: none; background: transparent; font-size: 13px; font-variant-numeric: tabular-nums; }
+.unitSuffix { padding: 0 10px 0 4px; font-size: 11.5px; color: var(--d-muted); flex: 0 0 auto; }
+
+/* ---------- custom styled duration selects ---------- */
+.selectWrap { position: relative; width: 100%; }
+.selectTrigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; height: 34px; padding: 0 10px; border-radius: 9px; border: 1px solid var(--d-line-strong); background: var(--d-soft); color: var(--d-text); font-size: 13px; cursor: pointer; transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease; }
+.selectTrigger:hover { border-color: color-mix(in srgb, var(--d-accent) 55%, var(--d-line-strong)); background: var(--d-card); }
+.selectTriggerOpen, .selectTrigger:focus-visible { outline: none; border-color: var(--d-accent); background: var(--d-card); box-shadow: 0 0 0 3px var(--d-accent-soft); }
+.selectTriggerOvertime { border-color: color-mix(in srgb, #f59e0b 45%, var(--d-line-strong)); background: color-mix(in srgb, #f59e0b 7%, var(--d-card)); }
+.selectTriggerLeave { border-color: color-mix(in srgb, #3b82f6 45%, var(--d-line-strong)); background: color-mix(in srgb, #3b82f6 7%, var(--d-card)); }
+.selectTriggerLead { display: inline-flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; }
+.selectTriggerValue { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 500; }
+.selectTriggerMuted { color: var(--d-muted); font-weight: 400; }
+.selectDot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; flex: 0 0 auto; }
+.selectChevron { display: inline-flex; color: var(--d-muted); flex: 0 0 auto; transition: transform 140ms ease, color 140ms ease; }
+.selectChevronOpen { transform: rotate(180deg); color: var(--d-accent); }
+.selectMenuUp { top: auto; bottom: calc(100% + 5px); }
+.selectMenuList { max-height: 224px; overflow-y: auto; padding: 4px; display: flex; flex-direction: column; gap: 1px; }
+.selectOption { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--d-text); text-align: left; cursor: pointer; font-size: 12.5px; transition: background 100ms ease; }
+.selectOption:hover { background: var(--d-hover); }
+.selectOptionSelected { background: var(--d-accent-soft); color: var(--d-accent-hover); font-weight: 600; }
+.selectOptionHint { flex: 0 0 auto; font-size: 11px; color: var(--d-muted); font-variant-numeric: tabular-nums; }
+.selectCheck { flex: 0 0 auto; font-size: 12px; font-weight: 700; color: var(--d-accent); }
 .submitBar { position: sticky; bottom: 0; z-index: 10; display: flex; align-items: center; gap: 10px; margin: 2px -18px 0; padding: 11px 18px; border-top: 1px solid var(--d-line); background: color-mix(in srgb, var(--d-card) 88%, transparent); backdrop-filter: blur(8px); }
 .submitHint { flex: 1; margin: 0; font-size: 11.5px; color: var(--d-second); opacity: .9; }
 

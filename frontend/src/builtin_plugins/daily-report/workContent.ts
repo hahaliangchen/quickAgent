@@ -6,9 +6,10 @@ export interface WorkContentParts {
   progress: string
 }
 
-const WORK_CONTENT_PATTERN = /^1\.\s*具体任务或功能：(.*?)\n2\.\s*今日完成工作：(.*?)\n3\.\s*进度\s*(.*?)\s*%\s*$/s
-const WORK_CONTENT_GROUP_PATTERN = /^【功能\s+\d+】\n([\s\S]*)$/
-const WORK_CONTENT_GROUP_SEPARATOR = /\n\n(?=【功能\s+\d+】\n)/
+const WORK_CONTENT_PATTERN =
+  /^\s*1[.、]\s*具体任务或功能\s*[：:]\s*(.*?)\n\s*2[.、]\s*今日完成工作\s*[：:]\s*(.*?)\n\s*3[.、]\s*进度\s*[：:]?\s*(\d{1,3}|[^\n%]*?)\s*%?(?:\n\s*4[.、]\s*(?:明日计划|下一步计划|后续计划)\s*[：:]\s*([\s\S]*?))?\s*$/s
+const WORK_CONTENT_GROUP_HEADER = /^\s*(?:\*\*)?【功能\s*\d+】(?:\*\*)?[ \t]*([^\n]*)\n([\s\S]*)$/
+const WORK_CONTENT_GROUP_SEPARATOR = /\n+(?=\s*(?:\*\*)?【功能\s*\d+】)/
 
 export function createEmptyWorkContentParts(): WorkContentParts {
   return { task: '', today: '', progress: '' }
@@ -22,16 +23,45 @@ export function createEmptyWorkContent(): string {
   return formatWorkContent(createEmptyWorkContentParts())
 }
 
+function parseStructuredSection(rawSection: string): WorkContentParts | null {
+  const normalized = rawSection.replace(/\r\n/g, '\n').trim()
+  let title = ''
+  let body = normalized
+  const headerMatch = normalized.match(WORK_CONTENT_GROUP_HEADER)
+  if (headerMatch) {
+    title = (headerMatch[1] ?? '').replace(/^\*\*|\*\*$/g, '').trim()
+    body = (headerMatch[2] ?? '').trim()
+  }
+  const match = body.match(WORK_CONTENT_PATTERN)
+  if (!match) return null
+
+  const rawTask = (match[1] ?? '').trim()
+  const rawToday = (match[2] ?? '').trim()
+  const rawProgress = (match[3] ?? '').trim()
+  const rawNextPlan = (match[4] ?? '').trim()
+
+  const task = title
+    ? rawTask
+      ? rawTask.includes(title) ? rawTask : `${title}：${rawTask}`
+      : title
+    : rawTask
+  const today = rawNextPlan
+    ? rawToday
+      ? `${rawToday}\n明日计划：${rawNextPlan}`
+      : `明日计划：${rawNextPlan}`
+    : rawToday
+
+  return {
+    task,
+    today,
+    progress: rawProgress,
+  }
+}
+
 export function parseWorkContent(value?: string | null): WorkContentParts {
   const content = String(value ?? '').replace(/\r\n/g, '\n')
-  const match = content.match(WORK_CONTENT_PATTERN)
-  if (match) {
-    return {
-      task: match[1] ?? '',
-      today: match[2] ?? '',
-      progress: match[3] ?? '',
-    }
-  }
+  const parsed = parseStructuredSection(content)
+  if (parsed) return parsed
   return { task: content, today: '', progress: '' }
 }
 
@@ -43,34 +73,26 @@ export function formatWorkContentGroups(groups: readonly WorkContentParts[]): st
 export function parseWorkContentGroups(value?: string | null): WorkContentParts[] {
   const content = String(value ?? '').replace(/\r\n/g, '\n').trim()
   if (!content) return [createEmptyWorkContentParts()]
-  const sections = content.split(WORK_CONTENT_GROUP_SEPARATOR)
-  if (sections.length > 1 && sections.every(section => WORK_CONTENT_GROUP_PATTERN.test(section))) {
-    return sections.map(section => {
-      const match = section.match(WORK_CONTENT_GROUP_PATTERN)
-      return parseWorkContent(match?.[1])
-    })
+  const sections = content.split(WORK_CONTENT_GROUP_SEPARATOR).map(s => s.trim()).filter(Boolean)
+  if (sections.length > 1) {
+    const parsed = sections.map(parseStructuredSection)
+    if (parsed.every((item): item is WorkContentParts => item !== null)) {
+      return parsed
+    }
   }
-  if (WORK_CONTENT_GROUP_PATTERN.test(content)) {
-    const match = content.match(WORK_CONTENT_GROUP_PATTERN)
-    return [parseWorkContent(match?.[1])]
-  }
+  const single = parseStructuredSection(content)
+  if (single) return [single]
   return [parseWorkContent(content)]
 }
 
 export function isStructuredWorkContent(value?: string | null): boolean {
   const content = String(value ?? '').replace(/\r\n/g, '\n').trim()
   if (!content) return true
-  const sections = content.split(WORK_CONTENT_GROUP_SEPARATOR)
+  const sections = content.split(WORK_CONTENT_GROUP_SEPARATOR).map(s => s.trim()).filter(Boolean)
   if (sections.length > 1) {
-    return sections.every(section => {
-      const match = section.match(WORK_CONTENT_GROUP_PATTERN)
-      return !!match?.[1] && WORK_CONTENT_PATTERN.test(match[1])
-    })
+    return sections.every(section => parseStructuredSection(section) !== null)
   }
-  const body = WORK_CONTENT_GROUP_PATTERN.test(content)
-    ? (content.match(WORK_CONTENT_GROUP_PATTERN)?.[1] ?? '')
-    : content
-  return WORK_CONTENT_PATTERN.test(body)
+  return parseStructuredSection(content) !== null
 }
 
 export function validateWorkContentParts({ task, today, progress }: WorkContentParts): string | null {

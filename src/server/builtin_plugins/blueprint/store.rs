@@ -10,16 +10,25 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::{ErrorKind, Read, Write},
     path::{Component, Path, PathBuf},
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, LazyLock, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 const LIMIT: u64 = 8 * 1024 * 1024;
-static ACCESS: Mutex<()> = Mutex::new(());
+static WORKSPACE_LOCKS: LazyLock<Mutex<BTreeMap<PathBuf, Arc<RwLock<()>>>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+fn lock_for_workspace(root: &Path) -> Arc<RwLock<()>> {
+    let key = crate::tools::file_edit::strip_verbatim_prefix(root);
+    let mut map = WORKSPACE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(key)
+        .or_insert_with(|| Arc::new(RwLock::new(())))
+        .clone()
+}
 
 pub(super) struct Store {
     pub root: PathBuf,
     root_dir: Dir,
-    _guard: MutexGuard<'static, ()>,
+    lock: Arc<RwLock<()>>,
 }
 
 fn subdir(dir: &Dir, name: &str, create: bool) -> Result<Option<Dir>> {
@@ -86,16 +95,28 @@ fn write(dir: &Dir, name: &str, value: &impl Serialize) -> Result<()> {
 // Canonicalize every existing prefix as well as the final path: a missing file
 // below an out-of-workspace symlink is not a valid future source anchor either.
 pub(super) fn source_path(root: &Path, raw: &str) -> Result<Option<PathBuf>> {
-    let rel = Path::new(raw);
+    let trimmed = raw.trim();
+    ensure!(!trimmed.is_empty(), "source path must be workspace-relative");
+    // Reject Windows drive prefixes or root prefixes on all platforms before normalizing separators.
+    let raw_path = Path::new(trimmed);
+    let posix = trimmed.replace('\\', "/");
+    let posix_path = Path::new(&posix);
+    let has_drive_prefix = trimmed.len() >= 2
+        && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        && trimmed.as_bytes()[1] == b':';
     ensure!(
-        !raw.is_empty()
-            && rel
+        !has_drive_prefix
+            && !posix.starts_with('/')
+            && raw_path
+                .components()
+                .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+            && posix_path
                 .components()
                 .all(|c| matches!(c, Component::Normal(_) | Component::CurDir)),
         "source path must be workspace-relative"
     );
     let mut path = root.to_owned();
-    for component in rel.components() {
+    for component in posix_path.components() {
         path.push(component);
         match path.canonicalize() {
             Ok(resolved) => {
@@ -123,12 +144,18 @@ impl Store {
         ensure!(!root.as_os_str().is_empty(), "workspace_root is required");
         let root = root.canonicalize().context("invalid workspace root")?;
         let root_dir = Dir::open_ambient_dir(&root, ambient_authority())?;
-        let guard = ACCESS.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = lock_for_workspace(&root);
         Ok(Self {
             root,
             root_dir,
-            _guard: guard,
+            lock,
         })
+    }
+    fn read_lock(&self) -> RwLockReadGuard<'_, ()> {
+        self.lock.read().unwrap_or_else(|e| e.into_inner())
+    }
+    fn write_lock(&self) -> RwLockWriteGuard<'_, ()> {
+        self.lock.write().unwrap_or_else(|e| e.into_inner())
     }
     pub fn source(&self, raw: &str) -> Result<Option<String>> {
         let Some(path) = source_path(&self.root, raw)? else {
@@ -170,7 +197,7 @@ impl Store {
         };
         subdir(&dir, "playbooks", create)
     }
-    pub fn manifest(&self) -> Result<Option<Manifest>> {
+    fn manifest_unlocked(&self) -> Result<Option<Manifest>> {
         let Some(dir) = self.dir(false)? else {
             return Ok(None);
         };
@@ -180,13 +207,21 @@ impl Store {
         }
         Ok(manifest)
     }
-    pub fn entities(&self) -> Result<EntityStore> {
+    pub fn manifest(&self) -> Result<Option<Manifest>> {
+        let _r = self.read_lock();
+        self.manifest_unlocked()
+    }
+    fn entities_unlocked(&self) -> Result<EntityStore> {
         let Some(dir) = self.dir(false)? else {
             return Ok(EntityStore::default());
         };
         Ok(read(&dir, "entities.json")?.unwrap_or_default())
     }
-    pub fn graph(&self, id: &str) -> Result<Option<BlueprintGraph>> {
+    pub fn entities(&self) -> Result<EntityStore> {
+        let _r = self.read_lock();
+        self.entities_unlocked()
+    }
+    fn graph_unlocked(&self, id: &str) -> Result<Option<BlueprintGraph>> {
         graph_id(id)?;
         let Some(dir) = self.graphs(false)? else {
             return Ok(None);
@@ -197,14 +232,26 @@ impl Store {
         }
         Ok(graph)
     }
-    pub fn all_graphs(&self, manifest: &Manifest) -> Result<Vec<BlueprintGraph>> {
-        manifest
-            .graphs
-            .iter()
-            .map(|g| self.graph(&g.id)?.context("indexed graph is missing"))
-            .collect()
+    pub fn graph(&self, id: &str) -> Result<Option<BlueprintGraph>> {
+        let _r = self.read_lock();
+        self.graph_unlocked(id)
     }
-    pub fn playbook(&self, id: &str) -> Result<Option<Playbook>> {
+    fn all_graphs_unlocked(&self, manifest: &Manifest) -> Result<(Vec<BlueprintGraph>, Vec<String>)> {
+        let mut loaded = Vec::with_capacity(manifest.graphs.len());
+        let mut missing = Vec::new();
+        for g in &manifest.graphs {
+            match self.graph_unlocked(&g.id)? {
+                Some(graph) => loaded.push(graph),
+                None => missing.push(g.id.clone()),
+            }
+        }
+        Ok((loaded, missing))
+    }
+    pub fn all_graphs(&self, manifest: &Manifest) -> Result<Vec<BlueprintGraph>> {
+        let _r = self.read_lock();
+        Ok(self.all_graphs_unlocked(manifest)?.0)
+    }
+    fn playbook_unlocked(&self, id: &str) -> Result<Option<Playbook>> {
         graph_id(id)?;
         let Some(dir) = self.playbooks(false)? else {
             return Ok(None);
@@ -215,12 +262,20 @@ impl Store {
         }
         Ok(playbook)
     }
-    pub fn all_playbooks(&self, manifest: &Manifest) -> Result<Vec<Playbook>> {
+    pub fn playbook(&self, id: &str) -> Result<Option<Playbook>> {
+        let _r = self.read_lock();
+        self.playbook_unlocked(id)
+    }
+    fn all_playbooks_unlocked(&self, manifest: &Manifest) -> Result<Vec<Playbook>> {
         manifest
             .playbooks
             .iter()
-            .filter_map(|p| self.playbook(&p.id).transpose())
+            .filter_map(|p| self.playbook_unlocked(&p.id).transpose())
             .collect()
+    }
+    pub fn all_playbooks(&self, manifest: &Manifest) -> Result<Vec<Playbook>> {
+        let _r = self.read_lock();
+        self.all_playbooks_unlocked(manifest)
     }
     fn save_manifest(
         &self,
@@ -240,10 +295,12 @@ impl Store {
         write(&self.dir(true)?.unwrap(), "manifest.json", &m)
     }
     pub fn upsert_entities(&self, update: EntityUpdate) -> Result<EntityStore> {
-        let manifest = self.manifest()?.unwrap_or_default();
-        let graphs = self.all_graphs(&manifest)?;
+        let _w = self.write_lock();
+        let manifest = self.manifest_unlocked()?.unwrap_or_default();
+        let (graphs, _) = self.all_graphs_unlocked(&manifest)?;
+        let playbooks = self.all_playbooks_unlocked(&manifest)?;
         let mut all = self
-            .entities()?
+            .entities_unlocked()?
             .entities
             .into_iter()
             .map(|e| (e.id.clone(), e))
@@ -255,9 +312,44 @@ impl Store {
         for mut e in update.entities {
             item_id(&e.id)?;
             ensure!(!e.name.trim().is_empty(), "entity name is required");
-            if let Some(path) = &e.file_path {
-                source_path(&self.root, path)?;
+            if let Some(path) = e.file_path.take() {
+                let norm = normalize_rel_path(&path);
+                if !norm.is_empty() {
+                    source_path(&self.root, &norm)?;
+                    e.file_path = Some(norm);
+                }
             }
+            let mut props = BTreeMap::new();
+            if !update.replace_properties
+                && let Some(old) = all.get(&e.id)
+            {
+                props.extend(old.properties.iter().cloned().map(|p| (p.id.clone(), p)));
+            }
+            let mut seen_props = BTreeSet::new();
+            for mut prop in e.properties {
+                item_id(&prop.id)?;
+                ensure!(seen_props.insert(prop.id.clone()), "duplicate property ID");
+                prop.name = prop.name.trim().to_owned();
+                prop.value = prop.value.trim().to_owned();
+                prop.summary = prop.summary.trim().to_owned();
+                ensure!(
+                    !prop.name.is_empty() && !prop.value.is_empty(),
+                    "property name and value are required"
+                );
+                if prop.kind == PropertyKind::File {
+                    let norm = normalize_rel_path(&prop.value);
+                    source_path(&self.root, &norm)?;
+                    prop.value = norm;
+                } else if prop.kind == PropertyKind::Symbol
+                    && let Some((file_part, sym_part)) = prop.value.split_once('#')
+                {
+                    let norm = normalize_rel_path(file_part);
+                    source_path(&self.root, &norm)?;
+                    prop.value = format!("{norm}#{}", sym_part.trim());
+                }
+                props.insert(prop.id.clone(), prop);
+            }
+            e.properties = props.into_values().collect();
             let mut ports = BTreeMap::new();
             if !update.replace_ports
                 && let Some(old) = all.get(&e.id)
@@ -265,7 +357,7 @@ impl Store {
                 ports.extend(old.ports.iter().cloned().map(|p| (p.id.clone(), p)));
             }
             let mut seen = BTreeSet::new();
-            for port in e.ports {
+            for mut port in e.ports {
                 item_id(&port.id)?;
                 ensure!(seen.insert(port.id.clone()), "duplicate port ID");
                 ensure!(
@@ -276,6 +368,14 @@ impl Store {
                             .is_none_or(|end| port.line_start.is_some_and(|start| end >= start)),
                     "invalid port name or line range"
                 );
+                port.reads = port
+                    .reads
+                    .into_iter()
+                    .map(|r| r.trim().to_owned())
+                    .filter(|r| !r.is_empty())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
                 ports.insert(port.id.clone(), port);
             }
             e.ports = ports.into_values().collect();
@@ -293,6 +393,17 @@ impl Store {
                 write(&graph_dir, &format!("{}.json", graph.meta.id), &graph)?;
             }
         }
+        if !update.remove_entity_ids.is_empty()
+            && let Some(pb_dir) = self.playbooks(false)?
+        {
+            for mut pb in playbooks {
+                let before = pb.related_entities.len();
+                pb.related_entities.retain(|eid| all.contains_key(eid));
+                if pb.related_entities.len() != before {
+                    write(&pb_dir, &format!("{}.json", pb.id), &pb)?;
+                }
+            }
+        }
         let entities = EntityStore {
             entities: all.into_values().collect(),
         };
@@ -301,13 +412,14 @@ impl Store {
         Ok(entities)
     }
     pub fn upsert_graph(&self, id: &str, update: GraphUpdate) -> Result<BlueprintGraph> {
+        let _w = self.write_lock();
         graph_id(id)?;
         ensure!(
             update.id.as_deref().is_none_or(|arg| arg == id),
             "graph ID does not match route"
         );
-        let mut manifest = self.manifest()?.unwrap_or_default();
-        let mut graph = self.graph(id)?.unwrap_or_else(|| BlueprintGraph {
+        let mut manifest = self.manifest_unlocked()?.unwrap_or_default();
+        let mut graph = self.graph_unlocked(id)?.unwrap_or_else(|| BlueprintGraph {
             meta: GraphSummary {
                 id: id.into(),
                 title: id.into(),
@@ -332,7 +444,7 @@ impl Store {
             graph.invariants = invariants;
         }
         let entities = self
-            .entities()?
+            .entities_unlocked()?
             .entities
             .into_iter()
             .map(|e| (e.id.clone(), e))
@@ -393,8 +505,9 @@ impl Store {
         Ok(graph)
     }
     pub fn delete_graph(&self, id: &str) -> Result<()> {
+        let _w = self.write_lock();
         graph_id(id)?;
-        let Some(mut manifest) = self.manifest()? else {
+        let Some(mut manifest) = self.manifest_unlocked()? else {
             return Ok(());
         };
         if let Some(dir) = self.graphs(false)? {
@@ -404,17 +517,27 @@ impl Store {
                 Err(e) => return Err(e.into()),
             }
         }
+        if let Some(pb_dir) = self.playbooks(false)? {
+            for mut pb in self.all_playbooks_unlocked(&manifest)? {
+                let before = pb.related_graphs.len();
+                pb.related_graphs.retain(|gid| gid != id);
+                if pb.related_graphs.len() != before {
+                    write(&pb_dir, &format!("{}.json", pb.id), &pb)?;
+                }
+            }
+        }
         manifest.graphs.retain(|g| g.id != id);
         self.save_manifest(manifest, None, None)
     }
     pub fn upsert_playbook(&self, id: &str, update: PlaybookUpdate) -> Result<Playbook> {
+        let _w = self.write_lock();
         graph_id(id)?;
         ensure!(
             update.id.as_deref().is_none_or(|arg| arg == id),
             "playbook ID does not match route"
         );
-        let mut manifest = self.manifest()?.unwrap_or_default();
-        let mut playbook = self.playbook(id)?.unwrap_or_else(|| Playbook {
+        let mut manifest = self.manifest_unlocked()?.unwrap_or_default();
+        let mut playbook = self.playbook_unlocked(id)?.unwrap_or_else(|| Playbook {
             id: id.into(),
             title: id.into(),
             trigger: String::new(),
@@ -427,6 +550,7 @@ impl Store {
             environment: Vec::new(),
             pitfalls: Vec::new(),
             source_tasks: Vec::new(),
+            pinned: false,
             updated_at: String::new(),
         });
         if let Some(title) = update.title {
@@ -445,12 +569,12 @@ impl Store {
         if let Some(files) = update.anchor_files {
             let mut clean = BTreeSet::new();
             for raw in files {
-                let trimmed = raw.trim().strip_prefix("./").unwrap_or(raw.trim());
-                if trimmed.is_empty() {
+                let norm = normalize_rel_path(&raw);
+                if norm.is_empty() {
                     continue;
                 }
-                source_path(&self.root, trimmed)?;
-                clean.insert(trimmed.to_owned());
+                source_path(&self.root, &norm)?;
+                clean.insert(norm);
             }
             playbook.anchor_files = clean.into_iter().collect();
         }
@@ -507,6 +631,9 @@ impl Store {
                 .filter(|t| !t.is_empty() && seen.insert(t.clone()))
                 .collect();
         }
+        if let Some(pinned) = update.pinned {
+            playbook.pinned = pinned;
+        }
         playbook.updated_at = chrono::Utc::now().to_rfc3339();
         let dir = self.dir(true)?.unwrap();
         if read::<EntityStore>(&dir, "entities.json")?.is_none() {
@@ -519,8 +646,9 @@ impl Store {
         Ok(playbook)
     }
     pub fn delete_playbook(&self, id: &str) -> Result<()> {
+        let _w = self.write_lock();
         graph_id(id)?;
-        let Some(mut manifest) = self.manifest()? else {
+        let Some(mut manifest) = self.manifest_unlocked()? else {
             return Ok(());
         };
         if let Some(dir) = self.playbooks(false)? {
@@ -534,7 +662,8 @@ impl Store {
         self.save_manifest(manifest, None, None)
     }
     pub fn save_layout(&self, id: &str, nodes: Vec<GraphNode>) -> Result<()> {
-        let mut graph = self.graph(id)?.context("graph not found")?;
+        let _w = self.write_lock();
+        let mut graph = self.graph_unlocked(id)?.context("graph not found")?;
         let positions = nodes
             .into_iter()
             .map(|n| (n.entity_id, (n.x, n.y)))
@@ -552,6 +681,7 @@ impl Store {
         )
     }
     pub fn inbox(&self) -> Result<Vec<ObserverSubmission>> {
+        let _r = self.read_lock();
         let Some(dir) = self.dir(false)? else {
             return Ok(Vec::new());
         };
@@ -565,6 +695,7 @@ impl Store {
         &self,
         input: ObserverSubmissionCreate,
     ) -> Result<ObserverSubmission> {
+        let _w = self.write_lock();
         let title = input.title.trim().to_owned();
         ensure!(!title.is_empty(), "submission title is required");
         let source_task_id = input.source_task_id.trim().to_owned();
@@ -582,10 +713,11 @@ impl Store {
         let clean_list = |items: Vec<String>, posix_paths: bool| -> Vec<String> {
             let mut out = Vec::new();
             for item in items {
-                let mut trimmed = item.trim().to_owned();
-                if posix_paths {
-                    trimmed = trimmed.replace('\\', "/");
-                }
+                let trimmed = if posix_paths {
+                    normalize_rel_path(&item)
+                } else {
+                    item.trim().to_owned()
+                };
                 if !trimmed.is_empty() && !out.contains(&trimmed) {
                     out.push(trimmed);
                 }
@@ -650,6 +782,7 @@ impl Store {
         id: &str,
         patch: ObserverSubmissionPatch,
     ) -> Result<ObserverSubmission> {
+        let _w = self.write_lock();
         graph_id(id)?;
         let dir = self.dir(false)?.context("blueprint inbox not found")?;
         let mut store: ObserverInboxStore = read(&dir, "inbox.json")?.unwrap_or_default();
@@ -668,6 +801,7 @@ impl Store {
         Ok(updated)
     }
     pub fn delete_observer_note(&self, id: &str) -> Result<()> {
+        let _w = self.write_lock();
         graph_id(id)?;
         let Some(dir) = self.dir(false)? else {
             return Ok(());
@@ -693,7 +827,7 @@ fn edge_ports(all: &BTreeMap<String, Entity>, edge: &BlueprintEdge) -> bool {
     })
 }
 fn height(entity: &Entity) -> f64 {
-    108. + entity.ports.len() as f64 * 31.
+    108. + entity.properties.len() as f64 * 26. + entity.ports.len() as f64 * 31.
 }
 fn place(nodes: &mut [GraphNode], entities: &BTreeMap<String, Entity>, edges: &[BlueprintEdge]) {
     let mut columns = nodes

@@ -741,3 +741,404 @@ fn observer_inbox_submit_dedup_status_and_delete() {
     store.delete_observer_note(&first.id).unwrap();
     assert!(store.inbox().unwrap().is_empty());
 }
+
+#[test]
+fn blueprint_class_properties_and_live_run_js_method_chaining() {
+    let root = Workspace::new();
+    fs::create_dir_all(root.0.join("src/ssh")).unwrap();
+    fs::write(root.0.join("src/ssh/ui.tsx"), "export function addServer() {}\n").unwrap();
+    fs::write(root.0.join("src/ssh/routes.rs"), "pub fn post_servers() {}\n").unwrap();
+    fs::write(root.0.join("src/ssh/store.rs"), "pub fn save_credential() {}\n").unwrap();
+    fs::write(root.0.join("src/ssh/audit.rs"), "pub fn record_audit() {}\n").unwrap();
+
+    let store = root.open();
+    // Use Windows-style backslashes to verify cross-platform POSIX normalization on properties & file_path.
+    update(
+        &store,
+        json!({
+            "entities": [
+                {
+                    "id": "ui.ssh_workbench",
+                    "name": "SshWorkbench",
+                    "kind": "trigger_ui",
+                    "file_path": r"src\ssh\ui.tsx",
+                    "summary": "SSH 主机管理界面",
+                    "properties": [
+                        {"id": "source", "name": "source", "kind": "file", "value": r"src\ssh\ui.tsx"},
+                        {"id": "ui_rule", "name": "mask_rule", "kind": "rule", "value": "界面不得明文回显密码"}
+                    ],
+                    "ports": [
+                        {"id": "add_server", "name": "添加服务器", "symbol": "addServer", "reads": ["source", "mask_rule"]}
+                    ]
+                },
+                {
+                    "id": "api.ssh_routes",
+                    "name": "SshApi",
+                    "kind": "trigger_api",
+                    "file_path": "src/ssh/routes.rs",
+                    "summary": "SSH HTTP 接口",
+                    "properties": [
+                        {"id": "route_src", "name": "source", "kind": "file", "value": "src/ssh/routes.rs"},
+                        {"id": "sym", "name": "handler", "kind": "symbol", "value": "src/ssh/routes.rs#post_servers"}
+                    ],
+                    "ports": [
+                        {"id": "post_servers", "name": "POST /api/ssh/servers", "symbol": "post_servers", "reads": ["source"]}
+                    ]
+                },
+                {
+                    "id": "store.cred",
+                    "name": "CredentialStore",
+                    "kind": "store",
+                    "file_path": "src/ssh/store.rs",
+                    "summary": "0600 凭据库",
+                    "properties": [
+                        {"id": "store_src", "name": "source", "kind": "file", "value": "src/ssh/store.rs"},
+                        {"id": "perm", "name": "perm_rule", "kind": "rule", "value": "凭据文件权限必须为 0600"}
+                    ],
+                    "ports": [
+                        {"id": "save_cred", "name": "保存凭据", "symbol": "save_credential", "reads": ["source", "perm_rule"]}
+                    ]
+                },
+                {
+                    "id": "svc.audit",
+                    "name": "AuditLog",
+                    "kind": "service",
+                    "file_path": "src/ssh/audit.rs",
+                    "summary": "审计日志",
+                    "properties": [
+                        {"id": "audit_src", "name": "source", "kind": "file", "value": "src/ssh/audit.rs"}
+                    ],
+                    "ports": [
+                        {"id": "record", "name": "记录审计", "symbol": "record_audit", "reads": ["source"]}
+                    ]
+                }
+            ]
+        }),
+    );
+
+    // Reject Windows drive prefix & traversal in properties and file_path.
+    assert!(
+        store
+            .upsert_entities(
+                serde_json::from_value(json!({
+                    "entities": [{
+                        "id": "bad.win",
+                        "name": "BadWin",
+                        "kind": "service",
+                        "properties": [{"id": "p", "name": "p", "kind": "file", "value": r"C:\Windows\win.ini"}]
+                    }]
+                }))
+                .unwrap()
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .upsert_entities(
+                serde_json::from_value(json!({
+                    "entities": [{
+                        "id": "bad.rel",
+                        "name": "BadRel",
+                        "kind": "service",
+                        "properties": [{"id": "p", "name": "p", "kind": "file", "value": r"src\..\..\etc\passwd"}]
+                    }]
+                }))
+                .unwrap()
+            )
+            .is_err()
+    );
+
+    graph(
+        &store,
+        "ssh-add",
+        json!({
+            "title": "SSH 添加主机",
+            "entry_kind": "ui_page",
+            "nodes": [
+                {"entity_id": "ui.ssh_workbench"},
+                {"entity_id": "api.ssh_routes"},
+                {"entity_id": "store.cred"},
+                {"entity_id": "svc.audit"}
+            ],
+            "edges": [
+                {
+                    "id": "e1",
+                    "source_entity": "ui.ssh_workbench",
+                    "source_port": "add_server",
+                    "target_entity": "api.ssh_routes",
+                    "target_port": "post_servers",
+                    "relation": "http",
+                    "label": "POST /api/ssh/servers",
+                    "severity": "critical",
+                    "invariant": "prod 写入强制 once_only 审批"
+                },
+                {
+                    "id": "e1b",
+                    "source_entity": "ui.ssh_workbench",
+                    "source_port": "add_server",
+                    "target_entity": "svc.audit",
+                    "target_port": "record",
+                    "relation": "calls",
+                    "label": "审计记录"
+                },
+                {
+                    "id": "e2",
+                    "source_entity": "api.ssh_routes",
+                    "source_port": "post_servers",
+                    "target_entity": "store.cred",
+                    "target_port": "save_cred",
+                    "relation": "writes",
+                    "label": "写入凭据库"
+                }
+            ]
+        }),
+    );
+
+    // Check normalized POSIX paths stored on disk.
+    let saved_ui = store
+        .entities()
+        .unwrap()
+        .entities
+        .into_iter()
+        .find(|e| e.id == "ui.ssh_workbench")
+        .unwrap();
+    assert_eq!(saved_ui.file_path.as_deref(), Some("src/ssh/ui.tsx"));
+    assert_eq!(saved_ui.properties[0].value, "src/ssh/ui.tsx");
+
+    // Verify graph_view includes computed method chains.
+    let view = graph_view(&store, "ssh-add", true).unwrap();
+    assert!(view["chains"].as_array().unwrap().len() >= 2);
+
+    // Execute live class & method-chain navigation inside the real agent_program JS VM!
+    let runtime_payload = super::runtime_graph::build_runtime_graph(&store, Some("ssh-add")).unwrap();
+    let mut libs = crate::runtime::agent_program::libraries::builtin();
+    libs.entry("blueprint".into())
+        .or_default()
+        .insert("open".into(), "blueprint__open".into());
+
+    let mut vm = crate::runtime::agent_program::Runtime::new_repl(libs.clone()).unwrap();
+    let mut state = vm
+        .append_segment(
+            r#"
+        const bp = blueprint.open({ graph_id: "ssh-add" });
+        const end = bp.SshWorkbench.addServer().post_servers().save_credential();
+        const alt = bp.SshWorkbench.addServer("AuditLog").record_audit();
+        const foundRule = bp.find("0600");
+        const foundChainFromRule = foundRule.classes[0].save_credential();
+        const foundInvariant = bp.find("once_only");
+        return {
+            propSource: bp.SshWorkbench.properties.source,
+            trace: end.trace(),
+            anchors: end.anchors(),
+            invariants: end.invariants(),
+            altTrace: alt.trace(),
+            chains: bp.chains(),
+            files: bp.files(),
+            foundClassName: foundRule.classes[0].name,
+            foundRuleTrace: foundChainFromRule.trace(),
+            foundInvariantChains: foundInvariant.chains.length,
+        };
+        "#,
+            libs,
+            true,
+        )
+        .unwrap();
+
+    let output = loop {
+        match state {
+            crate::runtime::agent_program::State::Action(action) => match action.kind {
+                crate::runtime::agent_program::runtime::ActionKind::Tool { name, .. }
+                    if name == "blueprint__open" =>
+                {
+                    vm.resume_action(&action.id, runtime_payload.clone(), false)
+                        .unwrap();
+                    state = vm.next();
+                }
+                other => panic!("unexpected action: {other:?}"),
+            },
+            crate::runtime::agent_program::State::Returned(val) => break val,
+            other => panic!("unexpected VM state: {other:?}"),
+        }
+    };
+
+    assert_eq!(output["propSource"], "src/ssh/ui.tsx");
+    let trace = output["trace"].as_array().unwrap();
+    assert_eq!(trace.len(), 3);
+    assert!(trace[0].as_str().unwrap().contains("SshWorkbench.addServer"));
+    assert!(trace[0].as_str().unwrap().contains("SshApi.post_servers"));
+    assert!(trace[1].as_str().unwrap().contains("CredentialStore.save_credential"));
+    let anchors = output["anchors"].as_array().unwrap();
+    assert!(anchors.contains(&json!("src/ssh/ui.tsx")));
+    assert!(anchors.contains(&json!("src/ssh/routes.rs")));
+    assert!(anchors.contains(&json!("src/ssh/store.rs")));
+    let invariants = output["invariants"].as_array().unwrap();
+    assert!(
+        invariants
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("once_only"))
+    );
+    assert!(
+        invariants
+            .iter()
+            .any(|v| v.as_str().unwrap_or("").contains("0600"))
+    );
+    let alt_trace = output["altTrace"].as_array().unwrap();
+    assert!(alt_trace[0].as_str().unwrap().contains("AuditLog.record_audit"));
+    assert_eq!(output["files"].as_array().unwrap().len(), 4);
+    assert!(output["chains"].as_array().unwrap().len() >= 2);
+    assert_eq!(output["foundClassName"], "CredentialStore");
+    assert_eq!(output["foundRuleTrace"], json!(["CredentialStore.save_credential"]));
+    assert!(output["foundInvariantChains"].as_u64().unwrap() >= 1);
+
+    // Confirm legacy `memory.*` tools are retired from ToolRegistry & default SDK declarations.
+    assert!(
+        crate::tools::tool_registry::ToolRegistry::all()
+            .iter()
+            .all(|spec| spec.library != "memory"),
+        "legacy memory tools should no longer be exposed in ToolRegistry"
+    );
+    let builtin_libs = crate::runtime::agent_program::libraries::builtin();
+    assert!(!builtin_libs.contains_key("memory"));
+    let header = crate::runtime::agent_program::declarations::static_library_header(&builtin_libs);
+    assert!(!header.contains("record_work_memory"));
+    assert!(!header.contains("record_architecture_memory"));
+    assert!(!header.contains("record_symbol_business_context"));
+}
+
+#[test]
+fn blueprint_verify_detects_missing_base_commit_and_windows_playbook_anchors() {
+    let root = Workspace::new();
+    git(&root.0, &["init", "-q"]);
+    fs::create_dir_all(root.0.join("src")).unwrap();
+    fs::write(root.0.join("src/mod.rs"), "pub fn init() {}\n").unwrap();
+    git(&root.0, &["add", "."]);
+    git(
+        &root.0,
+        &[
+            "-c",
+            "user.name=Blueprint",
+            "-c",
+            "user.email=blueprint@example.test",
+            "commit",
+            "-qm",
+            "init",
+        ],
+    );
+    let store = root.open();
+    // Save playbook with Windows-style anchor path & unreachable base commit (simulating rebase).
+    store
+        .upsert_playbook(
+            "win-path",
+            serde_json::from_value(json!({
+                "title": "Windows anchor test",
+                "anchor_files": [r"src\mod.rs"],
+                "last_synced_commit": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    fs::write(root.0.join("src/mod.rs"), "pub fn init() { /* edited */ }\n").unwrap();
+    let manifest = store.manifest().unwrap().unwrap();
+    let report = verify::verify(
+        &store,
+        Some(&manifest),
+        &[],
+        &[],
+        &store.all_playbooks(&manifest).unwrap(),
+    );
+    assert!(report.base_commit_missing);
+    assert!(report.stale);
+    assert_eq!(report.drifted_playbooks, 1);
+    assert_eq!(report.playbooks["win-path"].changed_files, ["src/mod.rs"]);
+}
+
+#[test]
+fn blueprint_impact_includes_related_playbooks_and_scopes_port_chains() {
+    let root = Workspace::new();
+    fs::create_dir_all(root.0.join("src")).unwrap();
+    fs::write(root.0.join("src/hub.rs"), "pub fn a() {}\npub fn b() {}\n").unwrap();
+    let store = root.open();
+    update(
+        &store,
+        json!({
+            "entities": [
+                {"id": "entry_a", "name": "EntryA", "kind": "trigger_ui", "ports": [{"id": "go", "name": "go"}]},
+                {"id": "hub", "name": "Hub", "kind": "service", "file_path": "src/hub.rs", "ports": [{"id": "a", "name": "a"}, {"id": "b", "name": "b"}]},
+                {"id": "leaf_a", "name": "LeafA", "kind": "store", "ports": [{"id": "save", "name": "save"}]},
+                {"id": "leaf_b", "name": "LeafB", "kind": "store", "ports": [{"id": "save", "name": "save"}]}
+            ]
+        }),
+    );
+    graph(
+        &store,
+        "g1",
+        json!({
+            "nodes": [{"entity_id": "entry_a"}, {"entity_id": "hub"}, {"entity_id": "leaf_a"}, {"entity_id": "leaf_b"}],
+            "edges": [
+                {"id": "e1", "source_entity": "entry_a", "source_port": "go", "target_entity": "hub", "target_port": "a", "relation": "calls"},
+                {"id": "e2", "source_entity": "hub", "source_port": "a", "target_entity": "leaf_a", "target_port": "save", "relation": "writes"},
+                {"id": "e3", "source_entity": "hub", "source_port": "b", "target_entity": "leaf_b", "target_port": "save", "relation": "writes"}
+            ]
+        }),
+    );
+    store
+        .upsert_playbook(
+            "hub-pb",
+            serde_json::from_value(json!({
+                "title": "Hub Path",
+                "anchor_files": ["src/hub.rs"],
+                "related_entities": ["hub"],
+                "related_graphs": ["g1"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+    // Port-scoped impact from EntryA:go should reach hub:a -> leaf_a:save, NOT unrelated leaf_b!
+    let report = impact::impact(
+        &store,
+        ImpactQuery {
+            entity_id: Some("entry_a".into()),
+            file_path: None,
+            port_id: Some("go".into()),
+            depth: Some(4),
+        },
+    )
+    .unwrap();
+    let down_ids: Vec<&str> = report.downstream.iter().map(|r| r.entity_id.as_str()).collect();
+    assert!(down_ids.contains(&"hub"));
+    assert!(down_ids.contains(&"leaf_a"));
+    assert!(!down_ids.contains(&"leaf_b"), "port-scoped chain leaked into unrelated hub port: {down_ids:?}");
+    assert_eq!(report.playbooks.len(), 1);
+    assert_eq!(report.playbooks[0].id, "hub-pb");
+
+    // Deleting graph cascades removal from playbook.related_graphs.
+    store.delete_graph("g1").unwrap();
+    assert!(store.playbook("hub-pb").unwrap().unwrap().related_graphs.is_empty());
+}
+
+#[test]
+#[ignore = "reads local desktop QuickAgent codex_state.db read-only to inspect real session extraction"]
+fn blueprint_extract_from_real_desktop_session() {
+    let state_root = std::path::PathBuf::from(
+        "/home/goodtime/.local/share/com.grow.agent/workspace",
+    );
+    let task_id = std::env::var("BLUEPRINT_TEST_TASK_ID")
+        .unwrap_or_else(|_| "task_f216a5583b46fda028f3aef4904b7f8f".into());
+    let dossier =
+        super::session_dossier::inspect_session(&state_root, &json!({ "task_id": task_id }))
+            .expect("inspect real desktop session");
+
+    println!("=== TASK SUMMARY ===");
+    println!("{}", serde_json::to_string_pretty(&dossier["task"]).unwrap());
+    println!("=== CLASS CANDIDATES ({}) ===", dossier["class_candidates"].as_array().map_or(0, Vec::len));
+    println!("{}", serde_json::to_string_pretty(&dossier["class_candidates"]).unwrap());
+    println!("=== CANDIDATE CHAINS ({}) ===", dossier["candidate_chains"].as_array().map_or(0, Vec::len));
+    println!("{}", serde_json::to_string_pretty(&dossier["candidate_chains"]).unwrap());
+    println!("=== ENV SIGNALS ===");
+    println!("{}", serde_json::to_string_pretty(&dossier["environment_signals"]).unwrap());
+    println!("=== WINNING COMMANDS ({}) ===", dossier["winning_commands"].as_array().map_or(0, Vec::len));
+    println!("{}", serde_json::to_string_pretty(&dossier["winning_commands"]).unwrap());
+
+    assert!(!dossier["class_candidates"].as_array().unwrap().is_empty());
+}

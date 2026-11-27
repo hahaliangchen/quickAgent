@@ -14,6 +14,24 @@
     }
   },
   {
+    "name": "blueprint__open",
+    "description": "Open the live executable class-graph & relational memory handle (`const bp = blueprint.open({})`). Supports keyword lookup (`bp.find(keyword)` -> live classes + matching chains), class anchor properties (`bp.<Class>.props()`), chainable methods (`bp.<Class>.<method>().<nextMethod>()`) collecting `.trace()`, `.anchors()`, `.invariants()`, `.branches()`, and `bp.chains()`.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_root": {
+          "type": "string"
+        },
+        "graph_id": {
+          "type": "string",
+          "description": "Optional canvas ID to scope the class graph; omit to load all graphs"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "blueprint__read_graph",
     "description": "Read one canvas with its shared entities, port anchor status, edges and invariants; this view excludes pixel coordinates.",
     "inputSchema": {
@@ -79,6 +97,56 @@
         }
       },
       "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "blueprint__list_inbox",
+    "description": "List Observer battlefield submissions from `.quickagent/blueprint/inbox.json` without reading raw JSON files manually.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workspace_root": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "merged",
+            "dismissed"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "blueprint__resolve_inbox",
+    "description": "Update an Observer battlefield submission status (`merged` or `dismissed`) after verifying and saving the corresponding classes, graphs, or playbook.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "merged",
+            "dismissed"
+          ]
+        },
+        "merged_playbook_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
       "additionalProperties": false
     }
   },
@@ -166,8 +234,46 @@
               "summary": {
                 "type": "string"
               },
+              "properties": {
+                "type": "array",
+                "description": "Coarse-grained class anchor properties (files, symbols, config, environment facts, red-line rules)",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "file",
+                        "symbol",
+                        "config",
+                        "env",
+                        "rule"
+                      ]
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              },
               "ports": {
                 "type": "array",
+                "description": "Class methods / ports that access properties and link to downstream class methods to form call chains",
                 "items": {
                   "type": "object",
                   "properties": {
@@ -209,15 +315,20 @@
                       "type": "integer",
                       "minimum": 1
                     },
+                    "reads": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Property IDs or names accessed by this method"
+                    },
                     "summary": {
                       "type": "string"
                     }
                   },
                   "required": [
                     "id",
-                    "name",
-                    "direction",
-                    "kind"
+                    "name"
                   ],
                   "additionalProperties": false
                 }
@@ -238,6 +349,9 @@
           }
         },
         "replace_ports": {
+          "type": "boolean"
+        },
+        "replace_properties": {
           "type": "boolean"
         },
         "project_kind": {
@@ -460,6 +574,10 @@
             "type": "string"
           },
           "description": "Historical session task IDs from which this playbook was distilled"
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "Prioritize this playbook's environment/pitfalls in context-tail reminders"
         },
         "project_kind": {
           "type": "string",

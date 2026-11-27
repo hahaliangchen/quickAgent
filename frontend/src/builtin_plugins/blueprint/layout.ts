@@ -28,7 +28,8 @@ export function layout(graph: Graph, entities: readonly Entity[]) {
   return [...new Set([...order, ...ids])].map(entity_id => {
     const col = rank.get(entity_id) ?? 0
     const y = heights.get(col) ?? 56
-    heights.set(col, y + 142 + (byId.get(entity_id)?.ports.length ?? 0) * 31)
+    const ent = byId.get(entity_id)
+    heights.set(col, y + 142 + (ent?.properties?.length ?? 0) * 26 + (ent?.ports.length ?? 0) * 31)
     return { entity_id, x: 40 + col * 470, y }
   })
 }

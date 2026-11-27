@@ -363,6 +363,35 @@ Each response MUST be **one** of two actions:
 2. **Reply directly to the user (without calling `run_js`)**:
    - Once you have real observed tool output, answer directly in clear, natural Markdown grounded strictly in the returned data. Never fabricate tool results or citations."#;
 
+enum SessionRole<'a> {
+    Virtual,
+    SlimPlugin(&'a str),
+    Observer(String),
+    Blueprint,
+    Standard,
+}
+
+fn session_role<'a>(s: &'a Session<'_>) -> SessionRole<'a> {
+    if let Some(plugin_id) = s.plugin.as_deref()
+        && s.prompt_profile() == crate::server::plugin_protocol::PromptProfile::Slim
+    {
+        return SessionRole::SlimPlugin(plugin_id);
+    }
+    if s.scope.starts_with("virtual:") {
+        return SessionRole::Virtual;
+    }
+    let root = s.state.workspace.root();
+    if let Some(target_task_id) =
+        crate::server::builtin_plugins::blueprint::observer::watched_task(root, s.task)
+    {
+        return SessionRole::Observer(target_task_id);
+    }
+    if crate::context::session_browser::is_blueprint_session(root, s.task).unwrap_or(false) {
+        return SessionRole::Blueprint;
+    }
+    SessionRole::Standard
+}
+
 /// Build the provider wire body: static system prompt + `.d.ts` declarations +
 /// conversation turns + ONLY the single fixed `run_js({ code })` shell tool.
 pub(super) fn build_request_body(
@@ -371,90 +400,94 @@ pub(super) fn build_request_body(
     libs: &Libraries,
 ) -> Value {
     let base = w.pinned_system_prompt.as_deref().unwrap_or(V2_SYSTEM_PROMPT);
-    let is_slim = s.plugin.is_some()
-        && s.prompt_profile() == crate::server::plugin_protocol::PromptProfile::Slim;
-    let ephemeral_tail = if s.scope.starts_with("virtual:") || is_slim {
-        None
-    } else {
-        let live_plan = crate::tools::plan_tools::format_turn_plan_for_context(
-            s.state.workspace.root(),
-            s.task,
-            s.turn,
-        );
-        let blueprint_tail = workspace_blueprint_tail(s, libs);
-        match (blueprint_tail, live_plan) {
-            (Some(bp), Some(plan)) => Some(format!("{bp}\n\n{plan}")),
-            (Some(bp), None) => Some(bp),
-            (None, Some(plan)) => Some(plan),
-            (None, None) => None,
+    let role = session_role(s);
+    let ephemeral_tail = match role {
+        SessionRole::Virtual | SessionRole::SlimPlugin(_) | SessionRole::Observer(_) => None,
+        SessionRole::Blueprint | SessionRole::Standard => {
+            let live_plan = crate::tools::plan_tools::format_turn_plan_for_context(
+                s.state.workspace.root(),
+                s.task,
+                s.turn,
+            );
+            let blueprint_tail = if matches!(role, SessionRole::Standard) {
+                workspace_blueprint_tail(s, libs)
+            } else {
+                None
+            };
+            match (blueprint_tail, live_plan) {
+                (Some(bp), Some(plan)) => Some(format!("{bp}\n\n{plan}")),
+                (Some(bp), None) => Some(bp),
+                (None, Some(plan)) => Some(plan),
+                (None, None) => None,
+            }
         }
     };
     build_request_body_for_doc_with_plan(s, &w.context_doc, base, libs, ephemeral_tail.as_deref())
 }
 
 pub(super) fn pinned_system_prompt(s: &Session<'_>, libs: &Libraries) -> String {
-    if let Some(plugin_id) = s.plugin.as_deref()
-        && s.prompt_profile() == crate::server::plugin_protocol::PromptProfile::Slim
-    {
-        let mut text = String::from(SLIM_SYSTEM_PROMPT);
-        if let Some(skill_body) = s
-            .state
-            .tool_catalog
-            .as_ref()
-            .and_then(|catalog| catalog.packages.inline_skill_body(plugin_id))
-        {
-            text.push_str("\n\n=== PLUGIN INSTRUCTIONS (SKILL.md) ===\n");
-            text.push_str(&skill_body);
-            text.push('\n');
-        }
-        text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
-        text.push_str(&declarations::static_library_header(libs));
-        return text;
-    }
-    let watched_task = if s.scope.starts_with("virtual:") {
-        None
-    } else {
-        crate::context::session_browser::observer_watched_task(s.state.workspace.root(), s.task)
-            .ok()
-            .flatten()
-    };
-    let mut text = String::from(V2_SYSTEM_PROMPT);
-    if let Some(target_task_id) = watched_task.as_deref() {
-        text.push_str(&format!(
-            "\n\n=== OBSERVER AGENT ROLE ===\n\
-你是专属于主会话 `{target_task_id}` 的只读观察者 Agent（严格只读，禁止修改任何文件或执行写操作）。\n\
-- 收到巡检信号或用户提问时，优先从尾部查看主会话最近在干什么：先调用 `blueprint.inspect_session({{ task_id: \"{target_task_id}\", max_recent: 20 }})` 查看最新多轮 `user_instructions`、运行中工具 `in_flight_tools`（含实时终端 `tail_lines`）和最新 20 条事件 `recent_tail`。\n\
-- 需要更多前因后果或细节时，可自由翻阅 SQLite 历史（`session.read_session_history`）或使用只读文件/搜索/Git 工具核对代码真相。\n\
-- 判断主会话目标与授权边界时，必须按时间顺序串联全部 `user_instructions`：后续轮次覆盖早先冲突限制；简短续跑指令（如“继续”“再连一下”）延续最近一条实质任务与授权，绝不回退套用已被覆盖的首轮旧限制。\n\
-- 工具偶尔报错但主会话自行修正的属于正常执行波动，无需小题大做；仅在发现明确跑偏、长时间卡死或需止损时建议介入。\n\
-- 每次回复末尾附如下 JSON 代码块供界面渲染确认卡片：\n\
-```observer-suggestion\n\
-{{\"should_interject\": false, \"action\": \"interject\", \"severity\": \"tip\", \"title\": \"\", \"reason\": \"当前进展正常\", \"interject\": \"\"}}\n\
-```\n\
-（`action` 可选 `\"interject\"` | `\"stop\"` | `\"stop_and_continue\"`；`severity` 可选 `\"tip\"` | `\"warn\"` | `\"blocker\"`；`interject` 为用户确认后发送给主会话的精炼指令。）\n\
-- **战地蓝图呈报（可选，有实质沉淀时才附）**：当主会话完成一轮实质改动、踩过值得记录的真实环境/架构坑、或用户要求呈报蓝图时，额外在末尾附一个 `blueprint-note` JSON 代码块，系统会自动呈报到当前项目的「架构蓝图 → 观察者呈报」收件箱供蓝图页审阅合入；普通进行中巡检若无新沉淀则不要附此块：\n\
-```blueprint-note\n\
-{{\"title\": \"简明主题\", \"trigger\": \"何时需要参考这条经验\", \"summary\": \"战地结论与架构/流程要点\", \"anchor_files\": [\"相对路径\"], \"environment\": [\"端口/路径/服务隔离约定\"], \"pitfalls\": [\"踩过的坑与红线\"], \"verify_commands\": [\"有效验收命令\"]}}\n\
-```\n"
-        ));
-    }
-    text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
-    if watched_task.is_some() {
-        text.push_str(&declarations::static_library_header(libs));
-    } else {
-        text.push_str(&model_library_header(libs));
-    }
-    if !s.scope.starts_with("virtual:") && watched_task.is_none() {
-        let orch = crate::runtime::flow_libraries::list_libraries(s);
-        if !orch.is_empty() {
-            text.push_str("\n// Reusable JS orchestration libraries via `require(\"<name>\")`:\n");
-            for (name, desc) in orch {
-                let methods = crate::runtime::flow_libraries::public_method_names(s, &name).unwrap_or_default();
-                text.push_str(&format!("// - require({name:?}) -> {{ {} }}: {desc}\n", methods.join(", ")));
+    match session_role(s) {
+        SessionRole::SlimPlugin(plugin_id) => {
+            let mut text = String::from(SLIM_SYSTEM_PROMPT);
+            if let Some(skill_body) = s
+                .state
+                .tool_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.packages.inline_skill_body(plugin_id))
+            {
+                text.push_str("\n\n=== PLUGIN INSTRUCTIONS (SKILL.md) ===\n");
+                text.push_str(&skill_body);
+                text.push('\n');
             }
+            text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
+            text.push_str(&declarations::static_library_header(libs));
+            text
+        }
+        SessionRole::Observer(target_task_id) => {
+            crate::server::builtin_plugins::blueprint::observer::build_system_prompt(
+                &target_task_id,
+                libs,
+            )
+        }
+        role @ (SessionRole::Virtual | SessionRole::Blueprint | SessionRole::Standard) => {
+            let is_blueprint = matches!(role, SessionRole::Blueprint);
+            let mut text = String::from(V2_SYSTEM_PROMPT);
+            if is_blueprint {
+                if let Some(skill_body) = s
+                    .state
+                    .tool_catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.packages.inline_skill_body("blueprint"))
+                {
+                    text.push_str("\n\n=== BLUEPRINT AGENT ROLE (SKILL.md) ===\n");
+                    text.push_str(&skill_body);
+                    text.push('\n');
+                }
+            }
+            text.push_str("\n/* === RUNTIME HOST SDK (.d.ts) === */\n");
+            if is_blueprint {
+                text.push_str(&declarations::static_library_header(libs));
+            } else {
+                text.push_str(&model_library_header(libs));
+            }
+            if !matches!(role, SessionRole::Virtual) {
+                let orch = crate::runtime::flow_libraries::list_libraries(s);
+                if !orch.is_empty() {
+                    text.push_str("\n// Reusable JS orchestration libraries via `require(\"<name>\")`:\n");
+                    for (name, desc) in orch {
+                        let methods =
+                            crate::runtime::flow_libraries::public_method_names(s, &name)
+                                .unwrap_or_default();
+                        text.push_str(&format!(
+                            "// - require({name:?}) -> {{ {} }}: {desc}\n",
+                            methods.join(", ")
+                        ));
+                    }
+                }
+            }
+            text
         }
     }
-    text
 }
 
 // Keep the pinned header stable and give only opted-in workspaces a blueprint hint.
@@ -477,11 +510,18 @@ fn task_blueprint_root(s: &Session<'_>, libs: &Libraries) -> Option<std::path::P
 }
 
 pub(super) fn workspace_blueprint_hint(s: &Session<'_>, libs: &Libraries) -> Option<String> {
+    // Inject only on turn 1 of normal work sessions so later turns never accumulate duplicate banners.
+    if s.turn != 1 || !matches!(session_role(s), SessionRole::Standard) {
+        return None;
+    }
     let root = task_blueprint_root(s, libs)?;
     crate::server::builtin_plugins::blueprint::workspace_blueprint_hint(&root)
 }
 
 pub(super) fn workspace_blueprint_tail(s: &Session<'_>, libs: &Libraries) -> Option<String> {
+    if !matches!(session_role(s), SessionRole::Standard) {
+        return None;
+    }
     let root = task_blueprint_root(s, libs)?;
     crate::server::builtin_plugins::blueprint::workspace_blueprint_tail(&root)
 }
@@ -1070,6 +1110,128 @@ mod tests {
         let b1 = build_request_body(&slim_session, &w, &slim_libs);
         let slim_turn2 = Session { turn: 2, ..slim_session };
         let b2 = build_request_body(&slim_turn2, &w, &slim_libs);
+        assert_eq!(
+            b1["messages"][0]["content"].as_str().unwrap().as_bytes(),
+            b2["messages"][0]["content"].as_str().unwrap().as_bytes()
+        );
+
+        runtime.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn blueprint_kind_session_pins_skill_md_and_exposes_blueprint_library() {
+        let root =
+            std::env::temp_dir().join(format!("blueprint-kind-{}", agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (runtime, catalog) = crate::server::skill_packages::test_runtime();
+        let mut state = agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        state.tool_catalog = Some(catalog);
+
+        let conn = agent_service::open_db(&root).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('bp-task','','m','draft',1,1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_session_meta(task_id,archived,workspace,kind) VALUES ('bp-task',1,'/repo','blueprint')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let session = Session {
+            state: &state,
+            task: "bp-task",
+            model: "m",
+            turn: 1,
+            cancel: &cancel,
+            scope: "main".into(),
+            parent: None,
+            agent_id: None,
+            task_node_id: None,
+            plugin: None,
+            ban_execution: false,
+            input_budget: 100_000,
+        };
+        let libs = super::super::tool_executor::library_compile_scope(&session, &Window::default());
+        let prompt = pinned_system_prompt(&session, &libs);
+        assert!(prompt.contains("=== BLUEPRINT AGENT ROLE (SKILL.md) ==="));
+        assert!(prompt.contains("Observer Battlefield Submissions"));
+        let sdk_section = prompt.split("/* === RUNTIME HOST SDK (.d.ts) === */").nth(1).unwrap();
+        assert!(sdk_section.contains("blueprint"), "{sdk_section}");
+        assert!(!model_library_header(&libs).contains("blueprint"));
+
+        runtime.shutdown().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn observer_session_uses_pure_read_only_prompt_and_filtered_libs() {
+        let root =
+            std::env::temp_dir().join(format!("observer-role-{}", agent_service::uuid_like()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (runtime, catalog) = crate::server::skill_packages::test_runtime();
+        let mut state = agent_service::tests::test_state(&root, "127.0.0.1:1".parse().unwrap());
+        state.tool_catalog = Some(catalog);
+
+        let conn = agent_service::open_db(&root).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks(id,prompt,model,status,created_at,updated_at) VALUES ('obs-task','','m','draft',1,1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_session_meta(task_id,archived,workspace,kind,watched_task_id) VALUES ('obs-task',1,'/repo','observer','main-task-99')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let session = Session {
+            state: &state,
+            task: "obs-task",
+            model: "m",
+            turn: 1,
+            cancel: &cancel,
+            scope: "main".into(),
+            parent: None,
+            agent_id: None,
+            task_node_id: None,
+            plugin: None,
+            ban_execution: false,
+            input_budget: 100_000,
+        };
+        let libs = super::super::tool_executor::library_compile_scope(&session, &Window::default());
+        assert!(libs.contains_key("blueprint"));
+        assert!(libs["blueprint"].contains_key("inspect_session"));
+        assert!(!libs["blueprint"].contains_key("upsert_entities"));
+        assert!(libs.contains_key("io"));
+        assert!(libs["io"].contains_key("read"));
+        assert!(!libs["io"].contains_key("edit"));
+        assert!(!libs.contains_key("process"));
+        assert!(!libs.contains_key("plan"));
+
+        let prompt = pinned_system_prompt(&session, &libs);
+        assert!(prompt.contains("=== OBSERVER AGENT ROLE ==="));
+        assert!(prompt.contains("main-task-99"));
+        assert!(!prompt.starts_with(V2_SYSTEM_PROMPT));
+        assert!(!prompt.contains("EDITING AND BUILDING"));
+        assert!(!prompt.contains("FINAL REPLY LAYOUT"));
+        assert!(workspace_blueprint_hint(&session, &libs).is_none());
+        assert!(workspace_blueprint_tail(&session, &libs).is_none());
+
+        // Prefix remains byte-identical across turns for KV cache reuse.
+        let w = Window {
+            pinned_system_prompt: Some(prompt),
+            ..Default::default()
+        };
+        let b1 = build_request_body(&session, &w, &libs);
+        let turn2 = Session { turn: 2, ..session };
+        let b2 = build_request_body(&turn2, &w, &libs);
         assert_eq!(
             b1["messages"][0]["content"].as_str().unwrap().as_bytes(),
             b2["messages"][0]["content"].as_str().unwrap().as_bytes()

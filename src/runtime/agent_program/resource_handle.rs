@@ -70,6 +70,9 @@ pub(super) fn try_method(
     name: &str,
     args: &[VmValue],
 ) -> Result<Option<VmValue>> {
+    if let Some(res) = try_blueprint_method(heap, id, name, args)? {
+        return Ok(Some(res));
+    }
     if !matches!(name, "slice" | "grep" | "outline" | "head" | "tail") {
         return Ok(None);
     }
@@ -297,4 +300,389 @@ fn eval_outline(lines: &[&str]) -> String {
     } else {
         entries.join("\n")
     }
+}
+
+// ============================================================================
+// Live Blueprint Class & Method-Chain Handle (`const bp = blueprint.open({})`)
+// ============================================================================
+
+fn push_unique_str(list: &mut Vec<serde_json::Value>, val: &str) {
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !list.iter().any(|v| v.as_str() == Some(trimmed)) {
+        list.push(serde_json::Value::String(trimmed.to_owned()));
+    }
+}
+
+fn try_blueprint_method(
+    heap: &mut Heap,
+    id: HeapId,
+    name: &str,
+    args: &[VmValue],
+) -> Result<Option<VmValue>> {
+    let (is_graph, is_node) = match heap.get(id)? {
+        HeapNode::Object(props) => (
+            props
+                .iter()
+                .any(|(k, v)| k == "__blueprint_graph" && *v == VmValue::Boolean(true)),
+            props
+                .iter()
+                .any(|(k, v)| k == "__blueprint_node" && *v == VmValue::Boolean(true)),
+        ),
+        _ => return Ok(None),
+    };
+
+    if is_graph {
+        return eval_blueprint_graph_method(heap, id, name, args);
+    }
+    if is_node {
+        return eval_blueprint_node_method(heap, id, name, args);
+    }
+    Ok(None)
+}
+
+fn eval_blueprint_graph_method(
+    heap: &mut Heap,
+    id: HeapId,
+    name: &str,
+    args: &[VmValue],
+) -> Result<Option<VmValue>> {
+    let root = heap.to_json(&VmValue::Reference(id))?;
+    let class_map_id = match heap.get(id)? {
+        HeapNode::Object(props) => props.iter().find_map(|(k, v)| match (k.as_str(), v) {
+            ("class_map", VmValue::Reference(cid)) => Some(*cid),
+            _ => None,
+        }),
+        _ => None,
+    };
+    match name {
+        "chains" => Ok(Some(heap.from_json(&root["chain_list"])?)),
+        "files" => Ok(Some(heap.from_json(&root["file_list"])?)),
+        "classes" => {
+            let mut items = Vec::new();
+            if let Some(map) = root["class_map"].as_object() {
+                for (cls_name, cls) in map {
+                    let methods: Vec<String> = cls["method_map"]
+                        .as_object()
+                        .map(|m| m.keys().cloned().collect())
+                        .unwrap_or_default();
+                    let props: Vec<String> = cls["properties"]
+                        .as_object()
+                        .map(|p| p.keys().cloned().collect())
+                        .unwrap_or_default();
+                    items.push(serde_json::json!({
+                        "class_name": cls_name,
+                        "id": cls["id"],
+                        "name": cls["name"],
+                        "kind": cls["kind"],
+                        "summary": cls["description"],
+                        "properties": props,
+                        "methods": methods,
+                    }));
+                }
+            }
+            Ok(Some(heap.from_json(&serde_json::Value::Array(items))?))
+        }
+        "class" => {
+            let query = to_string(heap, &arg(args, 0))?;
+            let q = query.trim();
+            if q.is_empty() {
+                return Ok(Some(VmValue::Undefined));
+            }
+            let Some(map) = root["class_map"].as_object() else {
+                return Ok(Some(VmValue::Undefined));
+            };
+            let found = map.get(q).or_else(|| {
+                map.values().find(|cls| {
+                    cls["id"].as_str() == Some(q)
+                        || cls["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(q))
+                        || cls["class_name"]
+                            .as_str()
+                            .is_some_and(|n| n.eq_ignore_ascii_case(q))
+                })
+            });
+            let Some(mut node) = found.cloned() else {
+                return Ok(Some(VmValue::Undefined));
+            };
+            if let Some(cid) = class_map_id
+                && let Some(obj) = node.as_object_mut()
+            {
+                obj.insert("__bp_classes_id".into(), serde_json::json!(cid.raw()));
+            }
+            Ok(Some(heap.from_json(&node)?))
+        }
+        "find" => {
+            let raw_query = to_string(heap, &arg(args, 0))?;
+            let q = raw_query.trim().to_ascii_lowercase();
+            if q.is_empty() {
+                return Ok(Some(heap.from_json(&serde_json::json!({
+                    "query": "",
+                    "classes": [],
+                    "chains": [],
+                }))?));
+            }
+            let mut matched_classes = Vec::new();
+            if let Some(map) = root["class_map"].as_object() {
+                for cls in map.values() {
+                    let hay = serde_json::to_string(cls).unwrap_or_default().to_ascii_lowercase();
+                    if hay.contains(&q) {
+                        let mut node = cls.clone();
+                        if let Some(cid) = class_map_id
+                            && let Some(obj) = node.as_object_mut()
+                        {
+                            obj.insert("__bp_classes_id".into(), serde_json::json!(cid.raw()));
+                        }
+                        matched_classes.push(node);
+                    }
+                }
+            }
+            let mut matched_chains = Vec::new();
+            if let Some(chains) = root["chain_list"].as_array() {
+                for ch in chains {
+                    let hay = serde_json::to_string(ch).unwrap_or_default().to_ascii_lowercase();
+                    if hay.contains(&q) {
+                        matched_chains.push(ch.clone());
+                    }
+                }
+            }
+            Ok(Some(heap.from_json(&serde_json::json!({
+                "query": raw_query.trim(),
+                "classes": matched_classes,
+                "chains": matched_chains,
+            }))?))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn eval_blueprint_node_method(
+    heap: &mut Heap,
+    id: HeapId,
+    name: &str,
+    args: &[VmValue],
+) -> Result<Option<VmValue>> {
+    let node = heap.to_json(&VmValue::Reference(id))?;
+    match name {
+        "props" => return Ok(Some(heap.from_json(&node["properties"])?)),
+        "anchors" => return Ok(Some(heap.from_json(&node["chain_anchors"])?)),
+        "invariants" => return Ok(Some(heap.from_json(&node["chain_invariants"])?)),
+        "trace" => return Ok(Some(heap.from_json(&node["chain_trace"])?)),
+        "branches" => return Ok(Some(heap.from_json(&node["chain_branches"])?)),
+        "methods" => {
+            let mut list = Vec::new();
+            if let Some(map) = node["method_map"].as_object() {
+                for (js_name, m) in map {
+                    let targets: Vec<String> = m["next"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|e| {
+                            Some(format!(
+                                "{}.{}",
+                                e["target_class"].as_str()?,
+                                e["target_method"].as_str()?
+                            ))
+                        })
+                        .collect();
+                    list.push(serde_json::json!({
+                        "name": js_name,
+                        "id": m["id"],
+                        "label": m["name"],
+                        "reads": m["reads"],
+                        "summary": m["summary"],
+                        "next": targets,
+                    }));
+                }
+            }
+            return Ok(Some(heap.from_json(&serde_json::Value::Array(list))?));
+        }
+        "summary" => {
+            let out = serde_json::json!({
+                "class": node["class_name"],
+                "id": node["id"],
+                "kind": node["kind"],
+                "description": node["description"],
+                "properties": node["properties"],
+                "trace": node["chain_trace"],
+                "anchors": node["chain_anchors"],
+                "invariants": node["chain_invariants"],
+                "branches": node["chain_branches"],
+            });
+            return Ok(Some(heap.from_json(&out)?));
+        }
+        _ => {}
+    }
+
+    // Dynamic class method call: match by `js_name`, `id`, or display `name`.
+    let Some(method_map) = node["method_map"].as_object() else {
+        return Ok(None);
+    };
+    let method = method_map.get(name).or_else(|| {
+        method_map.values().find(|m| {
+            m["id"].as_str() == Some(name) || m["name"].as_str() == Some(name)
+        })
+    });
+    let Some(method) = method else {
+        return Ok(None);
+    };
+
+    let cur_cls = node["class_name"]
+        .as_str()
+        .or_else(|| node["name"].as_str())
+        .unwrap_or("Class")
+        .to_owned();
+    let m_js = method["js_name"].as_str().unwrap_or(name).to_owned();
+
+    let mut trace = node["chain_trace"].as_array().cloned().unwrap_or_default();
+    let mut anchors = node["chain_anchors"].as_array().cloned().unwrap_or_default();
+    let mut invariants = node["chain_invariants"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    for f in node["anchor_files"].as_array().into_iter().flatten() {
+        if let Some(s) = f.as_str() {
+            push_unique_str(&mut anchors, s);
+        }
+    }
+    for r in node["rules"].as_array().into_iter().flatten() {
+        if let Some(s) = r.as_str() {
+            push_unique_str(&mut invariants, s);
+        }
+    }
+    // If method declares specific `reads`, include matching file/symbol/rule properties.
+    if let Some(reads) = method["reads"].as_array()
+        && let Some(prop_list) = node["property_list"].as_array()
+    {
+        for read_key in reads.iter().filter_map(serde_json::Value::as_str) {
+            for prop in prop_list {
+                let matches_prop = prop["id"].as_str() == Some(read_key)
+                    || prop["name"].as_str() == Some(read_key);
+                if !matches_prop {
+                    continue;
+                }
+                let val = prop["value"].as_str().unwrap_or_default();
+                match prop["kind"].as_str() {
+                    Some("file") => push_unique_str(&mut anchors, val),
+                    Some("symbol") => {
+                        if let Some((f, _)) = val.split_once('#') {
+                            push_unique_str(&mut anchors, f);
+                        }
+                    }
+                    Some("rule") => push_unique_str(&mut invariants, val),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Optional branch selector argument: string or `{ target: "..." }`.
+    let selector = match arg(args, 0) {
+        VmValue::Undefined | VmValue::Null => None,
+        VmValue::Reference(arg_id) => {
+            let arg_json = heap.to_json(&VmValue::Reference(arg_id)).ok();
+            arg_json
+                .as_ref()
+                .and_then(|v| v["target"].as_str().or_else(|| v.as_str()))
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        }
+        other => to_string(heap, &other)
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty()),
+    };
+
+    let next_edges = method["next"].as_array().cloned().unwrap_or_default();
+    let chosen_edge = if let Some(sel) = selector.as_deref() {
+        next_edges.iter().find(|e| {
+            e["target_class"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(sel))
+                || e["target_class_id"].as_str() == Some(sel)
+                || e["target_method"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(sel))
+                || e["target_method_id"].as_str() == Some(sel)
+                || e["label"].as_str().is_some_and(|s| s.contains(sel))
+        })
+    } else {
+        next_edges.first()
+    };
+
+    let branches_summary: Vec<serde_json::Value> = next_edges
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "target_class": e["target_class"],
+                "target_method": e["target_method"],
+                "relation": e["relation"],
+                "label": e["label"],
+                "invariant": e["invariant"],
+            })
+        })
+        .collect();
+
+    let classes_raw = node["__bp_classes_id"].as_f64().map(|n| n as u64);
+    if let Some(edge) = chosen_edge
+        && let Some(classes_raw) = classes_raw
+        && let Some(target_cls_name) = edge["target_class"].as_str()
+    {
+        let target_m = edge["target_method"].as_str().unwrap_or("call");
+        let label = edge["label"].as_str().unwrap_or_default().trim();
+        let step_text = if label.is_empty() {
+            format!("{cur_cls}.{m_js} -> {target_cls_name}.{target_m}")
+        } else {
+            format!("{cur_cls}.{m_js} -[{label}]-> {target_cls_name}.{target_m}")
+        };
+        trace.push(serde_json::Value::String(step_text));
+        if let Some(inv) = edge["invariant"].as_str() {
+            push_unique_str(&mut invariants, inv);
+        }
+
+        let classes_json = heap.to_json(&VmValue::Reference(HeapId::from_raw(classes_raw)))?;
+        if let Some(mut next_node) = classes_json.get(target_cls_name).cloned() {
+            for f in next_node["anchor_files"].as_array().into_iter().flatten() {
+                if let Some(s) = f.as_str() {
+                    push_unique_str(&mut anchors, s);
+                }
+            }
+            for r in next_node["rules"].as_array().into_iter().flatten() {
+                if let Some(s) = r.as_str() {
+                    push_unique_str(&mut invariants, s);
+                }
+            }
+            if let Some(obj) = next_node.as_object_mut() {
+                obj.insert("__bp_classes_id".into(), serde_json::json!(classes_raw));
+                obj.insert("chain_trace".into(), serde_json::Value::Array(trace));
+                obj.insert("chain_anchors".into(), serde_json::Value::Array(anchors));
+                obj.insert(
+                    "chain_invariants".into(),
+                    serde_json::Value::Array(invariants),
+                );
+                obj.insert(
+                    "chain_branches".into(),
+                    serde_json::Value::Array(branches_summary),
+                );
+                obj.insert("current_method".into(), serde_json::json!(target_m));
+            }
+            return Ok(Some(heap.from_json(&next_node)?));
+        }
+    }
+
+    // Leaf method (no outgoing edges): record step on current class and return updated node.
+    trace.push(serde_json::Value::String(format!("{cur_cls}.{m_js}")));
+    let mut leaf = node;
+    if let Some(obj) = leaf.as_object_mut() {
+        obj.insert("chain_trace".into(), serde_json::Value::Array(trace));
+        obj.insert("chain_anchors".into(), serde_json::Value::Array(anchors));
+        obj.insert(
+            "chain_invariants".into(),
+            serde_json::Value::Array(invariants),
+        );
+        obj.insert(
+            "chain_branches".into(),
+            serde_json::Value::Array(branches_summary),
+        );
+        obj.insert("current_method".into(), serde_json::json!(m_js));
+    }
+    Ok(Some(heap.from_json(&leaf)?))
 }

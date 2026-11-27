@@ -220,7 +220,7 @@ pub fn search(root: &Path, request: Request) -> anyhow::Result<Value> {
         .take(page.limit)
         .collect::<Vec<_>>();
     Ok(
-        json!({"query":request.query,"terms":terms,"groups":groups,"group_page":page,"language_pages":pages,"issues":issues,"candidate_window_per_language":100,"guidance":"Groups show saved responsibilities, not inferred call chains. Read a listed definition directly when implementation details are needed. Save a definition or file role with record_symbol_business_context; save a related cross-file area with record_architecture_memory. Missing/stale descriptions and zero matches do not prove missing functionality. offset pages each language's symbol candidates; group_offset pages groups within that candidate window."}),
+        json!({"query":request.query,"terms":terms,"groups":groups,"group_page":page,"language_pages":pages,"issues":issues,"candidate_window_per_language":100,"guidance":"Groups show saved responsibilities, not inferred call chains. Read a listed definition directly when implementation details are needed. Record durable cross-layer architecture relations, anchors, and invariants in the project blueprint (blueprint.upsert_entities / blueprint.upsert_graph). Missing/stale descriptions and zero matches do not prove missing functionality. offset pages each language's symbol candidates; group_offset pages groups within that candidate window."}),
     )
 }
 fn in_scope(file: &str, request: &Request) -> bool {

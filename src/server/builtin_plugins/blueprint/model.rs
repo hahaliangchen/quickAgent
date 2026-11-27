@@ -30,6 +30,30 @@ kind!(
 );
 kind!(Severity, Info, Warning, Critical);
 kind!(PortStatus, Ok, Drifted, Missing);
+kind!(PropertyKind, File, Symbol, Config, Env, Rule);
+
+/// Normalize workspace-relative paths to POSIX `/` separators for cross-platform storage & matching.
+pub(super) fn normalize_rel_path(raw: &str) -> String {
+    let replaced = raw.trim().replace('\\', "/");
+    let mut s = replaced.as_str();
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest;
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut prev_slash = false;
+    for ch in s.chars() {
+        if ch == '/' {
+            if !prev_slash {
+                out.push('/');
+            }
+            prev_slash = true;
+        } else {
+            out.push(ch);
+            prev_slash = false;
+        }
+    }
+    out
+}
 
 pub(super) fn graph_id(id: &str) -> Result<()> {
     ensure!(
@@ -87,6 +111,8 @@ pub(super) struct PlaybookSummary {
     #[serde(default)]
     pub anchor_count: usize,
     #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
     pub updated_at: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +140,8 @@ pub(super) struct Playbook {
     #[serde(default)]
     pub source_tasks: Vec<String>,
     #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
     pub updated_at: String,
 }
 impl Playbook {
@@ -124,6 +152,7 @@ impl Playbook {
             trigger: self.trigger.clone(),
             summary: self.summary.clone(),
             anchor_count: self.anchor_files.len(),
+            pinned: self.pinned,
             updated_at: self.updated_at.clone(),
         }
     }
@@ -142,6 +171,7 @@ pub(super) struct PlaybookUpdate {
     pub environment: Option<Vec<String>>,
     pub pitfalls: Option<Vec<String>>,
     pub source_tasks: Option<Vec<String>>,
+    pub pinned: Option<bool>,
     pub project_kind: Option<ProjectKind>,
     pub last_synced_commit: Option<String>,
 }
@@ -164,6 +194,16 @@ pub(super) struct EntityStore {
     pub entities: Vec<Entity>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct EntityProperty {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub kind: PropertyKind,
+    pub value: String,
+    #[serde(default)]
+    pub summary: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Entity {
     pub id: String,
     pub name: String,
@@ -174,17 +214,23 @@ pub(super) struct Entity {
     #[serde(default)]
     pub summary: String,
     #[serde(default)]
+    pub properties: Vec<EntityProperty>,
+    #[serde(default)]
     pub ports: Vec<Port>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Port {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub direction: Direction,
+    #[serde(default)]
     pub kind: PortKind,
     pub symbol: Option<String>,
     pub line_start: Option<usize>,
     pub line_end: Option<usize>,
+    #[serde(default)]
+    pub reads: Vec<String>,
     #[serde(default)]
     pub summary: String,
 }
@@ -227,6 +273,8 @@ pub(super) struct EntityUpdate {
     pub remove_entity_ids: Vec<String>,
     #[serde(default)]
     pub replace_ports: bool,
+    #[serde(default)]
+    pub replace_properties: bool,
     pub project_kind: Option<ProjectKind>,
     pub last_synced_commit: Option<String>,
 }
@@ -251,6 +299,10 @@ pub(super) struct Anchor {
 #[derive(Debug, Default, Serialize)]
 pub(super) struct EntityStatus {
     pub status: PortStatus,
+    #[serde(default)]
+    pub file_modified: bool,
+    #[serde(default)]
+    pub properties: BTreeMap<String, Anchor>,
     pub ports: BTreeMap<String, Anchor>,
 }
 #[derive(Debug, Default, Serialize)]
@@ -258,9 +310,13 @@ pub(super) struct VerifyReport {
     pub exists: bool,
     pub head_commit: Option<String>,
     pub last_synced_commit: Option<String>,
+    #[serde(default)]
+    pub base_commit_missing: bool,
     pub changed_files: Vec<String>,
     pub affected_entities: Vec<String>,
     pub affected_graphs: Vec<String>,
+    #[serde(default)]
+    pub missing_graphs: Vec<String>,
     pub affected_playbooks: Vec<String>,
     pub ok_ports: usize,
     pub drifted_ports: usize,

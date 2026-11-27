@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { CodeBlock } from '../../dsh/ui-primitives/markdown/CodeBlock.tsx'
 import type { BlueprintApi } from './api.ts'
-import { directions, entityKinds, entityLabels, portKinds, relations, severities, type Anchor, type Entity, type GraphEdge, type Impact, type Port, type Source } from './types.ts'
+import { directions, entityKinds, entityLabels, portKinds, propertyKinds, relations, severities, type Anchor, type Entity, type EntityProperty, type GraphEdge, type Impact, type Port, type PropertyKind, type Source } from './types.ts'
 import css from './style.module.css'
 
 export function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -16,8 +16,10 @@ export function Drawer({ title, close, children }: { title: string; close: () =>
     <div className={css.drawerBody}>{children}</div>
   </aside>
 }
-export const newPort = (): Port => ({ id: 'port-' + crypto.randomUUID().slice(0, 8), name: '', kind: 'method', direction: 'both', symbol: null, line_start: null, line_end: null, summary: '' })
-export const newEntity = (): Entity => ({ id: 'entity-' + crypto.randomUUID().slice(0, 8), name: '', kind: 'service', traits: [], file_path: null, summary: '', ports: [] })
+export const newProperty = (): EntityProperty => ({ id: 'prop-' + crypto.randomUUID().slice(0, 8), name: '', kind: 'file', value: '', summary: '' })
+export const newPort = (): Port => ({ id: 'port-' + crypto.randomUUID().slice(0, 8), name: '', kind: 'method', direction: 'both', symbol: null, line_start: null, line_end: null, reads: [], summary: '' })
+export const newEntity = (): Entity => ({ id: 'entity-' + crypto.randomUUID().slice(0, 8), name: '', kind: 'service', traits: [], file_path: null, summary: '', properties: [], ports: [] })
+const propertyLabels: Record<PropertyKind, string> = { file: '源码文件', symbol: '文件符号', config: '配置项', env: '环境约束', rule: '业务红线' }
 function formAction(event: FormEvent) { event.preventDefault() }
 
 function SourcePreview({ api, path, port, anchor }: { api: BlueprintApi; path: string; port: Port; anchor?: Anchor | undefined }) {
@@ -45,38 +47,50 @@ export function EntityEditor({ initial, isNew, initialPort, addingPort, api, anc
   initial: Entity; isNew: boolean; initialPort?: string | undefined; addingPort?: boolean | undefined; api: BlueprintApi; anchor?: Anchor | undefined; busy: boolean;
   save: (entity: Entity) => void; remove?: (() => void) | undefined; removeNode?: (() => void) | undefined; onImpact: (port?: string) => void;
 }) {
-  const [entity, setEntity] = useState(() => addingPort ? { ...initial, ports: [...initial.ports, newPort()] } : initial)
+  const [entity, setEntity] = useState(() => addingPort ? { ...initial, properties: initial.properties ?? [], ports: [...initial.ports, newPort()] } : { ...initial, properties: initial.properties ?? [] })
   const [traits, setTraits] = useState(initial.traits.join(', '))
   const [openPort, setOpenPort] = useState(addingPort ? entity.ports.at(-1)?.id : initialPort)
   const sourcePort = initial.ports.find(p => p.id === initialPort)
   const change = (patch: Partial<Entity>) => setEntity(current => ({ ...current, ...patch }))
+  const changeProp = (id: string, patch: Partial<EntityProperty>) => setEntity(current => ({ ...current, properties: (current.properties ?? []).map(p => p.id === id ? { ...p, ...patch } : p) }))
   const changePort = (id: string, patch: Partial<Port>) => setEntity(current => ({ ...current, ports: current.ports.map(p => p.id === id ? { ...p, ...patch } : p) }))
+  const props = entity.properties ?? []
   return <>
     {initial.file_path && sourcePort && <SourcePreview api={api} path={initial.file_path} port={sourcePort} anchor={anchor} />}
-    <form className={css.form} onSubmit={event => { formAction(event); save({ ...entity, name: entity.name.trim(), traits: traits.split(/[,，]/).map(t => t.trim()).filter(Boolean) }) }}>
-      <Field label='实体名称'><input required value={entity.name} onChange={event => change({ name: event.target.value })} /></Field>
+    <form className={css.form} onSubmit={event => { formAction(event); save({ ...entity, name: entity.name.trim(), traits: traits.split(/[,，]/).map(t => t.trim()).filter(Boolean), properties: props.filter(p => p.name.trim() && p.value.trim()) }) }}>
+      <Field label='类实体名称'><input required value={entity.name} onChange={event => change({ name: event.target.value })} /></Field>
       {isNew && <Field label='实体 ID'><input required pattern='[a-zA-Z0-9_.\-]+' value={entity.id} onChange={event => change({ id: event.target.value })} /></Field>}
       <Field label='实体类型'><Choices value={entity.kind} values={entityKinds} labels={entityLabels} onChange={kind => change({ kind })} /></Field>
       <Field label='Traits'><input value={traits} onChange={e => setTraits(e.target.value)} /></Field>
-      <Field label='源码路径'><input value={entity.file_path ?? ''} onChange={e => change({ file_path: e.target.value || null })} /></Field>
+      <Field label='主源码路径（可选）'><input value={entity.file_path ?? ''} onChange={e => change({ file_path: e.target.value || null })} /></Field>
       <Field label='职责摘要'><textarea rows={2} value={entity.summary} onChange={e => change({ summary: e.target.value })} /></Field>
-      <div className={css.row}><h3>端口</h3><button type='button' onClick={() => { const port = newPort(); change({ ports: [...entity.ports, port] }); setOpenPort(port.id) }}>+ 添加端口</button></div>
+      <div className={css.row}><h3>属性 · 锚点</h3><button type='button' onClick={() => change({ properties: [...props, newProperty()] })}>+ 添加属性</button></div>
+      {props.map((prop, idx) => <section key={prop.id} className={css.portEditor}>
+        <div className={css.columns}>
+          <Field label={'属性名 ' + (idx + 1)}><input required value={prop.name} placeholder='source / rule / env' onChange={e => changeProp(prop.id, { name: e.target.value })} /></Field>
+          <Field label='锚点类型'><Choices value={prop.kind} values={propertyKinds} labels={propertyLabels} onChange={kind => changeProp(prop.id, { kind })} /></Field>
+        </div>
+        <Field label='锚点值'><input required value={prop.value} placeholder='路径、路径#符号、环境或红线' onChange={e => changeProp(prop.id, { value: e.target.value })} /></Field>
+        <button type='button' onClick={() => change({ properties: props.filter(p => p.id !== prop.id) })}>删除属性</button>
+      </section>)}
+      <div className={css.row}><h3>方法 · 调用链端口</h3><button type='button' onClick={() => { const port = newPort(); change({ ports: [...entity.ports, port] }); setOpenPort(port.id) }}>+ 添加方法</button></div>
       {entity.ports.map((port, index) => <section key={port.id} className={css.portEditor}>
-        <button type='button' aria-expanded={openPort === port.id} onClick={() => setOpenPort(openPort === port.id ? undefined : port.id)}>{port.name || '端口 ' + (index + 1)}</button>
+        <button type='button' aria-expanded={openPort === port.id} onClick={() => setOpenPort(openPort === port.id ? undefined : port.id)}>{port.name || '方法 ' + (index + 1)}</button>
         <div hidden={openPort !== port.id}>
-          <Field label={'端口名称 ' + (index + 1)}><input required={openPort === port.id} value={port.name} onChange={e => changePort(port.id, { name: e.target.value })} /></Field>
+          <Field label={'方法名称 ' + (index + 1)}><input required={openPort === port.id} value={port.name} onChange={e => changePort(port.id, { name: e.target.value })} /></Field>
           <div className={css.columns}>
             <Field label='方向'><Choices value={port.direction} values={directions} onChange={direction => changePort(port.id, { direction })} /></Field>
-            <Field label='端口类型'><Choices value={port.kind} values={portKinds} onChange={kind => changePort(port.id, { kind })} /></Field>
+            <Field label='类型'><Choices value={port.kind} values={portKinds} onChange={kind => changePort(port.id, { kind })} /></Field>
           </div>
-          <Field label='符号'><input value={port.symbol ?? ''} onChange={e => changePort(port.id, { symbol: e.target.value || null })} /></Field>
+          <Field label='访问属性（逗号分隔）'><input value={(port.reads ?? []).join(', ')} placeholder='source, env_port' onChange={e => changePort(port.id, { reads: e.target.value.split(/[,，]/).map(s => s.trim()).filter(Boolean) })} /></Field>
+          <Field label='代码符号（可选）'><input value={port.symbol ?? ''} onChange={e => changePort(port.id, { symbol: e.target.value || null })} /></Field>
           <div className={css.columns}>
-            <Field label='起始行'><input type='number' min={1} value={port.line_start ?? ''} onChange={e => changePort(port.id, { line_start: Number(e.target.value) || null })} /></Field>
-            <Field label='结束行'><input type='number' min={port.line_start ?? 1} value={port.line_end ?? ''} onChange={e => changePort(port.id, { line_end: Number(e.target.value) || null })} /></Field>
+            <Field label='起始行（可选）'><input type='number' min={1} value={port.line_start ?? ''} onChange={e => changePort(port.id, { line_start: Number(e.target.value) || null })} /></Field>
+            <Field label='结束行（可选）'><input type='number' min={port.line_start ?? 1} value={port.line_end ?? ''} onChange={e => changePort(port.id, { line_end: Number(e.target.value) || null })} /></Field>
           </div>
-          <Field label='端口摘要'><input value={port.summary} onChange={e => changePort(port.id, { summary: e.target.value })} /></Field>
-          <button type='button' onClick={() => change({ ports: entity.ports.filter(p => p.id !== port.id) })}>删除端口</button>
-          {!isNew && initial.ports.some(p => p.id === port.id) && <button type='button' onClick={() => onImpact(port.id)}>端口影响面</button>}
+          <Field label='方法摘要'><input value={port.summary} onChange={e => changePort(port.id, { summary: e.target.value })} /></Field>
+          <button type='button' onClick={() => change({ ports: entity.ports.filter(p => p.id !== port.id) })}>删除方法</button>
+          {!isNew && initial.ports.some(p => p.id === port.id) && <button type='button' onClick={() => onImpact(port.id)}>方法影响面</button>}
         </div>
       </section>)}
       <button className={css.primary} disabled={busy} type='submit'>保存实体</button>
@@ -115,6 +129,7 @@ export function ImpactPanel({ report, jump, graphTitle }: { report: Impact; jump
     </section>)}
     {report.invariants.length > 0 && <section><h3>红线不变量</h3><ul>{report.invariants.map(rule => <li key={rule.text} className={rule.severity === 'critical' ? css.warning : undefined}>{rule.text}</li>)}</ul></section>}
     {report.test_guards.length > 0 && <section><h3>测试守卫</h3><ul>{report.test_guards.map(guard => <li key={guard.id}>{guard.name} {guard.file_path && <code>{guard.file_path}</code>}</li>)}</ul></section>}
+    {report.playbooks && report.playbooks.length > 0 && <section><h3>关联最短路径</h3><ul>{report.playbooks.map(pb => <li key={pb.id}><strong>{pb.title}</strong> <code>{pb.id}</code></li>)}</ul></section>}
   </div>
 }
 

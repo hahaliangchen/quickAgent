@@ -44,14 +44,13 @@ function Status({ tone, label }: { tone: Tone; label: string }) {
 }
 
 /** Recorded workflows of real sessions, and drafts of them that an Agent conversation edits. */
-export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, onDistillToBlueprint, onFilePreview, onPackages, pageRequest, renderSlot, theme }: {
+export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, onDistillToBlueprint, onFilePreview, pageRequest, renderSlot, theme }: {
   tasks: readonly Task[]
   projects: readonly Project[]
   defaultWorkspace: string
   onOpenChat: (id: string) => void
   onDistillToBlueprint?: ((task: Task) => void) | undefined
   onFilePreview?: ((taskId: string, path: string, options?: { line?: number; url?: string }, root?: string) => void) | undefined
-  onPackages: () => void
   /** A plugin conversation asked for its page; the signal changes on every request. */
   pageRequest?: { owner: string; seq: number } | undefined
   /** A plugin page gets the same chat dock beside it as the studio pages do. */
@@ -267,7 +266,6 @@ export function SkillWorkbench({ tasks, projects, defaultWorkspace, onOpenChat, 
       <div className={styles.listHead}>
         <strong>会话</strong>
         <button type="button" className={styles.iconButton} title="搜索会话" aria-label="搜索会话" onClick={() => { setSearchOpen(value => !value); window.setTimeout(() => searchRef.current?.focus(), 0) }}><Icon name="search" /></button>
-        <button type="button" className={styles.iconButton} title="已安装的插件" aria-label="已安装的插件" onClick={onPackages}><Icon name="plug" /></button>
       </div>
       {(searchOpen || query) && <label className={styles.search}><Icon name="search" size={15} /><input ref={searchRef} value={query} onChange={event => setQuery(event.target.value)}
         onKeyDown={event => { if (event.key === 'Escape') { setQuery(''); setSearchOpen(false) } }} placeholder="搜索会话标题和内容" aria-label="搜索会话" /></label>}

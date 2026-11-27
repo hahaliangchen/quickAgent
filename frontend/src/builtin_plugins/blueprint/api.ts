@@ -50,7 +50,7 @@ export function blueprintApi(workspaceRoot: string) {
     createPlaybook: (value: PlaybookUpdate & { id: string }) => request<Playbook>('/playbook', 'POST', value),
     savePlaybook: (id: string, value: PlaybookUpdate) => request<Playbook>(playbook(id), 'PUT', value),
     deletePlaybook: (id: string) => request(playbook(id), 'DELETE'),
-    putEntity: (entity: Entity) => request('/entities', 'PUT', { entities: [entity], replace_ports: true }),
+    putEntity: (entity: Entity) => request('/entities', 'PUT', { entities: [entity], replace_ports: true, replace_properties: true }),
     deleteEntity: (id: string) => request('/entities/' + encodeURIComponent(id), 'DELETE'),
     impact: (entity: string, port?: string) => request<Impact>('/impact', 'GET', undefined, { entity_id: entity, ...(port ? { port_id: port } : {}) }),
     verify: () => request<Verify>('/verify'),

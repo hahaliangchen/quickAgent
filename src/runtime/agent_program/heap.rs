@@ -17,6 +17,15 @@ mod class_support;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(super) struct HeapId(u64);
 
+impl HeapId {
+    pub(super) fn raw(self) -> u64 {
+        self.0
+    }
+    pub(super) fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
 /// IEEE-754 bits are stored directly so non-finite values and signed zero
 /// survive snapshots independently of JSON's number representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,8 +280,60 @@ impl Heap {
         if result.is_err() {
             self.nodes.retain(|id, _| id.0 < first_new_id);
             self.next_id = first_new_id;
+        } else if let Ok(VmValue::Reference(root_id)) = result {
+            self.attach_blueprint_registry(root_id);
         }
         result
+    }
+
+    /// Tag imported `__blueprint_graph` handles with a non-cyclic numeric pointer to
+    /// their `class_map` heap ID so live class method chaining resolves targets in O(1).
+    fn attach_blueprint_registry(&mut self, root_id: HeapId) {
+        let (is_graph, class_map_id, child_nodes) = match self.nodes.get(&root_id) {
+            Some(HeapNode::Object(props)) => {
+                let is_graph = props
+                    .iter()
+                    .any(|(k, v)| k == "__blueprint_graph" && *v == VmValue::Boolean(true));
+                let class_map_id = props.iter().find_map(|(k, v)| match (k.as_str(), v) {
+                    ("class_map", VmValue::Reference(id)) => Some(*id),
+                    _ => None,
+                });
+                let children: Vec<HeapId> = props
+                    .iter()
+                    .filter_map(|(_, v)| match v {
+                        VmValue::Reference(id) => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                (is_graph, class_map_id, children)
+            }
+            _ => return,
+        };
+        if !is_graph {
+            return;
+        }
+        let Some(classes_id) = class_map_id else {
+            return;
+        };
+        let mut node_ids = child_nodes;
+        if let Some(HeapNode::Object(map_props)) = self.nodes.get(&classes_id) {
+            for (_, v) in map_props {
+                if let VmValue::Reference(id) = v {
+                    node_ids.push(*id);
+                }
+            }
+        }
+        let tag_val = VmValue::Number(JsNumber::new(classes_id.raw() as f64));
+        for target_id in node_ids {
+            if let Some(HeapNode::Object(props)) = self.nodes.get_mut(&target_id)
+                && props
+                    .iter()
+                    .any(|(k, v)| k == "__blueprint_node" && *v == VmValue::Boolean(true))
+                && !props.iter().any(|(k, _)| k == "__bp_classes_id")
+            {
+                props.push(("__bp_classes_id".to_owned(), tag_val.clone()));
+            }
+        }
     }
 
     fn import_json(&mut self, input: &Value, depth: usize) -> Result<VmValue> {

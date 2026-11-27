@@ -152,6 +152,7 @@ function BlueprintObserverInner({
   const lastInspectedSeqRef = useRef<number>(watchedEvents.at(-1)?.seq ?? 0)
   const lastAutoInspectAtRef = useRef<number>(0)
   const watchdogFiredCallIdsRef = useRef<Set<string>>(new Set())
+  const pendingDismissedTitlesRef = useRef<string[]>([])
   const watchedEventsRef = useRef(watchedEvents)
   watchedEventsRef.current = watchedEvents
   const observerBusyRef = useRef(sending || observerRunning)
@@ -303,12 +304,14 @@ function BlueprintObserverInner({
     setLastTriggerLabel(trigger.label)
     try {
       const id = await createOrReuseObserverSession()
+      const dismissedTitles = pendingDismissedTitlesRef.current.splice(0)
       const prompt = buildObserverInspectPrompt({
         watchedTaskId,
         watchedTitle,
         watchedStatus: watchedTask.status,
         workspaceRoot: workspaceRoot || undefined,
         trigger,
+        ...(dismissedTitles.length ? { dismissedTitles } : {}),
       })
       await api.prompt(id, prompt, {
         permission_mode: 'read_only',
@@ -446,7 +449,7 @@ function BlueprintObserverInner({
     watchedTaskId,
   ])
 
-  const markSuggestionHandled = useCallback((id: string) => {
+  const markSuggestionHandled = useCallback((id: string, dismissedTitle?: string) => {
     setDismissedIds(prev => {
       const next = new Set(prev)
       next.add(id)
@@ -454,6 +457,12 @@ function BlueprintObserverInner({
       return next
     })
     setPopupDismissedId(id)
+    if (dismissedTitle?.trim()) {
+      const clean = dismissedTitle.trim()
+      if (!pendingDismissedTitlesRef.current.includes(clean)) {
+        pendingDismissedTitlesRef.current.push(clean)
+      }
+    }
   }, [])
 
   // Confirmed decision: Interject into running main session, OR send as follow-up if idle/failed.
@@ -669,7 +678,7 @@ function BlueprintObserverInner({
             <button
               type="button"
               className={css.popupGhostBtn}
-              onClick={() => markSuggestionHandled(activeSuggestion.id)}
+              onClick={() => markSuggestionHandled(activeSuggestion.id, activeSuggestion.title)}
             >
               忽略
             </button>
@@ -817,7 +826,7 @@ function BlueprintObserverInner({
                 <div className={css.emptyState}>
                   <strong>专属于当前会话的只读观察者</strong>
                   <p>
-                    观察者通过 <code>blueprint.inspect_session</code> 一步直读 SQLite 全局摘要与最新 20 条实时事件，并结合只读本地源码核验，绝不修改任何代码。
+                    观察者拥有对主会话 DB、架构蓝图与工作区源码的全局只读视野，会随计划推进自主判断是否走偏，并在会话完成后沉淀蓝图线索，绝不修改任何代码。
                   </p>
                   <p>
                     你可以点上方<strong>「立即巡检 DB」</strong>，或者直接在下面和观察者对话；确认方案后，再由你拍板插嘴或停止主会话。
@@ -848,7 +857,7 @@ function BlueprintObserverInner({
                   title="忽略这条建议"
                   aria-label="忽略"
                   onClick={() => {
-                    markSuggestionHandled(activeSuggestion.id)
+                    markSuggestionHandled(activeSuggestion.id, activeSuggestion.title)
                     setDecisionText('')
                   }}
                 >
@@ -877,7 +886,7 @@ function BlueprintObserverInner({
                     type="button"
                     className={css.confirmGhostBtn}
                     onClick={() => {
-                      markSuggestionHandled(activeSuggestion.id)
+                      markSuggestionHandled(activeSuggestion.id, activeSuggestion.title)
                       setDecisionText('')
                     }}
                   >

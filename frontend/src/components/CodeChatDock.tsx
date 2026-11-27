@@ -73,7 +73,7 @@ function asNonEmptyString(value: unknown): string | undefined {
 }
 
 /** Chat docked beside a page, VS Code style: asks about the file in view and files dropped on it. */
-export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePreview, diagnostic, viewContext, sessions, embeddedLauncher, linkedTaskId, linkedSession, openSignal }: {
+export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePreview, diagnostic, viewContext, sessions, embeddedLauncher, hideLauncher, linkedTaskId, linkedSession, openSignal }: {
   workspace: string
   renderSlot: AgentSlotProps['renderSlot']
   onOpenInChat: (taskId: string) => void
@@ -82,6 +82,7 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
   viewContext?: StudioViewContext | null | undefined
   sessions?: readonly Task[] | undefined
   embeddedLauncher?: boolean
+  hideLauncher?: boolean
   linkedTaskId?: string | undefined
   linkedSession?: Session | undefined
   openSignal?: number | undefined
@@ -476,14 +477,17 @@ export function CodeChatDock({ workspace, renderSlot, onOpenInChat, onFilePrevie
     },
   }
 
-  if (!open) return <button type="button" className={clsx(css.launcher, embeddedLauncher && css.embeddedLauncher, dropping && css.dropping)} title="代码问答：问 AI 当前文件"
-    onClick={() => setOpen(true)} onDragEnter={event => { if (accepts(event)) setOpen(true) }} {...dropProps}>
-    {/* White on the accent disc, and drawn solid: an outlined glyph at this size
-        antialiases away and reads as grey instead of white. */}
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
-      <path d="M7.2 4h9.6A4.2 4.2 0 0 1 21 8.2v5.6a4.2 4.2 0 0 1-4.2 4.2h-6.1l-4.2 3.4V17.9A4.2 4.2 0 0 1 3 13.8V8.2A4.2 4.2 0 0 1 7.2 4z" />
-    </svg>
-  </button>
+  if (!open) {
+    if (hideLauncher) return null
+    return <button type="button" className={clsx(css.launcher, embeddedLauncher && css.embeddedLauncher, dropping && css.dropping)} title="代码问答：问 AI 当前文件"
+      onClick={() => setOpen(true)} onDragEnter={event => { if (accepts(event)) setOpen(true) }} {...dropProps}>
+      {/* White on the accent disc, and drawn solid: an outlined glyph at this size
+          antialiases away and reads as grey instead of white. */}
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+        <path d="M7.2 4h9.6A4.2 4.2 0 0 1 21 8.2v5.6a4.2 4.2 0 0 1-4.2 4.2h-6.1l-4.2 3.4V17.9A4.2 4.2 0 0 1 3 13.8V8.2A4.2 4.2 0 0 1 7.2 4z" />
+      </svg>
+    </button>
+  }
 
   // Drag the left edge to resize; the width is remembered on this device.
   function resize(event: React.PointerEvent<HTMLDivElement>) {

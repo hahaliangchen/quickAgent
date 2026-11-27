@@ -168,7 +168,6 @@ impl Plugin for ToolCatalogPlugin {
     fn start(&self, context: &PluginContext<'_>) -> Result<()> {
         context.provide("tools", Arc::new(ToolCatalog::default()))?;
         context.mount(FileToolsPlugin)?;
-        context.mount(MemoryPlugin)?;
         context.mount(crate::server::skill_packages::PackagesPlugin)?;
         context.mount(AgentTasksPlugin)?;
         Ok(())
@@ -178,9 +177,6 @@ impl Plugin for ToolCatalogPlugin {
 pub(crate) const FILE_TOOLS: &[&str] = &ToolRegistry::catalog_names::<
     { ToolRegistry::catalog_len(CatalogKind::File) },
 >(CatalogKind::File);
-const MEMORY_TOOLS: &[&str] = &ToolRegistry::catalog_names::<
-    { ToolRegistry::catalog_len(CatalogKind::Memory) },
->(CatalogKind::Memory);
 
 fn register_tools(
     context: &PluginContext<'_>,
@@ -219,23 +215,6 @@ impl Plugin for FileToolsPlugin {
     }
 }
 
-pub struct MemoryPlugin;
-impl Plugin for MemoryPlugin {
-    fn id(&self) -> &'static str {
-        "memory"
-    }
-    fn requires(&self) -> Vec<String> {
-        ["tools", "workspace"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
-    }
-    fn start(&self, context: &PluginContext<'_>) -> Result<()> {
-        register_tools(context, MEMORY_TOOLS, mcp_handler())?;
-        context.provide("memory", Arc::new(()))
-    }
-}
-
 pub struct AgentTasksPlugin;
 
 impl Plugin for AgentTasksPlugin {
@@ -248,7 +227,6 @@ impl Plugin for AgentTasksPlugin {
             "model-settings",
             "tools",
             "file-tools",
-            "memory",
             "skill-packages",
         ]
         .into_iter()

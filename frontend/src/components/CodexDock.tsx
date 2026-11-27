@@ -5,7 +5,7 @@ import { ParchmentQuillIcon } from './ParchmentQuillIcon.tsx'
 /** The rail's icons: a 2px round stroke on a 24px grid, like the workbench's. */
 const STROKE = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: { display: 'block' } } as const
 
-export type DockTab = 'home' | 'skills' | 'git' | 'ssh' | 'office'
+export type DockTab = 'home' | 'skills' | 'git' | 'ssh' | 'office' | 'plugins'
 
 interface CodexDockProps {
   activeTab?: DockTab
@@ -88,6 +88,19 @@ export function CodexDock({
               fill="currentColor"
               stroke="none"
             />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          className={clsx(css.dockBtn, activeTab === 'plugins' && css.active)}
+          title="插件工具与技能页面"
+          aria-label="插件工具"
+          onClick={() => onSelectTab?.('plugins')}
+        >
+          <svg {...STROKE} aria-hidden="true">
+            <path d="M12 3.5 4.5 7.75v8.5L12 20.5l7.5-4.25v-8.5L12 3.5Z" />
+            <path d="M12 12 4.5 7.75M12 12l7.5-4.25M12 12v8.5" />
           </svg>
         </button>
       </div>

@@ -31,6 +31,35 @@ test('workContent single and multi-group formatting round-trips cleanly', () => 
   assert.equal(validateWorkContent(multi), null)
 })
 
+test('parseWorkContentGroups parses AI-authored feature titles, colon variants, and trailing next-day plan', () => {
+  const aiOutput = [
+    '【功能 1】知识库问答提速：精简档位 + 快慢分层检索',
+    '1. 具体任务或功能：把知识库问答从模型硬想改成快慢分层。',
+    '2. 今日完成工作：① 问答插件加了 slim / full 档位开关；② 砍掉进程内自研兜底问答 Agent。',
+    '3. 进度 80 %',
+    '4. 明日计划：专门验证长文盘点的最终生成耗时。',
+    '',
+    '【功能 2】知识图谱跨文档自动补边 + 分块质量验收',
+    '1. 具体任务或功能: 让新入库的文档自动连上全库已有实体。',
+    '2. 今日完成工作: 跑通隔离库实测并校验 Citations。',
+    '3. 进度：100%',
+  ].join('\n')
+
+  assert.equal(isStructuredWorkContent(aiOutput), true)
+  const groups = parseWorkContentGroups(aiOutput)
+  assert.equal(groups.length, 2)
+  assert.equal(groups[0]?.task, '知识库问答提速：精简档位 + 快慢分层检索：把知识库问答从模型硬想改成快慢分层。')
+  assert.equal(
+    groups[0]?.today,
+    '① 问答插件加了 slim / full 档位开关；② 砍掉进程内自研兜底问答 Agent。\n明日计划：专门验证长文盘点的最终生成耗时。',
+  )
+  assert.equal(groups[0]?.progress, '80')
+  assert.equal(groups[1]?.task, '知识图谱跨文档自动补边 + 分块质量验收：让新入库的文档自动连上全库已有实体。')
+  assert.equal(groups[1]?.today, '跑通隔离库实测并校验 Citations。')
+  assert.equal(groups[1]?.progress, '100')
+  assert.equal(validateWorkContent(aiOutput), null)
+})
+
 test('validateWorkContent rejects missing fields and out-of-range progress', () => {
   assert.match(validateWorkContent(formatWorkContentGroups([{ task: '', today: '做了测试', progress: '80' }])) ?? '', /具体任务或功能/)
   assert.match(validateWorkContent(formatWorkContentGroups([{ task: '测试', today: '', progress: '80' }])) ?? '', /今日完成工作/)

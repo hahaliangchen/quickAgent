@@ -1,6 +1,7 @@
 export const entityKinds = ['trigger_ui', 'trigger_api', 'trigger_job', 'service', 'store', 'external', 'test_guard'] as const
 export const entryKinds = ['ui_page', 'service_api', 'background_job', 'cli_command', 'custom'] as const
 export const projectKinds = ['fullstack', 'frontend', 'backend', 'cli', 'library'] as const
+export const propertyKinds = ['file', 'symbol', 'config', 'env', 'rule'] as const
 export const portKinds = ['event', 'method', 'route', 'tool', 'query', 'mutation', 'state', 'guard'] as const
 export const directions = ['in', 'out', 'both'] as const
 export const relations = ['triggers', 'http', 'calls', 'reads', 'writes', 'emits', 'must_sync', 'guards'] as const
@@ -8,8 +9,11 @@ export const severities = ['info', 'warning', 'critical'] as const
 export type EntityKind = typeof entityKinds[number]
 export type EntryKind = typeof entryKinds[number]
 export type ProjectKind = typeof projectKinds[number]
-export type Port = { id: string; name: string; direction: typeof directions[number]; kind: typeof portKinds[number]; symbol: string | null; line_start: number | null; line_end: number | null; summary: string }
-export type Entity = { id: string; name: string; kind: EntityKind; traits: string[]; file_path: string | null; summary: string; ports: Port[] }
+export type PropertyKind = typeof propertyKinds[number]
+export type EntityProperty = { id: string; name: string; kind: PropertyKind; value: string; summary: string }
+export type Port = { id: string; name: string; direction: typeof directions[number]; kind: typeof portKinds[number]; symbol: string | null; line_start: number | null; line_end: number | null; reads?: string[]; summary: string }
+export type Entity = { id: string; name: string; kind: EntityKind; traits: string[]; file_path: string | null; summary: string; properties?: EntityProperty[]; ports: Port[] }
+export type MethodChain = { graph_id: string; graph_title?: string; entry: string; steps: string[]; expression: string; files: string[]; invariants: string[] }
 export type GraphSummary = { id: string; title: string; entry_kind: EntryKind; entry_summary: string }
 export type GraphNode = { entity_id: string; x?: number; y?: number }
 export type GraphEdge = { id: string; source_entity: string; source_port: string; target_entity: string; target_port: string; relation: typeof relations[number]; label: string; invariant: string | null; severity: typeof severities[number] }
@@ -71,14 +75,16 @@ export type ObserverSubmission = {
 }
 export type Manifest = { version: number; project_kind: ProjectKind; last_synced_commit: string | null; updated_at: string; graphs: GraphSummary[]; playbooks?: PlaybookSummary[] }
 export type Anchor = { status: 'ok' | 'drifted' | 'missing'; suggested_line?: number }
-export type EntityStatus = { status: Anchor['status']; ports: Record<string, Anchor> }
+export type EntityStatus = { status: Anchor['status']; file_modified?: boolean; properties?: Record<string, Anchor>; ports: Record<string, Anchor> }
 export type Verify = {
   exists: boolean
   head_commit: string | null
   last_synced_commit: string | null
+  base_commit_missing?: boolean
   changed_files: string[]
   affected_entities: string[]
   affected_graphs: string[]
+  missing_graphs?: string[]
   affected_playbooks?: string[]
   ok_ports: number
   drifted_ports: number
@@ -91,9 +97,9 @@ export type Verify = {
   playbooks?: Record<string, PlaybookStatus>
 }
 export type BlueprintState = { exists: boolean; manifest: Manifest | null; graphs: GraphSummary[]; playbooks?: PlaybookSummary[]; inbox?: ObserverSubmission[]; entities: Entity[]; references: Record<string, string[]>; verify: Verify }
-export type GraphView = { graph: Graph; entities: Entity[]; statuses: Record<string, EntityStatus> }
+export type GraphView = { graph: Graph; entities: Entity[]; statuses: Record<string, EntityStatus>; chains?: MethodChain[] }
 export type Reach = { graph_id: string; entity_id: string; port_id: string; depth: number; edge: GraphEdge }
-export type Impact = { matches: { entity: Entity; graphs: string[] }[]; graphs: string[]; upstream: Reach[]; downstream: Reach[]; invariants: { text: string; severity: GraphEdge['severity'] }[]; test_guards: Entity[] }
+export type Impact = { matches: { entity: Entity; graphs: string[] }[]; graphs: string[]; upstream: Reach[]; downstream: Reach[]; invariants: { text: string; severity: GraphEdge['severity'] }[]; test_guards: Entity[]; playbooks?: PlaybookSummary[] }
 export type Source = { file_path: string; line_start: number; line_end: number; lines: { line: number; text: string }[] }
 export type BlueprintProjectStatus = {
   workspace_root: string

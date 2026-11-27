@@ -109,5 +109,12 @@ pub(crate) fn library_compile_scope(
             }
         }
     }
+    if crate::server::builtin_plugins::blueprint::observer::is_observer_session(
+        s.state.workspace.root(),
+        &s.scope,
+        s.task,
+    ) {
+        crate::server::builtin_plugins::blueprint::observer::filter_libraries(&mut libs);
+    }
     libs
 }

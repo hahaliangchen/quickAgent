@@ -264,6 +264,66 @@
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
+.userRawToggle {
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #71717a);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 24px;
+  cursor: pointer;
+}
+
+.userMarkdownBubble {
+  white-space: normal;
+  color: var(--dsw-alias-label-primary);
+}
+
+.userMarkdownBubble :global(p) {
+  margin: 6px 0;
+}
+
+.userMarkdownBubble :global(ul),
+.userMarkdownBubble :global(ol) {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.userMarkdownBubble :global(li) {
+  margin-top: 3px;
+}
+
+.userMarkdownBubble :global(h1),
+.userMarkdownBubble :global(h2),
+.userMarkdownBubble :global(h3),
+.userMarkdownBubble :global(h4) {
+  margin: 10px 0 6px;
+}
+
+.userMarkdownBubble :global(p:first-child),
+.userMarkdownBubble :global(ul:first-child),
+.userMarkdownBubble :global(ol:first-child),
+.userMarkdownBubble :global(h1:first-child),
+.userMarkdownBubble :global(h2:first-child),
+.userMarkdownBubble :global(h3:first-child),
+.userMarkdownBubble :global(h4:first-child),
+.userMarkdownBubble :global(pre:first-child),
+.userMarkdownBubble :global(blockquote:first-child) {
+  margin-top: 0;
+}
+
+.userMarkdownBubble :global(p:last-child),
+.userMarkdownBubble :global(ul:last-child),
+.userMarkdownBubble :global(ol:last-child),
+.userMarkdownBubble :global(pre:last-child),
+.userMarkdownBubble :global(blockquote:last-child) {
+  margin-bottom: 0;
+}
+
 .viewContextPill {
   max-width: 100%;
   align-self: flex-end;

@@ -6,9 +6,12 @@
   "skill": "SKILL.md",
   "tools": [
     "blueprint__overview",
+    "blueprint__open",
     "blueprint__read_graph",
     "blueprint__read_playbook",
     "blueprint__inspect_session",
+    "blueprint__list_inbox",
+    "blueprint__resolve_inbox",
     "blueprint__impact",
     "blueprint__verify_sync",
     "blueprint__upsert_entities",

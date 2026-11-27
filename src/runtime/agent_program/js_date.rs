@@ -206,6 +206,13 @@ pub(super) fn method(heap: &Heap, id: HeapId, name: &str, _args: &[VmValue]) -> 
     let ms = clip(ms);
     match name {
         "getTime" | "valueOf" => return Ok(number(ms)),
+        "getTimezoneOffset" => {
+            return Ok(number(if ms.is_finite() {
+                -(offset_at(ms) as f64) / 60.0 + 0.0
+            } else {
+                f64::NAN
+            }));
+        }
         "toISOString" => return Ok(VmValue::String(iso(ms)?)),
         "toJSON" => {
             return Ok(if ms.is_finite() {
@@ -805,6 +812,7 @@ mod tests {
             VmValue::Null
         );
         assert!(value(method(&heap, invalid_id, "getUTCFullYear", &[]).unwrap()).is_nan());
+        assert!(value(method(&heap, invalid_id, "getTimezoneOffset", &[]).unwrap()).is_nan());
         assert!(method(&heap, invalid_id, "toISOString", &[]).is_err());
         assert!(method(&heap, invalid_id, "setTime", &[]).is_err());
         assert!(
@@ -839,6 +847,10 @@ mod tests {
             );
         }
         let ms = heap.date_value(date).unwrap();
+        assert_eq!(
+            value(method(&heap, date, "getTimezoneOffset", &[]).unwrap()),
+            -(offset_at(ms) as f64) / 60.0 + 0.0
+        );
         let p = parts(ms + offset_at(ms) as f64 * 1000.0).unwrap();
         let args = [
             p.year as f64,

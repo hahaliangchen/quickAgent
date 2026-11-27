@@ -24,7 +24,7 @@ test('filterWorkspaceSessions filters by normalized workspace and sorts newest f
   assert.deepEqual(all.map(t => t.task_id), ['other', 'new', 'old'])
 })
 
-test('buildDistillPlaybookPrompt references session ids, existing playbooks, and upsert_playbook', () => {
+test('buildDistillPlaybookPrompt emits concise factual trigger without repeating SKILL.md SOP walls', () => {
   const prompt = buildDistillPlaybookPrompt(
     [{ task_id: 'task-abc', title: '排查打包与重启' }],
     [{ id: 'release-path', title: '打包发版最短路径' }],
@@ -34,9 +34,7 @@ test('buildDistillPlaybookPrompt references session ids, existing playbooks, and
   assert.match(prompt, /排查打包与重启/)
   assert.match(prompt, /release-path/)
   assert.match(prompt, /只保留构建和验证步骤/)
-  assert.match(prompt, /blueprint\.inspect_session/)
-  assert.match(prompt, /session\.read_session_history/)
-  assert.match(prompt, /blueprint\.upsert_playbook/)
+  assert.ok(prompt.length < 240, `prompt should stay concise, got ${prompt.length} chars`)
 })
 
 test('buildRunPlaybookPrompt warns when anchor files are drifted or missing', () => {
@@ -55,8 +53,8 @@ test('buildRunPlaybookPrompt warns when anchor files are drifted or missing', ()
     updated_at: '',
   }
   const okPrompt = buildRunPlaybookPrompt(pb, { status: 'ok', missing_files: [], changed_files: [] })
-  assert.match(okPrompt, /锚点已同步/)
-  assert.match(okPrompt, /blueprint\.read_playbook/)
+  assert.match(okPrompt, /release-path/)
+  assert.doesNotMatch(okPrompt, /drifted/)
 
   const driftedPrompt = buildRunPlaybookPrompt(pb, {
     status: 'drifted',
@@ -72,10 +70,10 @@ test('buildRunPlaybookPrompt warns when anchor files are drifted or missing', ()
     changed_files: [],
   })
   assert.match(syncPrompt, /src\/old\.rs/)
-  assert.match(syncPrompt, /blueprint\.upsert_playbook/)
+  assert.match(syncPrompt, /release-path/)
 })
 
-test('buildMergeObserverSubmissionPrompt carries battlefield submission payload and merge targets', () => {
+test('buildMergeObserverSubmissionPrompt carries concise submission reference without SOP walls', () => {
   const prompt = buildMergeObserverSubmissionPrompt(
     {
       id: 'obs-12345678',
@@ -99,5 +97,5 @@ test('buildMergeObserverSubmissionPrompt carries battlefield submission payload 
   assert.match(prompt, /task-battle-9/)
   assert.match(prompt, /deploy-201/)
   assert.match(prompt, /plugin-host/)
-  assert.match(prompt, /blueprint\.upsert_playbook/)
+  assert.ok(prompt.length < 260, `prompt should stay concise, got ${prompt.length} chars`)
 })

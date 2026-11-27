@@ -5,7 +5,7 @@ use anyhow::Result;
 
 pub(super) const ARRAY: &str = "at includes indexOf lastIndexOf slice concat push pop shift unshift splice reverse join flat fill sort toSorted toReversed toSpliced with keys values entries map filter forEach some every find findIndex findLast findLastIndex flatMap reduce reduceRight";
 pub(super) const STRING: &str = "localeCompare at includes indexOf lastIndexOf slice concat startsWith endsWith trim trimStart trimEnd toLowerCase toUpperCase toLocaleLowerCase toLocaleUpperCase split replace replaceAll match matchAll search charAt charCodeAt codePointAt substring substr repeat padStart padEnd";
-pub(super) const DATE: &str = "toLocaleString toLocaleDateString toLocaleTimeString getTime toISOString toJSON getFullYear getMonth getDate getDay getHours getMinutes getSeconds getMilliseconds getUTCFullYear getUTCMonth getUTCDate getUTCDay getUTCHours getUTCMinutes getUTCSeconds getUTCMilliseconds";
+pub(super) const DATE: &str = "toLocaleString toLocaleDateString toLocaleTimeString getTime getTimezoneOffset toISOString toJSON getFullYear getMonth getDate getDay getHours getMinutes getSeconds getMilliseconds getUTCFullYear getUTCMonth getUTCDate getUTCDay getUTCHours getUTCMinutes getUTCSeconds getUTCMilliseconds";
 fn contains(list: &str, name: &str) -> bool {
     list.split_whitespace().any(|item| item == name)
 }

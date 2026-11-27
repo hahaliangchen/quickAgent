@@ -9,7 +9,7 @@ mod sftp;
 mod store;
 
 pub(super) use package::package;
-pub(crate) use package::{is_tool, requires_approval, scoped};
+pub(crate) use package::{is_tool, requires_approval, scoped_with_policy};
 
 #[cfg(all(test, unix))]
 mod integration_tests;
